@@ -29,7 +29,6 @@ Primär für Arch Linux (cpu only) optimalisiert.
 - **Minimum**: 4GB RAM, 2-Core CPU
 - **Empfohlen**: 8GB RAM, 4-Core CPU  
 - **Optimal**: 16GB RAM, 8-Core CPU + GPU
-- 
 
 ## ⚡ Schnellstart
 1. Installiere Abhängigkeiten: pip install faster-whisper deep-translator tkinter psutil
@@ -40,3 +39,4 @@ Primär für Arch Linux (cpu only) optimalisiert.
 ```bash
 python >= 3.8
 ffmpeg installed
+```
