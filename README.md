@@ -56,7 +56,6 @@ Installation unter
 Python‑Pakete
 
 Die folgenden Pakete werden benötigt – die meisten werden automatisch erkannt, fehlende erzeugen eine klare Fehlermeldung.
-bash
 
 pip install faster-whisper      # Empfohlen (schneller, weniger RAM)
 # oder alternativ:
@@ -71,7 +70,7 @@ pip install torch numpy scipy deep-translator psutil requests
 
 Hinweis zu PyTorch mit GPU
 Für CUDA‑Unterstützung installiere torch mit dem passenden Index, z.B. für CUDA 11.8:
-bash
+
 
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 
