@@ -9,6 +9,7 @@ Dragon Whisperer verwandelt jeden Audio‑ oder Videostream in lesbaren Text –
 Egal ob YouTube, Twitch, lokale Dateien oder HLS‑Streams – die intelligente Streaming‑Engine extrahiert zuverlässig die Tonspur und liefert dir die Transkription direkt ins moderne, dunkle GUI.
 
 Highlights
+
     🎤 Echtzeit‑Transkription mit Whisper AI (wahlweise faster‑whisper oder openai‑whisper)
     🌐 Live‑Übersetzung in >50 Sprachen (über deep‑translator)
     📡 Unterstützt alle gängigen Plattformen (YouTube, Twitch, Kick, Rumble, Facebook, Twitter/X, TikTok, HLS, DASH, lokale Dateien)
