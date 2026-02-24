@@ -22,20 +22,22 @@ Highlights
 📸 Screenshot
 
     X
-
 📦 Systemanforderungen
 Minimal
+
     CPU: 2 Kerne
     RAM: 4 GB (für tiny‑Modell)
     Python: ≥ 3.8
     Betriebssystem: Windows 10+, macOS (Intel/Apple Silicon), Linux
 
 Empfohlen
+
     CPU: 4 Kerne
     RAM: 8 GB (für base/small)
     GPU: NVIDIA CUDA, AMD ROCm oder Apple MPS (optional, aber dringend empfohlen)
 
 Optimal
+
     CPU: 8 Kerne
     RAM: 16 GB (für medium/large)
     GPU: mit ≥ 6 GB VRAM
@@ -78,7 +80,7 @@ Für ROCm oder MPS folge der offiziellen PyTorch‑Dokumentation.
 ⚡ Schnellstart
 
     Repository klonen (oder Skript direkt herunterladen)
-    bash
+    
 
     git clone https://github.com/xecuterdiablo/DragonWhisperer/Dragon-Whisperer.git
     cd dragon-whisperer
@@ -86,7 +88,7 @@ Für ROCm oder MPS folge der offiziellen PyTorch‑Dokumentation.
     Abhängigkeiten installieren (siehe oben)
 
     Skript starten
-    bash
+    
 
     python Dragon_Whisperer.py
 
@@ -127,9 +129,7 @@ Alle Einstellungen werden automatisch gespeichert und beim nächsten Start wiede
 
     Linux – Das Skript wurde primär unter Arch Linux entwickelt und getestet.
     Der integrierte LinuxPerformanceOptimizer (benötigt psutil) reduziert bei Bedarf die GUI‑Last und optimiert Thread‑Prioritäten.
-
     Windows – Volle Unterstützung, inklusive UTF‑8‑Konsolen‑Setup und „No Window“‑Flags für Subprozesse.
-
     macOS – Apple Silicon (M1/M2) wird via MPS‑Backend erkannt und genutzt.
 
 🆘 Fehlerbehebung
