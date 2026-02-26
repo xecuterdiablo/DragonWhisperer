@@ -4543,7 +4543,7 @@ class ExcellenceFFmpegManager:
                 '-rw_timeout', '10000000',
                 '-accurate_seek',
                 '-ss', '0',
-                '-fflags', '+genpts+discardcorrupt+fastseek',  # fastseek korrekt in fflags
+                '-fflags', '+genpts+discardcorrupt+fastseek',
             ])
 
         cmd.extend(['-i', url])
@@ -4887,23 +4887,19 @@ class ExcellenceFFmpegManager:
                 logger.warning(f"⚠️ Cleanup worker error: {e}")
 
     def cleanup_stale_processes(self) -> None:
+        """
+        Bereinigt nur Prozesse, die bereits beendet sind (poll() not None).
+        Keine automatische Beendigung aufgrund von Inaktivität oder Laufzeit mehr.
+        """
         with self._lock:
-            current_time = time.time()
             stale_processes = []
             for process_id, process_info in self._processes.items():
                 process = process_info['process']
-                start_time = process_info['start_time']
-                last_activity = process_info.get('last_activity', start_time)
+                # Nur Prozesse, die bereits beendet sind, als stale markieren
                 if process.poll() is not None:
                     stale_processes.append(process_id)
-                elif current_time - last_activity > 300:  # Erhöht von 120 auf 300 Sekunden
-                    logger.warning(f"⚠️ Process {process_id} inactive for {current_time - last_activity:.0f}s")
-                    stale_processes.append(process_id)
-                elif current_time - start_time > 3600:
-                    logger.warning(f"⚠️ Process {process_id} running for {current_time - start_time:.0f}s")
-                    stale_processes.append(process_id)
             for process_id in stale_processes:
-                logger.info(f"🧹 Cleaning stale process: {process_id}")
+                logger.info(f"🧹 Cleaning terminated process: {process_id}")
                 self._cleanup_process_resources(process_id, self._processes[process_id]['process'])
 
     def dispose(self) -> None:
@@ -5493,14 +5489,13 @@ class ExcellenceAudioProcessor:
         # Untertitel-Listen mit Lock
         self._timed_transcriptions: Deque[ExcellenceTranscriptionResult] = deque(maxlen=self.config.SUBTITLE_BUFFER_SIZE)
         self._timed_translations: Deque[ExcellenceTranslationResult] = deque(maxlen=self.config.SUBTITLE_BUFFER_SIZE)
-        self._subtitle_lock = threading.RLock()   # NEU
+        self._subtitle_lock = threading.RLock()
         self.subtitle_mode = False
         self._recent_transcriptions: Deque[str] = deque(maxlen=self.config.RECENT_TRANSCRIPTIONS_SIZE)
         self._chunk_counter = 0
         self._empty_reads = 0
         self._stream_start_time: Optional[float] = None
         self._total_bytes_processed = 0
-        # Entfernt: _adaptive_chunk_size und _optimal_chunk_found (nicht verwendet)
         self._network_quality_history: Deque[float] = deque(maxlen=20)
         self._performance_history: Deque[float] = deque(maxlen=50)
         self._chunk_processing_times: Deque[float] = deque(maxlen=10)
@@ -5512,17 +5507,17 @@ class ExcellenceAudioProcessor:
 
         # Event für sauberes Ende des Processing-Threads
         self._process_finished = threading.Event()
-        self._process_finished.set()   # initial als beendet markieren
+        self._process_finished.set()
 
-        # Puffer für kleine Audios – mit erhöhter maximaler Größe (5 * MAX_CHUNK_BYTES)
+        # Puffer für kleine Audios
         self._audio_buffer = bytearray()
         self._max_buffer_size = self.config.MAX_CHUNK_BYTES * 5
 
-        # Callback für Verarbeitungsende (z.B. bei Dateien)
+        # Callback für Verarbeitungsende
         self._finished_callback: Optional[Callable] = None
-        
+
         self.last_confidence = 1.0
-        self._noisereduce_counter = 0   # Zähler für noisereduce
+        self._noisereduce_counter = 0
 
         logger.info("✅ AudioProcessor initialized:")
         logger.info(f"   Config Type: {self._get_config_type()}")
@@ -5544,7 +5539,6 @@ class ExcellenceAudioProcessor:
                          translation_callback: Callable, info_callback: Callable,
                          error_callback: Callable,
                          finished_callback: Optional[Callable] = None) -> None:
-        """Startet die Verarbeitung. finished_callback wird nach erfolgreichem Ende einer lokalen Datei aufgerufen."""
         logger.info(f"\n🔊 [START_PROCESSING] URL: {url[:80]}...")
         logger.info(f"   Config Type: {self._get_config_type()}")
         logger.info(f"   Chunk Size: {self.chunk_size:,} bytes")
@@ -5558,11 +5552,9 @@ class ExcellenceAudioProcessor:
         with self._processing_lock:
             if self._processing:
                 logger.warning("⚠️ Vorheriger Prozess läuft noch – stoppe diesen zuerst.")
-                # Warte auf sauberes Ende (max. 10 Sekunden)
                 if not self.stop_processing(wait=True, timeout=10.0):
                     error_callback("❌ Vorheriger Prozess konnte nicht gestoppt werden")
                     return
-            # Jetzt ist _processing garantiert False
             self._processing = True
             self._process_finished.clear()
             self._stop_event.clear()
@@ -5571,9 +5563,7 @@ class ExcellenceAudioProcessor:
             self._chunk_counter = 0
             self._total_bytes_processed = 0
             self._read_error_count = 0
-            # Puffer zurücksetzen
             self._audio_buffer = bytearray()
-            # finished_callback speichern
             self._finished_callback = finished_callback
             logger.info(f"✅ Flags gesetzt: processing=True, ID={self._current_stream_id}")
 
@@ -5592,11 +5582,11 @@ class ExcellenceAudioProcessor:
                                error_callback: Callable) -> None:
         process: Optional[subprocess.Popen] = None
         detected_language: Optional[str] = None
-        error_occurred = False  # NEU: Flag für Fehler
+        error_occurred = False
         try:
             logger.info(f"\n🎬 [PROCESS_LOOP] Start für: {url[:60]}...")
             info_callback("🔍 Extracting audio URL...")
-            audio_url = self.stream_manager.extract_audio_url(url)  # <-- direkt den stream_manager nutzen
+            audio_url = self.stream_manager.extract_audio_url(url)
             if not audio_url:
                 error_callback("❌ Could not extract audio URL")
                 error_occurred = True
@@ -5606,7 +5596,6 @@ class ExcellenceAudioProcessor:
             if not self._test_audio_stream(audio_url):
                 logger.warning("⚠️ Stream test failed, trying anyway...")
             info_callback("🔧 Setting up FFmpeg...")
-            # cmd = self._build_ffmpeg_command_enhanced(audio_url, detected_language)  # entfernt
             process_kwargs = {
                 'stdout': subprocess.PIPE,
                 'stderr': subprocess.PIPE,
@@ -5620,10 +5609,9 @@ class ExcellenceAudioProcessor:
                     process_kwargs[key] = value
             logger.info("🚀 Starting FFmpeg process...")
             try:
-                # Nutze ffmpeg_manager.start_stream, um den Prozess zu verwalten
                 process = self.ffmpeg_manager.start_stream(
                     video_url=url,
-                    output_queue=None,  # Wir lesen direkt, daher kein Queue
+                    output_queue=None,
                     process_id=self._current_stream_id
                 )
                 if process is None:
@@ -5682,7 +5670,6 @@ class ExcellenceAudioProcessor:
             error_callback(f"❌ {error_msg}")
             error_occurred = True
         finally:
-            # Puffer leeren, falls noch Daten vorhanden
             self._flush_audio_buffer(transcription_callback, translation_callback)
             if process:
                 self.ffmpeg_manager.stop_stream(self._current_stream_id)
@@ -5690,34 +5677,29 @@ class ExcellenceAudioProcessor:
             self._guaranteed_cleanup()
             self._process_finished.set()
 
-            # NEU: Prüfen, ob es eine lokale Datei war und normal beendet wurde (ohne Stop-Event und ohne Fehler)
             is_local_file = url.startswith('file://')
             normal_end = not self._stop_event.is_set() and not error_occurred
             if is_local_file and normal_end and self._finished_callback:
                 logger.info("✅ Datei normal beendet – rufe finished_callback auf")
                 self._finished_callback()
             elif not self._stop_event.is_set() and not error_occurred:
-                # Fehlermeldung ausgeben, wenn Abbruch nicht durch Stop-Event ausgelöst wurde
                 error_callback("❌ Stream wurde unerwartet beendet – versuche Neuverbindung...")
 
             logger.info("✅ Processing loop ended")
 
-    # ==================== KORRIGIERTE METHODE ====================
     def _standard_streaming_loop(self, process: subprocess.Popen, audio_url: str,
-                                  detected_language: Optional[str],
-                                  transcription_callback: Callable,
-                                  translation_callback: Callable,
-                                  info_callback: Callable,
-                                  error_callback: Callable) -> None:
+                                 detected_language: Optional[str],
+                                 transcription_callback: Callable,
+                                 translation_callback: Callable,
+                                 info_callback: Callable,
+                                 error_callback: Callable) -> None:
         last_data_time = time.time()
         consecutive_timeouts = 0
         backoff = 1.0
         max_reconnects = 10
         reconnect_attempts = 0
 
-        # NEU: Prozessüberwachung
         while self._processing and not self._stop_event.is_set():
-            # Prüfe, ob Prozess noch lebt
             if process.poll() is not None:
                 logger.info("FFmpeg process terminated – finishing loop.")
                 break
@@ -5771,13 +5753,10 @@ class ExcellenceAudioProcessor:
                 continue
 
             if audio_data is None:
-                # Keine Daten gelesen
                 if process.poll() is not None:
-                    # Prozess beendet und keine Daten mehr -> Ende
                     logger.debug("Process ended and no more data – finishing loop.")
                     break
                 else:
-                    # Nur ein Timeout, Prozess lebt noch – wiederhole
                     self._empty_reads += 1
                     if self._empty_reads > self.config.MAX_EMPTY_READS:
                         logger.warning(f"⚠️ Too many empty reads: {self._empty_reads}")
@@ -5787,7 +5766,8 @@ class ExcellenceAudioProcessor:
                     time.sleep(sleep_time)
                     continue
             else:
-                # Daten erfolgreich gelesen
+                # Daten erfolgreich gelesen – Aktivität melden
+                self.ffmpeg_manager.update_process_activity(self._current_stream_id)   # <-- NEU
                 self._read_error_count = 0
                 last_data_time = time.time()
                 self._empty_reads = 0
@@ -5808,7 +5788,6 @@ class ExcellenceAudioProcessor:
                         transcription_callback,
                         translation_callback
                     )
-    # =============================================================
 
     def _youtube_streaming_loop(self, process: subprocess.Popen, audio_url: str,
                                  detected_language: Optional[str],
@@ -5836,7 +5815,6 @@ class ExcellenceAudioProcessor:
                         self.ffmpeg_manager.stop_stream(self._current_stream_id)
                     time.sleep(wait)
                     backoff *= 2
-                    # Neuen Prozess über ffmpeg_manager starten
                     process = self.ffmpeg_manager.start_stream(
                         video_url=audio_url,
                         output_queue=None,
@@ -5861,7 +5839,6 @@ class ExcellenceAudioProcessor:
                 time.sleep(wait)
                 backoff *= 2
 
-    # ==================== OPTIMIERTE METHODE ====================
     def _single_youtube_session(self, process: subprocess.Popen, audio_url: str,
                                  detected_language: Optional[str],
                                  transcription_callback: Callable,
@@ -5895,11 +5872,9 @@ class ExcellenceAudioProcessor:
                 continue
 
             if audio_data is None:
-                # Keine Daten gelesen
                 if process.poll() is not None:
-                    # Prozess beendet und keine Daten mehr
                     logger.debug("YouTube process ended, no more data.")
-                    return True   # normales Ende
+                    return True
                 else:
                     chunk_read_attempts += 1
                     if chunk_read_attempts > max_chunk_attempts:
@@ -5910,7 +5885,8 @@ class ExcellenceAudioProcessor:
                     backoff *= 1.5
                     continue
             else:
-                # Daten erfolgreich gelesen – IMMER in Puffer, egal wie klein
+                # Daten erfolgreich gelesen – Aktivität melden
+                self.ffmpeg_manager.update_process_activity(self._current_stream_id)   # <-- NEU
                 self._read_error_count = 0
                 chunk_read_attempts = 0
                 backoff = 1.0
@@ -5926,10 +5902,8 @@ class ExcellenceAudioProcessor:
                 except Exception:
                     enhanced_audio = audio_data
 
-                # Immer in Puffer anhängen, aber Puffergröße begrenzt
                 self._audio_buffer.extend(enhanced_audio)
                 if len(self._audio_buffer) >= self.config.MIN_CHUNK_BYTES:
-                    # Nehme den ganzen Puffer, nicht nur MIN_CHUNK_BYTES, um Verluste zu vermeiden
                     chunk_to_process = bytes(self._audio_buffer)
                     self._audio_buffer.clear()
                     if self.transcription_engine:
@@ -5938,7 +5912,6 @@ class ExcellenceAudioProcessor:
                             transcription_callback,
                             translation_callback
                         )
-                # Falls Puffer trotzdem zu groß wird (z.B. bei extrem langsamer Verarbeitung), verarbeite alles
                 if len(self._audio_buffer) > self._max_buffer_size:
                     logger.warning(f"⚠️ Audio buffer too large ({len(self._audio_buffer)} bytes) – forcing flush")
                     chunk_to_process = bytes(self._audio_buffer)
@@ -5953,27 +5926,20 @@ class ExcellenceAudioProcessor:
                 if self._chunk_counter % 50 == 0:
                     info_callback(f"📊 {self._chunk_counter} chunks processed...")
         return True
-    # =============================================================
 
     def _read_with_timeout(self, process: subprocess.Popen, size: int, timeout: float = 1.0) -> Optional[bytes]:
-        """Liest maximal 'size' Bytes aus process.stdout, mit Gesamt-Timeout.
-           Bricht ab, wenn innerhalb von 'timeout' keine Daten ankommen.
-           Liest in kleinen Blöcken, um blockierende Aufrufe zu vermeiden."""
         data = b''
         start_time = time.time()
         remaining = size
         while remaining > 0 and (time.time() - start_time) < timeout:
             try:
-                # Lese nur so viel, wie noch benötigt wird, aber max. 4096 Bytes pro Iteration
                 to_read = min(remaining, 4096)
                 chunk = process.stdout.read(to_read)
                 if not chunk:
-                    # Keine weiteren Daten – Stream Ende oder blockiert? Wir gehen von Ende aus.
                     break
                 data += chunk
                 remaining -= len(chunk)
             except (IOError, OSError) as e:
-                # Lesefehler – wir geben bisher Gelesenes zurück oder None
                 logger.warning(f"⚠️ Read error in _read_with_timeout: {e}")
                 break
             except Exception as e:
@@ -6045,24 +6011,22 @@ class ExcellenceAudioProcessor:
         if not self.transcription_engine:
             return
         try:
-            # Performance-Messung für Debug
             if DEBUG_LEVEL >= 2:
                 start_time = time.perf_counter()
-                audio_len = len(audio_data) / (16000 * 2)  # Bytes → Sekunden (mono, 16bit)
+                audio_len = len(audio_data) / (16000 * 2)
 
             transcription = self.transcription_engine.safe_transcribe(audio_data)
 
             if transcription and hasattr(transcription, 'confidence'):
                 self.last_confidence = transcription.confidence
             else:
-                self.last_confidence = 0.0  # oder einen niedrigen Wert
+                self.last_confidence = 0.0
 
             if DEBUG_LEVEL >= 2 and transcription:
                 elapsed = time.perf_counter() - start_time
                 realtime_factor = elapsed / audio_len if audio_len > 0 else 0
                 logger.debug(f"Chunk {self._chunk_counter}: {audio_len:.2f}s audio, "
                              f"transcribe {elapsed*1000:.1f}ms ({realtime_factor:.2f}x realtime)")
-                # GPU-Abfrage (korrigiert) – beachte: bei faster-whisper ist diese nicht korrekt
                 if TORCH_AVAILABLE and self.transcription_engine.whisper_backend == "openai_whisper":
                     torch = FastLazyLoader.load('torch')
                     if hasattr(torch, 'cuda') and torch.cuda.is_available():
@@ -6112,9 +6076,7 @@ class ExcellenceAudioProcessor:
             np = FastLazyLoader.load("numpy")
             audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
             rms = np.sqrt(np.mean(audio_np**2))
-        
-            # --- Konfidenz-basierte Rauschunterdrückung ---
-            # Nur jeden 10. Chunk anwenden, wenn die letzte Konfidenz unter 0.6 lag
+
             self._noisereduce_counter += 1
             if hasattr(self, 'last_confidence') and self.last_confidence < 0.6 and self._noisereduce_counter % 10 == 0:
                 try:
@@ -6122,10 +6084,9 @@ class ExcellenceAudioProcessor:
                     audio_np = nr.reduce_noise(y=audio_np, sr=self.sample_rate, prop_decrease=0.8)
                     logger.debug(f"🔇 noisereduce angewendet (letzte Konfidenz: {self.last_confidence:.2f})")
                 except ImportError:
-                    pass  # Bibliothek fehlt – ignorieren
+                    pass
                 except Exception as e:
                     logger.warning(f"⚠️ noisereduce fehlgeschlagen: {e}")
-            # ------------------------------------------------
 
             if rms < self.config.MIN_RMS_THRESHOLD:
                 return audio_data
@@ -6311,7 +6272,6 @@ class ExcellenceAudioProcessor:
         with self._resource_lock:
             with self._processing_lock:
                 self._processing = False
-            #self._stop_event.set()
             self._current_stream_id = None
             self._consecutive_empty_chunks = 0
             self._empty_reads = 0
@@ -6325,7 +6285,6 @@ class ExcellenceAudioProcessor:
         issues: List[str] = []
         if IS_WINDOWS:
             try:
-                # psutil sicher importieren
                 try:
                     import psutil
                 except ImportError:
@@ -6338,12 +6297,10 @@ class ExcellenceAudioProcessor:
         return issues
 
     def _flush_audio_buffer(self, transcription_callback: Callable, translation_callback: Callable) -> None:
-        """Verarbeitet die im Puffer verbliebenen Audiodaten (auch wenn sie kleiner als die Mindestgröße sind)."""
         if not self._audio_buffer:
             return
         buffer_len = len(self._audio_buffer)
         logger.info(f"🧹 Flushing audio buffer ({buffer_len} bytes) at end of stream")
-        # Sende den gesamten Puffer als einen Chunk
         if self.transcription_engine:
             self._process_audio_chunk(
                 bytes(self._audio_buffer),
@@ -6353,7 +6310,6 @@ class ExcellenceAudioProcessor:
         self._audio_buffer.clear()
 
     def _build_ffmpeg_command_enhanced(self, audio_url: str, detected_lang: Optional[str] = None) -> List[str]:
-        # Diese Methode wird nicht mehr verwendet, bleibt aber als Platzhalter
         return []
 
     def _test_audio_stream(self, audio_url: str) -> bool:
@@ -6419,19 +6375,12 @@ class ExcellenceAudioProcessor:
             logger.warning(f"⚠️ ExcellenceAudioProcessor dispose error: {e}")
 
     def stop_processing(self, wait: bool = False, timeout: float = 5.0) -> bool:
-        """
-        Stoppt die Verarbeitung.
-        :param wait: Wenn True, wird auf das Ende des Processing-Threads gewartet.
-        :param timeout: Maximale Wartezeit in Sekunden.
-        :return: True, wenn der Thread beendet wurde (oder wait=False), sonst False.
-        """
         logger.info("🛑 ExcellenceAudioProcessor: Stopping processing...")
         self._stop_event.set()
         with self._processing_lock:
             self._processing = False
         if self._current_stream_id:
             logger.info(f"📛 Stream {self._current_stream_id} stopped by user")
-            # FFmpeg-Prozess sofort beenden
             if self.ffmpeg_manager:
                 self.ffmpeg_manager.stop_stream(self._current_stream_id)
         if wait:
