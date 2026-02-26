@@ -1,47 +1,42 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""🐉 THE DRAGON WHISPERER v1.94 – repariert & optimiert"""
+"""🐉 THE DRAGON WHISPERER v2.01)"""
 
-import os
-import sys
-import warnings
+# =============================================================================
+# 1. IMPORTS
+# =============================================================================
+import atexit
+import gc
+import hashlib
+import importlib
+import importlib.util
+import json
 import logging
+import os
+import platform
+import queue
+import re
+import shutil
+import signal as py_signal
+import subprocess
+import sys
+import tempfile
 import threading
 import time
-import signal as py_signal
-import gc
-import json
-import queue
-import shutil
-import subprocess
-import tempfile
-import hashlib
-import re
-import platform
 import urllib.parse
-import importlib.util
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
-from functools import wraps
-from datetime import datetime, timedelta
-from pathlib import Path
-from dataclasses import dataclass, field
-from typing import (Dict, List, Optional, Any, Callable, Tuple, Union, Deque,
-                    Set)
-from enum import Enum
-import atexit
+import warnings
 from collections import OrderedDict, deque
-
-FASTER_WHISPER_AVAILABLE = importlib.util.find_spec("faster_whisper") is not None
-OPENAI_WHISPER_AVAILABLE = importlib.util.find_spec("whisper") is not None
-
-try:
-    import requests
-    OLLAMA_AVAILABLE = True
-except ImportError:
-    OLLAMA_AVAILABLE = False
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from functools import wraps
+from pathlib import Path
+from typing import (Any, Callable, Deque, Dict, List, Optional, Set, Tuple,
+                    Union)
 
 # -----------------------------------------------------------------------------
-# DEBUG-LEVEL AUSWERTUNG (erweitert)
+# FRÜHE KONFIGURATION (muss vor allem anderen stehen)
 # -----------------------------------------------------------------------------
 DEBUG_LEVEL = 0
 DEBUG_COMPONENTS = []
@@ -54,12 +49,10 @@ for arg in sys.argv:
         if value.isdigit():
             DEBUG_LEVEL = max(DEBUG_LEVEL, int(value))
         else:
-            # Komponenten-spezifisches Debugging
             DEBUG_COMPONENTS.extend(value.split(','))
 
 QUIET_MODE = "--quiet" in sys.argv or "-q" in sys.argv
 
-# Logging-Konfiguration – jetzt mit Millisekunden
 logging.basicConfig(
     level=logging.WARNING,
     format="[%(asctime)s.%(msecs)03d] [%(levelname)s] %(message)s",
@@ -67,7 +60,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("dragon")
 
-# Externe Logger auf WARNING setzen
 for lib in ["httpx", "urllib3", "httpcore"]:
     logging.getLogger(lib).setLevel(logging.WARNING)
 
@@ -100,7 +92,8 @@ except Exception:
     IS_ARM = False
     IS_X86 = True
 
-logger.info(f"🐉 Dragon Whisperer - Platform: {SYSTEM} {'ARM' if IS_ARM else 'x86'} (Debug-Level: {DEBUG_LEVEL})")
+logger.info(f"🐉 Dragon Whisperer - Platform: {SYSTEM} "
+            f"{'ARM' if IS_ARM else 'x86'} (Debug-Level: {DEBUG_LEVEL})")
 
 os.environ.update({
     "FFMPEG_DISABLE_RKMPP": "1",
@@ -114,44 +107,395 @@ os.environ.update({
 if IS_WINDOWS:
     os.environ.update({"PYTHONIOENCODING": "utf-8"})
 
+
 # =============================================================================
-# TERMINAL-EINSTELLUNGEN SICHERN (Linux)
+# 2. KONSTANTEN & KONFIGURATION
 # =============================================================================
-_original_stty_settings: Optional[str] = None
 
-def _save_terminal_settings() -> None:
-    """Speichert die aktuellen Terminal-Einstellungen (Linux)."""
-    global _original_stty_settings
-    if not IS_LINUX:
-        return
-    try:
-        result = subprocess.run(['stty', '-g'], capture_output=True, text=True, check=False)
-        if result.returncode == 0 and result.stdout:
-            _original_stty_settings = result.stdout.strip()
-    except Exception:
-        pass
+class Constants:
+    """Zentrale Konstanten für das gesamte Programm."""
+    # Audio
+    SAMPLE_RATE: int = 16000
+    CHANNELS: int = 1
+    AUDIO_FORMAT: str = 's16le'
+    BYTES_PER_SAMPLE: int = 2
 
-def _restore_terminal_settings() -> None:
-    """Stellt die gespeicherten Terminal-Einstellungen wieder her (Linux)."""
-    if not IS_LINUX or _original_stty_settings is None:
-        return
-    try:
-        subprocess.run(['stty', _original_stty_settings], check=False)
-    except Exception:
-        pass
+    # Chunking
+    BASE_CHUNK_DURATION: int = 5
+    CHUNK_OVERLAP: float = 1.0
+    MIN_CHUNK_DURATION: int = 2
+    MAX_CHUNK_DURATION: int = 30
 
-_save_terminal_settings()
-atexit.register(_restore_terminal_settings)
+    # Prozesse & Timeouts
+    MAX_SUBPROCESSES: int = 8
+    SUBPROCESS_TIMEOUT: int = 60
+    GUI_OPERATION_TIMEOUT: float = 10.0
+    MEMORY_CHECK_INTERVAL: int = 15
+    MAX_GUI_UPDATES_PER_SECOND: int = 30
+    MAX_MEMORY_USAGE: int = 8 * 1024 * 1024 * 1024  # 8 GB
+    MAX_CACHE_SIZE: int = 500
+    MAX_TEXT_LINES: int = 2000
+    DEFAULT_BEAM_SIZE: int = 5
+    DEFAULT_TEMPERATURE: float = 0.0
+    ENABLE_VAD_FILTER: bool = True
+    MAX_CONSECUTIVE_ERRORS: int = 5  # neu
+
+    # Stream
+    STREAM_TIMEOUT: int = 10
+    INITIAL_BUFFER_SECONDS: float = 1.5
+    MAX_EMPTY_READS: int = 30
+    RECONNECT_DELAY: int = 2
+    READ_RETRY_DELAY: float = 0.1
+    YOUTUBE_TIMEOUT: int = 10000000
+    NORMAL_TIMEOUT: int = 30000000
+
+    # FFmpeg
+    FFMPEG_BUFSIZE: str = '2048k'
+    FFMPEG_THREADS: int = 1
+    FFMPEG_PROBESIZE: str = '32'
+    FFMPEG_ANALYZE_DURATION: str = '0'
+
+    # Audio-Filter (Sprachoptimierung)
+    AUDIO_FILTER: str = "aresample=16000,volume=1.5,dynaudnorm"
+    LANGUAGE_FILTERS: Dict[str, str] = {
+        'ko': "aresample=16000,volume=2.0,highpass=f=80,lowpass=f=3800,afftdn=nf=-15",
+        'ja': "aresample=16000,volume=2.0,highpass=f=90,lowpass=f=3700,afftdn=nf=-15",
+        'zh': "aresample=16000,volume=2.0,highpass=f=100,lowpass=f=3500,afftdn=nf=-20",
+        'de': "aresample=16000,volume=1.8,highpass=f=100,lowpass=f=3200,dynaudnorm",
+        'en': "aresample=16000,volume=1.8,highpass=f=80,lowpass=f=3400,dynaudnorm",
+        'fr': "aresample=16000,volume=2.0,highpass=f=100,lowpass=f=3300,dynaudnorm",
+        'es': "aresample=16000,volume=2.0,highpass=f=100,lowpass=f=3400,dynaudnorm",
+    }
+    FILTER_PROFILES: Dict[str, str] = {
+        'transcription': "aresample=16000,volume=1.5,dynaudnorm",
+        'translation': "aresample=16000,volume=2.0,highpass=f=100,lowpass=f=3400",
+        'realtime': "aresample=16000,volume=1.8,dynaudnorm",
+        'noisy': "aresample=16000,volume=2.5,highpass=f=150,lowpass=f=3000,afftdn=nf=-30",
+        'music': "aresample=16000,volume=1.5,highpass=f=50,lowpass=f=5000",
+        'podcast': "aresample=16000,volume=2.0,highpass=f=80,lowpass=f=3500",
+    }
+
+    # Audio-Enhancement
+    AUDIO_ENHANCEMENT_ENABLED: bool = True
+    MIN_RMS_THRESHOLD: float = 0.002
+    TARGET_RMS: float = 0.2
+    MAX_GAIN: float = 5.0
+    CLIPPING_THRESHOLD: float = 0.9
+
+    # Duplikaterkennung
+    DUPLICATE_CHECK_ENABLED: bool = True
+    RECENT_TRANSCRIPTIONS_SIZE: int = 10
+    MIN_TEXT_LENGTH: int = 3
+    MIN_UNIQUE_WORDS_RATIO: float = 0.3
+
+    # Untertitel
+    SUBTITLE_BUFFER_SIZE: int = 1000
+    ENABLE_TIMED_TRANSCRIPTIONS: bool = True
+    ENABLE_TIMED_TRANSLATIONS: bool = True
+
+    # Logging
+    ENABLE_DEBUG_LOGGING: bool = True
+    LOG_CHUNK_PROCESSING: bool = False
+    LOG_AUDIO_STATS: bool = True
+    LOG_PERFORMANCE: bool = True
+    LOG_STREAM_EVENTS: bool = True
+    PERFORMANCE_LOG_INTERVAL: int = 50
+
+    # Cache
+    MAX_CACHE_SIZE_MB: int = 100
+    CACHE_ENABLED: bool = True
+
+    # Cache-Größen (TTL in Sekunden)
+    TRANSCRIPTION_CACHE_SIZE: int = 200
+    TRANSCRIPTION_CACHE_TTL: int = 300
+    TRANSLATION_CACHE_SIZE: int = 500
+    TRANSLATION_CACHE_TTL: int = 3600
+    AUDIO_CACHE_SIZE: int = 128
+    AUDIO_CACHE_TTL: int = 1800
+
+    # VAD
+    VAD_THRESHOLD: float = 0.3
+    VAD_MIN_SPEECH_DURATION_MS: int = 200
+    VAD_MIN_SILENCE_DURATION_MS: int = 80
+
+    # Pfad-Validierung (Sicherheit)
+    ALLOWED_FILE_SCHEME_PREFIX: str = "file://"
+    ALLOWED_FILE_BASE_DIRS: List[str] = [
+        str(Path.home()),
+        os.getcwd(),
+    ]
+
+    # URL-Zeichen Whitelist (für subprocess-Aufrufe)
+    URL_ALLOWED_CHARS: str = r"a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%"
+
+    # YouTube-Header
+    YOUTUBE_HEADERS: Dict[str, str] = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://www.youtube.com/',
+        'Origin': 'https://www.youtube.com',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+    }
+
+    # Plattform-Konfiguration
+    PLATFORM_CONFIG: Dict[str, Dict[str, Any]] = {
+        'windows': {
+            'ffmpeg_flags': ['-reconnect', '1', '-reconnect_streamed', '1'],
+            'process_creation_flags': 0x08000000,
+        },
+        'macos': {
+            'ffmpeg_flags': ['-reconnect', '1', '-reconnect_on_network_error', '1'],
+            'start_new_session': True,
+        },
+        'linux': {
+            'ffmpeg_flags': ['-reconnect', '1', '-reconnect_streamed', '1'],
+            'start_new_session': True,
+        }
+    }
+
 
 # -----------------------------------------------------------------------------
-# FastLazyLoader – verbessert mit kleinerem Cache und konsistenten Typen
+# EXCELLENCE CONFIG
+# -----------------------------------------------------------------------------
+class ExcellenceConfig:
+    """Dynamische Konfiguration, die zur Laufzeit angepasst werden kann."""
+    SAMPLE_RATE: int = Constants.SAMPLE_RATE
+    CHANNELS: int = Constants.CHANNELS
+    AUDIO_FORMAT: str = Constants.AUDIO_FORMAT
+    BYTES_PER_SAMPLE: int = Constants.BYTES_PER_SAMPLE
+
+    MAX_SUBPROCESSES: int = Constants.MAX_SUBPROCESSES
+    SUBPROCESS_TIMEOUT: int = Constants.SUBPROCESS_TIMEOUT
+    GUI_OPERATION_TIMEOUT: float = Constants.GUI_OPERATION_TIMEOUT
+    MEMORY_CHECK_INTERVAL: int = Constants.MEMORY_CHECK_INTERVAL
+    MAX_GUI_UPDATES_PER_SECOND: int = Constants.MAX_GUI_UPDATES_PER_SECOND
+    MAX_MEMORY_USAGE: int = Constants.MAX_MEMORY_USAGE
+    MAX_CACHE_SIZE: int = Constants.MAX_CACHE_SIZE
+    MAX_TEXT_LINES: int = Constants.MAX_TEXT_LINES
+    DEFAULT_BEAM_SIZE: int = Constants.DEFAULT_BEAM_SIZE
+    DEFAULT_TEMPERATURE: float = Constants.DEFAULT_TEMPERATURE
+    ENABLE_VAD_FILTER: bool = Constants.ENABLE_VAD_FILTER
+    MAX_CONSECUTIVE_ERRORS: int = Constants.MAX_CONSECUTIVE_ERRORS  # neu
+
+    _base_chunk_duration: int = Constants.BASE_CHUNK_DURATION
+    CHUNK_OVERLAP: float = Constants.CHUNK_OVERLAP
+    MIN_CHUNK_DURATION: int = Constants.MIN_CHUNK_DURATION
+    MAX_CHUNK_DURATION: int = Constants.MAX_CHUNK_DURATION
+
+    @property
+    def CHUNK_DURATION(self) -> float:
+        return getattr(self, '_actual_chunk_duration', self._base_chunk_duration)
+
+    @CHUNK_DURATION.setter
+    def CHUNK_DURATION(self, value: float) -> None:
+        if self.MIN_CHUNK_DURATION <= value <= self.MAX_CHUNK_DURATION:
+            self._actual_chunk_duration = float(value)
+        else:
+            logger.warning(f"⚠️ Chunk duration {value}s out of range, using default")
+            self._actual_chunk_duration = self._base_chunk_duration
+
+    @property
+    def CHUNK_SIZE_BYTES(self) -> int:
+        return int(self.CHUNK_DURATION * self.SAMPLE_RATE *
+                   self.CHANNELS * self.BYTES_PER_SAMPLE)
+
+    @property
+    def OVERLAP_SIZE_BYTES(self) -> int:
+        return int(self.CHUNK_OVERLAP * self.SAMPLE_RATE *
+                   self.CHANNELS * self.BYTES_PER_SAMPLE)
+
+    @property
+    def BYTES_PER_SECOND(self) -> int:
+        return self.SAMPLE_RATE * self.CHANNELS * self.BYTES_PER_SAMPLE
+
+    @property
+    def MIN_CHUNK_BYTES(self) -> int:
+        return int(self.MIN_CHUNK_DURATION * self.BYTES_PER_SECOND)
+
+    @property
+    def MAX_CHUNK_BYTES(self) -> int:
+        return int(self.MAX_CHUNK_DURATION * self.BYTES_PER_SECOND)
+
+    STREAM_TIMEOUT: int = Constants.STREAM_TIMEOUT
+    INITIAL_BUFFER_SECONDS: float = Constants.INITIAL_BUFFER_SECONDS
+    MAX_EMPTY_READS: int = Constants.MAX_EMPTY_READS
+    RECONNECT_DELAY: int = Constants.RECONNECT_DELAY
+    READ_RETRY_DELAY: float = Constants.READ_RETRY_DELAY
+
+    @property
+    def INITIAL_BUFFER_BYTES(self) -> int:
+        return int(self.INITIAL_BUFFER_SECONDS * self.BYTES_PER_SECOND)
+
+    FFMPEG_BUFSIZE: str = Constants.FFMPEG_BUFSIZE
+    FFMPEG_THREADS: int = Constants.FFMPEG_THREADS
+    FFMPEG_PROBESIZE: str = Constants.FFMPEG_PROBESIZE
+    FFMPEG_ANALYZE_DURATION: str = Constants.FFMPEG_ANALYZE_DURATION
+
+    YOUTUBE_TIMEOUT: int = Constants.YOUTUBE_TIMEOUT
+    NORMAL_TIMEOUT: int = Constants.NORMAL_TIMEOUT
+
+    def get_timeout_microseconds(self, is_youtube: bool = False) -> int:
+        return self.YOUTUBE_TIMEOUT if is_youtube else self.NORMAL_TIMEOUT
+
+    AUDIO_FILTER: str = Constants.AUDIO_FILTER
+    LANGUAGE_FILTERS: Dict[str, str] = Constants.LANGUAGE_FILTERS
+    FILTER_PROFILES: Dict[str, str] = Constants.FILTER_PROFILES
+
+    def get_audio_filter(self, language: Optional[str] = None,
+                         profile: Optional[str] = None) -> str:
+        if profile and profile in self.FILTER_PROFILES:
+            return self.FILTER_PROFILES[profile]
+        if language:
+            lang_code = language[:2].lower() if len(language) >= 2 else None
+            if lang_code in self.LANGUAGE_FILTERS:
+                return self.LANGUAGE_FILTERS[lang_code]
+        return self.AUDIO_FILTER
+
+    YOUTUBE_HEADERS: Dict[str, str] = Constants.YOUTUBE_HEADERS
+
+    def get_youtube_headers(self, is_manifest: bool = False) -> Dict[str, str]:
+        headers = self.YOUTUBE_HEADERS.copy()
+        if is_manifest:
+            headers.update({
+                'X-Client-Data': 'CI22yQE=',
+                'Content-Type': 'application/x-mpegURL',
+            })
+        return headers
+
+    PLATFORM_CONFIG: Dict[str, Dict[str, Any]] = Constants.PLATFORM_CONFIG
+
+    def get_platform_config(self, platform: Optional[str] = None) -> Dict[str, Any]:
+        if not platform:
+            platform = SYSTEM.lower()
+        return self.PLATFORM_CONFIG.get(platform, self.PLATFORM_CONFIG['linux'])
+
+    AUDIO_ENHANCEMENT_ENABLED: bool = Constants.AUDIO_ENHANCEMENT_ENABLED
+    MIN_RMS_THRESHOLD: float = Constants.MIN_RMS_THRESHOLD
+    TARGET_RMS: float = Constants.TARGET_RMS
+    MAX_GAIN: float = Constants.MAX_GAIN
+    CLIPPING_THRESHOLD: float = Constants.CLIPPING_THRESHOLD
+
+    DUPLICATE_CHECK_ENABLED: bool = Constants.DUPLICATE_CHECK_ENABLED
+    RECENT_TRANSCRIPTIONS_SIZE: int = Constants.RECENT_TRANSCRIPTIONS_SIZE
+    MIN_TEXT_LENGTH: int = Constants.MIN_TEXT_LENGTH
+    MIN_UNIQUE_WORDS_RATIO: float = Constants.MIN_UNIQUE_WORDS_RATIO
+
+    SUBTITLE_BUFFER_SIZE: int = Constants.SUBTITLE_BUFFER_SIZE
+    ENABLE_TIMED_TRANSCRIPTIONS: bool = Constants.ENABLE_TIMED_TRANSCRIPTIONS
+    ENABLE_TIMED_TRANSLATIONS: bool = Constants.ENABLE_TIMED_TRANSLATIONS
+
+    ENABLE_DEBUG_LOGGING: bool = Constants.ENABLE_DEBUG_LOGGING
+    LOG_CHUNK_PROCESSING: bool = Constants.LOG_CHUNK_PROCESSING
+    LOG_AUDIO_STATS: bool = Constants.LOG_AUDIO_STATS
+    LOG_PERFORMANCE: bool = Constants.LOG_PERFORMANCE
+    LOG_STREAM_EVENTS: bool = Constants.LOG_STREAM_EVENTS
+    PERFORMANCE_LOG_INTERVAL: int = Constants.PERFORMANCE_LOG_INTERVAL
+
+    MAX_CACHE_SIZE_MB: int = Constants.MAX_CACHE_SIZE_MB
+    CACHE_ENABLED: bool = Constants.CACHE_ENABLED
+
+    def __init__(self) -> None:
+        self._actual_chunk_duration = self._base_chunk_duration
+
+    def calculate_optimal_chunk_duration(self, model_size: str = 'medium',
+                                         is_realtime: bool = False) -> int:
+        if is_realtime:
+            return self.MIN_CHUNK_DURATION
+        model_durations = {
+            'tiny': 3, 'tiny.en': 3,
+            'base': 4, 'base.en': 4,
+            'small': 5, 'small.en': 5,
+            'medium': 5, 'medium.en': 5,
+            'large': 6, 'large-v2': 6, 'large-v3': 6,
+        }
+        return model_durations.get(model_size.lower(), self._base_chunk_duration)
+
+    def validate_config(self) -> bool:
+        try:
+            valid = (
+                self.SAMPLE_RATE in [8000, 16000, 22050, 44100, 48000] and
+                self.CHANNELS in [1, 2] and
+                self.MIN_CHUNK_DURATION <= self.CHUNK_DURATION <= self.MAX_CHUNK_DURATION
+            )
+            if not valid:
+                logger.error("❌ Config validation failed")
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"❌ Config validation error: {e}")
+            return False
+
+    def print_summary(self) -> None:
+        logger.info("\n" + "="*60)
+        logger.info("🎵 EXCELLENCE CONFIGURATION")
+        logger.info("="*60)
+        logger.info(f"📊 Audio: {self.SAMPLE_RATE}Hz, {self.CHANNELS}ch")
+        logger.info(f"📦 Chunk: {self.CHUNK_DURATION}s ({self.CHUNK_SIZE_BYTES:,}B)")
+        logger.info(f"⚡ Bytes/sec: {self.BYTES_PER_SECOND:,}")
+        logger.info(f"🎛️ Filter Profiles: {len(self.FILTER_PROFILES)}")
+        logger.info(f"🌍 Language Filters: {len(self.LANGUAGE_FILTERS)}")
+        logger.info(f"✅ Valid: {self.validate_config()}")
+        logger.info("="*60)
+
+    def __str__(self) -> str:
+        return (f"ExcellenceConfig(chunk={self.CHUNK_DURATION}s, "
+                f"filter_profiles={len(self.FILTER_PROFILES)})")
+
+
+class RealtimeConfig(ExcellenceConfig):
+    def __init__(self) -> None:
+        super().__init__()
+        self.CHUNK_DURATION = 5
+        self.CHUNK_OVERLAP = 0.3
+        self.STREAM_TIMEOUT = 5
+        self.AUDIO_FILTER = self.FILTER_PROFILES['realtime']
+
+
+class HighAccuracyConfig(ExcellenceConfig):
+    def __init__(self) -> None:
+        super().__init__()
+        self.CHUNK_DURATION = 25
+        self.CHUNK_OVERLAP = 0.8
+        self.AUDIO_FILTER = ("aresample=16000,volume=1.8,highpass=f=80,"
+                             "lowpass=f=3800,dynaudnorm=p=0.3:s=3:g=20")
+
+
+class YouTubeOptimizedConfig(ExcellenceConfig):
+    def __init__(self) -> None:
+        super().__init__()
+        self.FFMPEG_THREADS = 1
+        self.FFMPEG_BUFSIZE = '1024k'
+        self.YOUTUBE_TIMEOUT = 5000000
+        self.RECONNECT_DELAY = 1
+        self.AUDIO_FILTER = ("aresample=16000,volume=2.2,highpass=f=120,"
+                             "lowpass=f=3200,compand=attacks=0:decays=0.3")
+
+
+def get_config(config_type: str = 'default') -> ExcellenceConfig:
+    configs = {
+        'default': ExcellenceConfig,
+        'realtime': RealtimeConfig,
+        'high_accuracy': HighAccuracyConfig,
+        'youtube': YouTubeOptimizedConfig,
+    }
+    config_class = configs.get(config_type, ExcellenceConfig)
+    config = config_class()
+    config.validate_config()
+    return config
+
+
+# =============================================================================
+# 3. HILFSKLASSEN UND -FUNKTIONEN (UTILS)
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# FastLazyLoader
 # -----------------------------------------------------------------------------
 class FastLazyLoader:
-    """Schnelles Lazy-Loading für teure Module – reduziert Startzeit."""
     _loaded_modules: Dict[str, Any] = {}
     _module_locks: Dict[str, threading.RLock] = {}
     _class_lock = threading.RLock()
-    MAX_CACHE_SIZE = 10  # Reduziert, da es nur wenige Module gibt
+    MAX_CACHE_SIZE = 10
 
     @classmethod
     def _get_lock(cls, module_name: str) -> threading.RLock:
@@ -185,25 +529,19 @@ class FastLazyLoader:
                     except Exception:
                         pass
                     cls._loaded_modules["torch"] = torch
-
                 elif module_name == "faster_whisper":
                     from faster_whisper import WhisperModel
                     cls._loaded_modules["faster_whisper"] = WhisperModel
-
                 elif module_name == "numpy":
                     import numpy as np
                     cls._loaded_modules["numpy"] = np
-
                 elif module_name == "deep_translator":
                     from deep_translator import GoogleTranslator
                     cls._loaded_modules["deep_translator"] = GoogleTranslator
-
                 elif module_name == "scipy.signal":
                     import scipy.signal
                     cls._loaded_modules["scipy.signal"] = scipy.signal
-
                 else:
-                    import importlib
                     module = importlib.import_module(import_path or module_name)
                     cls._loaded_modules[module_name] = module
 
@@ -241,49 +579,10 @@ class FastLazyLoader:
             cls._module_locks.clear()
 
 
-TORCH_AVAILABLE = FastLazyLoader.is_available("torch")
-NUMPY_AVAILABLE = FastLazyLoader.is_available("numpy")
-TRANSLATOR_AVAILABLE = FastLazyLoader.is_available("deep_translator")
-SCIPY_AVAILABLE = FastLazyLoader.is_available("scipy.signal")
-
-# Verfügbarkeit von Whisper-Bibliotheken mit importlib prüfen (ohne tatsächlichen Import)
-FASTER_WHISPER_AVAILABLE = importlib.util.find_spec("faster_whisper") is not None
-OPENAI_WHISPER_AVAILABLE = importlib.util.find_spec("whisper") is not None
-
-if FASTER_WHISPER_AVAILABLE:
-    logger.info("✅ faster-whisper verfügbar")
-else:
-    logger.warning("⚠️ faster-whisper nicht verfügbar")
-
-if OPENAI_WHISPER_AVAILABLE:
-    logger.info("✅ openai-whisper verfügbar")
-else:
-    logger.warning("⚠️ openai-whisper nicht verfügbar")
-
-WHISPER_AVAILABLE = FASTER_WHISPER_AVAILABLE or OPENAI_WHISPER_AVAILABLE
-
-if not WHISPER_AVAILABLE:
-    logger.error("❌ KEINE Whisper-Bibliothek verfügbar!")
-else:
-    logger.info(f"✅ Whisper verfügbar (faster: {FASTER_WHISPER_AVAILABLE}, openai: {OPENAI_WHISPER_AVAILABLE})")
-
-try:
-    import tkinter as tk
-    from tkinter import ttk, scrolledtext, filedialog
-    GUI_AVAILABLE = True
-    logger.info("✅ GUI verfügbar")
-except ImportError:
-    GUI_AVAILABLE = False
-    tk = None
-    ttk = None
-    scrolledtext = None
-    logger.info("📟 Terminal-Modus (kein GUI)")
-
 # -----------------------------------------------------------------------------
-# Plattform-Stderr-Filter
+# Plattform-Stderr-Filter (unverändert)
 # -----------------------------------------------------------------------------
 class PlatformStderrFilter:
-    """Filtert unerwünschte Plattform-Warnungen aus stderr."""
     def __init__(self, original_stderr: Any) -> None:
         self.original_stderr = original_stderr
         self.filter_patterns = [
@@ -309,8 +608,39 @@ class PlatformStderrFilter:
 
 sys.stderr = PlatformStderrFilter(sys.stderr)
 
+
 # -----------------------------------------------------------------------------
-# ShutdownPriority und SignalHandler (optimiert ohne ThreadPoolExecutor)
+# Terminal-Einstellungen (unverändert)
+# -----------------------------------------------------------------------------
+_original_stty_settings: Optional[str] = None
+
+def _save_terminal_settings() -> None:
+    global _original_stty_settings
+    if not IS_LINUX:
+        return
+    try:
+        result = subprocess.run(['stty', '-g'], capture_output=True,
+                                 text=True, check=False, timeout=2)
+        if result.returncode == 0 and result.stdout:
+            _original_stty_settings = result.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError) as e:
+        if DEBUG_LEVEL >= 2:
+            logger.debug(f"stty -g fehlgeschlagen: {e}")
+
+def _restore_terminal_settings() -> None:
+    if not IS_LINUX or _original_stty_settings is None:
+        return
+    try:
+        subprocess.run(['stty', _original_stty_settings], check=False, timeout=2)
+    except Exception:
+        pass
+
+_save_terminal_settings()
+atexit.register(_restore_terminal_settings)
+
+
+# -----------------------------------------------------------------------------
+# SignalHandler (überarbeitet mit Thread-Sicherheit)
 # -----------------------------------------------------------------------------
 class ShutdownPriority(Enum):
     CRITICAL = 0
@@ -320,19 +650,15 @@ class ShutdownPriority(Enum):
 
 
 class SignalHandler:
-    """
-    Zentraler Signal- und Cleanup-Handler.
-    Registriert Cleanup-Funktionen und führt sie bei SIGINT/SIGTERM aus.
-    """
     _instance: Optional['SignalHandler'] = None
     _lock = threading.RLock()
-    _atexit_lock = threading.RLock()
     _shutdown_requested = False
     _shutdown_in_progress = False
     _signal_count = 0
     _setup_complete = False
     _original_handlers: Dict[int, Any] = {}
     _atexit_registered = False
+    _atexit_lock = threading.RLock()
     _config = {
         'verbose': False,
         'silent': True,
@@ -363,17 +689,15 @@ class SignalHandler:
         def execute(self) -> bool:
             self.attempts += 1
             try:
-                # Statt ThreadPoolExecutor verwenden wir einen einfachen Thread
                 result: Any = None
-                exc: Optional[Exception] = None
+                exc: Optional[BaseException] = None
                 def target() -> None:
                     nonlocal result, exc
                     try:
                         result = self.func()
                     except Exception as e:
                         exc = e
-                thread = threading.Thread(target=target)
-                thread.daemon = True
+                thread = threading.Thread(target=target, daemon=True)
                 thread.start()
                 thread.join(timeout=self.timeout)
                 if thread.is_alive():
@@ -471,7 +795,7 @@ class SignalHandler:
             except ImportError:
                 try:
                     py_signal.signal(py_signal.SIGINT, signal_handler)
-                except Exception:
+                except (ValueError, OSError):
                     pass
             except Exception:
                 pass
@@ -489,7 +813,6 @@ class SignalHandler:
         )
 
         with cls._lock:
-            # Doppelte Registrierung vermeiden
             for existing in cls._cleanup_operations[priority]:
                 if existing.func == func:
                     return
@@ -578,7 +901,8 @@ class SignalHandler:
                         overall_success = False
 
         if cls._config.get('verbose', False):
-            print(f"📊 Cleanup abgeschlossen: {completed_ops} Operationen, {failed_ops} fehlgeschlagen")
+            print(f"📊 Cleanup abgeschlossen: {completed_ops} Operationen, "
+                  f"{failed_ops} fehlgeschlagen")
         return overall_success
 
     @classmethod
@@ -664,7 +988,8 @@ class SignalHandler:
                 },
                 'atexit_registered': cls._atexit_registered,
                 'hybrid_mode': cls._config.get('hybrid_shutdown', True),
-                'config': {k: v for k, v in cls._config.items() if not k.startswith('_')},
+                'config': {k: v for k, v in cls._config.items()
+                           if not k.startswith('_')},
             }
 
     @classmethod
@@ -695,279 +1020,10 @@ class SignalHandler:
                 ShutdownPriority.LOW: [],
             }
 
-# =============================================================================
-# EXCELLENCE CONFIG (erweitert mit Typannotationen)
-# =============================================================================
 
-class ExcellenceConfig:
-    """
-    Zentrale Konfiguration für Audio-Parameter, Filter und Plattform-Einstellungen.
-    Kann durch Ableitung oder Instanziierung mit verschiedenen Profilen angepasst werden.
-    """
-
-    SAMPLE_RATE: int = 16000
-    CHANNELS: int = 1
-    AUDIO_FORMAT: str = 's16le'
-    BYTES_PER_SAMPLE: int = 2
-
-    MAX_SUBPROCESSES: int = 8
-    SUBPROCESS_TIMEOUT: int = 60
-    GUI_OPERATION_TIMEOUT: float = 10.0
-    MEMORY_CHECK_INTERVAL: int = 15
-    MAX_GUI_UPDATES_PER_SECOND: int = 30
-    MAX_MEMORY_USAGE: int = 8 * 1024 * 1024 * 1024  # 8 GB
-    MAX_CACHE_SIZE: int = 500
-    MAX_TEXT_LINES: int = 2000
-    DEFAULT_BEAM_SIZE: int = 5
-    DEFAULT_TEMPERATURE: float = 0.0
-    ENABLE_VAD_FILTER: bool = True
-
-    _base_chunk_duration: int = 5
-    CHUNK_OVERLAP: float = 1.0
-    MIN_CHUNK_DURATION: int = 2
-    MAX_CHUNK_DURATION: int = 30
-
-    @property
-    def CHUNK_DURATION(self) -> float:
-        return getattr(self, '_actual_chunk_duration', self._base_chunk_duration)
-
-    @CHUNK_DURATION.setter
-    def CHUNK_DURATION(self, value: float) -> None:
-        if self.MIN_CHUNK_DURATION <= value <= self.MAX_CHUNK_DURATION:
-            self._actual_chunk_duration = float(value)
-        else:
-            logger.warning(f"⚠️ Chunk duration {value}s out of range, using default")
-            self._actual_chunk_duration = self._base_chunk_duration
-
-    @property
-    def CHUNK_SIZE_BYTES(self) -> int:
-        return int(self.CHUNK_DURATION * self.SAMPLE_RATE * self.CHANNELS * self.BYTES_PER_SAMPLE)
-
-    @property
-    def OVERLAP_SIZE_BYTES(self) -> int:
-        return int(self.CHUNK_OVERLAP * self.SAMPLE_RATE * self.CHANNELS * self.BYTES_PER_SAMPLE)
-
-    @property
-    def BYTES_PER_SECOND(self) -> int:
-        return self.SAMPLE_RATE * self.CHANNELS * self.BYTES_PER_SAMPLE
-
-    @property
-    def MIN_CHUNK_BYTES(self) -> int:
-        return int(self.MIN_CHUNK_DURATION * self.BYTES_PER_SECOND)
-
-    @property
-    def MAX_CHUNK_BYTES(self) -> int:
-        return int(self.MAX_CHUNK_DURATION * self.BYTES_PER_SECOND)
-
-    STREAM_TIMEOUT: int = 10
-    INITIAL_BUFFER_SECONDS: float = 1.5
-    MAX_EMPTY_READS: int = 30                     # Erhöht von 15 auf 30
-    RECONNECT_DELAY: int = 2
-    READ_RETRY_DELAY: float = 0.1
-
-    @property
-    def INITIAL_BUFFER_BYTES(self) -> int:
-        return int(self.INITIAL_BUFFER_SECONDS * self.BYTES_PER_SECOND)
-
-    FFMPEG_BUFSIZE: str = '2048k'
-    FFMPEG_THREADS: int = 1
-    FFMPEG_PROBESIZE: str = '32'
-    FFMPEG_ANALYZE_DURATION: str = '0'
-
-    YOUTUBE_TIMEOUT: int = 10000000
-    NORMAL_TIMEOUT: int = 30000000
-
-    def get_timeout_microseconds(self, is_youtube: bool = False) -> int:
-        return self.YOUTUBE_TIMEOUT if is_youtube else self.NORMAL_TIMEOUT
-
-    AUDIO_FILTER: str = "aresample=16000,volume=1.5,dynaudnorm"
-
-    LANGUAGE_FILTERS: Dict[str, str] = {
-        'ko': "aresample=16000,volume=2.0,highpass=f=80,lowpass=f=3800,afftdn=nf=-15",
-        'ja': "aresample=16000,volume=2.0,highpass=f=90,lowpass=f=3700,afftdn=nf=-15",
-        'zh': "aresample=16000,volume=2.0,highpass=f=100,lowpass=f=3500,afftdn=nf=-20",
-        'de': "aresample=16000,volume=1.8,highpass=f=100,lowpass=f=3200,dynaudnorm",
-        'en': "aresample=16000,volume=1.8,highpass=f=80,lowpass=f=3400,dynaudnorm",
-        'fr': "aresample=16000,volume=2.0,highpass=f=100,lowpass=f=3300,dynaudnorm",
-        'es': "aresample=16000,volume=2.0,highpass=f=100,lowpass=f=3400,dynaudnorm",
-    }
-
-    FILTER_PROFILES: Dict[str, str] = {
-        'transcription': "aresample=16000,volume=1.5,dynaudnorm",
-        'translation': "aresample=16000,volume=2.0,highpass=f=100,lowpass=f=3400",
-        'realtime': "aresample=16000,volume=1.8,dynaudnorm",
-        'noisy': "aresample=16000,volume=2.5,highpass=f=150,lowpass=f=3000,afftdn=nf=-30",
-        'music': "aresample=16000,volume=1.5,highpass=f=50,lowpass=f=5000",
-        'podcast': "aresample=16000,volume=2.0,highpass=f=80,lowpass=f=3500",
-    }
-
-    def get_audio_filter(self, language: Optional[str] = None,
-                         profile: Optional[str] = None) -> str:
-        if profile and profile in self.FILTER_PROFILES:
-            return self.FILTER_PROFILES[profile]
-        if language:
-            lang_code = language[:2].lower() if len(language) >= 2 else None
-            if lang_code in self.LANGUAGE_FILTERS:
-                return self.LANGUAGE_FILTERS[lang_code]
-        return self.AUDIO_FILTER
-
-    YOUTUBE_HEADERS: Dict[str, str] = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://www.youtube.com/',
-        'Origin': 'https://www.youtube.com',
-        'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.9',
-    }
-
-    def get_youtube_headers(self, is_manifest: bool = False) -> Dict[str, str]:
-        headers = self.YOUTUBE_HEADERS.copy()
-        if is_manifest:
-            headers.update({
-                'X-Client-Data': 'CI22yQE=',
-                'Content-Type': 'application/x-mpegURL',
-            })
-        return headers
-
-    PLATFORM_CONFIG: Dict[str, Dict[str, Any]] = {
-        'windows': {
-            'ffmpeg_flags': ['-reconnect', '1', '-reconnect_streamed', '1'],
-            'process_creation_flags': 0x08000000,
-        },
-        'macos': {
-            'ffmpeg_flags': ['-reconnect', '1', '-reconnect_on_network_error', '1'],
-            'start_new_session': True,
-        },
-        'linux': {
-            'ffmpeg_flags': ['-reconnect', '1', '-reconnect_streamed', '1'],
-            'start_new_session': True,
-        }
-    }
-
-    def get_platform_config(self, platform: Optional[str] = None) -> Dict[str, Any]:
-        if not platform:
-            import platform
-            platform = platform.system().lower()
-        return self.PLATFORM_CONFIG.get(platform, self.PLATFORM_CONFIG['linux'])
-
-    PERFORMANCE_LOG_INTERVAL: int = 50
-    STATS_BUFFER_SIZE: int = 100
-    MAX_CONSECUTIVE_ERRORS: int = 3
-
-    AUDIO_ENHANCEMENT_ENABLED: bool = True
-    MIN_RMS_THRESHOLD: float = 0.002
-    TARGET_RMS: float = 0.2
-    MAX_GAIN: float = 5.0
-    CLIPPING_THRESHOLD: float = 0.9
-
-    DUPLICATE_CHECK_ENABLED: bool = True
-    RECENT_TRANSCRIPTIONS_SIZE: int = 10
-    MIN_TEXT_LENGTH: int = 3
-    MIN_UNIQUE_WORDS_RATIO: float = 0.3
-
-    SUBTITLE_BUFFER_SIZE: int = 1000
-    ENABLE_TIMED_TRANSCRIPTIONS: bool = True
-    ENABLE_TIMED_TRANSLATIONS: bool = True
-
-    ENABLE_DEBUG_LOGGING: bool = True
-    LOG_CHUNK_PROCESSING: bool = False
-    LOG_AUDIO_STATS: bool = True
-    LOG_PERFORMANCE: bool = True
-    LOG_STREAM_EVENTS: bool = True
-
-    MAX_CACHE_SIZE_MB: int = 100
-    CACHE_ENABLED: bool = True
-
-    def __init__(self) -> None:
-        self._actual_chunk_duration = self._base_chunk_duration
-
-    def calculate_optimal_chunk_duration(self, model_size: str = 'medium',
-                                         is_realtime: bool = False) -> int:
-        if is_realtime:
-            return self.MIN_CHUNK_DURATION
-        model_durations = {
-            'tiny': 3, 'tiny.en': 3,
-            'base': 4, 'base.en': 4,
-            'small': 5, 'small.en': 5,
-            'medium': 5, 'medium.en': 5,
-            'large': 6, 'large-v2': 6, 'large-v3': 6,
-        }
-        return model_durations.get(model_size.lower(), self._base_chunk_duration)
-
-    def validate_config(self) -> bool:
-        try:
-            valid = (
-                self.SAMPLE_RATE in [8000, 16000, 22050, 44100, 48000] and
-                self.CHANNELS in [1, 2] and
-                self.MIN_CHUNK_DURATION <= self.CHUNK_DURATION <= self.MAX_CHUNK_DURATION
-            )
-            if not valid:
-                logger.error("❌ Config validation failed")
-                return False
-            return True
-        except Exception as e:
-            logger.error(f"❌ Config validation error: {e}")
-            return False
-
-    def print_summary(self) -> None:
-        logger.info("\n" + "="*60)
-        logger.info("🎵 EXCELLENCE CONFIGURATION")
-        logger.info("="*60)
-        logger.info(f"📊 Audio: {self.SAMPLE_RATE}Hz, {self.CHANNELS}ch")
-        logger.info(f"📦 Chunk: {self.CHUNK_DURATION}s ({self.CHUNK_SIZE_BYTES:,}B)")
-        logger.info(f"⚡ Bytes/sec: {self.BYTES_PER_SECOND:,}")
-        logger.info(f"🎛️ Filter Profiles: {len(self.FILTER_PROFILES)}")
-        logger.info(f"🌍 Language Filters: {len(self.LANGUAGE_FILTERS)}")
-        logger.info(f"✅ Valid: {self.validate_config()}")
-        logger.info("="*60)
-
-    def __str__(self) -> str:
-        return f"ExcellenceConfig(chunk={self.CHUNK_DURATION}s, filter_profiles={len(self.FILTER_PROFILES)})"
-
-
-class RealtimeConfig(ExcellenceConfig):
-    def __init__(self) -> None:
-        super().__init__()
-        self.CHUNK_DURATION = 5
-        self.CHUNK_OVERLAP = 0.3
-        self.STREAM_TIMEOUT = 5
-        self.AUDIO_FILTER = self.FILTER_PROFILES['realtime']
-
-
-class HighAccuracyConfig(ExcellenceConfig):
-    def __init__(self) -> None:
-        super().__init__()
-        self.CHUNK_DURATION = 25
-        self.CHUNK_OVERLAP = 0.8
-        self.AUDIO_FILTER = "aresample=16000,volume=1.8,highpass=f=80,lowpass=f=3800,dynaudnorm=p=0.3:s=3:g=20"
-
-
-class YouTubeOptimizedConfig(ExcellenceConfig):
-    def __init__(self) -> None:
-        super().__init__()
-        self.FFMPEG_THREADS = 1
-        self.FFMPEG_BUFSIZE = '1024k'
-        self.YOUTUBE_TIMEOUT = 5000000
-        self.RECONNECT_DELAY = 1
-        self.AUDIO_FILTER = "aresample=16000,volume=2.2,highpass=f=120,lowpass=f=3200,compand=attacks=0:decays=0.3"
-
-
-def get_config(config_type: str = 'default') -> ExcellenceConfig:
-    configs = {
-        'default': ExcellenceConfig,
-        'realtime': RealtimeConfig,
-        'high_accuracy': HighAccuracyConfig,
-        'youtube': YouTubeOptimizedConfig,
-    }
-    config_class = configs.get(config_type, ExcellenceConfig)
-    config = config_class()
-    config.validate_config()
-    return config
-
-
-# =============================================================================
-# PLATFORM UTILS (verbessert)
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# PlatformUtils (erweitert um URL-Validierung und Pfad-Sicherheit)
+# -----------------------------------------------------------------------------
 class PlatformUtils:
     _environment_setup_done = False
     _environment_setup_lock = threading.RLock()
@@ -1000,7 +1056,7 @@ class PlatformUtils:
                     capture_output=True,
                     timeout=5,
                     check=False,
-                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                    creationflags=subprocess.CREATE_NO_WINDOW
                 )
             else:
                 subprocess.run(
@@ -1011,10 +1067,13 @@ class PlatformUtils:
                 )
             return True
         except subprocess.TimeoutExpired:
-            logger.warning(f"⚠️ Timeout killing process tree {pid}")
+            logger.warning(f"⚠️ Timeout beim Beenden des Prozessbaums {pid}")
+            return False
+        except (OSError, subprocess.CalledProcessError) as e:
+            logger.warning(f"⚠️ Error killing process tree {pid}: {e}")
             return False
         except Exception as e:
-            logger.warning(f"⚠️ Error killing process tree {pid}: {e}")
+            logger.error(f"⚠️ Unerwarteter Fehler beim Beenden von Prozessbaum {pid}: {e}")
             return False
 
     @staticmethod
@@ -1026,49 +1085,7 @@ class PlatformUtils:
             issues: List[str] = []
             logger.info("🔍 Checking platform dependencies...")
 
-            ffmpeg_found = False
-            ffmpeg_paths: List[str] = []
-            ffmpeg_standard = shutil.which('ffmpeg')
-            if ffmpeg_standard:
-                ffmpeg_found = True
-                ffmpeg_paths.append(ffmpeg_standard)
-
-            if IS_WINDOWS:
-                windows_paths = [
-                    'C:\\ffmpeg\\bin\\ffmpeg.exe',
-                    'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe',
-                    'C:\\Program Files (x86)\\ffmpeg\\bin\\ffmpeg.exe',
-                ]
-                ffmpeg_paths.extend(windows_paths)
-            elif IS_MACOS:
-                mac_paths = [
-                    '/usr/local/bin/ffmpeg',
-                    '/opt/homebrew/bin/ffmpeg',
-                    '/usr/bin/ffmpeg',
-                ]
-                ffmpeg_paths.extend(mac_paths)
-            else:
-                linux_paths = [
-                    '/usr/bin/ffmpeg',
-                    '/usr/local/bin/ffmpeg',
-                ]
-                ffmpeg_paths.extend(linux_paths)
-
-            for path in ffmpeg_paths:
-                if os.path.exists(path) and os.path.isfile(path):
-                    if not ffmpeg_found:
-                        ffmpeg_found = True
-                        logger.info(f"✅ FFmpeg found: {path}")
-                        if IS_WINDOWS:
-                            try:
-                                bin_dir = os.path.dirname(path)
-                                if bin_dir not in os.environ.get('PATH', ''):
-                                    os.environ['PATH'] = f"{bin_dir};{os.environ.get('PATH', '')}"
-                                    logger.info(f"   ↪ Added to PATH: {bin_dir}")
-                            except Exception as e:
-                                logger.warning(f"   ⚠️ PATH update failed: {e}")
-                    break
-
+            ffmpeg_found = shutil.which('ffmpeg') is not None
             if not ffmpeg_found:
                 missing.append('ffmpeg')
                 issues.append("FFmpeg not found in PATH or standard locations")
@@ -1078,27 +1095,33 @@ class PlatformUtils:
                 missing.append('yt-dlp')
                 issues.append("yt-dlp not found in PATH")
 
-            # psutil prüfen
             psutil_found = FastLazyLoader.is_available('psutil')
             if not psutil_found:
-                missing.append('psutil')
                 issues.append("psutil not available (system monitoring)")
 
-            package_issues: List[str] = []
+            critical_missing = []
+            if not ffmpeg_found:
+                critical_missing.append('ffmpeg')
+            if not ytdlp_found:
+                critical_missing.append('yt-dlp')
+            if not GUI_AVAILABLE:
+                critical_missing.append('tkinter')
+                issues.append("Tkinter not available – required for GUI")
+
             if not WHISPER_AVAILABLE:
-                missing.append('faster-whisper')
-                package_issues.append("faster-whisper: pip install faster-whisper")
-            if not TORCH_AVAILABLE:
-                issues.append("PyTorch not available (optional for GPU acceleration)")
+                logger.warning("⚠️ Kein Whisper-Backend verfügbar. Starte im Demo-Modus.")
             if not TRANSLATOR_AVAILABLE:
                 issues.append("deep-translator not available (translation will be limited)")
-            if not GUI_AVAILABLE:
-                missing.append('tkinter')
-                package_issues.append("tkinter: Usually included with Python. On Linux: sudo apt-get install python3-tk")
+            if not TORCH_AVAILABLE:
+                issues.append("PyTorch not available (optional for GPU acceleration)")
+            if not psutil_found:
+                issues.append("psutil not available (system monitoring limited)")
 
-            if missing:
-                error_msg = f"❌ Missing dependencies: {', '.join(missing)}\n\n"
-                if 'ffmpeg' in missing:
+            if critical_missing:
+                error_msg = (f"❌ Fehlende kritische Abhängigkeiten: "
+                             f"{', '.join(critical_missing)}\n\n")
+                error_msg += "\n".join(issues) + "\n"
+                if 'ffmpeg' in critical_missing:
                     error_msg += "FFmpeg Installation:\n"
                     if IS_WINDOWS:
                         error_msg += "  • Download from: https://ffmpeg.org/download.html\n"
@@ -1106,16 +1129,12 @@ class PlatformUtils:
                         error_msg += "  • brew install ffmpeg\n"
                     else:
                         error_msg += "  • sudo apt install ffmpeg\n"
-                if 'yt-dlp' in missing:
+                if 'yt-dlp' in critical_missing:
                     error_msg += "yt-dlp Installation:\n"
                     error_msg += "  • pip install yt-dlp\n"
-                if 'psutil' in missing:
-                    error_msg += "psutil Installation:\n"
-                    error_msg += "  • pip install psutil\n"
-                if package_issues:
-                    error_msg += "\nPython Packages:\n"
-                    for issue in package_issues:
-                        error_msg += f"  • {issue}\n"
+                if 'tkinter' in critical_missing:
+                    error_msg += "Tkinter Installation:\n"
+                    error_msg += "  • Usually included with Python. On Linux: sudo apt-get install python3-tk\n"
                 if issues:
                     error_msg += "\nAdditional issues:\n"
                     for issue in issues:
@@ -1124,7 +1143,7 @@ class PlatformUtils:
                 PlatformUtils._dependencies_checked = False
                 raise RuntimeError(error_msg)
 
-            logger.info("✅ All dependencies found")
+            logger.info("✅ Alle kritischen Abhängigkeiten gefunden")
             PlatformUtils._dependencies_checked = True
             return True
 
@@ -1140,11 +1159,14 @@ class PlatformUtils:
                     ctypes.windll.kernel32.SetConsoleOutputCP(65001)
                     os.system('chcp 65001 > nul 2>&1')
                     os.system('color')
-                except Exception as e:
+                except (OSError, AttributeError) as e:
                     logger.warning(f"⚠️ Windows console setup failed: {e}")
             elif IS_MACOS:
                 temp_dir = Path(tempfile.gettempdir()) / "dragonwhisperer"
-                temp_dir.mkdir(exist_ok=True)
+                try:
+                    temp_dir.mkdir(exist_ok=True)
+                except (OSError, PermissionError) as e:
+                    logger.warning(f"⚠️ macOS temp dir creation failed: {e}")
             PlatformUtils._environment_setup_done = True
             logger.info("✅ Platform environment setup complete")
 
@@ -1190,7 +1212,6 @@ class PlatformUtils:
             'environment_setup': PlatformUtils._environment_setup_done,
             'dependencies_checked': PlatformUtils._dependencies_checked,
         }
-        # psutil sicher verwenden
         try:
             import psutil
             info['cpu_count'] = psutil.cpu_count()
@@ -1217,13 +1238,90 @@ class PlatformUtils:
         logger.info(f"{'Dependencies Checked':25} {'✅' if info['dependencies_checked'] else '❌'}")
         logger.info("="*60)
 
+    # ---------- SICHERHEITSRELEVANTE FUNKTIONEN ----------
+    @staticmethod
+    def sanitize_url(url: str) -> str:
+        """
+        Bereinigt eine URL: entfernt führende/folgende Whitespace-Zeichen.
+        (Keine Zeichenfilterung mehr, da shell=False ausreichend schützt.)
+        """
+        if not url:
+            return ""
+        return url.strip()
+
+    @staticmethod
+    def validate_file_path(file_url: str) -> Tuple[bool, str]:
+        """
+        Prüft, ob eine file://-URL auf eine erlaubte Datei verweist.
+        Gibt (ok, normalisierter Pfad) zurück.
+        """
+        if not file_url.startswith(Constants.ALLOWED_FILE_SCHEME_PREFIX):
+            return False, "Keine file://-URL"
+        path_part = file_url[len(Constants.ALLOWED_FILE_SCHEME_PREFIX):]
+        # Pfad normalisieren
+        try:
+            real_path = os.path.realpath(path_part)
+        except Exception as e:
+            return False, f"Pfad kann nicht normalisiert werden: {e}"
+        # Prüfen, ob die Datei existiert
+        if not os.path.exists(real_path):
+            return False, f"Datei existiert nicht: {real_path}"
+        # Prüfen, ob der Pfad innerhalb eines erlaubten Basisverzeichnisses liegt
+        allowed_bases = [os.path.realpath(p) for p in Constants.ALLOWED_FILE_BASE_DIRS]
+        for base in allowed_bases:
+            if real_path.startswith(base):
+                return True, real_path
+        # Falls nicht, zusätzlich prüfen, ob es sich um eine temporäre Datei handelt
+        temp_dir = os.path.realpath(tempfile.gettempdir())
+        if real_path.startswith(temp_dir):
+            return True, real_path
+        return False, f"Zugriff auf {real_path} nicht erlaubt (außerhalb erlaubter Verzeichnisse)"
+
 
 PlatformUtils.setup_platform_environment()
 
-# =============================================================================
-# DATENKLASSEN (mit Typen)
-# =============================================================================
 
+# -----------------------------------------------------------------------------
+# Verfügbarkeiten (unverändert)
+# -----------------------------------------------------------------------------
+TORCH_AVAILABLE = FastLazyLoader.is_available("torch")
+NUMPY_AVAILABLE = FastLazyLoader.is_available("numpy")
+TRANSLATOR_AVAILABLE = FastLazyLoader.is_available("deep_translator")
+SCIPY_AVAILABLE = FastLazyLoader.is_available("scipy.signal")
+FASTER_WHISPER_AVAILABLE = importlib.util.find_spec("faster_whisper") is not None
+OPENAI_WHISPER_AVAILABLE = importlib.util.find_spec("whisper") is not None
+WHISPER_AVAILABLE = FASTER_WHISPER_AVAILABLE or OPENAI_WHISPER_AVAILABLE
+OLLAMA_AVAILABLE = importlib.util.find_spec("requests") is not None
+
+if FASTER_WHISPER_AVAILABLE:
+    logger.info("✅ faster-whisper verfügbar")
+else:
+    logger.warning("⚠️ faster-whisper nicht verfügbar")
+
+if OPENAI_WHISPER_AVAILABLE:
+    logger.info("✅ openai-whisper verfügbar")
+else:
+    logger.warning("⚠️ openai-whisper nicht verfügbar")
+
+if not WHISPER_AVAILABLE:
+    logger.warning("⚠️ KEINE Whisper-Bibliothek verfügbar! Starte im Demo-Modus.")
+
+try:
+    import tkinter as tk
+    from tkinter import ttk, scrolledtext, filedialog
+    GUI_AVAILABLE = True
+    logger.info("✅ GUI verfügbar")
+except ImportError:
+    GUI_AVAILABLE = False
+    tk = None
+    ttk = None
+    scrolledtext = None
+    logger.info("📟 Terminal-Modus (kein GUI)")
+
+
+# -----------------------------------------------------------------------------
+# Datenklassen (unverändert)
+# -----------------------------------------------------------------------------
 @dataclass
 class ExcellenceTranscriptionResult:
     text: str
@@ -1245,6 +1343,9 @@ class ExcellenceTranslationResult:
     end: Optional[float] = None
 
 
+# -----------------------------------------------------------------------------
+# SimplePerformanceTracker (unverändert)
+# -----------------------------------------------------------------------------
 class SimplePerformanceTracker:
     def __init__(self) -> None:
         self.transcription_count = 0
@@ -1286,14 +1387,10 @@ class SimplePerformanceTracker:
             }
 
 
-# =============================================================================
-# CACHE-KLASSEN (verbessert mit LRU und TTL)
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# Cache-Klassen (überarbeitet mit Konstanten)
+# -----------------------------------------------------------------------------
 class ExcellenceTTLCache:
-    """
-    Thread-sicherer Cache mit TTL und LRU-Eviction.
-    """
     def __init__(self, maxsize: int = 128, ttl: float = 300.0) -> None:
         self.maxsize = maxsize
         self.ttl = ttl
@@ -1304,11 +1401,10 @@ class ExcellenceTTLCache:
         self._last_cleanup = time.time()
         self._stats = {"hits": 0, "misses": 0, "evictions": 0}
         self._stats_lock = threading.Lock()
-        self._access_counter = 0  # für bedingte Bereinigung
+        self._access_counter = 0
 
     def _perform_cleanup_if_needed(self) -> None:
         self._access_counter += 1
-        # Nur jeden 10. Zugriff wirklich bereinigen, um Overhead zu reduzieren
         if self._access_counter % 10 != 0:
             return
         current_time = time.time()
@@ -1400,9 +1496,19 @@ class ExcellenceTTLCache:
             }
 
 
-transcription_cache = ExcellenceTTLCache(maxsize=256, ttl=600)
-translation_cache = ExcellenceTTLCache(maxsize=512, ttl=3600)
-audio_cache = ExcellenceTTLCache(maxsize=128, ttl=1800)
+# Globale Cache-Instanzen (mit Konstanten)
+transcription_cache = ExcellenceTTLCache(
+    maxsize=Constants.TRANSCRIPTION_CACHE_SIZE,
+    ttl=Constants.TRANSCRIPTION_CACHE_TTL
+)
+translation_cache = ExcellenceTTLCache(
+    maxsize=Constants.TRANSLATION_CACHE_SIZE,
+    ttl=Constants.TRANSLATION_CACHE_TTL
+)
+audio_cache = ExcellenceTTLCache(
+    maxsize=Constants.AUDIO_CACHE_SIZE,
+    ttl=Constants.AUDIO_CACHE_TTL
+)
 
 
 def clear_expired_cache_entries() -> Dict[str, int]:
@@ -1443,8 +1549,11 @@ def get_cached_translation(original: str, target_lang: str) -> Optional[Excellen
     return translation_cache.get(key)
 
 
-# Zentraler Executor für den Decorator, um viele Threads zu vermeiden
+# -----------------------------------------------------------------------------
+# ThreadPoolExecutor und Decorator (unverändert)
+# -----------------------------------------------------------------------------
 _EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ExcellenceExec")
+
 
 def excellence_execution(timeout: int = 60, max_retries: int = 3) -> Callable:
     def decorator(func: Callable) -> Callable:
@@ -1490,14 +1599,10 @@ def excellence_gui_operation(func: Callable) -> Callable:
     return wrapper
 
 
-# =============================================================================
-# FARBEN UND SCHRIFTARTEN (GUI)
-# =============================================================================
-
-class DragonColors:
-    CHECKBOX_ACTIVE = "#000000"
-    MODERN_SUBTITLE_ACTIVE = "#00ff88"
-    MODERN_SUBTITLE_INACTIVE = "#8b949e"
+# -----------------------------------------------------------------------------
+# THEME-KLASSEN (unverändert)
+# -----------------------------------------------------------------------------
+class DarkTheme:
     BG_PRIMARY = "#0f1419"
     BG_SECONDARY = "#1a2129"
     BG_TERTIARY = "#242d38"
@@ -1528,11 +1633,54 @@ class DragonColors:
     CHECKBOX_BG = "#0d1117"
     CHECKBOX_FG = "#e6edf3"
     CHECKBOX_SELECTED = "#238636"
+    CHECKBOX_ACTIVE = "#000000"
     SUBTITLE_ACTIVE = "#8957e5"
     SUBTITLE_INACTIVE = "#30363d"
     STATUS_BAR_BG = "#0d1117"
     STATUS_BAR_FG = "#8b949e"
     STATUS_BAR_ACCENT = "#58a6ff"
+
+
+class LightTheme:
+    BG_PRIMARY = "#ffffff"
+    BG_SECONDARY = "#f0f0f0"
+    BG_TERTIARY = "#e5e5e5"
+    BG_HOVER = "#d9d9d9"
+    BG_CARD = "#f5f5f5"
+    TEXT_PRIMARY = "#000000"
+    TEXT_SECONDARY = "#4a4a4a"
+    TEXT_ACCENT = "#1f6feb"
+    TEXT_MUTED = "#666666"
+    DRAGON_GREEN = "#2ecc71"
+    DRAGON_GREEN_LIGHT = "#27ae60"
+    DRAGON_BLUE = "#3498db"
+    DRAGON_PURPLE = "#9b59b6"
+    SUCCESS = "#2ecc71"
+    WARNING = "#f39c12"
+    ERROR = "#e74c3c"
+    INFO = "#3498db"
+    BORDER = "#cccccc"
+    SCROLLBAR = "#b3b3b3"
+    SCROLLBAR_HOVER = "#999999"
+    INPUT_BG = "#ffffff"
+    INPUT_BORDER = "#cccccc"
+    INPUT_FOCUS = "#1f6feb"
+    COMBO_BG = "#ffffff"
+    COMBO_FG = "#000000"
+    COMBO_BORDER = "#cccccc"
+    COMBO_SELECTION = "#1f6feb"
+    CHECKBOX_BG = "#f0f0f0"
+    CHECKBOX_FG = "#000000"
+    CHECKBOX_SELECTED = "#2ecc71"
+    CHECKBOX_ACTIVE = "#ffffff"
+    SUBTITLE_ACTIVE = "#8957e5"
+    SUBTITLE_INACTIVE = "#b3b3b3"
+    STATUS_BAR_BG = "#f0f0f0"
+    STATUS_BAR_FG = "#4a4a4a"
+    STATUS_BAR_ACCENT = "#1f6feb"
+
+
+CURRENT_THEME = None  # wird später gesetzt
 
 
 class DragonFonts:
@@ -1546,11 +1694,7 @@ class DragonFonts:
     SMALL = ("Segoe UI", 7)
 
 
-ModernColors = DragonColors
-ModernFonts = DragonFonts
-
 class RateLimiter:
-    """Begrenzt Update-Rate für GUI-Stabilität."""
     def __init__(self, max_updates_per_second: float = 30) -> None:
         self.min_interval = 1.0 / max_updates_per_second
         self.last_calls: Dict[str, float] = {}
@@ -1573,8 +1717,10 @@ class RateLimiter:
                 del self.last_calls[update_type]
 
 
+# -----------------------------------------------------------------------------
+# DARK MESSAGEBOX (unverändert)
+# -----------------------------------------------------------------------------
 class DarkMessageBox:
-    """Einheitlicher, dunkler MessageBox-Stil."""
     @staticmethod
     def showinfo(title: str, message: str, parent: Optional[tk.Tk] = None) -> Optional[bool]:
         return DarkMessageBox._show_dialog(title, message, "info", parent)
@@ -1601,20 +1747,20 @@ class DarkMessageBox:
         try:
             if parent is None:
                 parent = tk._default_root
-            if not parent or not hasattr(parent, "winfo_exists") or not parent.winfo_exists():
+            if not parent or not parent.winfo_exists():
                 parent = DarkMessageBox._find_available_parent()
                 if not parent:
                     return DarkMessageBox._fallback_messagebox(title, message, msg_type, buttons)
 
             dialog = tk.Toplevel(parent)
             dialog.title(f"🐉 {title}" if not title.startswith("🐉") else title)
-            dialog.configure(bg=ModernColors.BG_PRIMARY)
+            dialog.configure(bg=CURRENT_THEME.BG_PRIMARY)
             dialog.resizable(False, False)
             dialog.transient(parent)
             dialog.grab_set()
 
-            # Timeout für automatisches Schließen
-            timeout_seconds = 15 if any(word in title.lower() for word in ["beenden", "exit", "quit", "schließen"]) else 10
+            timeout_seconds = 15 if any(word in title.lower()
+                                        for word in ["beenden", "exit", "quit", "schließen"]) else 10
             timeout_id: Optional[str] = None
 
             def auto_close() -> None:
@@ -1628,21 +1774,21 @@ class DarkMessageBox:
             timeout_id = dialog.after(timeout_seconds * 1000, auto_close)
 
             icons = {
-                "info": ("ℹ️", ModernColors.TEXT_ACCENT),
-                "warning": ("⚠️", ModernColors.WARNING),
-                "error": ("❌", ModernColors.ERROR),
-                "question": ("❓", ModernColors.TEXT_ACCENT),
-                "success": ("✅", ModernColors.SUCCESS),
+                "info": ("ℹ️", CURRENT_THEME.TEXT_ACCENT),
+                "warning": ("⚠️", CURRENT_THEME.WARNING),
+                "error": ("❌", CURRENT_THEME.ERROR),
+                "question": ("❓", CURRENT_THEME.TEXT_ACCENT),
+                "success": ("✅", CURRENT_THEME.SUCCESS),
             }
-            icon, icon_color = icons.get(msg_type, ("💬", ModernColors.TEXT_PRIMARY))
+            icon, icon_color = icons.get(msg_type, ("💬", CURRENT_THEME.TEXT_PRIMARY))
 
-            main_frame = tk.Frame(dialog, bg=ModernColors.BG_PRIMARY, padx=25, pady=25)
+            main_frame = tk.Frame(dialog, bg=CURRENT_THEME.BG_PRIMARY, padx=25, pady=25)
             main_frame.pack(fill="both", expand=True)
 
-            content_frame = tk.Frame(main_frame, bg=ModernColors.BG_PRIMARY)
+            content_frame = tk.Frame(main_frame, bg=CURRENT_THEME.BG_PRIMARY)
             content_frame.pack(fill="both", expand=True, pady=(0, 20))
 
-            icon_frame = tk.Frame(content_frame, bg=ModernColors.BG_PRIMARY, width=60)
+            icon_frame = tk.Frame(content_frame, bg=CURRENT_THEME.BG_PRIMARY, width=60)
             icon_frame.pack(side="left", fill="y")
             icon_frame.pack_propagate(False)
 
@@ -1650,21 +1796,21 @@ class DarkMessageBox:
                 icon_frame,
                 text=icon,
                 font=("Segoe UI", 24),
-                bg=ModernColors.BG_PRIMARY,
+                bg=CURRENT_THEME.BG_PRIMARY,
                 fg=icon_color,
             )
             icon_label.pack(expand=True)
 
-            message_frame = tk.Frame(content_frame, bg=ModernColors.BG_PRIMARY)
+            message_frame = tk.Frame(content_frame, bg=CURRENT_THEME.BG_PRIMARY)
             message_frame.pack(side="left", fill="both", expand=True, padx=(20, 0))
 
             if len(title) > 30:
                 title_label = tk.Label(
                     message_frame,
                     text=title,
-                    font=ModernFonts.SUBTITLE,
-                    bg=ModernColors.BG_PRIMARY,
-                    fg=ModernColors.TEXT_PRIMARY,
+                    font=DragonFonts.SUBTITLE,
+                    bg=CURRENT_THEME.BG_PRIMARY,
+                    fg=CURRENT_THEME.TEXT_PRIMARY,
                     justify="left",
                     anchor="w",
                 )
@@ -1673,16 +1819,16 @@ class DarkMessageBox:
             message_label = tk.Label(
                 message_frame,
                 text=message,
-                font=ModernFonts.PRIMARY,
-                bg=ModernColors.BG_PRIMARY,
-                fg=ModernColors.TEXT_PRIMARY,
+                font=DragonFonts.PRIMARY,
+                bg=CURRENT_THEME.BG_PRIMARY,
+                fg=CURRENT_THEME.TEXT_PRIMARY,
                 justify="left",
                 wraplength=350,
                 anchor="w",
             )
             message_label.pack(fill="x", expand=True, anchor="w")
 
-            button_frame = tk.Frame(main_frame, bg=ModernColors.BG_PRIMARY)
+            button_frame = tk.Frame(main_frame, bg=CURRENT_THEME.BG_PRIMARY)
             button_frame.pack(fill="x")
 
             result = {"value": None}
@@ -1707,9 +1853,9 @@ class DarkMessageBox:
                     button_frame,
                     text="Abbrechen",
                     command=lambda: set_result(False),
-                    bg=ModernColors.BG_TERTIARY,
-                    fg=ModernColors.TEXT_PRIMARY,
-                    font=ModernFonts.BUTTON,
+                    bg=CURRENT_THEME.BG_TERTIARY,
+                    fg=CURRENT_THEME.TEXT_PRIMARY,
+                    font=DragonFonts.BUTTON,
                     relief="flat",
                     padx=22,
                     pady=8,
@@ -1722,9 +1868,9 @@ class DarkMessageBox:
                     button_frame,
                     text="OK",
                     command=lambda: set_result(True),
-                    bg=ModernColors.SUCCESS,
-                    fg=ModernColors.TEXT_PRIMARY,
-                    font=ModernFonts.BUTTON,
+                    bg=CURRENT_THEME.SUCCESS,
+                    fg=CURRENT_THEME.TEXT_PRIMARY,
+                    font=DragonFonts.BUTTON,
                     relief="flat",
                     padx=25,
                     pady=8,
@@ -1737,7 +1883,8 @@ class DarkMessageBox:
                 dialog.bind("<Escape>", lambda e: set_result(False))
                 dialog.bind("<space>", lambda e: cancel_btn.focus_set())
 
-                is_exit_dialog = any(word in title.lower() for word in ["beenden", "exit", "quit", "schließen"])
+                is_exit_dialog = any(word in title.lower()
+                                     for word in ["beenden", "exit", "quit", "schließen"])
                 if is_exit_dialog:
                     cancel_btn.focus_set()
                 else:
@@ -1747,9 +1894,9 @@ class DarkMessageBox:
                     button_frame,
                     text="OK",
                     command=lambda: set_result(True),
-                    bg=ModernColors.SUCCESS,
-                    fg=ModernColors.TEXT_PRIMARY,
-                    font=ModernFonts.BUTTON,
+                    bg=CURRENT_THEME.SUCCESS,
+                    fg=CURRENT_THEME.TEXT_PRIMARY,
+                    font=DragonFonts.BUTTON,
                     relief="flat",
                     padx=25,
                     pady=8,
@@ -1770,10 +1917,8 @@ class DarkMessageBox:
             DarkMessageBox._center_dialog(dialog, parent)
             parent.wait_window(dialog)
             return result["value"]
-        except Exception as e:
+        except (tk.TclError, RuntimeError, AttributeError) as e:
             logger.warning(f"⚠️ DarkMessageBox Error: {e}")
-            import traceback
-            traceback.print_exc()
             return DarkMessageBox._fallback_messagebox(title, message, msg_type, buttons)
 
     @staticmethod
@@ -1788,36 +1933,36 @@ class DarkMessageBox:
                     return mb.askyesno(title, message)
             dialog = tk.Toplevel(parent)
             dialog.title(f"🐉 {title}")
-            dialog.configure(bg=ModernColors.BG_PRIMARY)
+            dialog.configure(bg=CURRENT_THEME.BG_PRIMARY)
             dialog.resizable(False, False)
             dialog.transient(parent)
             dialog.grab_set()
             timeout_id = dialog.after(15000, lambda: dialog.destroy() if dialog.winfo_exists() else None)
 
-            main_frame = tk.Frame(dialog, bg=ModernColors.BG_PRIMARY, padx=30, pady=25)
+            main_frame = tk.Frame(dialog, bg=CURRENT_THEME.BG_PRIMARY, padx=30, pady=25)
             main_frame.pack(fill="both", expand=True)
 
             icon_label = tk.Label(
                 main_frame,
                 text="❓",
                 font=("Segoe UI", 28),
-                bg=ModernColors.BG_PRIMARY,
-                fg=ModernColors.TEXT_ACCENT,
+                bg=CURRENT_THEME.BG_PRIMARY,
+                fg=CURRENT_THEME.TEXT_ACCENT,
             )
             icon_label.pack(pady=(0, 20))
 
             message_label = tk.Label(
                 main_frame,
                 text=message,
-                font=ModernFonts.PRIMARY,
-                bg=ModernColors.BG_PRIMARY,
-                fg=ModernColors.TEXT_PRIMARY,
+                font=DragonFonts.PRIMARY,
+                bg=CURRENT_THEME.BG_PRIMARY,
+                fg=CURRENT_THEME.TEXT_PRIMARY,
                 justify="center",
                 wraplength=350,
             )
             message_label.pack(pady=(0, 30))
 
-            button_frame = tk.Frame(main_frame, bg=ModernColors.BG_PRIMARY)
+            button_frame = tk.Frame(main_frame, bg=CURRENT_THEME.BG_PRIMARY)
             button_frame.pack(fill="x")
 
             result = {"value": None}
@@ -1842,8 +1987,8 @@ class DarkMessageBox:
                 button_frame,
                 text="  👍 Ja  ",
                 command=on_yes,
-                bg=ModernColors.SUCCESS,
-                fg=ModernColors.TEXT_PRIMARY,
+                bg=CURRENT_THEME.SUCCESS,
+                fg=CURRENT_THEME.TEXT_PRIMARY,
                 font=("Segoe UI", 10, "bold"),
                 relief="flat",
                 padx=25,
@@ -1856,8 +2001,8 @@ class DarkMessageBox:
                 button_frame,
                 text="  👎 Nein  ",
                 command=on_no,
-                bg=ModernColors.ERROR,
-                fg=ModernColors.TEXT_PRIMARY,
+                bg=CURRENT_THEME.ERROR,
+                fg=CURRENT_THEME.TEXT_PRIMARY,
                 font=("Segoe UI", 10, "bold"),
                 relief="flat",
                 padx=25,
@@ -1874,7 +2019,7 @@ class DarkMessageBox:
             DarkMessageBox._center_dialog(dialog, parent)
             parent.wait_window(dialog)
             return result["value"]
-        except Exception:
+        except (tk.TclError, RuntimeError, AttributeError):
             import tkinter.messagebox as mb
             return mb.askyesno(title, message)
 
@@ -1884,10 +2029,10 @@ class DarkMessageBox:
             if not tk._default_root:
                 return None
             for widget in tk._default_root.winfo_children():
-                if hasattr(widget, "winfo_exists") and widget.winfo_exists():
+                if widget.winfo_exists():
                     return widget
             return tk._default_root
-        except Exception:
+        except (tk.TclError, AttributeError):
             return None
 
     @staticmethod
@@ -1923,7 +2068,8 @@ class DarkMessageBox:
                 pass
 
     @staticmethod
-    def _fallback_messagebox(title: str, message: str, msg_type: str, buttons: bool = False) -> Optional[bool]:
+    def _fallback_messagebox(title: str, message: str, msg_type: str,
+                             buttons: bool = False) -> Optional[bool]:
         try:
             import tkinter.messagebox as mb
             if buttons:
@@ -1954,19 +2100,19 @@ class DarkMessageBox:
                 root_window = parent if parent else tk._default_root
                 dialog = tk.Toplevel(root_window)
                 dialog.title(f"🐉 {title}")
-                dialog.configure(bg=ModernColors.BG_PRIMARY)
+                dialog.configure(bg=CURRENT_THEME.BG_PRIMARY)
                 dialog.resizable(False, False)
                 dialog.transient(root_window)
 
-                main_frame = tk.Frame(dialog, bg=ModernColors.BG_PRIMARY, padx=30, pady=25)
+                main_frame = tk.Frame(dialog, bg=CURRENT_THEME.BG_PRIMARY, padx=30, pady=25)
                 main_frame.pack(fill="both", expand=True)
 
                 message_label = tk.Label(
                     main_frame,
                     text=message,
-                    font=ModernFonts.PRIMARY,
-                    bg=ModernColors.BG_PRIMARY,
-                    fg=ModernColors.TEXT_PRIMARY,
+                    font=DragonFonts.PRIMARY,
+                    bg=CURRENT_THEME.BG_PRIMARY,
+                    fg=CURRENT_THEME.TEXT_PRIMARY,
                     justify="center",
                 )
                 message_label.pack(pady=(0, 20))
@@ -1980,7 +2126,7 @@ class DarkMessageBox:
 
                 progress.start(10)
                 DarkMessageBox._center_dialog(dialog, root_window)
-            except Exception as e:
+            except (tk.TclError, RuntimeError) as e:
                 logger.warning(f"⚠️ Progress Dialog Error: {e}")
 
         def close_dialog() -> None:
@@ -2020,10 +2166,9 @@ class DarkMessageBox:
         return ProgressController()
 
 
-# =============================================================================
-# MEMORY MANAGER (optimiert, mit Typen)
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# MEMORY MANAGER (unverändert, bis auf kleine Optimierung)
+# -----------------------------------------------------------------------------
 class ExcellenceMemoryManager:
     def __init__(self) -> None:
         self._buffers: Dict[str, Deque[str]] = {}
@@ -2043,31 +2188,31 @@ class ExcellenceMemoryManager:
         self._start_maintenance()
 
     def _start_maintenance(self) -> None:
-        """Startet einen gemeinsamen Wartungsthread für periodisches Aufräumen und Überwachung."""
         def maintenance_worker() -> None:
             while not self._maintenance_stop.is_set():
                 try:
-                    time.sleep(60)  # alle 60 Sekunden
+                    time.sleep(60)
                     self._perform_periodic_maintenance()
                     self._perform_memory_health_check()
                 except Exception as e:
                     logger.warning(f"⚠️ Maintenance worker error: {e}")
-        self._maintenance_thread = threading.Thread(target=maintenance_worker, daemon=True, name="MemoryMaintenance")
+        self._maintenance_thread = threading.Thread(
+            target=maintenance_worker, daemon=True, name="MemoryMaintenance"
+        )
         self._maintenance_thread.start()
 
     def _perform_memory_health_check(self) -> None:
         try:
-            # psutil sicher importieren
-            try:
-                import psutil
-            except ImportError:
-                return
+            import psutil
+        except ImportError:
+            return
 
+        try:
             system_memory = psutil.virtual_memory()
             system_usage_percent = system_memory.percent / 100.0
             process = psutil.Process()
             process_memory = process.memory_info().rss
-            process_usage_percent = process_memory / ExcellenceConfig.MAX_MEMORY_USAGE
+            process_usage_percent = process_memory / Constants.MAX_MEMORY_USAGE
             memory_sample = {
                 "timestamp": time.time(),
                 "system_usage": system_usage_percent,
@@ -2091,12 +2236,11 @@ class ExcellenceMemoryManager:
 
     def get_memory_stats(self) -> Dict[str, Any]:
         try:
-            # psutil sicher importieren
-            try:
-                import psutil
-            except ImportError:
-                return {}
+            import psutil
+        except ImportError:
+            return {}
 
+        try:
             system_memory = psutil.virtual_memory()
             process = psutil.Process()
             process_memory = process.memory_info().rss
@@ -2108,7 +2252,7 @@ class ExcellenceMemoryManager:
                 "system_usage_percent": system_memory.percent,
                 "system_used_mb": system_memory.used // (1024 * 1024),
                 "system_total_mb": system_memory.total // (1024 * 1024),
-                "process_usage_percent": (process_memory / ExcellenceConfig.MAX_MEMORY_USAGE) * 100,
+                "process_usage_percent": (process_memory / Constants.MAX_MEMORY_USAGE) * 100,
                 "process_used_mb": process_memory // (1024 * 1024),
                 "process_peak_mb": self._get_peak_memory() // (1024 * 1024),
                 "long_term_samples": len(self._long_term_monitor),
@@ -2123,13 +2267,9 @@ class ExcellenceMemoryManager:
 
     def _get_peak_memory(self) -> int:
         try:
-            # psutil sicher importieren
-            try:
-                import psutil
-                process = psutil.Process()
-                return process.memory_info().rss
-            except ImportError:
-                return 0
+            import psutil
+            process = psutil.Process()
+            return process.memory_info().rss
         except Exception:
             return 0
 
@@ -2143,12 +2283,9 @@ class ExcellenceMemoryManager:
             memory_usage_percent = total_memory / self._max_memory_per_component
             if memory_usage_percent > 0.8:
                 logger.warning(f"⚠️ High buffer memory: {memory_usage_percent:.1%}")
-                def async_aggressive_cleanup() -> None:
-                    try:
-                        self._aggressive_cleanup()
-                    except Exception as e:
-                        logger.warning(f"⚠️ Aggressive cleanup error: {e}")
-                cleanup_thread = threading.Thread(target=async_aggressive_cleanup, daemon=True)
+                cleanup_thread = threading.Thread(
+                    target=self._aggressive_cleanup, daemon=True
+                )
                 cleanup_thread.start()
 
     def _aggressive_cleanup(self) -> None:
@@ -2163,19 +2300,21 @@ class ExcellenceMemoryManager:
                         if buffer_size > 100:
                             keep_count = max(50, int(buffer_size * 0.5))
                             current_buffer = self._buffers[component]
-                            new_deque = deque(list(current_buffer)[-keep_count:], maxlen=ExcellenceConfig.MAX_TEXT_LINES)
+                            new_deque = deque(
+                                list(current_buffer)[-keep_count:],
+                                maxlen=Constants.MAX_TEXT_LINES
+                            )
                             self._buffers[component] = new_deque
                             self._buffer_sizes[component] = sum(
-                                len(str(text).encode("utf-8")) if text else 0 for text in new_deque
+                                len(str(text).encode("utf-8")) if text else 0
+                                for text in new_deque
                             )
                             logger.info(f"  ↪ {component}: {buffer_size} → {keep_count} entries")
             except Exception as e:
                 logger.warning(f"⚠️ Component cleanup error for {component}: {e}")
 
         def async_gc() -> None:
-            for _ in range(3):
-                gc.collect()
-                time.sleep(0.01)
+            gc.collect()
         gc_thread = threading.Thread(target=async_gc, daemon=True)
         gc_thread.start()
         logger.info("✅ Aggressive cleanup completed")
@@ -2188,7 +2327,7 @@ class ExcellenceMemoryManager:
                 self._add_to_ring_buffer(component, text)
                 return
             if component not in self._buffers:
-                self._buffers[component] = deque(maxlen=ExcellenceConfig.MAX_TEXT_LINES)
+                self._buffers[component] = deque(maxlen=Constants.MAX_TEXT_LINES)
                 self._buffer_sizes[component] = 0
             text_size = len(text.encode("utf-8"))
             current_size = self._buffer_sizes[component]
@@ -2196,12 +2335,11 @@ class ExcellenceMemoryManager:
                 self._optimize_buffer(component)
             self._buffers[component].append(text)
             self._buffer_sizes[component] += text_size
-            # Kein separater GC-Thread mehr – die periodische Wartung übernimmt das
 
     def _add_to_ring_buffer(self, component: str, text: str) -> None:
         with self._lock:
             if component not in self._ring_buffers:
-                buffer_size = ExcellenceConfig.MAX_TEXT_LINES
+                buffer_size = Constants.MAX_TEXT_LINES
                 self._ring_buffers[component] = [None] * buffer_size
                 self._ring_buffer_pointers[component] = 0
                 self._ring_buffer_sizes[component] = 0
@@ -2222,16 +2360,21 @@ class ExcellenceMemoryManager:
     def _optimize_buffer(self, component: str) -> None:
         if component in self._ring_buffers:
             current_size = self._ring_buffer_sizes[component]
-            if current_size > ExcellenceConfig.MAX_TEXT_LINES // 2:
-                new_size = ExcellenceConfig.MAX_TEXT_LINES // 2
+            if current_size > Constants.MAX_TEXT_LINES // 2:
+                new_size = Constants.MAX_TEXT_LINES // 2
                 self._resize_ring_buffer(component, new_size)
             return
         if component in self._buffers:
             keep_count = int(len(self._buffers[component]) * 0.7)
             if keep_count > 0:
-                new_deque = deque(list(self._buffers[component])[-keep_count:], maxlen=ExcellenceConfig.MAX_TEXT_LINES)
+                new_deque = deque(
+                    list(self._buffers[component])[-keep_count:],
+                    maxlen=Constants.MAX_TEXT_LINES
+                )
                 self._buffers[component] = new_deque
-                self._buffer_sizes[component] = sum(len(text.encode("utf-8")) for text in self._buffers[component])
+                self._buffer_sizes[component] = sum(
+                    len(text.encode("utf-8")) for text in self._buffers[component]
+                )
                 logger.debug(f"🧹 Buffer {component} optimized: {keep_count} entries kept")
 
     def _resize_ring_buffer(self, component: str, new_size: int) -> None:
@@ -2316,9 +2459,9 @@ class ExcellenceMemoryManager:
                 return {
                     "type": "deque",
                     "size": len(self._buffers[component]),
-                    "capacity": ExcellenceConfig.MAX_TEXT_LINES,
+                    "capacity": Constants.MAX_TEXT_LINES,
                     "memory_bytes": self._buffer_sizes.get(component, 0),
-                    "maxlen": ExcellenceConfig.MAX_TEXT_LINES,
+                    "maxlen": Constants.MAX_TEXT_LINES,
                 }
             return {"type": "not_found"}
 
@@ -2360,8 +2503,10 @@ class ExcellenceMemoryManager:
         logger.info("\n" + "=" * 50)
         logger.info("🧠 MEMORY MANAGER DEBUG INFO")
         logger.info("=" * 50)
-        logger.info(f"System Memory: {stats.get('system_used_mb', 0)}MB / {stats.get('system_total_mb', 0)}MB ({stats.get('system_usage_percent', 0):.1f}%)")
-        logger.info(f"Process Memory: {stats.get('process_used_mb', 0)}MB ({stats.get('process_usage_percent', 0):.1f}%)")
+        logger.info(f"System Memory: {stats.get('system_used_mb', 0)}MB / "
+                    f"{stats.get('system_total_mb', 0)}MB ({stats.get('system_usage_percent', 0):.1f}%)")
+        logger.info(f"Process Memory: {stats.get('process_used_mb', 0)}MB "
+                    f"({stats.get('process_usage_percent', 0):.1f}%)")
         logger.info(f"Buffer Components: {stats.get('buffer_components', 0)}")
         logger.info(f"Ring Buffer Components: {stats.get('ring_buffer_components', 0)}")
         logger.info(f"Total Buffer Size: {stats.get('total_buffer_size_mb', 0)}MB")
@@ -2371,16 +2516,16 @@ class ExcellenceMemoryManager:
             logger.info(f"\nActive Components ({len(components)}):")
             for comp in components[:5]:
                 comp_stats = self.get_buffer_stats(comp)
-                logger.info(f"  • {comp}: {comp_stats['type']}, size: {comp_stats.get('size', 0)}")
+                logger.info(f"  • {comp}: {comp_stats['type']}, "
+                            f"size: {comp_stats.get('size', 0)}")
             if len(components) > 5:
                 logger.info(f"  ... and {len(components) - 5} more")
         logger.info("=" * 50)
 
 
-# =============================================================================
-# SUPPORTED LANGUAGES & SETTINGS
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# SUPPORTED LANGUAGES & SETTINGS (unverändert)
+# -----------------------------------------------------------------------------
 SUPPORTED_LANGUAGES: Dict[str, str] = {
     "auto": "Automatisch",
     "de": "Deutsch", "en": "Englisch", "fr": "Französisch", "es": "Spanisch",
@@ -2400,7 +2545,10 @@ SUPPORTED_LANGUAGES: Dict[str, str] = {
     "ca": "Katalanisch", "eu": "Baskisch", "gl": "Galizisch",
 }
 
-SORTED_LANGUAGES: List[Tuple[str, str]] = sorted([(name, code) for code, name in SUPPORTED_LANGUAGES.items()], key=lambda x: x[0])
+SORTED_LANGUAGES: List[Tuple[str, str]] = sorted(
+    [(name, code) for code, name in SUPPORTED_LANGUAGES.items()],
+    key=lambda x: x[0]
+)
 
 LANGUAGE_SHORT_CODES: Dict[str, str] = {
     "auto": "Auto", "de": "Deu", "en": "Eng", "fr": "Fra", "es": "Esp",
@@ -2437,20 +2585,17 @@ class AsianLanguageSupport:
             return " ".join(text)
         elif language_code == "ja":
             return text.replace("。", ". ").replace("、", ", ")
-        elif language_code == "ko":
-            return text
         return text
 
 
-# =============================================================================
-# ADVANCED SETTINGS (mit JSON-Persistenz, optimierte VAD-Standards)
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# ADVANCED SETTINGS (überarbeitet mit Konstanten)
+# -----------------------------------------------------------------------------
 class AdvancedSettings:
     def __init__(self,
-                 beam_size: int = 5,
-                 temperature: float = 0.0,
-                 vad_filter: bool = True,
+                 beam_size: int = Constants.DEFAULT_BEAM_SIZE,
+                 temperature: float = Constants.DEFAULT_TEMPERATURE,
+                 vad_filter: bool = Constants.ENABLE_VAD_FILTER,
                  max_cache_size: int = 200,
                  auto_save_interval: int = 300,
                  enable_sentiment_analysis: bool = False,
@@ -2472,10 +2617,9 @@ class AdvancedSettings:
         self.optimize_translations = optimize_translations
         self.chunk_duration = self.config.CHUNK_DURATION
 
-        # NEU: VAD‑Parameter mit optimierten Standardwerten (toleranter)
-        self.vad_threshold: float = 0.2
-        self.vad_min_speech_duration_ms: int = 100
-        self.vad_min_silence_duration_ms: int = 50
+        self.vad_threshold: float = Constants.VAD_THRESHOLD
+        self.vad_min_speech_duration_ms: int = Constants.VAD_MIN_SPEECH_DURATION_MS
+        self.vad_min_silence_duration_ms: int = Constants.VAD_MIN_SILENCE_DURATION_MS
 
         logger.info("🔊 AdvancedSettings initialized:")
         logger.info(f"   Config Type: {config_type}")
@@ -2495,8 +2639,14 @@ class AdvancedSettings:
             config_dir = PlatformUtils.get_platform_config_dir()
             file_path = config_dir / filename
             if file_path.exists():
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                except (json.JSONDecodeError, PermissionError, OSError) as e:
+                    logger.error(f"Fehler beim Laden der Einstellungen: {e}")
+                    if DEBUG_LEVEL >= 2:
+                        logger.exception("Stacktrace:")
+                    return cls()
                 import inspect
                 signature = inspect.signature(cls.__init__)
                 valid_params = list(signature.parameters.keys())
@@ -2508,12 +2658,10 @@ class AdvancedSettings:
                     filtered_data['config_type'] = config_type
                 instance = cls(**filtered_data)
 
-                # Lade VAD‑Parameter mit optimierten Fallback-Werten
-                instance.vad_threshold = data.get('vad_threshold', 0.3)
-                instance.vad_min_speech_duration_ms = data.get('vad_min_speech_duration_ms', 200)
-                instance.vad_min_silence_duration_ms = data.get('vad_min_silence_duration_ms', 80)
+                instance.vad_threshold = data.get('vad_threshold', Constants.VAD_THRESHOLD)
+                instance.vad_min_speech_duration_ms = data.get('vad_min_speech_duration_ms', Constants.VAD_MIN_SPEECH_DURATION_MS)
+                instance.vad_min_silence_duration_ms = data.get('vad_min_silence_duration_ms', Constants.VAD_MIN_SILENCE_DURATION_MS)
 
-                # Audio-Parameter aus der Config wiederherstellen – mit .get() absichern
                 if 'chunk_duration' in data:
                     try:
                         instance.config.CHUNK_DURATION = float(data['chunk_duration'])
@@ -2521,25 +2669,25 @@ class AdvancedSettings:
                         pass
                 if 'sample_rate' in data:
                     try:
-                        instance.config.SAMPLE_RATE = int(data.get('sample_rate', ExcellenceConfig.SAMPLE_RATE))
+                        instance.config.SAMPLE_RATE = int(data.get('sample_rate', Constants.SAMPLE_RATE))
                     except (ValueError, AttributeError):
                         pass
                 if 'channels' in data:
                     try:
-                        instance.config.CHANNELS = int(data.get('channels', ExcellenceConfig.CHANNELS))
+                        instance.config.CHANNELS = int(data.get('channels', Constants.CHANNELS))
                     except (ValueError, AttributeError):
                         pass
                 if 'audio_format' in data:
                     try:
-                        instance.config.AUDIO_FORMAT = str(data.get('audio_format', ExcellenceConfig.AUDIO_FORMAT))
+                        instance.config.AUDIO_FORMAT = str(data.get('audio_format', Constants.AUDIO_FORMAT))
                     except (ValueError, AttributeError):
                         pass
                 logger.info(f"✅ Settings loaded successfully (Config Type: {config_type})")
                 return instance
+        except FileNotFoundError:
+            logger.info("Keine gespeicherten Einstellungen gefunden, verwende Standard")
         except Exception as e:
             logger.error(f"❌ Error loading advanced settings: {e}")
-            import traceback
-            traceback.print_exc()
         logger.info("📝 Using default settings")
         return cls()
 
@@ -2570,14 +2718,20 @@ class AdvancedSettings:
                 'sample_rate': self.config.SAMPLE_RATE,
                 'channels': self.config.CHANNELS,
                 'audio_format': self.config.AUDIO_FORMAT,
-                # NEU: VAD‑Parameter
                 'vad_threshold': self.vad_threshold,
                 'vad_min_speech_duration_ms': self.vad_min_speech_duration_ms,
                 'vad_min_silence_duration_ms': self.vad_min_silence_duration_ms,
             }
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(save_dict, f, indent=2, ensure_ascii=False)
-            logger.info(f"💾 Settings saved to {file_path} (Config Type: {config_type})")
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(save_dict, f, indent=2, ensure_ascii=False)
+                logger.info(f"💾 Settings saved to {file_path} (Config Type: {config_type})")
+            except (OSError, PermissionError) as e:
+                logger.error(f"Fehler beim Schreiben der Einstellungen: {e}")
+            except Exception as e:
+                logger.error(f"Unerwarteter Fehler beim Speichern: {e}")
+                if DEBUG_LEVEL >= 2:
+                    logger.exception("Stacktrace:")
         except Exception as e:
             logger.error(f"❌ Error saving settings: {e}")
 
@@ -2613,7 +2767,7 @@ class AdvancedSettings:
             issues.append(f"Invalid max_memory_mb: {self.max_memory_mb} (should be 100-16384)")
         if not (self.config.MIN_CHUNK_DURATION <= self.config.CHUNK_DURATION <= self.config.MAX_CHUNK_DURATION):
             issues.append(f"Invalid CHUNK_DURATION: {self.config.CHUNK_DURATION}s "
-                         f"(should be {self.config.MIN_CHUNK_DURATION}-{self.config.MAX_CHUNK_DURATION}s)")
+                          f"(should be {self.config.MIN_CHUNK_DURATION}-{self.config.MAX_CHUNK_DURATION}s)")
         return issues
 
     def set_config_type(self, config_type: str) -> bool:
@@ -2637,7 +2791,8 @@ class AdvancedSettings:
         logger.info(f"   New CHUNK_SIZE: {self.config.CHUNK_SIZE_BYTES:,} bytes")
         return True
 
-    def get_audio_filter(self, language: Optional[str] = None, profile: Optional[str] = None) -> str:
+    def get_audio_filter(self, language: Optional[str] = None,
+                         profile: Optional[str] = None) -> str:
         return self.config.get_audio_filter(language, profile)
 
     def get_youtube_headers(self, is_manifest: bool = False) -> Dict[str, str]:
@@ -2660,7 +2815,8 @@ class AdvancedSettings:
         logger.info(f"  • GPU Acceleration: {self.gpu_acceleration}")
         logger.info("\n🎵 Audio Configuration (from ExcellenceConfig):")
         logger.info(f"  • Sample Rate: {self.config.SAMPLE_RATE} Hz")
-        logger.info(f"  • Channels: {self.config.CHANNELS} ({'Mono' if self.config.CHANNELS == 1 else 'Stereo'})")
+        logger.info(f"  • Channels: {self.config.CHANNELS} "
+                    f"({'Mono' if self.config.CHANNELS == 1 else 'Stereo'})")
         logger.info(f"  • Chunk Duration: {self.config.CHUNK_DURATION}s")
         logger.info(f"  • Chunk Size: {self.config.CHUNK_SIZE_BYTES:,} bytes")
         logger.info(f"  • Bytes/sec: {self.config.BYTES_PER_SECOND:,}")
@@ -2705,10 +2861,9 @@ class AdvancedSettings:
                 f"gpu={self.gpu_acceleration})")
 
 
-# =============================================================================
-# PLUGINS (einfache Struktur)
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# PLUGINS (vereinfacht, unverändert)
+# -----------------------------------------------------------------------------
 class Plugin:
     def __init__(self, name: str, version: str = "1.0.0") -> None:
         self.name = name
@@ -2734,7 +2889,6 @@ class SentimentAnalysisPlugin(Plugin):
         self.sentiment_cache: Dict[str, Any] = {}
 
     def on_transcription(self, result: ExcellenceTranscriptionResult) -> ExcellenceTranscriptionResult:
-        # Platzhalter für echte Sentiment-Analyse
         return result
 
 
@@ -2742,7 +2896,8 @@ class KeywordExtractionPlugin(Plugin):
     def __init__(self) -> None:
         super().__init__("Keyword Extraction", "1.0.0")
         self.common_words = {
-            "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
+            "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
+            "of", "with", "by",
         }
 
     def on_transcription(self, result: ExcellenceTranscriptionResult) -> ExcellenceTranscriptionResult:
@@ -2784,15 +2939,15 @@ class PluginManager:
         return result
 
 
-# =============================================================================
-# EXCELLENCE TRANSLATION ENGINE
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# TRANSLATION ENGINE (überarbeitet mit Thread-Sicherheit und Fehlerbehandlung)
+# -----------------------------------------------------------------------------
 class ExcellenceTranslationEngine:
-    def __init__(self, target_lang: str = "de", advanced_settings: Optional[AdvancedSettings] = None) -> None:
+    def __init__(self, target_lang: str = "de",
+                 advanced_settings: Optional[AdvancedSettings] = None) -> None:
         self.target_lang = target_lang
         self.translator: Optional[Any] = None
-        self._cache = ExcellenceTTLCache(maxsize=500, ttl=3600)
+        self._cache = ExcellenceTTLCache(maxsize=Constants.TRANSLATION_CACHE_SIZE, ttl=Constants.TRANSLATION_CACHE_TTL)
         self._lock = threading.RLock()
         self.advanced_settings = advanced_settings or AdvancedSettings()
         self._last_translations: Deque[str] = deque(maxlen=15)
@@ -2809,6 +2964,8 @@ class ExcellenceTranslationEngine:
             (0x3130, 0x318F),   # Korean Hangul Compatibility Jamo
         ]
         for char in text:
+            if not char:
+                continue
             code = ord(char)
             for low, high in asian_ranges:
                 if low <= code <= high:
@@ -2828,7 +2985,6 @@ class ExcellenceTranslationEngine:
         is_asian = self._contains_asian(orig_clean) or self._contains_asian(trans_clean)
 
         if is_asian:
-            # Großzügigere Regeln für asiatische Sprachen
             if len(trans_clean) <= 1:
                 return True
             orig_len = len(orig_clean)
@@ -2858,7 +3014,8 @@ class ExcellenceTranslationEngine:
                 self.translator = GoogleTranslator(source="auto", target=self.target_lang)
             else:
                 self.translator = None
-        except Exception:
+        except ImportError as e:
+            logger.warning(f"deep_translator nicht verfügbar: {e}")
             self.translator = None
 
     def set_target_language(self, target_lang: str) -> None:
@@ -2925,6 +3082,8 @@ class ExcellenceTranslationEngine:
                         time.sleep(1.5)
                         self._setup_translator()
                     else:
+                        if DEBUG_LEVEL >= 2:
+                            logger.exception("Fehler bei Übersetzung (letzter Versuch):")
                         logger.debug("❌ translate_text: Letzter Versuch fehlgeschlagen, gebe auf.")
             return None
         except Exception:
@@ -2979,19 +3138,91 @@ class ExcellenceTranslationEngine:
         return result.strip()
 
 
-# =============================================================================
-# EXCELLENCE TRANSCRIPTION ENGINE (mit Modell-Caching)
-# =============================================================================
+# -----------------------------------------------------------------------------
+# DUMMY ENGINES (unverändert)
+# -----------------------------------------------------------------------------
+class DummyTranscriptionEngine:
+    def __init__(self, advanced_settings: Optional[AdvancedSettings] = None):
+        self.advanced_settings = advanced_settings or AdvancedSettings()
+        self.model = None
+        self.model_size = "dummy"
+        self.whisper_backend = None
+        self.demo_mode = True
 
-# Dummy-Klassen für einheitliches Verhalten in _universal_transcribe
+    def load_model(self, model_size: str, set_active: bool = False) -> Optional[Tuple[Any, str]]:
+        logger.info("Dummy-Modus: Laden eines Modells nicht erforderlich.")
+        return (None, "dummy")
+
+    def transcribe_audio(self, audio_data: bytes, include_timestamps: bool = False) -> Any:
+        if include_timestamps:
+            dummy = ExcellenceTranscriptionResult(
+                text="[Whisper nicht verfügbar]",
+                confidence=0.5,
+                language="de",
+                start=0.0,
+                end=5.0
+            )
+            return [dummy]
+        else:
+            return ExcellenceTranscriptionResult(
+                text="[Whisper nicht verfügbar]",
+                confidence=0.5,
+                language="de"
+            )
+
+    def safe_transcribe(self, audio_data: bytes, max_retries: int = 2) -> Optional[ExcellenceTranscriptionResult]:
+        return self.transcribe_audio(audio_data)
+
+    def get_current_model(self) -> str:
+        return "dummy"
+
+    def is_model_loading(self) -> bool:
+        return False
+
+    def reload_model(self, model_size: str) -> bool:
+        return False
+
+    def test_model_functionality(self) -> bool:
+        return True
+
+    def dispose(self) -> None:
+        pass
+
+class DummyTranslationEngine:
+    def __init__(self, target_lang: str = "de",
+                 advanced_settings: Optional[AdvancedSettings] = None):
+        self.target_lang = target_lang
+        self.advanced_settings = advanced_settings or AdvancedSettings()
+
+    def set_target_language(self, target_lang: str) -> None:
+        self.target_lang = target_lang
+
+    def translate_text(self, text: str, source_lang: str = "auto") -> Optional[ExcellenceTranslationResult]:
+        if not text:
+            return None
+        return ExcellenceTranslationResult(
+            original=text,
+            translated=f"[Übersetzer nicht verfügbar] {text}",
+            source_lang=source_lang,
+            target_lang=self.target_lang
+        )
+
+    def dispose(self) -> None:
+        pass
+
+# -----------------------------------------------------------------------------
+# HILFSKLASSEN FÜR TRANSCRIPTION (unverändert)
+# -----------------------------------------------------------------------------
 class _EmptyInfo:
     language = "unknown"
     duration = 0.0
+
 
 class _UniversalInfo:
     def __init__(self, result_dict: Dict[str, Any]) -> None:
         self.language = result_dict.get("language", "unknown")
         self.duration = result_dict.get("duration", 0.0)
+
 
 class _UniversalSegment:
     def __init__(self, seg_dict: Dict[str, Any]) -> None:
@@ -2999,6 +3230,7 @@ class _UniversalSegment:
         self.start = seg_dict.get("start", 0.0)
         self.end = seg_dict.get("end", 0.0)
         self.confidence = seg_dict.get("confidence", 0.9)
+
 
 class _EmergencySegment:
     def __init__(self, seg_dict: Dict[str, Any]) -> None:
@@ -3008,13 +3240,17 @@ class _EmergencySegment:
         self.confidence = 0.5
 
 
+# -----------------------------------------------------------------------------
+# TRANSCRIPTION ENGINE (überarbeitet mit Thread-Sicherheit und Fehlerbehandlung)
+# -----------------------------------------------------------------------------
 class ExcellenceTranscriptionEngine:
     def __init__(self, advanced_settings: Optional[AdvancedSettings] = None) -> None:
         self.model: Optional[Any] = None
         self.model_size: Optional[str] = None
-        self.whisper_backend: Optional[str] = None  # 'faster_whisper' or 'openai_whisper'
+        self.whisper_backend: Optional[str] = None
         self._lock = threading.RLock()
         self._model_loading = False
+        self._max_cached_models = 3
         self.advanced_settings = advanced_settings or AdvancedSettings()
         self._cache = ExcellenceTTLCache(maxsize=self.advanced_settings.max_cache_size)
         self.device, self.compute_type = self._detect_optimal_device()
@@ -3023,17 +3259,13 @@ class ExcellenceTranscriptionEngine:
         self._active_model_loads: Set[str] = set()
         self._model_loaded_flag = False
         self._disposing = False
-
-        # Modell-Cache für mehrere Modelle (LRU), Key = (model_size, backend)
         self._model_cache: Dict[Tuple[str, str], Any] = {}
-        self._max_cached_models = 3
 
     def _detect_optimal_device(self) -> Tuple[str, str]:
         device = "cpu"
         compute_type = "int8"
         if TORCH_AVAILABLE:
             torch = FastLazyLoader.load('torch')
-            # NVIDIA CUDA
             if torch.cuda.is_available():
                 try:
                     torch.tensor([1.0]).cuda()
@@ -3043,17 +3275,15 @@ class ExcellenceTranscriptionEngine:
                 except Exception as e:
                     if DEBUG_LEVEL >= 1:
                         logger.warning(f"⚠️ CUDA test failed, falling back: {e}")
-            # AMD ROCm (über HIP)
             if hasattr(torch.version, 'hip') and torch.version.hip:
                 try:
                     if torch.cuda.device_count() > 0:
                         device = "cuda"
                         compute_type = "float16" if self.advanced_settings.gpu_acceleration else "int8"
                         logger.info("✅ AMD GPU (ROCm) detected")
-                except Exception as e:
+                except (AttributeError, RuntimeError) as e:
                     if DEBUG_LEVEL >= 1:
                         logger.warning(f"⚠️ ROCm test failed: {e}")
-            # Apple Silicon MPS
             if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
                 device = "mps"
                 compute_type = "float16"
@@ -3062,33 +3292,37 @@ class ExcellenceTranscriptionEngine:
         return device, compute_type
 
     @excellence_execution(timeout=180.0)
-    def load_model(self, model_size: str) -> bool:
-        # Backend basierend auf Verfügbarkeit wählen
+    def load_model(self, model_size: str, set_active: bool = False) -> Optional[Tuple[Any, str]]:
+        if set_active:
+            self._force_model_cleanup()
+
         if FASTER_WHISPER_AVAILABLE:
             backend = "faster_whisper"
         elif OPENAI_WHISPER_AVAILABLE:
             backend = "openai_whisper"
         else:
             logger.error("❌ Kein Whisper-Backend verfügbar")
-            return False
+            return None
 
         cache_key = (model_size, backend)
 
         with self._lock:
             if cache_key in self._model_cache:
-                logger.info(f"⚡ Model '{model_size}' ({backend}) aus Cache geladen")
-                self.model = self._model_cache[cache_key]
-                self.model_size = model_size
-                self.whisper_backend = backend
-                return True
+                model = self._model_cache[cache_key]
+                if set_active:
+                    self.model = model
+                    self.model_size = model_size
+                    self.whisper_backend = backend
+                return model, backend
 
         load_lock_key = f"model_load_{model_size}_{backend}"
         if load_lock_key in self._active_model_loads:
             logger.info("⏳ Model wird bereits geladen...")
-            return False
+            return None
         self._active_model_loads.add(load_lock_key)
+
         try:
-            self._force_model_cleanup()  # Nur das aktive Modell entladen, nicht den Cache leeren
+            self._force_model_cleanup()
             config_dir = PlatformUtils.get_platform_config_dir()
             model_dir = config_dir / "models"
             model_dir.mkdir(exist_ok=True)
@@ -3106,38 +3340,26 @@ class ExcellenceTranscriptionEngine:
                         cpu_threads=4,
                         num_workers=1,
                     )
-                    # Testen
                     np = FastLazyLoader.load("numpy")
                     test_audio = np.zeros(1600, dtype=np.float32)
-                    segments, info = model.transcribe(test_audio, beam_size=1, best_of=1, vad_filter=False, without_timestamps=True)
-                    list(segments)  # Generator auswerten
+                    segments, info = model.transcribe(
+                        test_audio, beam_size=1, best_of=1,
+                        vad_filter=False, without_timestamps=True
+                    )
+                    list(segments)
                     logger.info(f"✅ faster-whisper '{model_size}' erfolgreich geladen und getestet")
-                    with self._lock:
-                        self._model_cache[cache_key] = model
-                        if len(self._model_cache) > self._max_cached_models:
-                            # Ältestes Modell entfernen (erstes Element nach Einfügereihenfolge)
-                            # Da Dict ab 3.7 insertion-order beibehält, können wir popitem(last=False) verwenden
-                            oldest_key, old_model = next(iter(self._model_cache.items()))
-                            del self._model_cache[oldest_key]
-                            logger.info(f"🧹 Entferne altes Modell '{oldest_key[0]}' ({oldest_key[1]}) aus Cache")
-                            if hasattr(old_model, 'unload_model'):
-                                try:
-                                    old_model.unload_model()
-                                except Exception:
-                                    pass
-                        self.model = model
-                        self.model_size = model_size
-                        self.whisper_backend = backend
-                    return True
-                except Exception as e:
-                    logger.warning(f"⚠️ faster-whisper fehlgeschlagen: {e}")
-                    # Falls faster-whisper fehlschlägt und openai-whisper verfügbar, wechsle Backend
+                except (ImportError, OSError, RuntimeError) as e:
+                    logger.warning(f"⚠️ faster-whisper konnte nicht geladen werden: {e}")
+                    if DEBUG_LEVEL >= 2:
+                        logger.exception("Stacktrace:")
                     if OPENAI_WHISPER_AVAILABLE:
                         backend = "openai_whisper"
                         cache_key = (model_size, backend)
+                        if DEBUG_LEVEL >= 2:
+                            logger.debug("  → Wechsle zu openai-whisper...")
                         logger.info("  → Wechsle zu openai-whisper...")
                     else:
-                        return False
+                        return None
 
             if backend == "openai_whisper":
                 try:
@@ -3149,30 +3371,93 @@ class ExcellenceTranscriptionEngine:
                         download_root=str(model_dir) if model_dir else None,
                     )
                     logger.info(f"✅ openai-whisper '{model_size}' erfolgreich geladen")
-                    with self._lock:
-                        self._model_cache[cache_key] = model
-                        if len(self._model_cache) > self._max_cached_models:
-                            oldest_key, old_model = next(iter(self._model_cache.items()))
-                            del self._model_cache[oldest_key]
-                            logger.info(f"🧹 Entferne altes Modell '{oldest_key[0]}' ({oldest_key[1]}) aus Cache")
-                        self.model = model
-                        self.model_size = model_size
-                        self.whisper_backend = backend
-                    return True
-                except Exception as e:
+                except (ImportError, OSError, RuntimeError) as e:
                     logger.error(f"❌ openai-whisper fehlgeschlagen: {e}")
-                    return False
+                    if DEBUG_LEVEL >= 2:
+                        logger.exception("Stacktrace:")
+                    return None
 
-            logger.error("❌ Alle Whisper-Varianten fehlgeschlagen")
-            return False
+            with self._lock:
+                self._model_cache[cache_key] = model
+                if len(self._model_cache) > self._max_cached_models:
+                    oldest_key, old_model = next(iter(self._model_cache.items()))
+                    del self._model_cache[oldest_key]
+                    logger.info(f"🧹 Entferne altes Modell '{oldest_key[0]}' ({oldest_key[1]}) aus Cache")
+                    if hasattr(old_model, 'unload_model'):
+                        try:
+                            old_model.unload_model()
+                        except Exception:
+                            pass
+                if set_active:
+                    self.model = model
+                    self.model_size = model_size
+                    self.whisper_backend = backend
+            return model, backend
+
         except Exception as e:
             logger.error(f"❌ Unerwarteter Fehler: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
+            return None
         finally:
             if load_lock_key in self._active_model_loads:
                 self._active_model_loads.remove(load_lock_key)
+
+    def reload_model(self, model_size: str) -> bool:
+        with self._lock:
+            if self._model_loading:
+                logger.warning("⚠️ Model loading already in progress")
+                return False
+            self._model_loading = True
+
+        def _load_in_background():
+            try:
+                result = self.load_model(model_size, set_active=False)
+                if result is not None:
+                    new_model, new_backend = result
+                    with self._lock:
+                        self.model = new_model
+                        self.model_size = model_size
+                        self.whisper_backend = new_backend
+                    logger.info(f"✅ Model switched to {model_size} ({new_backend})")
+                else:
+                    logger.error("❌ Background model loading failed")
+            except Exception as e:
+                logger.error(f"❌ Background model loading error: {e}")
+            finally:
+                with self._lock:
+                    self._model_loading = False
+
+        thread = threading.Thread(target=_load_in_background, daemon=True, name=f"ModelLoader-{model_size}")
+        thread.start()
+        return True
+
+    def is_model_loading(self) -> bool:
+        return self._model_loading
+
+    def _force_model_cleanup(self) -> None:
+        import gc
+        import time
+        with self._lock:
+            if self.model is not None:
+                try:
+                    if hasattr(self.model, "unload_model"):
+                        self.model.unload_model()
+                    self.model = None
+                    self.model_size = None
+                    self._model_loaded_flag = False
+                except Exception as e:
+                    logger.warning(f"⚠️ Model cleanup error (step 1): {e}")
+                time.sleep(0.1)
+            gc.collect()  # Einmal reicht
+            if self.device == "cuda" and TORCH_AVAILABLE:
+                try:
+                    torch = FastLazyLoader.load("torch")
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+                        logger.info("🧹 GPU Memory freigegeben")
+                except Exception as e:
+                    logger.warning(f"⚠️ GPU cleanup error: {e}")
+            logger.info("✅ Model-Cleanup abgeschlossen (aktives Modell entladen)")
 
     def _universal_transcribe(self, audio_np: Any, **kwargs: Any) -> Tuple[List[Any], Any]:
         if not self.model:
@@ -3180,7 +3465,6 @@ class ExcellenceTranscriptionEngine:
         backend = getattr(self, "whisper_backend", "openai_whisper")
         if backend == "faster_whisper":
             try:
-                # DEBUG-ERWEITERUNG: VAD-Parameter ausgeben
                 if DEBUG_LEVEL >= 2 and kwargs.get('vad_filter', False):
                     vad_params = kwargs.get('vad_parameters', {})
                     logger.debug(f"VAD params: threshold={vad_params.get('threshold')}, "
@@ -3190,7 +3474,6 @@ class ExcellenceTranscriptionEngine:
                 segments, info = self.model.transcribe(audio_np, **kwargs)
                 segments_list = list(segments)
 
-                # DEBUG-ERWEITERUNG: VAD-Ergebnisse detailliert ausgeben
                 if DEBUG_LEVEL >= 2 and kwargs.get('vad_filter', False):
                     total_speech_ms = 0.0
                     seg_details = []
@@ -3204,7 +3487,7 @@ class ExcellenceTranscriptionEngine:
                     logger.debug(f"VAD: {len(segments_list)} speech segments detected (threshold={kwargs.get('vad_parameters', {}).get('threshold', '?')})")
 
                 return segments_list, info
-            except TypeError as e:
+            except (TypeError, ValueError) as e:
                 logger.warning(f"⚠️ faster-whisper Parameterfehler: {e} – verwende minimale Parameter")
                 minimal_kwargs = {}
                 for key in ["language", "task", "temperature", "beam_size", "best_of"]:
@@ -3216,7 +3499,14 @@ class ExcellenceTranscriptionEngine:
                     return segments_list, info
                 except Exception as e2:
                     logger.error(f"❌ faster-whisper auch mit minimalen Parametern fehlgeschlagen: {e2}")
+                    if DEBUG_LEVEL >= 2:
+                        logger.exception("Stacktrace:")
                     return [], _EmptyInfo()
+            except RuntimeError as e:
+                logger.error(f"❌ faster-whisper Runtime-Error: {e}")
+                if DEBUG_LEVEL >= 2:
+                    logger.exception("Stacktrace:")
+                return [], _EmptyInfo()
             except Exception as e:
                 logger.error(f"❌ faster-whisper transcribe error: {e}")
                 if DEBUG_LEVEL >= 2:
@@ -3276,40 +3566,6 @@ class ExcellenceTranscriptionEngine:
                         logger.exception("Fallback stacktrace:")
                     return [], _EmptyInfo()
 
-    def _force_model_cleanup(self) -> None:
-        import gc
-        import time
-        with self._lock:
-            if hasattr(self, "model") and self.model is not None:
-                try:
-                    if hasattr(self.model, "unload_model"):
-                        self.model.unload_model()
-                    for attr in ["model", "_model", "generator", "encoder", "decoder"]:
-                        if hasattr(self, attr):
-                            try:
-                                delattr(self, attr)
-                            except Exception:
-                                pass
-                    self.model = None
-                except Exception as e:
-                    logger.warning(f"⚠️ Model cleanup error (step 1): {e}")
-                time.sleep(0.1)
-            self.model_size = None
-            self._model_loaded_flag = False
-            for _ in range(3):
-                gc.collect()
-                time.sleep(0.05)
-            if hasattr(self, "device") and self.device == "cuda" and TORCH_AVAILABLE:
-                try:
-                    torch = FastLazyLoader.load("torch")
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                        torch.cuda.synchronize()
-                        logger.info("🧹 GPU Memory freigegeben")
-                except Exception as e:
-                    logger.warning(f"⚠️ GPU cleanup error: {e}")
-            logger.info("✅ Model-Cleanup abgeschlossen")
-
     def validate_audio_data(self, audio_data: bytes) -> Tuple[bool, str]:
         if not isinstance(audio_data, bytes):
             return False, "Audio data must be bytes"
@@ -3336,11 +3592,17 @@ class ExcellenceTranscriptionEngine:
             try:
                 try:
                     processed_audio = self.enhance_audio_for_transcription(audio_data)
-                except Exception:
+                except (ValueError, ImportError, RuntimeError) as e:
+                    logger.warning(f"Audio-Enhancement fehlgeschlagen (Versuch {attempt+1}): {e}")
                     processed_audio = audio_data
                 result = self.transcribe_audio(processed_audio)
                 if result and result.text and result.text.strip():
                     return result
+            except (ValueError, RuntimeError) as e:
+                logger.warning(f"Transkriptionsfehler (Versuch {attempt+1}): {e}")
+                if attempt < max_retries:
+                    wait_time = 0.5 * (attempt + 1)
+                    time.sleep(wait_time)
             except Exception:
                 if attempt < max_retries:
                     wait_time = 0.5 * (attempt + 1)
@@ -3350,9 +3612,7 @@ class ExcellenceTranscriptionEngine:
     def enhance_audio_for_transcription(self, audio_data: bytes) -> bytes:
         if not audio_data or len(audio_data) == 0:
             return audio_data
-        if not NUMPY_AVAILABLE:
-            return audio_data
-        if len(audio_data) < 1600:
+        if not NUMPY_AVAILABLE or len(audio_data) < 1600:
             return audio_data
         try:
             np = FastLazyLoader.load("numpy")
@@ -3364,6 +3624,7 @@ class ExcellenceTranscriptionEngine:
                 return audio_data
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
+                audio_np = np.where(np.abs(audio_np) < 1e-10, 0, audio_np)
                 rms = np.sqrt(np.mean(audio_np**2))
             if rms < 1e-8:
                 gain = 2.0
@@ -3387,7 +3648,8 @@ class ExcellenceTranscriptionEngine:
                 try:
                     if SCIPY_AVAILABLE:
                         scipy_signal = FastLazyLoader.load("scipy.signal")
-                        b, a = scipy_signal.butter(2, 80 / (self.advanced_settings.config.SAMPLE_RATE / 2), btype="high")
+                        b, a = scipy_signal.butter(2, 80 / (self.advanced_settings.config.SAMPLE_RATE / 2),
+                                                    btype="high")
                         audio_np = scipy_signal.filtfilt(b, a, audio_np)
                 except ImportError:
                     audio_np = audio_np - np.mean(audio_np)
@@ -3398,7 +3660,10 @@ class ExcellenceTranscriptionEngine:
             if len(enhanced_audio) != len(audio_data):
                 return audio_data
             return enhanced_audio
-        except Exception:
+        except (ImportError, ValueError, RuntimeError) as e:
+            logger.warning(f"Audio-Enhancement fehlgeschlagen: {e}")
+            if DEBUG_LEVEL >= 2:
+                logger.exception("Stacktrace:")
             return audio_data
 
     def _validate_transcription_segment(self, text: str, confidence: float, segment: Any) -> bool:
@@ -3454,7 +3719,6 @@ class ExcellenceTranscriptionEngine:
             else:
                 beam_size = 5
 
-            # VAD-Parameter vorbereiten (nur wenn aktiviert)
             vad_params = None
             if self.advanced_settings.vad_filter:
                 vad_params = {
@@ -3525,6 +3789,11 @@ class ExcellenceTranscriptionEngine:
                     )
                 else:
                     return self.emergency_fallback_transcription(audio_data)
+        except (ValueError, RuntimeError, ImportError) as e:
+            logger.error(f"❌ transcribe_audio exception: {e}")
+            if DEBUG_LEVEL >= 2:
+                logger.exception("Stacktrace:")
+            return None if not include_timestamps else []
         except Exception as e:
             logger.error(f"❌ transcribe_audio exception: {e}")
             if DEBUG_LEVEL >= 2:
@@ -3554,7 +3823,7 @@ class ExcellenceTranscriptionEngine:
             best_segment = None
             best_confidence = 0.0
             best_text = ""
-            for i, segment in enumerate(segments_list):
+            for segment in segments_list:
                 text = segment.text.strip()
                 if text and len(text) > 1:
                     confidence = self._calculate_enhanced_confidence(segment, text)
@@ -3575,8 +3844,11 @@ class ExcellenceTranscriptionEngine:
                     language=getattr(info, "language", "unknown"),
                 )
             return None
-        except Exception as e:
+        except (ValueError, RuntimeError, ImportError) as e:
             logger.error(f"❌ Emergency fallback exception: {e}")
+            if DEBUG_LEVEL >= 2:
+                logger.exception("Stacktrace:")
+        except Exception:
             if DEBUG_LEVEL >= 2:
                 logger.exception("Stacktrace:")
             return None
@@ -3589,22 +3861,20 @@ class ExcellenceTranscriptionEngine:
             if self.device == "cuda" and TORCH_AVAILABLE:
                 try:
                     torch = FastLazyLoader.load("torch")
+                    torch.cuda.synchronize()
                     torch.cuda.empty_cache()
                 except Exception:
                     pass
 
-    def reload_model(self, model_size: str) -> bool:
-        return self.load_model(model_size)
-
     def get_current_model(self) -> str:
         return self.model_size if self.model_size else "None"
 
-    def is_model_loading(self) -> bool:
-        return self._model_loading
+    # is_model_loading ist bereits oben definiert (Zeile ~3408) – hier keine zweite Definition!
 
     def test_model_functionality(self) -> bool:
         if not self.model:
-            logger.error("❌ Kein Model geladen zum Testen")
+            if DEBUG_LEVEL >= 2:
+                logger.error("❌ Kein Model geladen zum Testen")
             return False
         try:
             logger.info("🔍 Teste Model-Funktionalität...")
@@ -3630,8 +3900,6 @@ class ExcellenceTranscriptionEngine:
             return True
         except Exception as e:
             logger.error(f"❌ Model-Test fehlgeschlagen: {e}")
-            import traceback
-            traceback.print_exc()
             return False
 
     def dispose(self) -> None:
@@ -3640,27 +3908,22 @@ class ExcellenceTranscriptionEngine:
         with self._lock:
             self._cache.clear()
             self._last_transcription_text = ""
-            # Cache leeren und alle Modelle entladen
             for (size, backend), model in list(self._model_cache.items()):
                 if hasattr(model, 'unload_model'):
                     try:
                         model.unload_model()
-                    except Exception:
+                    except (RuntimeError, AttributeError):
                         pass
             self._model_cache.clear()
         self._force_model_cleanup()
-        import gc
-        for _ in range(3):
-            gc.collect()
+        gc.collect()
         logger.info("✅ Transcription Engine disposed")
 
-
-# =============================================================================
-# STREAM MANAGER (mit Plattformerkennung und Caching, erweitert um Cookie-basierte Extraktion)
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# STREAM MANAGER (überarbeitet mit Sicherheitsvalidierung der URLs)
+# -----------------------------------------------------------------------------
 class StreamManager:
-    def __init__(self, enable_debug: bool = False) -> None:
+    def __init__(self, enable_debug: bool = False, use_browser_cookies: bool = True) -> None:
         self._platform_cache: OrderedDict[str, Tuple[str, str]] = OrderedDict()
         self._audio_url_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
         self._live_status_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
@@ -3675,8 +3938,8 @@ class StreamManager:
             'errors': 0,
             'start_time': time.time()
         }
-        self._stats_lock = threading.RLock()  # Lock für _stats
-        self._cache_lock = threading.RLock()  # NEU: Lock für alle Caches
+        self._stats_lock = threading.RLock()
+        self._cache_lock = threading.RLock()
         self._format_priorities = {
             'youtube': ['bestaudio[ext=m4a]/bestaudio/best', 'bestaudio/best', 'ba'],
             'youtube_live': ['bestaudio/best', 'ba'],
@@ -3696,7 +3959,6 @@ class StreamManager:
             'desktop': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'mobile': 'Mozilla/5.0 (Linux; Android 10; SM-G975F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
         }
-        # Liste der Browser für Cookie-Extraktion (Reihenfolge = Priorität)
         self._browsers = [
             ('firefox', 'Firefox'),
             ('chrome', 'Chrome'),
@@ -3706,9 +3968,9 @@ class StreamManager:
             ('opera', 'Opera'),
             ('vivaldi', 'Vivaldi'),
         ]
+        self.use_browser_cookies = use_browser_cookies  # NEW
 
     def _extract_youtube_video_id(self, url: str) -> Optional[str]:
-        """Extrahiert die YouTube-Video-ID aus verschiedenen URL-Formaten."""
         patterns = [
             r'(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})',
             r'youtube\.com/embed/([a-zA-Z0-9_-]{11})',
@@ -3723,6 +3985,8 @@ class StreamManager:
     def detect_platform(self, url: str) -> Tuple[str, str]:
         if not url:
             return ('unknown', 'Invalid URL')
+        # URL bereinigen (nicht erlaubte Zeichen entfernen)
+        url = PlatformUtils.sanitize_url(url)
         with self._cache_lock:
             if url in self._platform_cache:
                 with self._stats_lock:
@@ -3733,12 +3997,18 @@ class StreamManager:
         url_lower = url.lower().strip()
         detection_reason = []
         if url_lower.startswith('file://'):
+            # Prüfe, ob der Pfad erlaubt ist
+            ok, _ = PlatformUtils.validate_file_path(url)
+            if not ok:
+                return ('invalid', 'Invalid file path')
             result = ('local', 'Local File')
             detection_reason = ["startswith file://"]
-        elif any(url_lower.endswith(ext) for ext in ['.mp3', '.wav', '.m4a', '.flac', '.ogg', '.aac', '.opus', '.webm']):
+        elif any(url_lower.endswith(ext) for ext in
+                 ['.mp3', '.wav', '.m4a', '.flac', '.ogg', '.aac', '.opus', '.webm']):
             result = ('direct_audio', 'Direct Audio')
             detection_reason = ["audio extension"]
-        elif any(url_lower.endswith(ext) for ext in ['.mp4', '.avi', '.mkv', '.mov', '.webm', '.m4v', '.wmv', '.flv']):
+        elif any(url_lower.endswith(ext) for ext in
+                 ['.mp4', '.avi', '.mkv', '.mov', '.webm', '.m4v', '.wmv', '.flv']):
             result = ('direct_video', 'Direct Video')
             detection_reason = ["video extension"]
         elif 'youtube.com' in url_lower or 'youtu.be' in url_lower:
@@ -3805,10 +4075,8 @@ class StreamManager:
         live_patterns = ['/live', 'live=1', '/stream', 'livestream']
         if any(pattern in url_lower for pattern in live_patterns):
             is_live = True
-        # Cache bereinigen, wenn zu voll
         with self._cache_lock:
             if len(self._live_status_cache) > 30:
-                # Älteste Einträge entfernen (basierend auf Timestamp)
                 oldest_keys = sorted(self._live_status_cache.keys(),
                                       key=lambda k: self._live_status_cache[k]['timestamp'])[:10]
                 for k in oldest_keys:
@@ -3831,7 +4099,7 @@ class StreamManager:
             with self._stats_lock:
                 self._stats['errors'] += 1
             return None
-        cleaned_url = url.strip()
+        cleaned_url = PlatformUtils.sanitize_url(url.strip())
         if not cleaned_url:
             self._last_error = "Empty URL"
             with self._stats_lock:
@@ -3846,7 +4114,8 @@ class StreamManager:
                     cache_age = current_time - cached['timestamp']
                     if self._debug or DEBUG_LEVEL >= 2:
                         logger.debug(f"📦 [DEBUG] Cache found, age: {cache_age:.1f}s, failed: {cached.get('failed', False)}")
-                    if cache_age < 1800 and not cached.get('failed', False):
+                    ttl = cached.get('ttl', 1800)
+                    if cache_age < ttl and not cached.get('failed', False):
                         with self._stats_lock:
                             self._stats['cache_hits'] += 1
                         return cached['url']
@@ -3859,13 +4128,14 @@ class StreamManager:
         extraction_method = "unknown"
         try:
             if cleaned_url.startswith('file://'):
-                file_path = cleaned_url[7:]
-                if os.path.exists(file_path) and os.path.isfile(file_path):
+                ok, real_path = PlatformUtils.validate_file_path(cleaned_url)
+                if ok:
                     result = cleaned_url
                     extraction_method = "local_file"
                 else:
                     if self._debug or DEBUG_LEVEL >= 2:
-                        logger.debug("❌ [DEBUG] File not found or not accessible")
+                        logger.debug(f"❌ [DEBUG] File validation failed: {real_path}")
+                    self._last_error = real_path
             if not result:
                 url_lower = cleaned_url.lower()
                 AUDIO_EXTENSIONS = ('.mp3', '.wav', '.m4a', '.flac', '.ogg', '.aac', '.opus', '.webm')
@@ -3898,6 +4168,7 @@ class StreamManager:
                             '--socket-timeout', '15',
                             cleaned_url
                         ]
+                        # URL wird als separates Argument übergeben, keine Shell-Injection möglich
                         process_result = subprocess.run(
                             cmd,
                             capture_output=True,
@@ -3942,23 +4213,21 @@ class StreamManager:
         except Exception as e:
             if self._debug or DEBUG_LEVEL >= 2:
                 logger.debug(f"❌ [DEBUG] EXCEPTION in extract_audio_url: {e}")
-                import traceback
-                traceback.print_exc()
             self._last_error = f"Exception: {str(e)[:100]}"
             with self._stats_lock:
                 self._stats['errors'] += 1
+        ttl = 300 if platform_id in ['youtube', 'youtube_live'] else 1800
         cache_entry = {
             'url': result,
             'timestamp': current_time,
             'failed': result is None,
             'method': extraction_method,
-            'platform': platform_id
+            'platform': platform_id,
+            'ttl': ttl,
         }
         with self._cache_lock:
             self._audio_url_cache[cache_key] = cache_entry
-            # Cache-Größe begrenzen
             if len(self._audio_url_cache) > 50:
-                # Ältesten Eintrag entfernen (LRU)
                 self._audio_url_cache.popitem(last=False)
         self._last_method = extraction_method
         if result:
@@ -3979,53 +4248,55 @@ class StreamManager:
         if self._debug or DEBUG_LEVEL >= 2:
             logger.debug(f"  🔍 Video ID: {video_id}")
 
-        # Priorität 1: Versuche mit verschiedenen Browsern und Cookies
-        for browser_cmd, browser_name in self._browsers:
-            try:
-                if self._debug or DEBUG_LEVEL >= 2:
-                    logger.debug(f"    🧪 Testing with {browser_name} cookies...")
-                cmd = [
-                    'yt-dlp',
-                    '-g',
-                    '-f', 'bestaudio[ext=m4a]/bestaudio/best',
-                    '--cookies-from-browser', browser_cmd,
-                    '--no-warnings',
-                    '--no-check-certificate',
-                    '--socket-timeout', '15',
-                    url
-                ]
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=20,
-                    shell=False,
-                    encoding='utf-8',
-                    errors='ignore'
-                )
-                if self._debug or DEBUG_LEVEL >= 2:
-                    logger.debug(f"    📊 Result: returncode={result.returncode}, stdout={len(result.stdout)} chars")
-                if result.returncode == 0 and result.stdout.strip():
-                    lines = result.stdout.strip().split('\n')
-                    for line in lines:
-                        line = line.strip()
-                        if line and line.startswith(('http://', 'https://')):
-                            if self._debug or DEBUG_LEVEL >= 2:
-                                logger.debug(f"    ✅ Success with {browser_name} cookies")
-                            return line
-                # Fehler nur bei Debug anzeigen
-                if result.stderr and self._debug:
-                    logger.debug(f"    📝 Stderr: {result.stderr[:100]}")
-            except subprocess.TimeoutExpired:
-                if self._debug or DEBUG_LEVEL >= 2:
-                    logger.debug(f"    ⏰ Timeout with {browser_name} cookies")
-                continue
-            except Exception as e:
-                if self._debug or DEBUG_LEVEL >= 2:
-                    logger.debug(f"    ⚠️ Error with {browser_name} cookies: {str(e)[:50]}")
-                continue
+        # NEW: Nur Cookie-basierte Methoden ausführen, wenn Einstellung aktiv
+        if self.use_browser_cookies:
+            for browser_cmd, browser_name in self._browsers:
+                try:
+                    if self._debug or DEBUG_LEVEL >= 2:
+                        logger.debug(f"    🧪 Testing with {browser_name} cookies...")
+                    cmd = [
+                        'yt-dlp',
+                        '-g',
+                        '-f', 'bestaudio[ext=m4a]/bestaudio/best',
+                        '--cookies-from-browser', browser_cmd,
+                        '--no-warnings',
+                        '--no-check-certificate',
+                        '--socket-timeout', '15',
+                        url
+                    ]
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=20,
+                        shell=False,
+                        encoding='utf-8',
+                        errors='ignore'
+                    )
+                    if self._debug or DEBUG_LEVEL >= 2:
+                        logger.debug(f"    📊 Result: returncode={result.returncode}, stdout={len(result.stdout)} chars")
+                    if result.returncode == 0 and result.stdout.strip():
+                        lines = result.stdout.strip().split('\n')
+                        for line in lines:
+                            line = line.strip()
+                            if line and line.startswith(('http://', 'https://')):
+                                if self._debug or DEBUG_LEVEL >= 2:
+                                    logger.debug(f"    ✅ Success with {browser_name} cookies")
+                                return line
+                    if result.stderr and self._debug:
+                        logger.debug(f"    📝 Stderr: {result.stderr[:100]}")
+                except subprocess.TimeoutExpired:
+                    if self._debug or DEBUG_LEVEL >= 2:
+                        logger.debug(f"    ⏰ Timeout with {browser_name} cookies")
+                    continue
+                except Exception as e:
+                    if self._debug or DEBUG_LEVEL >= 2:
+                        logger.debug(f"    ⚠️ Error with {browser_name} cookies: {str(e)[:50]}")
+                    continue
+        else:
+            if self._debug or DEBUG_LEVEL >= 2:
+                logger.debug("    ⏩ Cookie-based extraction skipped (user setting)")
 
-        # Priorität 2: Fallback auf Standardmethoden (ohne Cookies)
         methods = [
             {
                 'name': 'Standard yt-dlp',
@@ -4110,7 +4381,6 @@ class StreamManager:
                     logger.debug(f"    ⚠️ Error: {str(e)[:50]}")
                 continue
 
-        # Priorität 3: JSON-Fallback
         try:
             if self._debug or DEBUG_LEVEL >= 2:
                 logger.debug("    🔄 Trying JSON fallback...")
@@ -4161,7 +4431,6 @@ class StreamManager:
             if self._debug or DEBUG_LEVEL >= 2:
                 logger.debug(f"    ⚠️ JSON fallback error: {str(e)[:50]}")
 
-        # Priorität 4: Direkte DASH-URL generieren (letzter Versuch)
         if self._debug or DEBUG_LEVEL >= 2:
             logger.debug("    🔄 Generating direct audio URL...")
         direct_url = f"https://manifest.googlevideo.com/api/manifest/dash/id/{video_id}/source/youtube"
@@ -4237,12 +4506,14 @@ class StreamManager:
                     'timestamp': current_time
                 }
                 if len(self._stream_info_cache) > 30:
-                    # Ältesten Eintrag entfernen
                     oldest_key = min(self._stream_info_cache.items(), key=lambda x: x[1]['timestamp'])[0]
                     del self._stream_info_cache[oldest_key]
             if self._debug or DEBUG_LEVEL >= 2:
                 logger.debug("✅ [DEBUG] Stream info extracted")
             return info
+        except (json.JSONDecodeError, KeyError) as e:
+            if self._debug or DEBUG_LEVEL >= 2:
+                logger.debug(f"⚠️ Stream info extraction error: {e}")
         except Exception as e:
             if self._debug or DEBUG_LEVEL >= 2:
                 logger.debug(f"❌ [DEBUG] EXCEPTION in extract_stream_info: {e}")
@@ -4357,11 +4628,14 @@ class StreamManager:
             logger.debug(f"\n🔍 [DEBUG] VALIDATE_URL für: {url[:80]}...")
         if not url or not isinstance(url, str):
             return False, "Invalid input"
-        cleaned_url = url.strip()
+        cleaned_url = PlatformUtils.sanitize_url(url.strip())
         if not cleaned_url:
             return False, "Empty URL"
         if cleaned_url.startswith('file://'):
-            file_path = cleaned_url[7:]
+            ok, real_path = PlatformUtils.validate_file_path(cleaned_url)
+            if not ok:
+                return False, real_path
+            file_path = real_path
             if not os.path.exists(file_path):
                 return False, "File not found"
             if not os.path.isfile(file_path):
@@ -4411,9 +4685,9 @@ class StreamManager:
                             status_parts.append(f"⏱️ {data['duration_string']}")
                         if data.get('is_live'):
                             status_parts.append("🔴 LIVE")
-                    except Exception:
+                    except (json.JSONDecodeError, KeyError):
                         pass
-            except Exception:
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
                 pass
         status = " | ".join(status_parts)
         return True, status
@@ -4459,10 +4733,9 @@ class StreamManager:
             logger.debug("🔌 [DEBUG] StreamManager disposed")
 
 
-# =============================================================================
-# EXCELLENCE FFMPEG MANAGER (erweitert um start_stream)
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# FFMPEG MANAGER (überarbeitet mit Thread-Sicherheit und Ressourcenmanagement)
+# -----------------------------------------------------------------------------
 class ExcellenceFFmpegManager:
     def __init__(self, config: Optional[ExcellenceConfig] = None,
                  stream_manager: Optional[StreamManager] = None) -> None:
@@ -4506,22 +4779,10 @@ class ExcellenceFFmpegManager:
 
         if 'youtube.com' in url.lower() or 'youtu.be' in url.lower():
             logger.info("  🎯 Adding YouTube-specific headers")
-            headers = [
-                'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Origin: https://www.youtube.com',
-                'Referer: https://www.youtube.com/',
-                'Accept: */*',
-                'Accept-Language: en-US,en;q=0.9',
-                'Accept-Encoding: gzip, deflate',
-                'Connection: keep-alive',
-            ]
-            if 'manifest.googlevideo.com' in url:
-                headers.extend([
-                    'Sec-Fetch-Dest: empty',
-                    'Sec-Fetch-Mode: cors',
-                    'Sec-Fetch-Site: same-site',
-                ])
-            headers_string = '\r\n'.join(headers)
+            # Header aus der Konfiguration holen (YOUTUBE_HEADERS)
+            headers_dict = self.config.get_youtube_headers(is_manifest='manifest.googlevideo.com' in url)
+            headers_list = [f"{k}: {v}" for k, v in headers_dict.items()]
+            headers_string = '\r\n'.join(headers_list)
             cmd.extend(['-headers', headers_string])
 
         if is_live:
@@ -4551,8 +4812,8 @@ class ExcellenceFFmpegManager:
             '-vn',
             '-f', 's16le',
             '-acodec', 'pcm_s16le',
-            '-ar', str(ExcellenceConfig.SAMPLE_RATE),
-            '-ac', str(ExcellenceConfig.CHANNELS),
+            '-ar', str(Constants.SAMPLE_RATE),
+            '-ac', str(Constants.CHANNELS),
             '-af', 'volume=1.5,dynaudnorm',
             '-fflags', '+genpts+discardcorrupt',
             '-avoid_negative_ts', 'make_zero',
@@ -4564,14 +4825,14 @@ class ExcellenceFFmpegManager:
         return cmd
 
     def start_stream(self, video_url: str, output_queue: Optional[queue.Queue],
-                     process_id: str) -> Optional[subprocess.Popen]:
+                     process_id: str, force_refresh_audio_url: bool = False) -> Optional[subprocess.Popen]:
         logger.info(f"\n🎬 FFmpegManager: Starting stream for: {video_url[:80]}...")
         with self._lock:
             if self.is_active(process_id):
                 logger.warning(f"⚠️ Stream {process_id} already active")
                 return None
         logger.info("🎵 Resolving audio URL...")
-        audio_url = self.stream_manager.extract_audio_url(video_url)
+        audio_url = self.stream_manager.extract_audio_url(video_url, force_refresh=force_refresh_audio_url)
         if not audio_url:
             logger.error("❌ Audio URL resolution failed")
             return None
@@ -4615,10 +4876,14 @@ class ExcellenceFFmpegManager:
         except PermissionError:
             logger.error("❌ Permission denied - cannot execute FFmpeg")
             return None
+        except subprocess.TimeoutExpired:
+            logger.error("❌ Timeout beim Start von FFmpeg")
+            return None
+        except OSError as e:
+            logger.error(f"❌ OS-Fehler beim Start von FFmpeg: {e}")
+            return None
         except Exception as e:
             logger.error(f"❌ Failed to start FFmpeg: {e}")
-            import traceback
-            traceback.print_exc()
             return None
 
     def _register_process(self, process_id: str, process: subprocess.Popen,
@@ -4654,7 +4919,6 @@ class ExcellenceFFmpegManager:
             logger.info(f"📊 Process registered: {process_id} (PID: {process.pid})")
 
     def update_process_activity(self, process_id: str) -> None:
-        """Aktualisiert den Zeitstempel der letzten Aktivität eines Prozesses."""
         with self._lock:
             if process_id in self._processes:
                 self._processes[process_id]['last_activity'] = time.time()
@@ -4714,6 +4978,9 @@ class ExcellenceFFmpegManager:
                                key=lambda x: x[1]['timestamp'])[0]
                     del self._live_detection_cache[oldest]
             return is_live, platform
+        except (KeyError, AttributeError) as e:
+            logger.warning(f"⚠️ Stream type detection error: {e}")
+            return False, "unknown"
         except Exception as e:
             logger.warning(f"⚠️ Stream type detection error: {e}")
             return False, "unknown"
@@ -4745,34 +5012,37 @@ class ExcellenceFFmpegManager:
             if process_info.get('stopping', False):
                 return None
             process = process_info['process']
-            try:
-                audio_data = process.stdout.read(size)
-                if audio_data:
+        # Lesen außerhalb des Locks, um Deadlocks zu vermeiden
+        try:
+            audio_data = process.stdout.read(size)
+            if audio_data:
+                with self._lock:
                     process_info['bytes_read'] += len(audio_data)
                     process_info['chunks_processed'] += 1
                     process_info['last_activity'] = time.time()
-                    return audio_data
-                else:
-                    if process.poll() is not None:
-                        exit_code = process.poll()
-                        logger.warning(f"⚠️ Process {process_id} terminated (exit: {exit_code})")
-                        try:
-                            stderr = process.stderr.read(300).decode('utf-8', errors='ignore')
-                            if stderr:
-                                logger.info(f"📝 Last error: {stderr[:150]}")
-                        except Exception:
-                            pass
-                        self.stop_stream(process_id)
-                        return None
+                return audio_data
+            else:
+                # Prüfen, ob Prozess beendet ist
+                if process.poll() is not None:
+                    exit_code = process.poll()
+                    logger.warning(f"⚠️ Process {process_id} terminated (exit: {exit_code})")
+                    try:
+                        stderr = process.stderr.read(300).decode('utf-8', errors='ignore')
+                        if stderr:
+                            logger.info(f"📝 Last error: {stderr[:150]}")
+                    except Exception:
+                        pass
+                    self.stop_stream(process_id)
                     return None
-            except (IOError, OSError) as e:
-                logger.warning(f"⚠️ Read error for {process_id}: {e}")
-                self.stop_stream(process_id)
                 return None
-            except Exception as e:
-                logger.warning(f"⚠️ Unexpected read error for {process_id}: {e}")
-                self.stop_stream(process_id)
-                return None
+        except (IOError, OSError, ValueError) as e:
+            logger.warning(f"⚠️ Read error for {process_id}: {e}")
+            self.stop_stream(process_id)
+            return None
+        except Exception as e:  # zusätzlicher Schutz
+            logger.warning(f"⚠️ Unexpected read error for {process_id}: {e}")
+            self.stop_stream(process_id)
+            return None
 
     def stop_stream(self, process_id: str) -> bool:
         with self._lock:
@@ -4782,7 +5052,6 @@ class ExcellenceFFmpegManager:
             if process_info.get('stopping', False):
                 return True
             process = process_info['process']
-            process_info['stopping'] = True
             termination_success = False
             try:
                 if process.poll() is None:
@@ -4812,6 +5081,8 @@ class ExcellenceFFmpegManager:
             return termination_success
 
     def _cleanup_process_resources(self, process_id: str, process: subprocess.Popen) -> None:
+        if process_id not in self._processes:
+            return
         try:
             if process_id in self._processes:
                 del self._processes[process_id]
@@ -4835,14 +5106,19 @@ class ExcellenceFFmpegManager:
                 try:
                     process.terminate()
                     time.sleep(0.1)
-                except Exception:
+                except (OSError, PermissionError):
                     pass
                 try:
                     process.kill()
                     time.sleep(0.1)
-                except Exception:
+                except (OSError, PermissionError):
                     pass
-            gc.collect()
+            try:
+                if process.poll() is None:
+                    process.kill()
+            except (OSError, PermissionError):
+                pass
+            # gc.collect() hier entfernt, da es in dispose() gemacht wird
             logger.debug(f"🧹 Resources cleaned for: {process_id}")
         except Exception as e:
             logger.warning(f"⚠️ Resource cleanup error for {process_id}: {e}")
@@ -4887,15 +5163,10 @@ class ExcellenceFFmpegManager:
                 logger.warning(f"⚠️ Cleanup worker error: {e}")
 
     def cleanup_stale_processes(self) -> None:
-        """
-        Bereinigt nur Prozesse, die bereits beendet sind (poll() not None).
-        Keine automatische Beendigung aufgrund von Inaktivität oder Laufzeit mehr.
-        """
         with self._lock:
             stale_processes = []
             for process_id, process_info in self._processes.items():
                 process = process_info['process']
-                # Nur Prozesse, die bereits beendet sind, als stale markieren
                 if process.poll() is not None:
                     stale_processes.append(process_id)
             for process_id in stale_processes:
@@ -4914,10 +5185,10 @@ class ExcellenceFFmpegManager:
         gc.collect()
         logger.info("✅ FFmpeg Manager disposed")
 
-# =============================================================================
-# STREAM INFO EXTRACTOR (mit Cookie-basierter YouTube-Extraktion und Twitch-Fallback)
-# =============================================================================
 
+# -----------------------------------------------------------------------------
+# STREAM INFO EXTRACTOR (unverändert, aber mit Sicherheitsvalidierung)
+# -----------------------------------------------------------------------------
 @dataclass
 class StreamInfo:
     title: str
@@ -4939,13 +5210,24 @@ class StreamInfoExtractor:
         )
         self._lock = threading.RLock()
         self._debug = DEBUG_LEVEL >= 1
+        self.use_browser_cookies = True  # wird später von GUI gesetzt
 
     def extract_stream_info(self, url: str) -> StreamInfo:
         if self._debug or DEBUG_LEVEL >= 2:
             logger.debug(f"🔍 StreamInfoExtractor.extract_stream_info für: {url[:80]}...")
+        url = PlatformUtils.sanitize_url(url)
 
         if url.startswith('file://'):
-            file_path = url[7:]
+            ok, real_path = PlatformUtils.validate_file_path(url)
+            if not ok:
+                return StreamInfo(
+                    title="Invalid file",
+                    uploader="Error",
+                    duration="",
+                    view_count=0,
+                    platform="invalid"
+                )
+            file_path = real_path
             return StreamInfo(
                 title=os.path.basename(file_path),
                 uploader="Local File",
@@ -4954,13 +5236,11 @@ class StreamInfoExtractor:
                 platform="local"
             )
 
-        # YouTube speziell behandeln
         if 'youtube.com' in url.lower() or 'youtu.be' in url.lower():
             info = self._extract_youtube_info_with_cookies(url)
             if info:
                 return info
 
-        # Für alle anderen Plattformen: yt-dlp JSON versuchen
         try:
             cmd = ['yt-dlp', '--dump-json', '--no-warnings', '--no-check-certificate', url]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, shell=False)
@@ -4994,29 +5274,21 @@ class StreamInfoExtractor:
                     platform=platform,
                     description=info.get('description', '')
                 )
-                if self._debug or DEBUG_LEVEL >= 2:
-                    # DEBUG-ERWEITERUNG: Ausgabe der rohen JSON-Daten (gekürzt)
-                    debug_json = result.stdout[:500] + "..." if len(result.stdout) > 500 else result.stdout
-                    logger.debug(f"yt-dlp JSON (gekürzt): {debug_json}")
-                    logger.debug(f"Extrahiert: title='{self.current_info.title}', uploader='{self.current_info.uploader}'")
                 return self.current_info
         except Exception as e:
             if self._debug or DEBUG_LEVEL >= 2:
                 logger.debug(f"⚠️ StreamInfoExtractor: yt-dlp JSON fehlgeschlagen für {url[:50]}: {e}")
 
-        # Fallback: aus URL einen sinnvollen Titel generieren
         if self._debug or DEBUG_LEVEL >= 2:
             logger.debug("🔄 StreamInfoExtractor: Fallback – extrahiere Titel aus URL")
         try:
             parsed = urllib.parse.urlparse(url)
-            # Für Twitch: Channel aus Pfad extrahieren
             if 'twitch.tv' in parsed.netloc:
                 path = parsed.path.strip('/')
                 channel = path.split('/')[0] if path else parsed.netloc.replace('www.', '')
                 title = f"{channel} (Twitch)"
                 uploader = channel
             else:
-                # Generisch: Domain + letzter Pfadteil
                 domain = parsed.netloc.replace('www.', '')
                 path_segments = [s for s in parsed.path.split('/') if s]
                 if path_segments:
@@ -5036,7 +5308,6 @@ class StreamInfoExtractor:
             if self._debug or DEBUG_LEVEL >= 2:
                 logger.debug(f"❌ StreamInfoExtractor: URL-Fallback fehlgeschlagen: {e}")
 
-        # Ultimativer Fallback
         return StreamInfo(
             title="Unknown Stream",
             uploader="Unknown",
@@ -5066,47 +5337,52 @@ class StreamInfoExtractor:
                     logger.warning(f"    ⚠️ Chrome symlink setup failed: {e}")
 
         methods: List[Tuple[List[str], str]] = []
-        if IS_LINUX:
-            browsers = [
-                ('firefox', 'Firefox'),
-                ('chromium', 'Chromium'),
-                ('brave', 'Brave'),
-                ('chrome', 'Chrome'),
-                ('vivaldi', 'Vivaldi'),
-                ('opera', 'Opera'),
-                ('edge', 'Edge'),
-            ]
-            for browser_cmd, browser_name in browsers:
-                methods.append(([
-                    'yt-dlp', '--cookies-from-browser', browser_cmd, '--dump-json',
-                    '--no-warnings', '--no-check-certificate', '--playlist-items', '1', url
-                ], f"{browser_name} Cookies"))
-        elif IS_WINDOWS:
-            browsers = [
-                ('chrome', 'Chrome'),
-                ('firefox', 'Firefox'),
-                ('edge', 'Edge'),
-                ('brave', 'Brave'),
-                ('opera', 'Opera'),
-            ]
-            for browser_cmd, browser_name in browsers:
-                methods.append(([
-                    'yt-dlp', '--cookies-from-browser', browser_cmd, '--dump-json',
-                    '--no-warnings', '--no-check-certificate', '--playlist-items', '1', url
-                ], f"{browser_name} Cookies"))
-        else:  # macOS
-            browsers = [
-                ('safari', 'Safari'),
-                ('chrome', 'Chrome'),
-                ('firefox', 'Firefox'),
-                ('brave', 'Brave'),
-                ('edge', 'Edge'),
-            ]
-            for browser_cmd, browser_name in browsers:
-                methods.append(([
-                    'yt-dlp', '--cookies-from-browser', browser_cmd, '--dump-json',
-                    '--no-warnings', '--no-check-certificate', '--playlist-items', '1', url
-                ], f"{browser_name} Cookies"))
+        # NEW: Nur Cookie-Methoden hinzufügen, wenn erlaubt
+        if self.use_browser_cookies:
+            if IS_LINUX:
+                browsers = [
+                    ('firefox', 'Firefox'),
+                    ('chromium', 'Chromium'),
+                    ('brave', 'Brave'),
+                    ('chrome', 'Chrome'),
+                    ('vivaldi', 'Vivaldi'),
+                    ('opera', 'Opera'),
+                    ('edge', 'Edge'),
+                ]
+                for browser_cmd, browser_name in browsers:
+                    methods.append(([
+                        'yt-dlp', '--cookies-from-browser', browser_cmd, '--dump-json',
+                        '--no-warnings', '--no-check-certificate', '--playlist-items', '1', url
+                    ], f"{browser_name} Cookies"))
+            elif IS_WINDOWS:
+                browsers = [
+                    ('chrome', 'Chrome'),
+                    ('firefox', 'Firefox'),
+                    ('edge', 'Edge'),
+                    ('brave', 'Brave'),
+                    ('opera', 'Opera'),
+                ]
+                for browser_cmd, browser_name in browsers:
+                    methods.append(([
+                        'yt-dlp', '--cookies-from-browser', browser_cmd, '--dump-json',
+                        '--no-warnings', '--no-check-certificate', '--playlist-items', '1', url
+                    ], f"{browser_name} Cookies"))
+            else:  # macOS
+                browsers = [
+                    ('safari', 'Safari'),
+                    ('chrome', 'Chrome'),
+                    ('firefox', 'Firefox'),
+                    ('brave', 'Brave'),
+                    ('edge', 'Edge'),
+                ]
+                for browser_cmd, browser_name in browsers:
+                    methods.append(([
+                        'yt-dlp', '--cookies-from-browser', browser_cmd, '--dump-json',
+                        '--no-warnings', '--no-check-certificate', '--playlist-items', '1', url
+                    ], f"{browser_name} Cookies"))
+        else:
+            if self._debug:
+                logger.debug("    ⏩ Cookie-based extraction skipped (user setting)")
 
         fallback_methods = [
             (['yt-dlp', '--dump-json', '--no-warnings', '--no-check-certificate',
@@ -5146,7 +5422,6 @@ class StreamInfoExtractor:
                     if IS_LINUX and 'chrome' in method_name.lower() and 'could not find' in error_preview:
                         logger.info("      ⏩ Skipping Chrome (not available)")
                         continue
-                    # Nur bei Debug anzeigen
                     if self._debug:
                         logger.info(f"      ❌ Error: {error_preview}")
 
@@ -5206,6 +5481,9 @@ class StreamInfoExtractor:
             except subprocess.TimeoutExpired:
                 logger.info(f"      ⏰ Timeout after {timeout}s")
                 continue
+            except OSError as e:
+                logger.info(f"      ⚠️ OS-Fehler bei {method_name}: {e}")
+                continue
             except Exception as e:
                 logger.info(f"      ⚠️ Method error: {str(e)[:50]}")
                 continue
@@ -5216,7 +5494,6 @@ class StreamInfoExtractor:
                          '--no-check-certificate', '--quiet', url]
             cmd_uploader = ['yt-dlp', '--get-filename', '-o', '%(uploader)s',
                            '--no-warnings', '--no-check-certificate', '--quiet', url]
-            from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=2) as executor:
                 title_future = executor.submit(
                     subprocess.run, cmd_title,
@@ -5251,24 +5528,14 @@ class StreamInfoExtractor:
         return None
 
 
-# =============================================================================
-# LANGUAGE DETECTOR
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# LANGUAGE DETECTOR (unverändert)
+# -----------------------------------------------------------------------------
 class LanguageDetector:
-    """
-    Verbesserte Sprachdetektion für Video-/Audiodateien.
-    - Ermittelt zuerst die Gesamtdauer der Datei mit ffprobe.
-    - Wählt ein dynamisches Sample (min. 30s, max. 60s, maximal die Hälfte der Datei).
-    - Fallback auf gesamte Datei, falls das Sample keine Sprache enthält.
-    """
     def __init__(self, transcription_engine: ExcellenceTranscriptionEngine) -> None:
         self.transcription_engine = transcription_engine
 
     def _get_media_duration(self, file_path: str) -> Optional[float]:
-        """
-        Ermittelt die Dauer einer Mediendatei in Sekunden mit ffprobe.
-        """
         try:
             cmd = [
                 'ffprobe',
@@ -5280,51 +5547,37 @@ class LanguageDetector:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if result.returncode == 0 and result.stdout.strip():
                 return float(result.stdout.strip())
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, ValueError, OSError):
+            pass
         except Exception:
             pass
         return None
 
     def detect_video_language(self, video_path: str) -> Dict[str, Any]:
-        """
-        Analysiert die Sprache einer Videodatei.
-        Extrahiert zuerst ein intelligentes Sample (dynamisch je nach Dateilänge),
-        bei Fehlschlag die gesamte Datei.
-        Gibt ein Dictionary mit Sprache, Konfidenz und einem kurzen Textbeispiel zurück.
-        """
         try:
             if not os.path.exists(video_path):
                 return {"error": "File not found"}
 
-            # 1. Gesamtdauer ermitteln (optional, für bessere Sample-Wahl)
             duration = self._get_media_duration(video_path)
             if duration is None:
-                # Fallback: Dateigröße prüfen (nur für Warnung)
                 try:
                     file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
                     if file_size_mb > 500:
                         return {"info": "Large file - direct processing recommended"}
-                except Exception:
+                except OSError:
                     pass
-                # Standard-Sample-Dauer: 60 Sekunden
                 sample_duration = 60
             else:
-                # Dynamische Sample-Dauer: mindestens 30 s, höchstens 60 s,
-                # aber nicht mehr als die halbe Dateilänge
                 sample_duration = min(60, max(30, duration // 2))
 
-            # 2. Audio extrahieren (mit der berechneten Dauer)
             temp_audio = self._extract_audio_sample(video_path, duration=sample_duration)
 
-            # 3. Falls Extraktion fehlschlägt, versuche die gesamte Datei (ohne -t)
             if not temp_audio:
-                # Optional: Debug-Ausgabe
-                # logger.debug("Sample-Extraktion fehlgeschlagen, versuche gesamte Datei")
                 temp_audio = self._extract_audio_sample(video_path, duration=None)
 
             if not temp_audio:
                 return {"error": "Could not extract audio"}
 
-            # 4. Transkribieren (ohne Timestamps)
             result = self.transcription_engine.transcribe_audio(temp_audio, include_timestamps=False)
 
             if result and hasattr(result, 'language'):
@@ -5343,13 +5596,9 @@ class LanguageDetector:
             return {"error": f"Analysis failed: {str(e)}"}
 
     def _extract_audio_sample(self, video_path: str, duration: Optional[int] = 30) -> Optional[bytes]:
-        """
-        Extrahiert einen Audioteil aus einer Videodatei.
-        - duration=None: gesamte Datei
-        - duration=30: 30 Sekunden (Standard)
-        """
         try:
             config = self.transcription_engine.advanced_settings.config
+            # Temporäre Datei vermeiden, direkt in Bytes streamen
             cmd = [
                 'ffmpeg',
                 '-i', video_path,
@@ -5359,7 +5608,6 @@ class LanguageDetector:
                 '-loglevel', 'quiet',
                 '-'
             ]
-            # Nur wenn duration angegeben ist, füge -t ein
             if duration is not None:
                 cmd.insert(2, '-t')
                 cmd.insert(3, str(duration))
@@ -5371,17 +5619,17 @@ class LanguageDetector:
             pass
         return None
 
-# =============================================================================
-# PROGRESS DIALOG
-# =============================================================================
 
+# -----------------------------------------------------------------------------
+# PROGRESS DIALOG (unverändert)
+# -----------------------------------------------------------------------------
 class ProgressDialog:
     def __init__(self, parent: tk.Tk, title: str = "Processing...") -> None:
         self.parent = parent
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(title)
         self.dialog.geometry("300x120")
-        self.dialog.configure(bg=ModernColors.BG_PRIMARY)
+        self.dialog.configure(bg=CURRENT_THEME.BG_PRIMARY)
         self.dialog.transient(parent)
         self.dialog.grab_set()
         self.dialog.protocol("WM_DELETE_WINDOW", self.cancel)
@@ -5389,26 +5637,26 @@ class ProgressDialog:
         x = parent.winfo_x() + (parent.winfo_width() - self.dialog.winfo_width()) // 2
         y = parent.winfo_y() + (parent.winfo_height() - self.dialog.winfo_height()) // 2
         self.dialog.geometry(f"+{x}+{y}")
-        content_frame = tk.Frame(self.dialog, bg=ModernColors.BG_PRIMARY, padx=20, pady=20)
+        content_frame = tk.Frame(self.dialog, bg=CURRENT_THEME.BG_PRIMARY, padx=20, pady=20)
         content_frame.pack(fill="both", expand=True)
         self.message_label = tk.Label(
             content_frame,
             text="Analyzing video...",
-            bg=ModernColors.BG_PRIMARY,
-            fg=ModernColors.TEXT_PRIMARY,
-            font=ModernFonts.PRIMARY,
+            bg=CURRENT_THEME.BG_PRIMARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=DragonFonts.PRIMARY,
         )
         self.message_label.pack(pady=(0, 10))
         self.progress = ttk.Progressbar(content_frame, mode="indeterminate", length=250)
         self.progress.pack(pady=(0, 15))
-        button_frame = tk.Frame(content_frame, bg=ModernColors.BG_PRIMARY)
+        button_frame = tk.Frame(content_frame, bg=CURRENT_THEME.BG_PRIMARY)
         button_frame.pack()
         self.cancel_button = tk.Button(
             button_frame,
             text="Cancel",
             command=self.cancel,
-            bg=ModernColors.ERROR,
-            fg=ModernColors.TEXT_PRIMARY,
+            bg=CURRENT_THEME.ERROR,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
             relief="flat",
             padx=15,
         )
@@ -5420,7 +5668,7 @@ class ProgressDialog:
         self._schedule_updates()
 
     def _schedule_updates(self) -> None:
-        if self._is_running and hasattr(self, "dialog") and self.dialog.winfo_exists():
+        if self._is_running and self.dialog.winfo_exists():
             try:
                 self.dialog.update_idletasks()
                 self.dialog.after(self._update_interval, self._schedule_updates)
@@ -5430,14 +5678,14 @@ class ProgressDialog:
     def cancel(self) -> None:
         self.is_cancelled = True
         self._is_running = False
-        if hasattr(self, "message_label") and self.message_label.winfo_exists():
-            self.message_label.config(text="Cancelling...", fg=ModernColors.ERROR)
-        if hasattr(self, "cancel_button") and self.cancel_button.winfo_exists():
+        if self.message_label.winfo_exists():
+            self.message_label.config(text="Cancelling...", fg=CURRENT_THEME.ERROR)
+        if self.cancel_button.winfo_exists():
             self.cancel_button.config(text="Cancelling...", state="disabled")
         self.close()
 
     def update_message(self, message: str) -> None:
-        if self._is_running and hasattr(self, "message_label") and self.message_label.winfo_exists():
+        if self._is_running and self.message_label.winfo_exists():
             try:
                 self.message_label.config(text=message)
             except tk.TclError:
@@ -5456,10 +5704,9 @@ class ProgressDialog:
             pass
 
 
-# =============================================================================
-# EXCELLENCE AUDIO PROCESSOR (mit Lock für Untertitel)
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# AUDIO PROCESSOR (überarbeitet mit Thread-Sicherheit und Fehlerbehandlung)
+# -----------------------------------------------------------------------------
 class ExcellenceAudioProcessor:
     def __init__(self, controller_ref: Any, ffmpeg_manager: ExcellenceFFmpegManager,
                  advanced_settings: Optional[AdvancedSettings] = None) -> None:
@@ -5486,12 +5733,12 @@ class ExcellenceAudioProcessor:
         self._resource_lock = threading.RLock()
         self._translation_active = True
         self._last_transcription_text = ""
-        # Untertitel-Listen mit Lock
         self._timed_transcriptions: Deque[ExcellenceTranscriptionResult] = deque(maxlen=self.config.SUBTITLE_BUFFER_SIZE)
         self._timed_translations: Deque[ExcellenceTranslationResult] = deque(maxlen=self.config.SUBTITLE_BUFFER_SIZE)
         self._subtitle_lock = threading.RLock()
         self.subtitle_mode = False
         self._recent_transcriptions: Deque[str] = deque(maxlen=self.config.RECENT_TRANSCRIPTIONS_SIZE)
+        self._duplicate_lock = threading.RLock()  # neu
         self._chunk_counter = 0
         self._empty_reads = 0
         self._stream_start_time: Optional[float] = None
@@ -5501,23 +5748,24 @@ class ExcellenceAudioProcessor:
         self._chunk_processing_times: Deque[float] = deque(maxlen=10)
         self.stream_manager = StreamManager(enable_debug=(DEBUG_LEVEL >= 1))
 
-        # Backoff-Parameter
         self._read_error_count = 0
         self._max_backoff = 30
 
-        # Event für sauberes Ende des Processing-Threads
         self._process_finished = threading.Event()
         self._process_finished.set()
 
-        # Puffer für kleine Audios
         self._audio_buffer = bytearray()
         self._max_buffer_size = self.config.MAX_CHUNK_BYTES * 5
 
-        # Callback für Verarbeitungsende
         self._finished_callback: Optional[Callable] = None
 
         self.last_confidence = 1.0
         self._noisereduce_counter = 0
+
+        self._total_file_size: Optional[int] = None
+        self._progress_callback: Optional[Callable[[int, Optional[int], int], None]] = None
+        self._last_progress_update = 0.0
+        self._progress_update_interval = 0.5
 
         logger.info("✅ AudioProcessor initialized:")
         logger.info(f"   Config Type: {self._get_config_type()}")
@@ -5535,6 +5783,9 @@ class ExcellenceAudioProcessor:
             return 'youtube'
         return 'default'
 
+    def set_progress_callback(self, callback: Callable[[int, Optional[int], int], None]) -> None:
+        self._progress_callback = callback
+
     def start_processing(self, url: str, transcription_callback: Callable,
                          translation_callback: Callable, info_callback: Callable,
                          error_callback: Callable,
@@ -5542,6 +5793,23 @@ class ExcellenceAudioProcessor:
         logger.info(f"\n🔊 [START_PROCESSING] URL: {url[:80]}...")
         logger.info(f"   Config Type: {self._get_config_type()}")
         logger.info(f"   Chunk Size: {self.chunk_size:,} bytes")
+
+        # URL validieren
+        url = PlatformUtils.sanitize_url(url)
+
+        if url.startswith('file://'):
+            ok, real_path = PlatformUtils.validate_file_path(url)
+            if not ok:
+                error_callback(f"❌ {real_path}")
+                return
+            file_path = real_path
+            try:
+                self._total_file_size = os.path.getsize(file_path)
+                logger.info(f"📁 Lokale Datei, Größe: {self._total_file_size} bytes")
+            except OSError:
+                self._total_file_size = None
+        else:
+            self._total_file_size = None
 
         health_issues = self._platform_specific_health_check()
         if health_issues:
@@ -5622,6 +5890,10 @@ class ExcellenceAudioProcessor:
                 error_callback("❌ FFmpeg not found - please install")
                 error_occurred = True
                 return
+            except (OSError, PermissionError) as e:
+                error_callback(f"❌ FFmpeg konnte nicht gestartet werden: {e}")
+                error_occurred = True
+                return
             logger.info(f"✅ FFmpeg started (PID: {process.pid})")
             info_callback("⏳ Initializing stream...")
             wait_time = self.config.INITIAL_BUFFER_SECONDS
@@ -5644,7 +5916,7 @@ class ExcellenceAudioProcessor:
             if is_youtube:
                 logger.info("🎯 Using YouTube-optimized streaming loop")
                 self._youtube_streaming_loop(
-                    process, audio_url, detected_language,
+                    process, audio_url, url, detected_language,
                     transcription_callback, translation_callback,
                     info_callback, error_callback
                 )
@@ -5661,6 +5933,11 @@ class ExcellenceAudioProcessor:
             error_occurred = True
         except FileNotFoundError:
             error_callback("❌ FFmpeg not found - please install")
+            error_occurred = True
+        except OSError as e:
+            error_msg = f"OS error: {str(e)[:100]}"
+            logger.error(f"❌ {error_msg}")
+            error_callback(f"❌ {error_msg}")
             error_occurred = True
         except Exception as e:
             error_msg = f"Unexpected error: {str(e)[:100]}"
@@ -5766,8 +6043,7 @@ class ExcellenceAudioProcessor:
                     time.sleep(sleep_time)
                     continue
             else:
-                # Daten erfolgreich gelesen – Aktivität melden
-                self.ffmpeg_manager.update_process_activity(self._current_stream_id)   # <-- NEU
+                self.ffmpeg_manager.update_process_activity(self._current_stream_id)
                 self._read_error_count = 0
                 last_data_time = time.time()
                 self._empty_reads = 0
@@ -5775,6 +6051,16 @@ class ExcellenceAudioProcessor:
                 self._total_bytes_processed += len(audio_data)
                 if self._chunk_counter <= 3:
                     logger.debug(f"📦 Chunk #{self._chunk_counter}: {len(audio_data)} bytes")
+
+                if self._progress_callback:
+                    now = time.time()
+                    if now - self._last_progress_update >= self._progress_update_interval:
+                        self._last_progress_update = now
+                        self._progress_callback(
+                            self._total_bytes_processed,
+                            self._total_file_size,
+                            self._chunk_counter
+                        )
 
                 try:
                     enhanced_audio = self.enhance_audio_quality(audio_data)
@@ -5789,7 +6075,7 @@ class ExcellenceAudioProcessor:
                         translation_callback
                     )
 
-    def _youtube_streaming_loop(self, process: subprocess.Popen, audio_url: str,
+    def _youtube_streaming_loop(self, process: subprocess.Popen, audio_url: str, original_video_url: str,
                                  detected_language: Optional[str],
                                  transcription_callback: Callable,
                                  translation_callback: Callable,
@@ -5802,7 +6088,7 @@ class ExcellenceAudioProcessor:
         while session_active and self._processing and not self._stop_event.is_set():
             try:
                 session_success = self._single_youtube_session(
-                    process, audio_url, detected_language,
+                    process, audio_url, original_video_url, detected_language,
                     transcription_callback, translation_callback,
                     info_callback, error_callback
                 )
@@ -5816,9 +6102,10 @@ class ExcellenceAudioProcessor:
                     time.sleep(wait)
                     backoff *= 2
                     process = self.ffmpeg_manager.start_stream(
-                        video_url=audio_url,
+                        video_url=original_video_url,
                         output_queue=None,
-                        process_id=self._current_stream_id
+                        process_id=self._current_stream_id,
+                        force_refresh_audio_url=True
                     )
                     if process is None:
                         logger.error("❌ Could not restart FFmpeg")
@@ -5839,7 +6126,7 @@ class ExcellenceAudioProcessor:
                 time.sleep(wait)
                 backoff *= 2
 
-    def _single_youtube_session(self, process: subprocess.Popen, audio_url: str,
+    def _single_youtube_session(self, process: subprocess.Popen, audio_url: str, original_video_url: str,
                                  detected_language: Optional[str],
                                  transcription_callback: Callable,
                                  translation_callback: Callable,
@@ -5849,12 +6136,16 @@ class ExcellenceAudioProcessor:
         max_chunk_attempts = 50
         last_successful_chunk_time = time.time()
         backoff = 1.0
+        refresh_count = 0
+        max_refresh_attempts = 3
+        current_process = process
+        #current_audio_url = audio_url
+
         while self._processing and not self._stop_event.is_set():
             current_time = time.time()
             if self._chunk_counter > 0:
-                youtube_timeout = 25
-                if current_time - last_successful_chunk_time > youtube_timeout:
-                    logger.warning(f"⚠️ YouTube idle timeout after {self._chunk_counter} chunks")
+                if current_time - last_successful_chunk_time > 25:
+                    logger.warning("⚠️ YouTube idle timeout")
                     return False
             else:
                 if current_time - last_successful_chunk_time > self.config.STREAM_TIMEOUT:
@@ -5862,9 +6153,28 @@ class ExcellenceAudioProcessor:
                     return False
 
             try:
-                audio_data = self._read_with_timeout(process, self.chunk_size, timeout=1.0)
-            except Exception as e:
+                audio_data = self._read_with_timeout(current_process, self.chunk_size, timeout=1.0)
+            except (IOError, OSError) as e:
                 logger.warning(f"⚠️ Session read error: {e}")
+                if current_process.poll() is not None:
+                    stderr = self._read_stderr(current_process)
+                    if self._needs_url_refresh(stderr):
+                        logger.info(f"🔄 Detected URL refresh needed: {stderr[:200]}")
+                        new_url = self._refresh_youtube_url(original_video_url)
+                        if new_url:
+                            refresh_count += 1
+                            if refresh_count <= max_refresh_attempts:
+                                new_proc = self._restart_ffmpeg_with_new_url(self._current_stream_id, original_video_url)
+                                if new_proc is None:
+                                    logger.error("❌ Failed to restart FFmpeg, aborting session.")
+                                    return False
+                                current_process = new_proc
+                                refresh_count = 0
+                                last_successful_chunk_time = time.time()
+                                continue
+                        refresh_count += 1
+                        if refresh_count > max_refresh_attempts:
+                            return False
                 chunk_read_attempts += 1
                 wait = min(10, backoff)
                 time.sleep(wait)
@@ -5872,9 +6182,32 @@ class ExcellenceAudioProcessor:
                 continue
 
             if audio_data is None:
-                if process.poll() is not None:
-                    logger.debug("YouTube process ended, no more data.")
-                    return True
+                if current_process.poll() is not None:
+                    stderr = self._read_stderr(current_process)
+                    if self._needs_url_refresh(stderr):
+                        logger.info(f"🔄 Detected URL refresh needed: {stderr[:200]}")
+                        new_url = self._refresh_youtube_url(original_video_url)
+                        if new_url:
+                            refresh_count += 1
+                            if refresh_count <= max_refresh_attempts:
+                                new_proc = self._restart_ffmpeg_with_new_url(self._current_stream_id, original_video_url)
+                                if new_proc is None:
+                                    logger.error("❌ Failed to restart FFmpeg, aborting session.")
+                                    return False
+                                current_process = new_proc
+                                #current_audio_url = new_url
+                                refresh_count = 0
+                                last_successful_chunk_time = time.time()
+                                continue
+                            else:
+                                return False
+                        else:
+                            refresh_count += 1
+                            if refresh_count > max_refresh_attempts:
+                                return False
+                    else:
+                        logger.warning(f"FFmpeg terminated: {stderr[:200]}")
+                        return False
                 else:
                     chunk_read_attempts += 1
                     if chunk_read_attempts > max_chunk_attempts:
@@ -5885,8 +6218,7 @@ class ExcellenceAudioProcessor:
                     backoff *= 1.5
                     continue
             else:
-                # Daten erfolgreich gelesen – Aktivität melden
-                self.ffmpeg_manager.update_process_activity(self._current_stream_id)   # <-- NEU
+                self.ffmpeg_manager.update_process_activity(self._current_stream_id)
                 self._read_error_count = 0
                 chunk_read_attempts = 0
                 backoff = 1.0
@@ -5896,6 +6228,16 @@ class ExcellenceAudioProcessor:
                 self._total_bytes_processed += len(audio_data)
                 if self._chunk_counter <= 3:
                     logger.debug(f"📦 YouTube Chunk #{self._chunk_counter}: {len(audio_data)} bytes")
+
+                if self._progress_callback:
+                    now = time.time()
+                    if now - self._last_progress_update >= self._progress_update_interval:
+                        self._last_progress_update = now
+                        self._progress_callback(
+                            self._total_bytes_processed,
+                            self._total_file_size,
+                            self._chunk_counter
+                        )
 
                 try:
                     enhanced_audio = self.enhance_audio_quality(audio_data)
@@ -5947,6 +6289,60 @@ class ExcellenceAudioProcessor:
                 break
         return data if len(data) > 0 else None
 
+    def _read_stderr(self, process: subprocess.Popen) -> str:
+        try:
+            if process.stderr:
+                return process.stderr.read().decode('utf-8', errors='ignore')
+        except Exception:
+            pass
+        return ""
+
+    def _needs_url_refresh(self, stderr: str) -> bool:
+        patterns = [
+            "403", "401", "forbidden", "unauthorized", "invalid parameters",
+            "http error 403", "http error 401", "access denied", "signature expired",
+            "token expired", "url signature expired"
+        ]
+        stderr_lower = stderr.lower()
+        return any(p in stderr_lower for p in patterns)
+
+    def _refresh_youtube_url(self, video_url: str) -> Optional[str]:
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                logger.info(f"🔄 Attempt {attempt}/{max_attempts} to refresh YouTube URL...")
+                new_url = self.stream_manager.extract_audio_url(video_url, force_refresh=True)
+                if new_url:
+                    logger.info(f"✅ Successfully obtained new YouTube URL (attempt {attempt})")
+                    if DEBUG_LEVEL >= 2:
+                        logger.debug(f"   New URL: {new_url[:100]}...")
+                    return new_url
+            except Exception as e:
+                logger.warning(f"⚠️ Refresh attempt {attempt} error: {e}")
+            if attempt < max_attempts:
+                wait = 2 ** (attempt - 1)
+                time.sleep(wait)
+        logger.error("❌ All attempts to refresh YouTube URL failed")
+        return None
+
+    def _restart_ffmpeg_with_new_url(self, process_id: str, video_url: str) -> Optional[subprocess.Popen]:
+        logger.info(f"🔄 Restarting FFmpeg for {process_id} with new URL...")
+        if self.ffmpeg_manager:
+            self.ffmpeg_manager.stop_stream(process_id)
+            time.sleep(0.5)
+        new_process = self.ffmpeg_manager.start_stream(
+            video_url=video_url,
+            output_queue=None,
+            process_id=process_id,
+            force_refresh_audio_url=True
+        )
+        if new_process:
+            logger.info(f"✅ Successfully restarted FFmpeg (new PID: {new_process.pid})")
+            return new_process
+        else:
+            logger.error("❌ Failed to restart FFmpeg")
+            return None
+
     def emergency_diagnosis(self, url: str) -> bool:
         logger.info(f"🔍 [EMERGENCY_DIAGNOSIS] Testing: {url[:80]}...")
         try:
@@ -5987,6 +6383,9 @@ class ExcellenceAudioProcessor:
             if 'youtube.com' in url.lower():
                 logger.info("  ⚠️  YouTube timeout common, trying anyway...")
                 return True
+            return False
+        except (OSError, PermissionError) as e:
+            logger.info(f"  ⚠️  Emergency diagnosis OS error: {e}")
             return False
         except Exception as e:
             logger.info(f"  ⚠️  Emergency diagnosis error: {e}")
@@ -6029,7 +6428,7 @@ class ExcellenceAudioProcessor:
                              f"transcribe {elapsed*1000:.1f}ms ({realtime_factor:.2f}x realtime)")
                 if TORCH_AVAILABLE and self.transcription_engine.whisper_backend == "openai_whisper":
                     torch = FastLazyLoader.load('torch')
-                    if hasattr(torch, 'cuda') and torch.cuda.is_available():
+                    if torch.cuda.is_available():
                         vram = torch.cuda.memory_allocated() / 1024**3
                         logger.debug(f"  VRAM: {vram:.2f}GB")
 
@@ -6070,7 +6469,7 @@ class ExcellenceAudioProcessor:
                 logger.exception("Stacktrace:")
 
     def enhance_audio_quality(self, audio_data: bytes) -> bytes:
-        if not self.config.AUDIO_ENHANCEMENT_ENHANCED or len(audio_data) < 1600 or not NUMPY_AVAILABLE:
+        if not self.config.AUDIO_ENHANCEMENT_ENABLED or len(audio_data) < 1600 or not NUMPY_AVAILABLE:
             return audio_data
         try:
             np = FastLazyLoader.load("numpy")
@@ -6078,7 +6477,7 @@ class ExcellenceAudioProcessor:
             rms = np.sqrt(np.mean(audio_np**2))
 
             self._noisereduce_counter += 1
-            if hasattr(self, 'last_confidence') and self.last_confidence < 0.6 and self._noisereduce_counter % 10 == 0:
+            if self.last_confidence < 0.6 and self._noisereduce_counter % 10 == 0:
                 try:
                     import noisereduce as nr
                     audio_np = nr.reduce_noise(y=audio_np, sr=self.sample_rate, prop_decrease=0.8)
@@ -6104,24 +6503,25 @@ class ExcellenceAudioProcessor:
     def _is_duplicate_transcription(self, current_text: str) -> bool:
         if not self.config.DUPLICATE_CHECK_ENABLED:
             return False
-        if not current_text or not current_text.strip():
-            return True
-        current_text = current_text.strip()
-        if len(current_text) < self.config.MIN_TEXT_LENGTH:
-            return True
-        if current_text.isspace():
-            return True
-        if current_text == self._last_transcription_text:
-            return True
-        if current_text in self._recent_transcriptions:
-            return True
-        words = current_text.lower().split()
-        if len(words) > 3:
-            unique_words = len(set(words))
-            unique_ratio = unique_words / len(words)
-            if unique_ratio < self.config.MIN_UNIQUE_WORDS_RATIO:
+        with self._duplicate_lock:
+            if not current_text or not current_text.strip():
                 return True
-        self._recent_transcriptions.append(current_text)
+            current_text = current_text.strip()
+            if len(current_text) < self.config.MIN_TEXT_LENGTH:
+                return True
+            if current_text.isspace():
+                return True
+            if current_text == self._last_transcription_text:
+                return True
+            if current_text in self._recent_transcriptions:
+                return True
+            words = current_text.lower().split()
+            if len(words) > 3:
+                unique_words = len(set(words))
+                unique_ratio = unique_words / len(words)
+                if unique_ratio < self.config.MIN_UNIQUE_WORDS_RATIO:
+                    return True
+            self._recent_transcriptions.append(current_text)
         return False
 
     def _add_timed_transcription(self, result: ExcellenceTranscriptionResult) -> None:
@@ -6245,7 +6645,6 @@ class ExcellenceAudioProcessor:
                         pass
         try:
             del process
-            import gc
             gc.collect()
         except Exception:
             pass
@@ -6263,7 +6662,8 @@ class ExcellenceAudioProcessor:
                 with self._subtitle_lock:
                     self._timed_transcriptions.clear()
                     self._timed_translations.clear()
-                self._recent_transcriptions.clear()
+                with self._duplicate_lock:
+                    self._recent_transcriptions.clear()
         logger.info(f"✅ Reset completed: {old_state} -> {self._processing}")
         return True
 
@@ -6285,10 +6685,7 @@ class ExcellenceAudioProcessor:
         issues: List[str] = []
         if IS_WINDOWS:
             try:
-                try:
-                    import psutil
-                except ImportError:
-                    return []
+                import psutil
                 memory = psutil.virtual_memory()
                 if memory.percent > 85:
                     issues.append("High memory usage - consider closing other applications")
@@ -6367,8 +6764,9 @@ class ExcellenceAudioProcessor:
             with self._subtitle_lock:
                 self._timed_transcriptions.clear()
                 self._timed_translations.clear()
-            self._recent_transcriptions.clear()
-            self._last_transcription_text = ""
+            with self._duplicate_lock:
+                self._recent_transcriptions.clear()
+                self._last_transcription_text = ""
             gc.collect()
             logger.info("✅ ExcellenceAudioProcessor disposed")
         except Exception as e:
@@ -6388,20 +6786,19 @@ class ExcellenceAudioProcessor:
         return True
 
 
-# =============================================================================
-# DARK CONTEXT MENUS
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# DARK CONTEXT MENUS (unverändert)
+# -----------------------------------------------------------------------------
 class DarkContextMenu:
     def __init__(self, text_widget: tk.Text) -> None:
         self.text_widget = text_widget
         self.menu = tk.Menu(
             text_widget,
             tearoff=0,
-            bg=ModernColors.BG_TERTIARY,
-            fg=ModernColors.TEXT_PRIMARY,
-            activebackground=ModernColors.BG_HOVER,
-            activeforeground=ModernColors.TEXT_ACCENT,
+            bg=CURRENT_THEME.BG_TERTIARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            activebackground=CURRENT_THEME.BG_HOVER,
+            activeforeground=CURRENT_THEME.TEXT_ACCENT,
             borderwidth=1,
             relief="solid",
         )
@@ -6440,10 +6837,10 @@ class DarkEntryContextMenu:
         self.menu = tk.Menu(
             entry_widget,
             tearoff=0,
-            bg=ModernColors.BG_TERTIARY,
-            fg=ModernColors.TEXT_PRIMARY,
-            activebackground=ModernColors.BG_HOVER,
-            activeforeground=ModernColors.TEXT_ACCENT,
+            bg=CURRENT_THEME.BG_TERTIARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            activebackground=CURRENT_THEME.BG_HOVER,
+            activeforeground=CURRENT_THEME.TEXT_ACCENT,
             borderwidth=1,
             relief="solid",
         )
@@ -6477,10 +6874,10 @@ class DarkEntryContextMenu:
     def delete_text(self) -> None:
         self.entry_widget.delete(0, "end")
 
-# =============================================================================
-# EXPORT MANAGER
-# =============================================================================
 
+# -----------------------------------------------------------------------------
+# EXPORT MANAGER (unverändert)
+# -----------------------------------------------------------------------------
 class ExportManager:
     def __init__(self) -> None:
         self.supported_formats = ["txt", "srt", "vtt", "json", "docx"]
@@ -6615,10 +7012,9 @@ class ExportManager:
             raise ExcellenceError(f"DOCX export failed: {e}")
 
 
-# =============================================================================
-# APP SETTINGS
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# APP SETTINGS (unverändert, ergänzt um Cookie-Einstellungen)
+# -----------------------------------------------------------------------------
 @dataclass
 class AppSettings:
     last_url: str = ""
@@ -6629,6 +7025,9 @@ class AppSettings:
     enable_plugins: bool = True
     export_format: str = "txt"
     auto_save_on_completion: bool = False
+    theme: str = "dark"
+    use_browser_cookies: bool = True      # NEW
+    cookies_notice_shown: bool = False    # NEW
 
     def __post_init__(self) -> None:
         if self.recent_urls is None:
@@ -6664,10 +7063,9 @@ class AppSettings:
         self.save_to_file()
 
 
-# =============================================================================
-# RESOURCE MANAGER
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# RESOURCE MANAGER (unverändert)
+# -----------------------------------------------------------------------------
 class ResourceManager:
     def __init__(self) -> None:
         self.processes: List[subprocess.Popen] = []
@@ -6744,7 +7142,7 @@ class ResourceManager:
                             except Exception:
                                 if attempt < 1:
                                     time.sleep(0.1)
-                except Exception:
+                except (OSError, PermissionError):
                     pass
                 finally:
                     if temp_file in self.temp_files:
@@ -6763,10 +7161,9 @@ class ResourceManager:
         return self._shutdown_event.is_set()
 
 
-# =============================================================================
-# OLLAMA SUMMARIZER
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# OLLAMA SUMMARIZER (unverändert)
+# -----------------------------------------------------------------------------
 class OllamaSummarizer:
     def __init__(self, parent: Any, model: str = "llama3", host: str = "http://localhost:11434") -> None:
         self.parent = parent
@@ -6778,6 +7175,7 @@ class OllamaSummarizer:
         if not self.available:
             return []
         try:
+            import requests
             r = requests.get(f"{self.host}/api/tags", timeout=5)
             if r.status_code == 200:
                 data = r.json()
@@ -6790,12 +7188,6 @@ class OllamaSummarizer:
                   callback: Callable[[str], None],
                   error_callback: Callable[[str], None],
                   complete_callback: Optional[Callable[[], None]] = None) -> None:
-        """
-        Sendet den Text an Ollama und liefert die Antwort als Stream.
-        - callback: wird für jedes empfangene Token aufgerufen.
-        - error_callback: wird bei einem Fehler aufgerufen.
-        - complete_callback: wird nach erfolgreichem Empfang der vollständigen Antwort aufgerufen (optional).
-        """
         if not self.available:
             error_callback("Ollama nicht verfügbar (requests nicht installiert)")
             return
@@ -6805,6 +7197,7 @@ class OllamaSummarizer:
 
         def worker() -> None:
             try:
+                import requests
                 full_prompt = f"{prompt}\n\n{text}"
                 payload = {
                     "model": self.model,
@@ -6836,6 +7229,8 @@ class OllamaSummarizer:
                             complete_callback()
                 else:
                     error_callback(f"Ollama Fehler {response.status_code}")
+            except requests.exceptions.Timeout:
+                error_callback("Ollama Timeout – Server nicht erreichbar?")
             except requests.exceptions.ConnectionError:
                 error_callback("Ollama nicht erreichbar (läuft der Server?)")
             except Exception as e:
@@ -6857,17 +7252,17 @@ class SummarizeDialog:
         self.dialog = tk.Toplevel(self.parent)
         self.dialog.title("🐉 Zusammenfassung mit Ollama")
         self.dialog.geometry("700x600")
-        self.dialog.configure(bg=ModernColors.BG_PRIMARY)
+        self.dialog.configure(bg=CURRENT_THEME.BG_PRIMARY)
         self.dialog.transient(self.parent)
         self.dialog.grab_set()
 
-        main = tk.Frame(self.dialog, bg=ModernColors.BG_PRIMARY, padx=15, pady=15)
+        main = tk.Frame(self.dialog, bg=CURRENT_THEME.BG_PRIMARY, padx=15, pady=15)
         main.pack(fill="both", expand=True)
 
-        model_frame = tk.Frame(main, bg=ModernColors.BG_PRIMARY)
+        model_frame = tk.Frame(main, bg=CURRENT_THEME.BG_PRIMARY)
         model_frame.pack(fill="x", pady=5)
-        tk.Label(model_frame, text="Modell:", bg=ModernColors.BG_PRIMARY,
-                 fg=ModernColors.TEXT_PRIMARY).pack(side="left")
+        tk.Label(model_frame, text="Modell:", bg=CURRENT_THEME.BG_PRIMARY,
+                 fg=CURRENT_THEME.TEXT_PRIMARY).pack(side="left")
         self.model_var = tk.StringVar(value="llama3")
         self.model_combo = ttk.Combobox(
             model_frame, textvariable=self.model_var,
@@ -6876,56 +7271,56 @@ class SummarizeDialog:
         )
         self.model_combo.pack(side="left", padx=10)
 
-        tk.Label(model_frame, text="Temperatur:", bg=ModernColors.BG_PRIMARY,
-                 fg=ModernColors.TEXT_PRIMARY).pack(side="left", padx=(20,5))
+        tk.Label(model_frame, text="Temperatur:", bg=CURRENT_THEME.BG_PRIMARY,
+                 fg=CURRENT_THEME.TEXT_PRIMARY).pack(side="left", padx=(20,5))
         self.temp_var = tk.DoubleVar(value=0.7)
         temp_scale = tk.Scale(
             model_frame, from_=0.0, to=1.0, resolution=0.1, orient=tk.HORIZONTAL,
-            variable=self.temp_var, length=150, bg=ModernColors.BG_PRIMARY,
-            fg=ModernColors.TEXT_PRIMARY, highlightbackground=ModernColors.BG_PRIMARY
+            variable=self.temp_var, length=150, bg=CURRENT_THEME.BG_PRIMARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY, highlightbackground=CURRENT_THEME.BG_PRIMARY
         )
         temp_scale.pack(side="left")
 
-        tk.Label(main, text="Prompt (optional):", bg=ModernColors.BG_PRIMARY,
-                 fg=ModernColors.TEXT_PRIMARY).pack(anchor="w", pady=(10,2))
+        tk.Label(main, text="Prompt (optional):", bg=CURRENT_THEME.BG_PRIMARY,
+                 fg=CURRENT_THEME.TEXT_PRIMARY).pack(anchor="w", pady=(10,2))
         self.prompt_text = scrolledtext.ScrolledText(
-            main, height=4, bg=ModernColors.BG_TERTIARY, fg=ModernColors.TEXT_PRIMARY,
-            font=ModernFonts.MONOSPACE, wrap=tk.WORD
+            main, height=4, bg=CURRENT_THEME.BG_TERTIARY, fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=DragonFonts.MONOSPACE, wrap=tk.WORD
         )
         self.prompt_text.pack(fill="x", pady=(0,10))
         self.prompt_text.insert("1.0", "Fasse den folgenden Text kurz und präzise auf Deutsch zusammen:")
 
-        tk.Label(main, text="Zusammenfassung:", bg=ModernColors.BG_PRIMARY,
-                 fg=ModernColors.TEXT_PRIMARY).pack(anchor="w")
+        tk.Label(main, text="Zusammenfassung:", bg=CURRENT_THEME.BG_PRIMARY,
+                 fg=CURRENT_THEME.TEXT_PRIMARY).pack(anchor="w")
         self.summary_text = scrolledtext.ScrolledText(
-            main, height=12, bg=ModernColors.BG_TERTIARY, fg=ModernColors.TEXT_PRIMARY,
-            font=ModernFonts.MONOSPACE, wrap=tk.WORD
+            main, height=12, bg=CURRENT_THEME.BG_TERTIARY, fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=DragonFonts.MONOSPACE, wrap=tk.WORD
         )
         self.summary_text.pack(fill="both", expand=True, pady=10)
         DarkContextMenu(self.summary_text)
 
-        btn_frame = tk.Frame(main, bg=ModernColors.BG_PRIMARY)
+        btn_frame = tk.Frame(main, bg=CURRENT_THEME.BG_PRIMARY)
         btn_frame.pack(fill="x")
         self.summarize_btn = tk.Button(
             btn_frame, text="🤖 Zusammenfassen", command=self.start_summarize,
-            bg=ModernColors.DRAGON_GREEN, fg=ModernColors.TEXT_PRIMARY,
-            font=ModernFonts.BUTTON, padx=20
+            bg=CURRENT_THEME.DRAGON_GREEN, fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=DragonFonts.BUTTON, padx=20
         )
         self.summarize_btn.pack(side="left", padx=5)
         self.copy_btn = tk.Button(
             btn_frame, text="📋 Kopieren", command=self.copy_summary,
-            bg=ModernColors.BG_TERTIARY, fg=ModernColors.TEXT_PRIMARY,
-            font=ModernFonts.BUTTON, padx=20
+            bg=CURRENT_THEME.BG_TERTIARY, fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=DragonFonts.BUTTON, padx=20
         )
         self.copy_btn.pack(side="left", padx=5)
         self.close_btn = tk.Button(
             btn_frame, text="Schließen", command=self.dialog.destroy,
-            bg=ModernColors.BG_TERTIARY, fg=ModernColors.TEXT_PRIMARY
+            bg=CURRENT_THEME.BG_TERTIARY, fg=CURRENT_THEME.TEXT_PRIMARY
         )
         self.close_btn.pack(side="right", padx=5)
 
-        self.status_label = tk.Label(main, text="", bg=ModernColors.BG_PRIMARY,
-                                      fg=ModernColors.TEXT_SECONDARY)
+        self.status_label = tk.Label(main, text="", bg=CURRENT_THEME.BG_PRIMARY,
+                                      fg=CURRENT_THEME.TEXT_SECONDARY)
         self.status_label.pack(pady=5)
 
         self.full_summary = ""
@@ -6946,7 +7341,6 @@ class SummarizeDialog:
         self.summary_text.delete("1.0", "end")
         self.full_summary = ""
 
-        # Callback für erfolgreichen Abschluss
         def on_complete() -> None:
             if self.dialog and self.dialog.winfo_exists():
                 self.dialog.after(0, self._reset_ui)
@@ -6955,11 +7349,10 @@ class SummarizeDialog:
             self.text, prompt, temp,
             callback=self.on_chunk,
             error_callback=self.on_error,
-            complete_callback=on_complete   # <-- NEU
+            complete_callback=on_complete
         )
 
     def _reset_ui(self) -> None:
-        """Setzt die UI nach erfolgreichem Empfang zurück."""
         if self.dialog and self.dialog.winfo_exists():
             self.summarize_btn.config(state="normal", text="🤖 Zusammenfassen")
             self.status_label.config(text="✅ Zusammenfassung abgeschlossen")
@@ -6991,10 +7384,9 @@ class SummarizeDialog:
             self.status_label.config(text="⚠️ Keine Zusammenfassung vorhanden")
 
 
-# =============================================================================
-# ROBUSTE TOOLTIP-KLASSE
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# TOOLTIP (unverändert)
+# -----------------------------------------------------------------------------
 class ToolTip:
     def __init__(self, widget: tk.Widget, text: str, delay: int = 500) -> None:
         self.widget = widget
@@ -7041,10 +7433,9 @@ class ToolTip:
             self.tip_window = None
 
 
-# =============================================================================
-# WHISPER LAYOUT MANAGER
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# LAYOUT MANAGER (unverändert)
+# -----------------------------------------------------------------------------
 class WhisperLayoutManager:
     def __init__(self, gui_ref: Any) -> None:
         self.gui_ref = gui_ref
@@ -7061,7 +7452,7 @@ class WhisperLayoutManager:
                     self.maxsize = maxsize
                     self._items: List[Any] = []
                     self._lock = threading.Lock()
-                    self.Empty = queue.Empty
+                    self.Empty = queue.Empty  # neu: echte Empty-Exception
                 def put(self, item: Any, block: bool = True, timeout: Optional[float] = None) -> None:
                     with self._lock:
                         self._items.append(item)
@@ -7089,7 +7480,7 @@ class WhisperLayoutManager:
             logger.warning("⚠️ Verwende Dummy-Queues (eingeschränkte Funktionalität)")
 
     def setup_gui(self) -> None:
-        self.root.configure(bg=DragonColors.BG_PRIMARY)
+        self.root.configure(bg=self.gui_ref.current_theme.BG_PRIMARY)
         self.root.title("🐉 Dragon Whisperer - Plattformunabhängig")
         self.root.geometry("900x700")
         self.root.minsize(850, 600)
@@ -7110,12 +7501,12 @@ class WhisperLayoutManager:
         style.theme_use("clam")
         style.configure(
             "Dark.TCombobox",
-            fieldbackground=ModernColors.COMBO_BG,
-            background=ModernColors.COMBO_BG,
-            foreground=ModernColors.COMBO_FG,
-            selectbackground=ModernColors.COMBO_SELECTION,
-            selectforeground=ModernColors.TEXT_PRIMARY,
-            insertcolor=ModernColors.TEXT_PRIMARY,
+            fieldbackground=self.gui_ref.current_theme.COMBO_BG,
+            background=self.gui_ref.current_theme.COMBO_BG,
+            foreground=self.gui_ref.current_theme.COMBO_FG,
+            selectbackground=self.gui_ref.current_theme.COMBO_SELECTION,
+            selectforeground=self.gui_ref.current_theme.TEXT_PRIMARY,
+            insertcolor=self.gui_ref.current_theme.TEXT_PRIMARY,
             borderwidth=1,
             relief="flat",
             arrowsize=12,
@@ -7124,22 +7515,28 @@ class WhisperLayoutManager:
         style.map(
             "Dark.TCombobox",
             fieldbackground=[
-                ("readonly", ModernColors.COMBO_BG),
-                ("active", ModernColors.BG_HOVER),
+                ("readonly", self.gui_ref.current_theme.COMBO_BG),
+                ("active", self.gui_ref.current_theme.BG_HOVER),
             ],
             background=[
-                ("readonly", ModernColors.COMBO_BG),
-                ("active", ModernColors.BG_HOVER),
+                ("readonly", self.gui_ref.current_theme.COMBO_BG),
+                ("active", self.gui_ref.current_theme.BG_HOVER),
             ],
             foreground=[
-                ("readonly", ModernColors.COMBO_FG),
-                ("active", ModernColors.TEXT_PRIMARY),
+                ("readonly", self.gui_ref.current_theme.COMBO_FG),
+                ("active", self.gui_ref.current_theme.TEXT_PRIMARY),
             ],
         )
-        self.root.option_add("*TCombobox*Listbox.background", ModernColors.COMBO_BG)
-        self.root.option_add("*TCombobox*Listbox.foreground", ModernColors.COMBO_FG)
-        self.root.option_add("*TCombobox*Listbox.selectBackground", ModernColors.COMBO_SELECTION)
-        self.root.option_add("*TCombobox*Listbox.selectForeground", ModernColors.TEXT_PRIMARY)
+        style.configure(
+            "Dark.Horizontal.TProgressbar",
+            background=self.gui_ref.current_theme.SUCCESS,
+            troughcolor=self.gui_ref.current_theme.BG_TERTIARY,
+            bordercolor=self.gui_ref.current_theme.BORDER,
+        )
+        self.root.option_add("*TCombobox*Listbox.background", self.gui_ref.current_theme.COMBO_BG)
+        self.root.option_add("*TCombobox*Listbox.foreground", self.gui_ref.current_theme.COMBO_FG)
+        self.root.option_add("*TCombobox*Listbox.selectBackground", self.gui_ref.current_theme.COMBO_SELECTION)
+        self.root.option_add("*TCombobox*Listbox.selectForeground", self.gui_ref.current_theme.TEXT_PRIMARY)
 
     def center_window(self) -> None:
         self.root.update_idletasks()
@@ -7150,45 +7547,45 @@ class WhisperLayoutManager:
         self.root.geometry(f"+{x}+{y}")
 
     def create_layout(self) -> None:
-        header_frame = tk.Frame(self.root, bg=ModernColors.BG_PRIMARY, height=35)
+        header_frame = tk.Frame(self.root, bg=self.gui_ref.current_theme.BG_PRIMARY, height=35)
         header_frame.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
         header_frame.grid_propagate(False)
         title_label = tk.Label(
             header_frame,
             text="🐉 Dragon Whisperer - Livestream Transcription & Translation",
-            font=ModernFonts.TITLE,
-            bg=ModernColors.BG_PRIMARY,
-            fg=ModernColors.DRAGON_GREEN,
+            font=DragonFonts.TITLE,
+            bg=self.gui_ref.current_theme.BG_PRIMARY,
+            fg=self.gui_ref.current_theme.DRAGON_GREEN,
         )
         title_label.pack(side="left")
         self.gui_ref.status_label = tk.Label(
             header_frame,
             text="✅ READY",
-            font=ModernFonts.PRIMARY,
-            bg=ModernColors.BG_PRIMARY,
-            fg=ModernColors.TEXT_SECONDARY,
+            font=DragonFonts.PRIMARY,
+            bg=self.gui_ref.current_theme.BG_PRIMARY,
+            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
         )
         self.gui_ref.status_label.pack(side="right")
         self.create_stream_info_display()
         self.gui_ref.stream_info_frame.grid(row=1, column=0, sticky="ew", padx=12, pady=3)
-        input_frame = tk.Frame(self.root, bg=ModernColors.BG_PRIMARY)
+        input_frame = tk.Frame(self.root, bg=self.gui_ref.current_theme.BG_PRIMARY)
         input_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=3)
-        url_frame = tk.Frame(input_frame, bg=ModernColors.BG_PRIMARY)
+        url_frame = tk.Frame(input_frame, bg=self.gui_ref.current_theme.BG_PRIMARY)
         url_frame.pack(fill="x", pady=2)
         tk.Label(
             url_frame,
             text="URL:",
-            bg=ModernColors.BG_PRIMARY,
-            fg=ModernColors.TEXT_PRIMARY,
-            font=ModernFonts.PRIMARY,
+            bg=self.gui_ref.current_theme.BG_PRIMARY,
+            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            font=DragonFonts.PRIMARY,
         ).pack(side="left")
         self.gui_ref.url_entry = tk.Entry(
             url_frame,
-            font=ModernFonts.PRIMARY,
-            bg=ModernColors.BG_TERTIARY,
-            fg=ModernColors.TEXT_PRIMARY,
-            insertbackground=ModernColors.TEXT_PRIMARY,
-            selectbackground=ModernColors.COMBO_SELECTION,
+            font=DragonFonts.PRIMARY,
+            bg=self.gui_ref.current_theme.BG_TERTIARY,
+            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            insertbackground=self.gui_ref.current_theme.TEXT_PRIMARY,
+            selectbackground=self.gui_ref.current_theme.COMBO_SELECTION,
             width=60,
         )
         self.gui_ref.url_entry.pack(side="left", fill="x", expand=True, padx=(5, 5))
@@ -7197,9 +7594,9 @@ class WhisperLayoutManager:
         self.gui_ref.language_info_label = tk.Label(
             url_frame,
             text="",
-            font=ModernFonts.PRIMARY,
-            bg=ModernColors.BG_PRIMARY,
-            fg=ModernColors.TEXT_ACCENT,
+            font=DragonFonts.PRIMARY,
+            bg=self.gui_ref.current_theme.BG_PRIMARY,
+            fg=self.gui_ref.current_theme.TEXT_ACCENT,
         )
         self.gui_ref.language_info_label.pack(side="right", padx=(5, 0))
         self.create_compact_control_panel(input_frame)
@@ -7211,14 +7608,14 @@ class WhisperLayoutManager:
         self.gui_ref.url_entry.bind("<FocusOut>", self.gui_ref.on_url_change)
 
     def create_stream_info_display(self) -> None:
-        self.gui_ref.stream_info_frame = tk.Frame(self.root, bg=ModernColors.BG_SECONDARY, height=50)
+        self.gui_ref.stream_info_frame = tk.Frame(self.root, bg=self.gui_ref.current_theme.BG_SECONDARY, height=50)
         self.gui_ref.stream_info_frame.grid_propagate(True)
         self.gui_ref.stream_title_label = tk.Label(
             self.gui_ref.stream_info_frame,
             text="📡 No active stream",
-            font=ModernFonts.SUBTITLE,
-            bg=ModernColors.BG_SECONDARY,
-            fg=ModernColors.TEXT_ACCENT,
+            font=DragonFonts.SUBTITLE,
+            bg=self.gui_ref.current_theme.BG_SECONDARY,
+            fg=self.gui_ref.current_theme.TEXT_ACCENT,
             wraplength=700,
             justify="left",
         )
@@ -7226,17 +7623,17 @@ class WhisperLayoutManager:
         self.gui_ref.stream_details_label = tk.Label(
             self.gui_ref.stream_info_frame,
             text="Ready to connect...",
-            font=ModernFonts.PRIMARY,
-            bg=ModernColors.BG_SECONDARY,
-            fg=ModernColors.TEXT_SECONDARY,
+            font=DragonFonts.PRIMARY,
+            bg=self.gui_ref.current_theme.BG_SECONDARY,
+            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
             justify="left",
         )
         self.gui_ref.stream_details_label.pack(fill="x", padx=8, pady=(2, 6))
 
     def create_compact_control_panel(self, parent: tk.Frame) -> None:
-        control_frame = tk.Frame(parent, bg=ModernColors.BG_PRIMARY)
+        control_frame = tk.Frame(parent, bg=self.gui_ref.current_theme.BG_PRIMARY)
         control_frame.pack(fill="x", pady=8)
-        left_controls = tk.Frame(control_frame, bg=ModernColors.BG_PRIMARY)
+        left_controls = tk.Frame(control_frame, bg=self.gui_ref.current_theme.BG_PRIMARY)
         left_controls.pack(side="left")
         action_buttons = [
             ("📁", self.gui_ref.select_file_dark, "Datei auswählen"),
@@ -7247,8 +7644,8 @@ class WhisperLayoutManager:
                 left_controls,
                 text=icon,
                 command=command,
-                bg=ModernColors.BG_TERTIARY,
-                fg=ModernColors.TEXT_PRIMARY,
+                bg=self.gui_ref.current_theme.BG_TERTIARY,
+                fg=self.gui_ref.current_theme.TEXT_PRIMARY,
                 relief="flat",
                 bd=0,
                 font=("Segoe UI", 9),
@@ -7261,8 +7658,8 @@ class WhisperLayoutManager:
             left_controls,
             text="🔄",
             command=self.gui_ref.toggle_layout,
-            bg=ModernColors.BG_TERTIARY,
-            fg=ModernColors.TEXT_PRIMARY,
+            bg=self.gui_ref.current_theme.BG_TERTIARY,
+            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
             relief="flat",
             bd=0,
             font=("Segoe UI", 9),
@@ -7271,16 +7668,16 @@ class WhisperLayoutManager:
         self.gui_ref.layout_btn.pack(side="left", padx=5)
         ToolTip(self.gui_ref.layout_btn, "Layout umschalten (vertikal/horizontal)")
 
-        center_controls = tk.Frame(control_frame, bg=ModernColors.BG_PRIMARY)
+        center_controls = tk.Frame(control_frame, bg=self.gui_ref.current_theme.BG_PRIMARY)
         center_controls.pack(side="left", padx=15)
-        model_frame = tk.Frame(center_controls, bg=ModernColors.BG_PRIMARY)
+        model_frame = tk.Frame(center_controls, bg=self.gui_ref.current_theme.BG_PRIMARY)
         model_frame.pack(side="left", padx=5)
         tk.Label(
             model_frame,
             text="Model:",
-            bg=ModernColors.BG_PRIMARY,
-            fg=ModernColors.TEXT_SECONDARY,
-            font=ModernFonts.PRIMARY,
+            bg=self.gui_ref.current_theme.BG_PRIMARY,
+            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            font=DragonFonts.PRIMARY,
         ).pack(side="left")
         self.gui_ref.model_var = tk.StringVar(value=self.gui_ref.settings.default_model)
         self.gui_ref.model_combo = ttk.Combobox(
@@ -7294,14 +7691,18 @@ class WhisperLayoutManager:
         self.gui_ref.model_combo.pack(side="left", padx=3)
         ToolTip(self.gui_ref.model_combo, "Whisper-Modell auswählen (größer = genauer, aber langsamer)")
 
-        lang_frame = tk.Frame(center_controls, bg=ModernColors.BG_PRIMARY)
+        if getattr(self.gui_ref, 'demo_mode', False):
+            self.gui_ref.model_combo.config(state="disabled")
+            self.gui_ref.model_var.set("dummy (Demo)")
+
+        lang_frame = tk.Frame(center_controls, bg=self.gui_ref.current_theme.BG_PRIMARY)
         lang_frame.pack(side="left", padx=5)
         tk.Label(
             lang_frame,
             text="Translate:",
-            bg=ModernColors.BG_PRIMARY,
-            fg=ModernColors.TEXT_SECONDARY,
-            font=ModernFonts.PRIMARY,
+            bg=self.gui_ref.current_theme.BG_PRIMARY,
+            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            font=DragonFonts.PRIMARY,
         ).pack(side="left")
         self.gui_ref.lang_var = tk.StringVar()
         language_groups = {
@@ -7344,14 +7745,14 @@ class WhisperLayoutManager:
         self.gui_ref.lang_var.set(default_lang_name)
         self.gui_ref.lang_combo.bind("<<ComboboxSelected>>", self.gui_ref.on_language_change)
 
-        right_controls = tk.Frame(control_frame, bg=ModernColors.BG_PRIMARY)
+        right_controls = tk.Frame(control_frame, bg=self.gui_ref.current_theme.BG_PRIMARY)
         right_controls.pack(side="right")
         self.gui_ref.start_button = tk.Button(
             right_controls,
             text="🚀 START",
             command=self.gui_ref._on_start_click,
-            bg=ModernColors.SUCCESS,
-            fg=ModernColors.TEXT_PRIMARY,
+            bg=self.gui_ref.current_theme.SUCCESS,
+            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 9, "bold"),
             relief="flat",
             padx=20,
@@ -7363,8 +7764,8 @@ class WhisperLayoutManager:
             right_controls,
             text="⏹️ STOP",
             command=self.gui_ref.controller.stop_processing,
-            bg=ModernColors.ERROR,
-            fg=ModernColors.TEXT_PRIMARY,
+            bg=self.gui_ref.current_theme.ERROR,
+            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
             state="disabled",
             font=("Segoe UI", 9, "bold"),
             relief="flat",
@@ -7379,12 +7780,12 @@ class WhisperLayoutManager:
             text="Translate",
             variable=self.gui_ref.translate_toggle,
             command=self.gui_ref.toggle_translation,
-            bg=ModernColors.BG_PRIMARY,
-            fg=ModernColors.TEXT_PRIMARY,
-            selectcolor=ModernColors.BG_TERTIARY,
-            activebackground=ModernColors.BG_PRIMARY,
-            activeforeground=ModernColors.TEXT_PRIMARY,
-            font=ModernFonts.PRIMARY,
+            bg=self.gui_ref.current_theme.BG_PRIMARY,
+            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            selectcolor=self.gui_ref.current_theme.BG_TERTIARY,
+            activebackground=self.gui_ref.current_theme.BG_PRIMARY,
+            activeforeground=self.gui_ref.current_theme.TEXT_PRIMARY,
+            font=DragonFonts.PRIMARY,
         )
         translate_btn.pack(side="left", padx=5)
         ToolTip(translate_btn, "Übersetzung ein-/ausschalten")
@@ -7393,8 +7794,8 @@ class WhisperLayoutManager:
             right_controls,
             text="🎬",
             command=self.gui_ref.toggle_subtitle_mode,
-            bg=ModernColors.SUBTITLE_INACTIVE,
-            fg=ModernColors.TEXT_PRIMARY,
+            bg=self.gui_ref.current_theme.SUBTITLE_INACTIVE,
+            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
             relief="flat",
             bd=0,
             font=("Segoe UI", 9),
@@ -7422,7 +7823,7 @@ class WhisperLayoutManager:
             except Exception as e:
                 logger.warning(f"   ⚠️ Container destroy warning: {e}")
         if layout_changed or not hasattr(self.gui_ref, 'text_container'):
-            self.gui_ref.text_container = tk.Frame(self.root, bg=ModernColors.BG_PRIMARY)
+            self.gui_ref.text_container = tk.Frame(self.root, bg=self.gui_ref.current_theme.BG_PRIMARY)
             self.gui_ref._current_layout = self.gui_ref.layout_mode
             logger.info(f"   ✅ New container created for {self.gui_ref.layout_mode} layout")
         if self.gui_ref.layout_mode == "horizontal":
@@ -7442,69 +7843,69 @@ class WhisperLayoutManager:
         main_frame = tk.LabelFrame(
             self.gui_ref.text_container,
             text="Live Transkription & Übersetzung",
-            bg=ModernColors.BG_SECONDARY,
-            fg=ModernColors.TEXT_PRIMARY,
-            font=ModernFonts.SUBTITLE,
+            bg=self.gui_ref.current_theme.BG_SECONDARY,
+            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            font=DragonFonts.SUBTITLE,
             padx=8,
             pady=8,
         )
         main_frame.pack(fill="both", expand=True)
-        trans_frame = tk.Frame(main_frame, bg=ModernColors.BG_SECONDARY)
+        trans_frame = tk.Frame(main_frame, bg=self.gui_ref.current_theme.BG_SECONDARY)
         trans_frame.pack(fill="x", pady=(0, 3))
-        trans_header = tk.Frame(trans_frame, bg=ModernColors.BG_SECONDARY)
+        trans_header = tk.Frame(trans_frame, bg=self.gui_ref.current_theme.BG_SECONDARY)
         trans_header.pack(fill="x")
         tk.Label(
             trans_header,
             text="🎤 Transkription:",
-            bg=ModernColors.BG_SECONDARY,
-            fg=ModernColors.TEXT_ACCENT,
-            font=ModernFonts.SUBTITLE,
+            bg=self.gui_ref.current_theme.BG_SECONDARY,
+            fg=self.gui_ref.current_theme.TEXT_ACCENT,
+            font=DragonFonts.SUBTITLE,
         ).pack(side="left")
         self.gui_ref.transcript_scroll_var = tk.BooleanVar(value=True)
         scroll_cb = tk.Checkbutton(
             trans_header,
             variable=self.gui_ref.transcript_scroll_var,
-            bg=ModernColors.BG_SECONDARY,
-            activebackground=ModernColors.BG_SECONDARY,
-            selectcolor=ModernColors.CHECKBOX_ACTIVE,
-            fg=ModernColors.TEXT_PRIMARY,
+            bg=self.gui_ref.current_theme.BG_SECONDARY,
+            activebackground=self.gui_ref.current_theme.BG_SECONDARY,
+            selectcolor=self.gui_ref.current_theme.CHECKBOX_ACTIVE,
+            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
         )
         scroll_cb.pack(side="right", padx=3)
         tk.Label(
             trans_header,
             text="Auto-Scroll",
-            bg=ModernColors.BG_SECONDARY,
-            fg=ModernColors.TEXT_SECONDARY,
+            bg=self.gui_ref.current_theme.BG_SECONDARY,
+            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
             font=("Segoe UI", 7),
         ).pack(side="right", padx=1)
         self.gui_ref.transcript_text = self.create_text_widget(main_frame, height=6)
-        transla_frame = tk.Frame(main_frame, bg=ModernColors.BG_SECONDARY)
+        transla_frame = tk.Frame(main_frame, bg=self.gui_ref.current_theme.BG_SECONDARY)
         transla_frame.pack(fill="x", pady=(8, 0))
-        transla_header = tk.Frame(transla_frame, bg=ModernColors.BG_SECONDARY)
+        transla_header = tk.Frame(transla_frame, bg=self.gui_ref.current_theme.BG_SECONDARY)
         transla_header.pack(fill="x")
         self.gui_ref.translation_header = tk.Label(
             transla_header,
             text="🌐 Übersetzung:",
-            bg=ModernColors.BG_SECONDARY,
-            fg=ModernColors.TEXT_ACCENT,
-            font=ModernFonts.SUBTITLE,
+            bg=self.gui_ref.current_theme.BG_SECONDARY,
+            fg=self.gui_ref.current_theme.TEXT_ACCENT,
+            font=DragonFonts.SUBTITLE,
         )
         self.gui_ref.translation_header.pack(side="left")
         self.gui_ref.translation_scroll_var = tk.BooleanVar(value=True)
         scroll_cb = tk.Checkbutton(
             transla_header,
             variable=self.gui_ref.translation_scroll_var,
-            bg=ModernColors.BG_SECONDARY,
-            activebackground=ModernColors.BG_SECONDARY,
-            selectcolor=ModernColors.CHECKBOX_ACTIVE,
-            fg=ModernColors.TEXT_PRIMARY,
+            bg=self.gui_ref.current_theme.BG_SECONDARY,
+            activebackground=self.gui_ref.current_theme.BG_SECONDARY,
+            selectcolor=self.gui_ref.current_theme.CHECKBOX_ACTIVE,
+            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
         )
         scroll_cb.pack(side="right", padx=3)
         tk.Label(
             transla_header,
             text="Auto-Scroll",
-            bg=ModernColors.BG_SECONDARY,
-            fg=ModernColors.TEXT_SECONDARY,
+            bg=self.gui_ref.current_theme.BG_SECONDARY,
+            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
             font=("Segoe UI", 7),
         ).pack(side="right", padx=1)
         self.gui_ref.translation_text = self.create_text_widget(main_frame, height=6)
@@ -7513,9 +7914,9 @@ class WhisperLayoutManager:
         main_frame = tk.LabelFrame(
             self.gui_ref.text_container,
             text="Live Transkription & Übersetzung",
-            bg=ModernColors.BG_SECONDARY,
-            fg=ModernColors.TEXT_PRIMARY,
-            font=ModernFonts.SUBTITLE,
+            bg=self.gui_ref.current_theme.BG_SECONDARY,
+            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            font=DragonFonts.SUBTITLE,
             padx=8,
             pady=8,
         )
@@ -7523,68 +7924,68 @@ class WhisperLayoutManager:
         self.gui_ref.paned_window = tk.PanedWindow(
             main_frame,
             orient=tk.HORIZONTAL,
-            bg=ModernColors.BG_SECONDARY,
+            bg=self.gui_ref.current_theme.BG_SECONDARY,
             sashrelief="raised",
             sashwidth=4,
             sashpad=0,
         )
         self.gui_ref.paned_window.pack(fill="both", expand=True)
-        left_frame = tk.Frame(self.gui_ref.paned_window, bg=ModernColors.BG_TERTIARY)
+        left_frame = tk.Frame(self.gui_ref.paned_window, bg=self.gui_ref.current_theme.BG_TERTIARY)
         self.gui_ref.paned_window.add(left_frame, stretch="always", width=400)
-        trans_header = tk.Frame(left_frame, bg=ModernColors.BG_TERTIARY)
+        trans_header = tk.Frame(left_frame, bg=self.gui_ref.current_theme.BG_TERTIARY)
         trans_header.pack(fill="x", padx=5, pady=2)
         tk.Label(
             trans_header,
             text="🎤 Transkription",
-            bg=ModernColors.BG_TERTIARY,
-            fg=ModernColors.TEXT_ACCENT,
-            font=ModernFonts.SUBTITLE,
+            bg=self.gui_ref.current_theme.BG_TERTIARY,
+            fg=self.gui_ref.current_theme.TEXT_ACCENT,
+            font=DragonFonts.SUBTITLE,
         ).pack(side="left")
         self.gui_ref.transcript_scroll_var = tk.BooleanVar(value=True)
         scroll_cb = tk.Checkbutton(
             trans_header,
             variable=self.gui_ref.transcript_scroll_var,
-            bg=ModernColors.BG_TERTIARY,
-            activebackground=ModernColors.BG_TERTIARY,
-            selectcolor=ModernColors.CHECKBOX_ACTIVE,
-            fg=ModernColors.TEXT_PRIMARY,
+            bg=self.gui_ref.current_theme.BG_TERTIARY,
+            activebackground=self.gui_ref.current_theme.BG_TERTIARY,
+            selectcolor=self.gui_ref.current_theme.CHECKBOX_ACTIVE,
+            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
         )
         scroll_cb.pack(side="right", padx=3)
         tk.Label(
             trans_header,
             text="Auto-Scroll",
-            bg=ModernColors.BG_TERTIARY,
-            fg=ModernColors.TEXT_SECONDARY,
+            bg=self.gui_ref.current_theme.BG_TERTIARY,
+            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
             font=("Segoe UI", 7),
         ).pack(side="right", padx=1)
         self.gui_ref.transcript_text = self.create_text_widget(left_frame)
-        right_frame = tk.Frame(self.gui_ref.paned_window, bg=ModernColors.BG_TERTIARY)
+        right_frame = tk.Frame(self.gui_ref.paned_window, bg=self.gui_ref.current_theme.BG_TERTIARY)
         self.gui_ref.paned_window.add(right_frame, stretch="always", width=400)
-        transla_header = tk.Frame(right_frame, bg=ModernColors.BG_TERTIARY)
+        transla_header = tk.Frame(right_frame, bg=self.gui_ref.current_theme.BG_TERTIARY)
         transla_header.pack(fill="x", padx=5, pady=2)
         self.gui_ref.translation_header = tk.Label(
             transla_header,
             text="🌐 Übersetzung",
-            bg=ModernColors.BG_TERTIARY,
-            fg=ModernColors.TEXT_ACCENT,
-            font=ModernFonts.SUBTITLE,
+            bg=self.gui_ref.current_theme.BG_TERTIARY,
+            fg=self.gui_ref.current_theme.TEXT_ACCENT,
+            font=DragonFonts.SUBTITLE,
         )
         self.gui_ref.translation_header.pack(side="left")
         self.gui_ref.translation_scroll_var = tk.BooleanVar(value=True)
         scroll_cb = tk.Checkbutton(
             transla_header,
             variable=self.gui_ref.translation_scroll_var,
-            bg=ModernColors.BG_TERTIARY,
-            activebackground=ModernColors.BG_TERTIARY,
-            selectcolor=ModernColors.CHECKBOX_ACTIVE,
-            fg=ModernColors.TEXT_PRIMARY,
+            bg=self.gui_ref.current_theme.BG_TERTIARY,
+            activebackground=self.gui_ref.current_theme.BG_TERTIARY,
+            selectcolor=self.gui_ref.current_theme.CHECKBOX_ACTIVE,
+            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
         )
         scroll_cb.pack(side="right", padx=3)
         tk.Label(
             transla_header,
             text="Auto-Scroll",
-            bg=ModernColors.BG_TERTIARY,
-            fg=ModernColors.TEXT_SECONDARY,
+            bg=self.gui_ref.current_theme.BG_TERTIARY,
+            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
             font=("Segoe UI", 7),
         ).pack(side="right", padx=1)
         self.gui_ref.translation_text = self.create_text_widget(right_frame)
@@ -7594,14 +7995,14 @@ class WhisperLayoutManager:
     def create_text_widget(self, parent: tk.Frame, height: Optional[int] = None) -> scrolledtext.ScrolledText:
         text_widget = scrolledtext.ScrolledText(
             parent,
-            bg=ModernColors.BG_TERTIARY,
-            fg=ModernColors.TEXT_PRIMARY,
-            font=ModernFonts.MONOSPACE,
-            insertbackground=ModernColors.TEXT_PRIMARY,
+            bg=self.gui_ref.current_theme.BG_TERTIARY,
+            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            font=DragonFonts.MONOSPACE,
+            insertbackground=self.gui_ref.current_theme.TEXT_PRIMARY,
             wrap=tk.WORD,
             relief="flat",
-            selectbackground=ModernColors.COMBO_SELECTION,
-            selectforeground=ModernColors.TEXT_PRIMARY,
+            selectbackground=self.gui_ref.current_theme.COMBO_SELECTION,
+            selectforeground=self.gui_ref.current_theme.TEXT_PRIMARY,
             maxundo=30,
             undo=True,
         )
@@ -7630,14 +8031,20 @@ class WhisperLayoutManager:
         return text_widget
 
     def setup_status_bar(self) -> None:
-        self.gui_ref.status_bar_frame = tk.Frame(self.root, bg=ModernColors.BG_SECONDARY, height=50)
+        self.gui_ref.status_bar_frame = tk.Frame(self.root, bg=self.gui_ref.current_theme.BG_SECONDARY, height=50)
         self.gui_ref.status_bar_frame.grid_propagate(True)
-        separator = tk.Frame(self.gui_ref.status_bar_frame, height=2, bg=ModernColors.DRAGON_GREEN)
+        separator = tk.Frame(self.gui_ref.status_bar_frame, height=2, bg=self.gui_ref.current_theme.DRAGON_GREEN)
         separator.pack(fill="x", side="top")
-        main_container = tk.Frame(self.gui_ref.status_bar_frame, bg=ModernColors.BG_SECONDARY)
+        main_container = tk.Frame(self.gui_ref.status_bar_frame, bg=self.gui_ref.current_theme.BG_SECONDARY)
         main_container.pack(fill="x", expand=True, padx=12, pady=8)
-        left_panel = tk.Frame(main_container, bg=ModernColors.BG_SECONDARY)
-        left_panel.pack(side="left", fill="x", expand=False)
+
+        main_container.columnconfigure(0, weight=0)
+        main_container.columnconfigure(1, weight=1)
+        main_container.columnconfigure(2, weight=0)
+
+        left_panel = tk.Frame(main_container, bg=self.gui_ref.current_theme.BG_SECONDARY)
+        left_panel.grid(row=0, column=0, sticky="w", padx=5)
+
         quick_actions = [
             ("🗑️", self.gui_ref.clear_all, "Alles löschen"),
             ("💾", self.gui_ref.save_transcript, "Transkription speichern"),
@@ -7647,24 +8054,60 @@ class WhisperLayoutManager:
             ("🌐", self.gui_ref.show_translation_dialog, "Text übersetzen"),
             ("🤖", self.gui_ref.show_summarize_dialog, "Mit Ollama zusammenfassen"),
         ]
+
+        if getattr(self.gui_ref, 'demo_mode', False) or not TRANSLATOR_AVAILABLE:
+            install_btn = tk.Button(
+                left_panel,
+                text="📦",
+                command=self.gui_ref.show_install_dialog,
+                bg=self.gui_ref.current_theme.BG_TERTIARY,
+                fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+                relief="flat",
+                font=("Segoe UI", 9),
+                cursor="hand2",
+                padx=4, pady=2,
+                activebackground=self.gui_ref.current_theme.BG_HOVER,
+            )
+            install_btn.grid(row=0, column=len(quick_actions)+1, padx=1, sticky="w")
+            ToolTip(install_btn, "Fehlende Pakete installieren")
+
         for i, (icon, command, tooltip) in enumerate(quick_actions):
             btn = tk.Button(
                 left_panel,
                 text=icon,
                 command=command,
-                bg=ModernColors.BG_TERTIARY,
-                fg=ModernColors.TEXT_PRIMARY,
+                bg=self.gui_ref.current_theme.BG_TERTIARY,
+                fg=self.gui_ref.current_theme.TEXT_PRIMARY,
                 relief="flat",
                 font=("Segoe UI", 9),
                 cursor="hand2",
                 padx=4,
                 pady=2,
-                activebackground=ModernColors.BG_HOVER,
+                activebackground=self.gui_ref.current_theme.BG_HOVER,
             )
             btn.grid(row=0, column=i, padx=1, sticky="w")
             ToolTip(btn, tooltip)
-        center_panel = tk.Frame(main_container, bg=ModernColors.BG_SECONDARY)
-        center_panel.pack(side="left", fill="x", expand=True, padx=(15, 15))
+
+        center_panel = tk.Frame(main_container, bg=self.gui_ref.current_theme.BG_SECONDARY)
+        center_panel.grid(row=0, column=1, sticky="ew", padx=5)
+
+        self.gui_ref.progress_bar = ttk.Progressbar(
+            center_panel,
+            mode='determinate',
+            length=150,
+            style="Dark.Horizontal.TProgressbar"
+        )
+        self.gui_ref.progress_bar.pack(side="left", padx=(10, 10))
+
+        self.gui_ref.progress_label = tk.Label(
+            center_panel,
+            text="",
+            font=("Segoe UI", 8),
+            bg=self.gui_ref.current_theme.BG_SECONDARY,
+            fg=self.gui_ref.current_theme.TEXT_SECONDARY
+        )
+        self.gui_ref.progress_label.pack(side="left", padx=(0, 10))
+
         if IS_WINDOWS:
             default_text = "🪟 Windows | CPU: --% | RAM: --MB | GPU: --% | Model: --"
         elif IS_MACOS:
@@ -7680,13 +8123,15 @@ class WhisperLayoutManager:
             center_panel,
             text=default_text,
             font=("Segoe UI", 8, "normal"),
-            bg=ModernColors.BG_SECONDARY,
-            fg=ModernColors.TEXT_SECONDARY,
+            bg=self.gui_ref.current_theme.BG_SECONDARY,
+            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
             padx=5,
         )
-        self.gui_ref.system_info_label.pack(fill="x")
-        right_panel = tk.Frame(main_container, bg=ModernColors.BG_SECONDARY)
-        right_panel.pack(side="right", fill="x", expand=False)
+        self.gui_ref.system_info_label.pack(side="left", fill="x", expand=True)
+
+        right_panel = tk.Frame(main_container, bg=self.gui_ref.current_theme.BG_SECONDARY)
+        right_panel.grid(row=0, column=2, sticky="e", padx=5)
+
         self.gui_ref.exit_button = tk.Button(
             right_panel,
             text=" ⏻ EXIT ",
@@ -7701,7 +8146,21 @@ class WhisperLayoutManager:
             activebackground="#c82333",
         )
         self.gui_ref.exit_button.pack(side="right")
-        ToolTip(self.gui_ref.exit_button, "Programm beenden")
+        ToolTip(self.gui_ref.exit_button, "Programm beenden (Strg+Q / Cmd+Q)")
+
+        help_btn = tk.Button(
+            right_panel,
+            text="⌨️",
+            command=self.gui_ref.show_shortcuts_help,
+            bg=self.gui_ref.current_theme.BG_TERTIARY,
+            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            relief="flat",
+            font=("Segoe UI", 9),
+            cursor="hand2",
+            padx=4
+        )
+        help_btn.pack(side="right", padx=2)
+        ToolTip(help_btn, "Tastenkürzel anzeigen (F1)")
 
     def process_batch_text_updates(self) -> None:
         if (not hasattr(self.gui_ref, '_shutting_down') or
@@ -7709,7 +8168,6 @@ class WhisperLayoutManager:
             return
         if (not hasattr(self, 'root') or
             self.root is None or
-            not hasattr(self.root, 'winfo_exists') or
             not self.root.winfo_exists()):
             return
         if not hasattr(self.gui_ref, '_text_update_queue'):
@@ -7750,7 +8208,6 @@ class WhisperLayoutManager:
             if update_type == 'transcript':
                 if (hasattr(self.gui_ref, 'transcript_text') and
                     self.gui_ref.transcript_text is not None and
-                    hasattr(self.gui_ref.transcript_text, 'winfo_exists') and
                     self.gui_ref.transcript_text.winfo_exists()):
                     self.gui_ref.transcript_text.insert('end', text_data)
                     self._auto_scroll('transcript')
@@ -7758,7 +8215,6 @@ class WhisperLayoutManager:
             elif update_type == 'translation':
                 if (hasattr(self.gui_ref, 'translation_text') and
                     self.gui_ref.translation_text is not None and
-                    hasattr(self.gui_ref.translation_text, 'winfo_exists') and
                     self.gui_ref.translation_text.winfo_exists()):
                     self.gui_ref.translation_text.insert('end', text_data)
                     self._auto_scroll('translation')
@@ -7804,7 +8260,6 @@ class WhisperLayoutManager:
         try:
             if (hasattr(self, 'root') and
                 self.root is not None and
-                hasattr(self.root, 'winfo_exists') and
                 self.root.winfo_exists()):
                 interval = 150
                 if hasattr(self.gui_ref, '_batch_update_interval'):
@@ -7825,7 +8280,6 @@ class WhisperLayoutManager:
         try:
             if (hasattr(self, 'root') and
                 self.root is not None and
-                hasattr(self.root, 'winfo_exists') and
                 self.root.winfo_exists()):
                 if not hasattr(self.gui_ref, '_text_update_queue') or self.gui_ref._text_update_queue is None:
                     try:
@@ -7869,16 +8323,15 @@ class WhisperLayoutManager:
             logger.warning(f"⚠️ Start batch updates error: {e}")
 
 
-# =============================================================================
-# WHISPER CONTROLLER 
-# =============================================================================
-
+# -----------------------------------------------------------------------------
+# WHISPER CONTROLLER (überarbeitet mit Thread-Sicherheit)
+# -----------------------------------------------------------------------------
 class WhisperController:
     def __init__(self, gui_ref: Any, ui_update_fn: Optional[Callable] = None,
                  status_update_fn: Optional[Callable] = None) -> None:
         self.gui_ref = gui_ref
         self.is_processing = False
-        self._processing_lock = threading.Lock()   # NEU: Lock für Start
+        self._processing_lock = threading.Lock()
         self._cleanup_lock = threading.RLock()
         self._last_transcription_text = ""
         self._duplicate_check_cache: Deque[str] = deque(maxlen=20)
@@ -7896,9 +8349,8 @@ class WhisperController:
         self._processing_active = threading.Event()
         self._initialized = True
 
-        # Event für abgeschlossenen Stop
         self._stop_complete = threading.Event()
-        self._stop_complete.set()  # initial gesetzt
+        self._stop_complete.set()
 
     def _create_default_ui_updater(self) -> Callable:
         def default_updater(component: str, text: str) -> None:
@@ -7932,9 +8384,7 @@ class WhisperController:
                 pass
         return default_updater
 
-    # --- NEU: Methode für reguläres Ende ---
     def _processing_finished(self) -> None:
-        """Wird aufgerufen, wenn die Verarbeitung regulär endet (z.B. Dateiende)."""
         self.is_processing = False
         self.status_update_fn({"processing_state": False, "status": "✅ Processing completed"})
 
@@ -7942,7 +8392,7 @@ class WhisperController:
         try:
             if hasattr(self.gui_ref, "root") and self.gui_ref.root.winfo_exists():
                 self.gui_ref.root.after(0, lambda: self._safe_text_insert(widget, text))
-        except Exception:
+        except (tk.TclError, AttributeError):
             pass
 
     def _safe_text_insert(self, widget: tk.Text, text: str) -> None:
@@ -7981,34 +8431,30 @@ class WhisperController:
             pass
 
     def _stop_processing_sync(self, timeout: float = 10.0) -> bool:
-        """
-        Stoppt die Verarbeitung synchron und wartet auf das Ende des Audio-Processors.
-        """
         self._stop_complete.clear()
         logger.info("🛑 WhisperController: Synchrone Stop angefordert")
 
-        # Asynchronen Stop anstoßen
-        self.stop_processing()  # diese Methode startet einen Thread
+        self.stop_processing()
 
-        # Jetzt auf das Ende des Audio-Processors warten
         if hasattr(self.gui_ref, 'audio_processor') and self.gui_ref.audio_processor:
-            # Prüfen, ob _process_finished existiert (neuere Version)
             if hasattr(self.gui_ref.audio_processor, '_process_finished'):
                 if not self.gui_ref.audio_processor._process_finished.wait(timeout):
                     logger.warning(f"⚠️ Audio-Processor nicht innerhalb von {timeout}s beendet")
                     return False
             else:
-                # Fallback: einfach kurz warten
                 time.sleep(0.5)
         else:
-            # Kein Audio-Processor, trotzdem als beendet markieren
             time.sleep(0.1)
 
         self._stop_complete.set()
         return True
 
+    def _on_progress(self, processed: int, total: Optional[int], chunks: int) -> None:
+        if hasattr(self.gui_ref, 'update_progress'):
+            self.gui_ref.root.after(0, self.gui_ref.update_progress, processed, total, chunks)
+
     def _start_processing(self) -> None:
-        with self._processing_lock:   # NEU: Lock gegen doppelte Starts
+        with self._processing_lock:
             if self.is_processing:
                 self.status_update_fn({"status": "⚠️ Bereits aktiv"})
                 return
@@ -8022,8 +8468,14 @@ class WhisperController:
                 self.status_update_fn({"status": "❌ Bitte URL eingeben"})
                 return
             try:
+                # URL validieren
+                url = PlatformUtils.sanitize_url(url)
                 if url.startswith("file://"):
-                    file_path = url[7:]
+                    ok, real_path = PlatformUtils.validate_file_path(url)
+                    if not ok:
+                        self.status_update_fn({"status": f"❌ {real_path}"})
+                        return
+                    file_path = real_path
                     if not os.path.exists(file_path):
                         self.status_update_fn({"status": "❌ Datei nicht gefunden"})
                         return
@@ -8038,14 +8490,12 @@ class WhisperController:
 
             self.status_update_fn({"status": "🔍 Analysiere Stream..."})
 
-            # Falls noch ein alter Prozess läuft, warte synchron auf dessen Ende
             if self.is_processing:
                 logger.warning("⚠️ Vorheriger Prozess läuft noch – stoppe diesen zuerst synchron.")
                 if not self._stop_processing_sync(timeout=10):
                     self.status_update_fn({"status": "❌ Vorheriger Prozess konnte nicht gestoppt werden"})
                     return
 
-            # Stream-Info versuchen (optional)
             try:
                 if hasattr(self.gui_ref, "stream_manager"):
                     platform_type, platform_name = self.gui_ref.stream_manager.detect_platform(url)
@@ -8095,10 +8545,13 @@ class WhisperController:
                     model_name = "medium"
                     if hasattr(self.gui_ref, "model_var"):
                         model_name = self.gui_ref.model_var.get()
-                    model_loaded = self.gui_ref.transcription_engine.load_model(model_name)
-                    if not model_loaded:
+                    result = self.gui_ref.transcription_engine.load_model(model_name, set_active=True)
+                    if result is not None:
+                        model_loaded = True
+                    else:
                         logger.info("🔄 Versuche base model...")
-                        model_loaded = self.gui_ref.transcription_engine.load_model("base")
+                        result = self.gui_ref.transcription_engine.load_model("base", set_active=True)
+                        model_loaded = result is not None
             except Exception as e:
                 logger.warning(f"⚠️ Model Load Error: {e}")
             if not model_loaded:
@@ -8187,17 +8640,15 @@ class WhisperController:
                 except Exception:
                     pass
 
-            # NEU: finished_callback für Dateiende
             def file_finished_callback() -> None:
-                """Wird aufgerufen, wenn eine lokale Datei normal beendet wurde."""
                 logger.info("✅ Dateiende erkannt – zeige Speicherdialog")
                 self.status_update_fn({"file_finished": True})
-                self._processing_finished()   # <-- NEU: Controller-Status zurücksetzen
+                self._processing_finished()
 
             try:
                 if hasattr(self.gui_ref, "audio_processor"):
-                    # NICHT: self.gui_ref.audio_processor._processing = True  ← ENTFERNT
                     self.gui_ref.audio_processor._stop_event.clear()
+                    self.gui_ref.audio_processor.set_progress_callback(self._on_progress)
                     processing_thread = threading.Thread(
                         target=lambda: self.gui_ref.audio_processor.start_processing(
                             url=url,
@@ -8217,7 +8668,7 @@ class WhisperController:
                     error_callback("❌ Audio-Processor nicht verfügbar")
                     self.status_update_fn({"processing_state": False, "status": "❌ Audio-Processor nicht verfügbar"})
                     self.is_processing = False
-            except Exception as e:
+            except (AttributeError, RuntimeError) as e:
                 error_msg = f"Start Error: {str(e)[:100]}"
                 logger.error(f"❌ Processing Start Error: {e}")
                 error_callback(error_msg)
@@ -8258,7 +8709,7 @@ class WhisperController:
                 self._stop_complete.set()
             except Exception as e:
                 logger.warning(f"⚠️ Audio Stop Fehler: {e}")
-                self._stop_complete.set()   # auch bei Fehler als beendet markieren
+                self._stop_complete.set()
 
         audio_stop_thread = threading.Thread(target=stop_audio_processor, daemon=True)
         audio_stop_thread.start()
@@ -8276,6 +8727,7 @@ class WhisperController:
                 if hasattr(self.gui_ref, "stream_details_label"):
                     self.gui_ref.stream_details_label.config(text="Bereit für neue Verbindung")
                 self.is_processing = False
+                self.gui_ref._reset_progress()
             except Exception as e:
                 logger.warning(f"⚠️ GUI Update Fehler: {e}")
         if hasattr(self.gui_ref, "root") and self.gui_ref.root.winfo_exists():
@@ -8316,454 +8768,460 @@ class WhisperController:
         except Exception:
             sys.exit(0)
 
-# =============================================================================
-# LINUX PERFORMANCE OPTIMIZER (mit psutil-Fallback, korrigiert)
-# =============================================================================
 
-# Prüfen, ob psutil verfügbar ist
-try:
-    import importlib
-    PSUTIL_AVAILABLE = importlib.util.find_spec("psutil") is not None
-except ImportError:
-    PSUTIL_AVAILABLE = False
-    logger.warning("⚠️ importlib nicht verfügbar – psutil-Prüfung übersprungen")
+# -----------------------------------------------------------------------------
+# LINUX PERFORMANCE OPTIMIZER (unverändert)
+# -----------------------------------------------------------------------------
+PSUTIL_AVAILABLE = importlib.util.find_spec("psutil") is not None
 if not PSUTIL_AVAILABLE:
     logger.warning("⚠️ psutil nicht verfügbar – Linux Performance Optimizer läuft im Dummy-Modus")
 
-if IS_LINUX:
-    if PSUTIL_AVAILABLE:
-        class LinuxPerformanceOptimizer:
-            """
-            Verwaltet Linux-spezifische Performance-Optimierungen während der Verarbeitung.
-            Reduziert GUI-Last, passt Thread-Prioritäten an und überwacht die Systemauslastung.
-            Alle GUI-Zugriffe erfolgen über den Hauptthread mittels after() oder Queues.
-            """
-            def __init__(self, gui_ref: 'DragonWhispererGUI') -> None:
-                self.gui = gui_ref
-                self.is_processing = False
-                self._original_settings: Dict[str, Any] = {}
-                self._optimization_active = False
-                self._monitoring_thread: Optional[threading.Thread] = None
-                self._shutdown_event = threading.Event()
-                self._monitoring_lock = threading.RLock()
-                self._last_gui_access_time = 0.0
-                self._gui_access_warning_printed = False
+if IS_LINUX and PSUTIL_AVAILABLE:
+    class LinuxPerformanceOptimizer:
+        def __init__(self, gui_ref: 'DragonWhispererGUI') -> None:
+            self.gui = gui_ref
+            self.is_processing = False
+            self._original_settings: Dict[str, Any] = {}
+            self._optimization_active = False
+            self._monitoring_thread: Optional[threading.Thread] = None
+            self._shutdown_event = threading.Event()
+            self._monitoring_lock = threading.RLock()
+            self._last_gui_access_time = 0.0
+            self._gui_access_warning_printed = False
 
-            def optimize_for_processing(self) -> None:
-                """Aktiviert Performance-Optimierungen für die Transkriptionsverarbeitung."""
-                if not IS_LINUX or self._optimization_active:
-                    return
-                with self._monitoring_lock:
-                    # Shutdown-Event zurücksetzen
-                    self._shutdown_event.clear()
-
-                    # Falls ein alter Monitor-Thread noch läuft, ignorieren wir ihn –
-                    # wir starten nur einen neuen, wenn keiner aktiv ist.
-                    if self._monitoring_thread and self._monitoring_thread.is_alive():
-                        logger.warning("⚠️ Optimize: Monitoring-Thread läuft bereits – überspringe")
-                        return
-
-                    logger.info("🔧 Aktiviere Linux-Performance-Optimierungen...")
-                    if not self._is_gui_available_safe():
-                        logger.warning("⚠️ Optimize: GUI nicht verfügbar")
-                        return
-
-                    # Text-Widgets optimieren (weniger Undo-Puffer)
-                    self._optimize_text_widget('transcript_text')
-                    self._optimize_text_widget('translation_text')
-
-                    # Batch-Update-Interval erhöhen (nur über Hauptthread)
-                    self._schedule_batch_interval_increase()
-
-                    # GUI-Queue leeren, falls überlastet
-                    self._clean_queue_safe(getattr(self.gui, 'gui_queue', None), 15)
-
-                    self._apply_linux_specific_optimizations()
-                    # Wichtig: _optimization_active VOR dem Start des Monitoring-Threads setzen
-                    self._optimization_active = True
-                    self.is_processing = True
-                    self._start_performance_monitoring()
-                    logger.info("✅ Linux-Performance-Optimierungen aktiviert")
-
-            def _schedule_batch_interval_increase(self) -> None:
-                """Erhöht das Batch-Update-Interval im Hauptthread und speichert den Originalwert sofort."""
-                if not self._is_gui_available_safe():
-                    return
-                # Originalwert sofort sichern
-                if hasattr(self.gui, '_batch_update_interval'):
-                    self._original_settings['batch_update_interval'] = self.gui._batch_update_interval
-                def task() -> None:
-                    if hasattr(self.gui, '_batch_update_interval'):
-                        self.gui._batch_update_interval = 250
-                        logger.info(f"  ↪ Batch-Update-Intervall: {self._original_settings['batch_update_interval']} → 250ms")
-                if hasattr(self.gui, 'root'):
-                    self.gui.root.after(0, task)
-
-            def _optimize_text_widget(self, attr_name: str) -> None:
-                """Optimiert ein einzelnes Text-Widget (reduziert Undo-Puffer)."""
-                widget = getattr(self.gui, attr_name, None)
-                if widget and widget.winfo_exists():
-                    self._original_settings[attr_name] = {
-                        'maxundo': widget.cget('maxundo'),
-                        'undo': widget.cget('undo'),
-                        'autoseparators': widget.cget('autoseparators')
-                    }
-                    widget.configure(maxundo=5, undo=True, autoseparators=True, height=12)
-                    logger.info(f"  ↪ {attr_name} optimiert")
-
-            def _is_gui_available_safe(self) -> bool:
-                """Prüft, ob die GUI noch verfügbar ist (shutdown-sicher)."""
-                try:
-                    return (hasattr(self.gui, 'root') and
-                            self.gui.root is not None and
-                            self.gui.root.winfo_exists() and
-                            not getattr(self.gui, '_shutting_down', False))
-                except Exception:
-                    return False
-
-            def _apply_linux_specific_optimizations(self) -> None:
-                """Wendet Linux-spezifische Optimierungen an (X11, Compositor, Ressourcenlimits)."""
-                if not self._is_gui_available_safe():
-                    return
-
-                # Compositor-Erkennung (nur Info)
-                self._detect_compositor()
-
-                # Ressourcenlimits erhöhen (falls möglich) – kein GUI-Zugriff
-                self._increase_resource_limits()
-
-            def _detect_compositor(self) -> None:
-                """Erkennt laufende Compositor-Prozesse (nur zu Informationszwecken)."""
-                try:
-                    # psutil sicher verwenden
-                    try:
-                        import psutil
-                    except ImportError:
-                        return
-                    for proc in psutil.process_iter(['name']):
-                        try:
-                            name = proc.info['name'].lower()
-                            if any(c in name for c in ['compton', 'picom', 'compiz', 'kwin']):
-                                logger.info(f"  ↪ Compositor erkannt: {name}")
-                                break
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            continue
-                except Exception:
-                    pass
-
-            def _increase_resource_limits(self) -> None:
-                """Erhöht Soft-Limits für Speicher und Dateideskriptoren (falls möglich)."""
-                try:
-                    import resource
-                    # Daten-Segment-Limit erhöhen
-                    soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
-                    new_soft = min(hard, 1024 * 1024 * 1024)  # 1 GB
-                    if new_soft > soft:
-                        resource.setrlimit(resource.RLIMIT_DATA, (new_soft, hard))
-                        logger.info(f"  ↪ Daten-Limit erhöht: {soft} → {new_soft}")
-
-                    # Dateideskriptoren-Limit erhöhen
-                    soft_fd, hard_fd = resource.getrlimit(resource.RLIMIT_NOFILE)
-                    new_soft_fd = min(hard_fd, 8192)
-                    if new_soft_fd > soft_fd:
-                        resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft_fd, hard_fd))
-                        logger.info(f"  ↪ Dateideskriptoren-Limit erhöht: {soft_fd} → {new_soft_fd}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Ressourcenlimits konnten nicht erhöht werden: {e}")
-
-            def _start_performance_monitoring(self) -> None:
-                """Startet einen Hintergrund-Thread zur Überwachung der Systemauslastung.
-                   KEINE GUI-Zugriffe in diesem Thread! Ergebnisse werden über Queue an Hauptthread gesendet."""
-                with self._monitoring_lock:
-                    # Sicherheitshalber nochmal prüfen
-                    if self._monitoring_thread and self._monitoring_thread.is_alive():
-                        logger.debug("Monitoring-Thread läuft bereits – kein Neustart.")
-                        return
-
-                    def monitor_worker() -> None:
-                        # Prüfe gleich zu Beginn, ob das Event gesetzt ist
-                        if self._shutdown_event.is_set():
-                            logger.debug("Monitoring-Thread: shutdown gesetzt – beende sofort")
-                            return
-                        logger.info("🔍 Linux-Performance-Monitoring gestartet")
-                        check_count = 0
-                        max_checks = 240  # ca. 2 Stunden (alle 30 Sekunden)
-
-                        while not self._shutdown_event.is_set() and self._optimization_active:
-                            try:
-                                time.sleep(30)
-                                if self._shutdown_event.is_set():
-                                    break
-                                if not self._is_gui_available_safe():
-                                    logger.warning("⚠️ GUI nicht mehr verfügbar – stoppe Monitoring")
-                                    break
-
-                                check_count += 1
-                                if check_count > max_checks:
-                                    logger.info("⏰ Monitoring-Zeitlimit erreicht – beende")
-                                    break
-
-                                system_load = self._get_system_load()
-                                memory_usage = self._get_memory_usage()
-
-                                if system_load > 0.8 or memory_usage > 0.85:
-                                    # Anpassungen über Hauptthread anstoßen
-                                    self._schedule_adjustments(system_load, memory_usage)
-
-                                if check_count % 12 == 0:  # Alle ~6 Minuten
-                                    self._print_performance_report(system_load, memory_usage)
-
-                            except Exception as e:
-                                logger.warning(f"⚠️ Fehler im Monitoring-Thread: {e}")
-
-                        logger.info("✅ Linux-Performance-Monitoring beendet")
-                        with self._monitoring_lock:
-                            self._monitoring_thread = None
-
-                    self._monitoring_thread = threading.Thread(target=monitor_worker, daemon=True, name="LinuxPerfMon")
-                    self._monitoring_thread.start()
-
-            def _get_system_load(self) -> float:
-                """Gibt die aktuelle Systemlast normiert auf die CPU-Anzahl zurück."""
-                try:
-                    load_avg = os.getloadavg()
-                    cpu_count = os.cpu_count() or 1
-                    return load_avg[0] / cpu_count
-                except Exception:
-                    return 0.0
-
-            def _get_memory_usage(self) -> float:
-                """Gibt den prozentualen RAM-Verbrauch zurück (0.0–1.0)."""
-                try:
-                    # psutil sicher importieren
-                    try:
-                        import psutil
-                    except ImportError:
-                        return 0.0
-                    memory = psutil.virtual_memory()
-                    return memory.percent / 100.0
-                except Exception:
-                    return 0.0
-
-            def _schedule_adjustments(self, load: float, memory: float) -> None:
-                """Leitet Anpassungen im Hauptthread ein."""
-                if not self._is_gui_available_safe():
-                    return
-                def task() -> None:
-                    if not self._optimization_active or self._shutdown_event.is_set():
-                        return
-                    adjustments: List[str] = []
-
-                    # GUI-Queue bei hoher Speicherauslastung leeren
-                    if memory > 0.85 and hasattr(self.gui, 'gui_queue'):
-                        cleared = self._clean_queue_safe(self.gui.gui_queue, 5)
-                        if cleared > 0:
-                            adjustments.append(f"Queue: -{cleared}")
-
-                    # Batch-Update-Interval bei hoher CPU-Last erhöhen
-                    if load > 0.8 and hasattr(self.gui, '_batch_update_interval'):
-                        current = self.gui._batch_update_interval
-                        if current < 500:
-                            self.gui._batch_update_interval = min(500, current + 50)
-                            adjustments.append(f"Update: {current}→{self.gui._batch_update_interval}ms")
-
-                    if adjustments:
-                        logger.info(f"🔧 Anpassungen: {', '.join(adjustments)}")
-                if hasattr(self.gui, 'root'):
-                    self.gui.root.after(0, task)
-
-            def _clean_queue_safe(self, queue_obj: Optional[queue.Queue], target_size: int) -> int:
-                """Entfernt überschüssige Elemente aus einer Queue (sicher im Hauptthread)."""
-                if not queue_obj or queue_obj.qsize() <= target_size:
-                    return 0
-                cleared = 0
-                try:
-                    while queue_obj.qsize() > target_size and cleared < 50:
-                        queue_obj.get_nowait()
-                        queue_obj.task_done()
-                        cleared += 1
-                except queue.Empty:
-                    pass
-                except Exception as e:
-                    logger.warning(f"⚠️ Queue-Cleanup-Fehler: {e}")
-                return cleared
-
-            def _print_performance_report(self, load: float, memory: float) -> None:
-                """Gibt einen regelmäßigen Performance-Report aus (kein GUI-Zugriff)."""
-                try:
-                    stats = {
-                        'System-Last': f"{load:.1%}",
-                        'RAM-Auslastung': f"{memory:.1%}",
-                        'Status': 'Aktiv' if self.is_processing else 'Inaktiv'
-                    }
-                    logger.info("🐧 Linux-Performance-Report: " + " | ".join(f"{k}: {v}" for k, v in stats.items()))
-                except Exception:
-                    pass
-
-            def restore_normal_mode(self) -> None:
-                """Stellt die ursprünglichen Einstellungen wieder her (sicherer Shutdown)."""
-                if not IS_LINUX:
-                    return
-                logger.info("🔧 Linux-Optimierer: Fahre herunter...")
-                self._shutdown_event.set()
-                self._optimization_active = False
-                self.is_processing = False
-
-                # Monitoring-Thread beenden
+        def optimize_for_processing(self) -> None:
+            if not IS_LINUX or self._optimization_active:
+                return
+            with self._monitoring_lock:
+                self._shutdown_event.clear()
                 if self._monitoring_thread and self._monitoring_thread.is_alive():
-                    self._monitoring_thread.join(timeout=1.0)
-                    self._monitoring_thread = None
-
-                # GUI-Einstellungen zurücksetzen (falls GUI noch existiert)
-                if self._is_gui_available_safe():
-                    logger.info("  ↪ Stelle GUI-Einstellungen wieder her...")
-                    self._restore_text_widget('transcript_text')
-                    self._restore_text_widget('translation_text')
-
-                    # Batch-Update-Intervall nur wiederherstellen, wenn der Schlüssel existiert
-                    if 'batch_update_interval' in self._original_settings:
-                        # Wert sofort lokal sichern, damit er nicht später verloren geht
-                        saved_interval = self._original_settings['batch_update_interval']
-                        def restore_batch_interval(saved=saved_interval):
-                            if hasattr(self.gui, 'root') and self.gui.root.winfo_exists():
-                                if hasattr(self.gui, '_batch_update_interval'):
-                                    self.gui._batch_update_interval = saved
-                                    logger.debug(f"    Batch-Update-Intervall wiederhergestellt: {saved}ms")
-                        if hasattr(self.gui, 'root'):
-                            self.gui.root.after(0, restore_batch_interval)
-
-                self._original_settings.clear()
-                # shutdown_event bleibt gesetzt – das ist okay, da wir nicht mehr optimieren.
-                logger.info("✅ Linux-Optimierer heruntergefahren")
-
-            def _restore_text_widget(self, attr_name: str) -> None:
-                """Stellt die ursprüngliche Konfiguration eines Text-Widgets wieder her (im Hauptthread)."""
-                widget = getattr(self.gui, attr_name, None)
-                if widget and widget.winfo_exists() and attr_name in self._original_settings:
-                    try:
-                        widget.configure(**self._original_settings[attr_name])
-                        logger.info(f"    ✅ {attr_name} wiederhergestellt")
-                    except Exception as e:
-                        logger.warning(f"    ⚠️ {attr_name} konnte nicht wiederhergestellt werden: {e}")
-
-            def emergency_optimize(self) -> None:
-                """Führt eine sofortige, drastische Optimierung durch (bei Überlast)."""
-                if self._shutdown_event.is_set():
+                    logger.warning("⚠️ Optimize: Monitoring-Thread läuft bereits – überspringe")
                     return
-                logger.info("🚨 Führe Notfall-Optimierungen durch...")
-                if not self._is_gui_available_safe():
-                    return
+                logger.info("🔧 Aktiviere Linux-Performance-Optimierungen...")
+                self._optimize_text_widget('transcript_text')
+                self._optimize_text_widget('translation_text')
+                self._schedule_batch_interval_increase()
+                self._clean_queue_safe(getattr(self.gui, 'gui_queue', None), 15)
+                self._apply_linux_specific_optimizations()
+                self._optimization_active = True
+                self.is_processing = True
+                self._start_performance_monitoring()
+                logger.info("✅ Linux-Performance-Optimierungen aktiviert")
 
-                # Queues leeren (im Hauptthread)
-                def task() -> None:
-                    self._clean_queue_safe(getattr(self.gui, 'gui_queue', None), 3)
-                    self._clean_queue_safe(getattr(self.gui, '_text_update_queue', None), 2)
+        def _schedule_batch_interval_increase(self) -> None:
+            if not self._is_gui_available_safe():
+                return
+            if hasattr(self.gui, '_batch_update_interval'):
+                self._original_settings['batch_update_interval'] = self.gui._batch_update_interval
+            def task() -> None:
+                if hasattr(self.gui, '_batch_update_interval'):
+                    self.gui._batch_update_interval = 250
+            if hasattr(self.gui, 'root'):
+                self.gui.root.after(0, task)
 
-                    # Text-Widgets auf minimale Größe setzen
-                    for attr in ['transcript_text', 'translation_text']:
-                        widget = getattr(self.gui, attr, None)
-                        if widget and widget.winfo_exists():
-                            try:
-                                widget.configure(height=6, maxundo=1)
-                            except Exception:
-                                pass
-
-                    # Batch-Update-Intervall erhöhen
-                    if hasattr(self.gui, '_batch_update_interval'):
-                        self.gui._batch_update_interval = 500
-
-                    gc.collect()
-                    logger.info("✅ Notfall-Optimierungen abgeschlossen")
-                if hasattr(self.gui, 'root'):
-                    self.gui.root.after(0, task)
-
-            def get_optimization_status(self) -> Dict[str, Any]:
-                """Gibt den aktuellen Status des Optimierers zurück."""
-                return {
-                    'platform': SYSTEM,
-                    'optimization_active': self._optimization_active,
-                    'processing_active': self.is_processing,
-                    'monitoring_active': self._monitoring_thread and self._monitoring_thread.is_alive(),
-                    'shutdown_event_set': self._shutdown_event.is_set(),
-                    'original_settings_count': len(self._original_settings),
-                    'linux_specific': IS_LINUX,
-                    'gui_available': self._is_gui_available_safe()
+        def _optimize_text_widget(self, attr_name: str) -> None:
+            widget = getattr(self.gui, attr_name, None)
+            if widget and widget.winfo_exists():
+                self._original_settings[attr_name] = {
+                    'maxundo': widget.cget('maxundo'),
+                    'undo': widget.cget('undo'),
+                    'autoseparators': widget.cget('autoseparators')
                 }
+                widget.configure(maxundo=5, undo=True, autoseparators=True, height=12)
 
-            def print_optimization_info(self) -> None:
-                """Gibt Debug-Informationen aus."""
-                status = self.get_optimization_status()
-                print("\n" + "=" * 60)
-                print("🐧 LINUX PERFORMANCE OPTIMIZER - STATUS")
-                print("=" * 60)
-                for key, value in status.items():
-                    print(f"{key:35} {value}")
-                print("=" * 60)
+        def _is_gui_available_safe(self) -> bool:
+            try:
+                return (hasattr(self.gui, 'root') and
+                        self.gui.root is not None and
+                        self.gui.root.winfo_exists() and
+                        not getattr(self.gui, '_shutting_down', False))
+            except Exception:
+                return False
 
-            def dispose(self) -> None:
-                """Räumt Ressourcen des Optimierers auf."""
-                logger.info("🧹 Linux-Performance-Optimierer wird entsorgt...")
-                self._shutdown_event.set()
-                try:
-                    self.restore_normal_mode()
-                except Exception as e:
-                    logger.warning(f"⚠️ restore_normal_mode fehlgeschlagen: {e}")
-                self._original_settings.clear()
-                gc.collect()
-                logger.info("✅ Linux-Performance-Optimierer entsorgt")
+        def _apply_linux_specific_optimizations(self) -> None:
+            if not self._is_gui_available_safe():
+                return
+            self._detect_compositor()
+            self._increase_resource_limits()
 
-            def emergency_shutdown(self) -> None:
-                """Externer Notfall-Shutdown (wird von außen aufgerufen)."""
-                logger.info("🚨 Externer Notfall-Shutdown des Linux-Optimierers")
-                self._shutdown_event.set()
-                self._optimization_active = False
-                self.is_processing = False
+        def _detect_compositor(self) -> None:
+            try:
+                import psutil
+                for proc in psutil.process_iter(['name']):
+                    try:
+                        name = proc.info['name'].lower()
+                        if any(c in name for c in ['compton', 'picom', 'compiz', 'kwin']):
+                            logger.info(f"  ↪ Compositor erkannt: {name}")
+                            break
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+            except (ImportError, AttributeError):
+                pass
+
+        def _increase_resource_limits(self) -> None:
+            try:
+                import resource
+                soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
+                new_soft = min(hard, 1024 * 1024 * 1024)
+                if new_soft > soft:
+                    resource.setrlimit(resource.RLIMIT_DATA, (new_soft, hard))
+                    logger.info(f"  ↪ Daten-Limit erhöht: {soft} → {new_soft}")
+
+                soft_fd, hard_fd = resource.getrlimit(resource.RLIMIT_NOFILE)
+                new_soft_fd = min(hard_fd, 8192)
+                if new_soft_fd > soft_fd:
+                    resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft_fd, hard_fd))
+                    logger.info(f"  ↪ Dateideskriptoren-Limit erhöht: {soft_fd} → {new_soft_fd}")
+            except Exception as e:
+                logger.warning(f"⚠️ Ressourcenlimits konnten nicht erhöht werden: {e}")
+
+        def _start_performance_monitoring(self) -> None:
+            with self._monitoring_lock:
+                if self._monitoring_thread and self._monitoring_thread.is_alive():
+                    return
+
+                def monitor_worker() -> None:
+                    if self._shutdown_event.is_set():
+                        return
+                    logger.info("🔍 Linux-Performance-Monitoring gestartet")
+                    check_count = 0
+                    max_checks = 240
+
+                    while not self._shutdown_event.is_set() and self._optimization_active:
+                        try:
+                            time.sleep(30)
+                            if self._shutdown_event.is_set():
+                                break
+                            if not self._is_gui_available_safe():
+                                logger.warning("⚠️ GUI nicht mehr verfügbar – stoppe Monitoring")
+                                break
+
+                            check_count += 1
+                            if check_count > max_checks:
+                                logger.info("⏰ Monitoring-Zeitlimit erreicht – beende")
+                                break
+
+                            system_load = self._get_system_load()
+                            memory_usage = self._get_memory_usage()
+
+                            if system_load > 0.8 or memory_usage > 0.85:
+                                self._schedule_adjustments(system_load, memory_usage)
+
+                            if check_count % 12 == 0:
+                                self._print_performance_report(system_load, memory_usage)
+
+                        except (OSError, ValueError) as e:
+                            logger.warning(f"⚠️ Fehler im Monitoring-Thread: {e}")
+
+                    logger.info("✅ Linux-Performance-Monitoring beendet")
+                    with self._monitoring_lock:
+                        self._monitoring_thread = None
+
+                self._monitoring_thread = threading.Thread(target=monitor_worker, daemon=True, name="LinuxPerfMon")
+                self._monitoring_thread.start()
+
+        def _get_system_load(self) -> float:
+            try:
+                load_avg = os.getloadavg()
+                cpu_count = os.cpu_count() or 1
+                return load_avg[0] / cpu_count
+            except (OSError, ValueError):
+                return 0.0
+
+        def _get_memory_usage(self) -> float:
+            try:
+                import psutil
+                memory = psutil.virtual_memory()
+                return memory.percent / 100.0
+            except Exception:
+                return 0.0
+
+        def _schedule_adjustments(self, load: float, memory: float) -> None:
+            if not self._is_gui_available_safe():
+                return
+            def task() -> None:
+                if not self._optimization_active or self._shutdown_event.is_set():
+                    return
+                adjustments: List[str] = []
+
+                if memory > 0.85 and hasattr(self.gui, 'gui_queue'):
+                    cleared = self._clean_queue_safe(self.gui.gui_queue, 5)
+                    if cleared > 0:
+                        adjustments.append(f"Queue: -{cleared}")
+
+                if load > 0.8 and hasattr(self.gui, '_batch_update_interval'):
+                    current = self.gui._batch_update_interval
+                    if current < 500:
+                        self.gui._batch_update_interval = min(500, current + 50)
+                        adjustments.append(f"Update: {current}→{self.gui._batch_update_interval}ms")
+
+                if adjustments:
+                    logger.info(f"🔧 Anpassungen: {', '.join(adjustments)}")
+            if hasattr(self.gui, 'root'):
+                self.gui.root.after(0, task)
+
+        def _clean_queue_safe(self, queue_obj: Optional[queue.Queue], target_size: int) -> int:
+            if not queue_obj or queue_obj.qsize() <= target_size:
+                return 0
+            cleared = 0
+            try:
+                while queue_obj.qsize() > target_size and cleared < 50:
+                    queue_obj.get_nowait()
+                    queue_obj.task_done()
+                    cleared += 1
+            except queue.Empty:
+                pass
+            except Exception as e:
+                logger.warning(f"⚠️ Queue-Cleanup-Fehler: {e}")
+            return cleared
+
+        def _print_performance_report(self, load: float, memory: float) -> None:
+            try:
+                stats = {
+                    'System-Last': f"{load:.1%}",
+                    'RAM-Auslastung': f"{memory:.1%}",
+                    'Status': 'Aktiv' if self.is_processing else 'Inaktiv'
+                }
+                logger.info("🐧 Linux-Performance-Report: " + " | ".join(f"{k}: {v}" for k, v in stats.items()))
+            except Exception:
+                pass
+
+        def restore_normal_mode(self) -> None:
+            if not IS_LINUX:
+                return
+            logger.info("🔧 Linux-Optimierer: Fahre herunter...")
+            self._shutdown_event.set()
+            self._optimization_active = False
+            self.is_processing = False
+
+            if self._monitoring_thread and self._monitoring_thread.is_alive():
+                self._monitoring_thread.join(timeout=1.0)
                 self._monitoring_thread = None
-                self._original_settings.clear()
 
-    else:
-        # Dummy-Implementierung, wenn psutil fehlt
-        class LinuxPerformanceOptimizer:
-            def __init__(self, gui_ref: 'DragonWhispererGUI') -> None:
-                self.gui = gui_ref
-                self.is_processing = False
-                logger.info("🐧 LinuxPerformanceOptimizer: Dummy-Modus (psutil fehlt)")
+            if self._is_gui_available_safe():
+                logger.info("  ↪ Stelle GUI-Einstellungen wieder her...")
+                self._restore_text_widget('transcript_text')
+                self._restore_text_widget('translation_text')
 
-            def optimize_for_processing(self) -> None:
-                logger.debug("LinuxPerformanceOptimizer (Dummy): optimize_for_processing")
+                if 'batch_update_interval' in self._original_settings:
+                    saved_interval = self._original_settings['batch_update_interval']
+                    def restore_batch_interval(saved=saved_interval):
+                        if hasattr(self.gui, 'root') and self.gui.root.winfo_exists():
+                            if hasattr(self.gui, '_batch_update_interval'):
+                                self.gui._batch_update_interval = saved
+                    if hasattr(self.gui, 'root'):
+                        self.gui.root.after(0, restore_batch_interval)
 
-            def restore_normal_mode(self) -> None:
-                logger.debug("LinuxPerformanceOptimizer (Dummy): restore_normal_mode")
+            self._original_settings.clear()
+            logger.info("✅ Linux-Optimierer heruntergefahren")
 
-            def emergency_optimize(self) -> None:
-                logger.debug("LinuxPerformanceOptimizer (Dummy): emergency_optimize")
+        def _restore_text_widget(self, attr_name: str) -> None:
+            widget = getattr(self.gui, attr_name, None)
+            if widget and widget.winfo_exists() and attr_name in self._original_settings:
+                try:
+                    widget.configure(**self._original_settings[attr_name])
+                    logger.info(f"    ✅ {attr_name} wiederhergestellt")
+                except Exception as e:
+                    logger.warning(f"    ⚠️ {attr_name} konnte nicht wiederhergestellt werden: {e}")
 
-            def get_optimization_status(self) -> Dict[str, Any]:
-                return {'platform': SYSTEM, 'dummy_mode': True, 'psutil_missing': True}
+        def emergency_optimize(self) -> None:
+            if self._shutdown_event.is_set():
+                return
+            logger.info("🚨 Führe Notfall-Optimierungen durch...")
+            if not self._is_gui_available_safe():
+                return
+            def task() -> None:
+                self._clean_queue_safe(getattr(self.gui, 'gui_queue', None), 3)
+                self._clean_queue_safe(getattr(self.gui, '_text_update_queue', None), 2)
 
-            def print_optimization_info(self) -> None:
-                print("LinuxPerformanceOptimizer läuft im Dummy-Modus (psutil fehlt)")
+                for attr in ['transcript_text', 'translation_text']:
+                    widget = getattr(self.gui, attr, None)
+                    if widget and widget.winfo_exists():
+                        try:
+                            widget.configure(height=6, maxundo=1)
+                        except Exception:
+                            pass
 
-            def dispose(self) -> None:
-                pass
+                if hasattr(self.gui, '_batch_update_interval'):
+                    self.gui._batch_update_interval = 500
 
-            def emergency_shutdown(self) -> None:
-                pass
+                gc.collect()
+                logger.info("✅ Notfall-Optimierungen abgeschlossen")
+            if hasattr(self.gui, 'root'):
+                self.gui.root.after(0, task)
+
+        def get_optimization_status(self) -> Dict[str, Any]:
+            return {
+                'platform': SYSTEM,
+                'optimization_active': self._optimization_active,
+                'processing_active': self.is_processing,
+                'monitoring_active': self._monitoring_thread and self._monitoring_thread.is_alive(),
+                'shutdown_event_set': self._shutdown_event.is_set(),
+                'original_settings_count': len(self._original_settings),
+                'linux_specific': IS_LINUX,
+                'gui_available': self._is_gui_available_safe()
+            }
+
+        def dispose(self) -> None:
+            logger.info("🧹 Linux-Performance-Optimierer wird entsorgt...")
+            self._shutdown_event.set()
+            try:
+                self.restore_normal_mode()
+            except Exception as e:
+                logger.warning(f"⚠️ restore_normal_mode fehlgeschlagen: {e}")
+            self._original_settings.clear()
+            gc.collect()
+            logger.info("✅ Linux-Performance-Optimierer entsorgt")
+
+        def emergency_shutdown(self) -> None:
+            logger.info("🚨 Externer Notfall-Shutdown des Linux-Optimierers")
+            self._shutdown_event.set()
+            self._optimization_active = False
+            self.is_processing = False
+            self._monitoring_thread = None
+            self._original_settings.clear()
+
+elif IS_LINUX:
+    class LinuxPerformanceOptimizer:
+        def __init__(self, gui_ref: 'DragonWhispererGUI') -> None:
+            self.gui = gui_ref
+            self.is_processing = False
+            logger.info("🐧 LinuxPerformanceOptimizer: Dummy-Modus (psutil fehlt)")
+
+        def optimize_for_processing(self) -> None:
+            logger.debug("LinuxPerformanceOptimizer (Dummy): optimize_for_processing")
+
+        def restore_normal_mode(self) -> None:
+            logger.debug("LinuxPerformanceOptimizer (Dummy): restore_normal_mode")
+
+        def emergency_optimize(self) -> None:
+            logger.debug("LinuxPerformanceOptimizer (Dummy): emergency_optimize")
+
+        def get_optimization_status(self) -> Dict[str, Any]:
+            return {'platform': SYSTEM, 'dummy_mode': True, 'psutil_missing': True}
+
+        def dispose(self) -> None:
+            pass
+
+        def emergency_shutdown(self) -> None:
+            pass
 
 
-# =============================================================================
-# DRAGON WHISPERER GUI (mit VRAM-Anzeige und MPS)
-# =============================================================================
+# -----------------------------------------------------------------------------
+# INSTALL DIALOG (unverändert)
+# -----------------------------------------------------------------------------
+class InstallDependencyDialog:
+    def __init__(self, parent, gui_ref):
+        self.parent = parent
+        self.gui = gui_ref
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("🐉 Fehlende Pakete installieren")
+        self.dialog.geometry("600x400")
+        self.dialog.configure(bg=CURRENT_THEME.BG_PRIMARY)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
 
+        main = tk.Frame(self.dialog, bg=CURRENT_THEME.BG_PRIMARY, padx=15, pady=15)
+        main.pack(fill="both", expand=True)
+
+        tk.Label(main, text="Optionale Pakete, die installiert werden können:",
+                 bg=CURRENT_THEME.BG_PRIMARY, fg=CURRENT_THEME.TEXT_PRIMARY,
+                 font=DragonFonts.PRIMARY).pack(anchor="w", pady=(0,10))
+
+        self.packages = {}
+        frame = tk.Frame(main, bg=CURRENT_THEME.BG_PRIMARY)
+        frame.pack(fill="x")
+
+        if not WHISPER_AVAILABLE:
+            var = tk.BooleanVar(value=True)
+            cb = tk.Checkbutton(frame, text="faster-whisper (benötigt für Transkription)",
+                                variable=var, bg=CURRENT_THEME.BG_PRIMARY,
+                                fg=CURRENT_THEME.TEXT_PRIMARY,
+                                selectcolor=CURRENT_THEME.BG_TERTIARY)
+            cb.pack(anchor="w")
+            self.packages["faster-whisper"] = var
+
+        if not TRANSLATOR_AVAILABLE:
+            var = tk.BooleanVar(value=True)
+            cb = tk.Checkbutton(frame, text="deep-translator (für Übersetzungen)",
+                                variable=var, bg=CURRENT_THEME.BG_PRIMARY,
+                                fg=CURRENT_THEME.TEXT_PRIMARY,
+                                selectcolor=CURRENT_THEME.BG_TERTIARY)
+            cb.pack(anchor="w")
+            self.packages["deep-translator"] = var
+
+        if not FastLazyLoader.is_available('psutil'):
+            var = tk.BooleanVar(value=True)
+            cb = tk.Checkbutton(frame, text="psutil (Systemmonitoring)",
+                                variable=var, bg=CURRENT_THEME.BG_PRIMARY,
+                                fg=CURRENT_THEME.TEXT_PRIMARY,
+                                selectcolor=CURRENT_THEME.BG_TERTIARY)
+            cb.pack(anchor="w")
+            self.packages["psutil"] = var
+
+        if not self.packages:
+            tk.Label(main, text="✅ Alle optionalen Pakete sind bereits installiert.",
+                     bg=CURRENT_THEME.BG_PRIMARY, fg=CURRENT_THEME.SUCCESS).pack(pady=20)
+            self.dialog.after(2000, self.dialog.destroy)
+            return
+
+        tk.Label(main, text="Installationsausgabe:", bg=CURRENT_THEME.BG_PRIMARY,
+                 fg=CURRENT_THEME.TEXT_PRIMARY).pack(anchor="w", pady=(10,2))
+        self.output_text = scrolledtext.ScrolledText(
+            main, height=10, bg=CURRENT_THEME.BG_TERTIARY, fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=DragonFonts.MONOSPACE, wrap=tk.WORD
+        )
+        self.output_text.pack(fill="both", expand=True, pady=5)
+
+        btn_frame = tk.Frame(main, bg=CURRENT_THEME.BG_PRIMARY)
+        btn_frame.pack(fill="x", pady=5)
+        install_btn = tk.Button(btn_frame, text="Installieren", command=self.install_selected,
+                                bg=CURRENT_THEME.DRAGON_GREEN, fg=CURRENT_THEME.TEXT_PRIMARY,
+                                font=DragonFonts.BUTTON, padx=15)
+        install_btn.pack(side="left")
+        close_btn = tk.Button(btn_frame, text="Schließen", command=self.dialog.destroy,
+                              bg=CURRENT_THEME.BG_TERTIARY, fg=CURRENT_THEME.TEXT_PRIMARY)
+        close_btn.pack(side="right")
+
+    def install_selected(self):
+        packages = [pkg for pkg, var in self.packages.items() if var.get()]
+        if not packages:
+            return
+        self.output_text.insert("end", f"Starte Installation von: {', '.join(packages)}...\n")
+        self.dialog.update()
+
+        python_exe = sys.executable
+        cmd = [python_exe, "-m", "pip", "install"] + packages
+
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                encoding='utf-8',
+                errors='ignore'
+            )
+            for line in process.stdout:
+                self.output_text.insert("end", line)
+                self.output_text.see("end")
+                self.dialog.update()
+            process.wait()
+            if process.returncode == 0:
+                self.output_text.insert("end", "\n✅ Installation erfolgreich!\n")
+                self.output_text.insert("end", "Bitte starten Sie das Programm neu, um die neuen Pakete zu nutzen.\n")
+            else:
+                self.output_text.insert("end", f"\n❌ Fehler bei der Installation (Rückgabecode {process.returncode})\n")
+        except Exception as e:
+            self.output_text.insert("end", f"\n❌ Ausnahmefehler: {e}\n")
+
+
+# -----------------------------------------------------------------------------
+# DRAGON WHISPERER GUI (überarbeitet mit Thread-Sicherheit)
+# -----------------------------------------------------------------------------
 class DragonWhispererGUI:
-    """
-    Haupt-GUI-Klasse für Dragon Whisperer.
-    Verwaltet alle UI-Elemente, Callbacks und die Verbindung zu den Controllern.
-    """
-
     class RateLimiter:
-        """Begrenzt Update-Rate für GUI-Stabilität mit Thread-Sicherheit."""
-
         def __init__(self, max_updates_per_second: int = 30) -> None:
             self.min_interval = 1.0 / max_updates_per_second
             self.last_calls: Dict[str, float] = {}
@@ -8788,7 +9246,6 @@ class DragonWhispererGUI:
                     del self.last_calls[update_type]
 
     def __init__(self) -> None:
-        # Basis-Attribute (immer vorhanden, auch bei Fehlern)
         self._gui_update_limiter = self.RateLimiter(max_updates_per_second=30)
         self._shutting_down = False
         self._exit_dialog_active = False
@@ -8797,17 +9254,15 @@ class DragonWhispererGUI:
         self.exit_confirmed = False
         self.current_stream_info: Optional[StreamInfo] = None
         self.current_video_language: Optional[str] = None
+        self._progress_bar_started = False
 
-        # GUI-Verfügbarkeit prüfen
         if not GUI_AVAILABLE:
             logger.error("❌ Tkinter nicht verfügbar. Versuche Fallback...")
             self._try_fallback_gui()
             return
 
-        # Einstellungen laden
         try:
             self.settings = AppSettings.load_from_file()
-            # Standard-URL setzen (überschreibt gespeicherte URL, aber nur wenn leer)
             if not self.settings.last_url:
                 self.settings.last_url = ""
             self.advanced_settings = AdvancedSettings.load_from_file()
@@ -8815,53 +9270,57 @@ class DragonWhispererGUI:
             validation_issues = self.advanced_settings.validate()
             if validation_issues:
                 logger.warning(f"⚠️ Settings validation issues: {validation_issues}")
-            # Logging mit korrektem Zugriff auf config
             logger.info(f"✅ AdvancedSettings ready: SAMPLE_RATE={self.advanced_settings.config.SAMPLE_RATE}, "
                         f"CHANNELS={self.advanced_settings.config.CHANNELS}, "
                         f"CHUNK_SIZE_BYTES={self.advanced_settings.config.CHUNK_SIZE_BYTES}")
         except Exception as e:
             logger.warning(f"⚠️ Settings load failed: {e}, using defaults")
             self.settings = AppSettings()
-            self.settings.last_url = ""  # Keine hartcodierte URL
+            self.settings.last_url = ""
             self.advanced_settings = AdvancedSettings()
 
-        # Layout-Modus und Sprache aus Einstellungen (nur einmal)
+        # NEW: Cookie-Hinweis anzeigen, wenn noch nicht gezeigt
+        if not self.settings.cookies_notice_shown and self.settings.use_browser_cookies:
+            # Wir zeigen den Dialog später, wenn das root-Fenster existiert
+            self._show_cookie_notice = True
+        else:
+            self._show_cookie_notice = False
+
+        if self.settings.theme == "light":
+            self.current_theme = LightTheme()
+        else:
+            self.current_theme = DarkTheme()
+
+        global CURRENT_THEME
+        CURRENT_THEME = self.current_theme
+
+        self.demo_mode = not WHISPER_AVAILABLE
         self.layout_mode = getattr(self.settings, 'layout_mode', 'vertical')
         self.current_language = getattr(self.settings, 'default_language', 'de')
 
-        # Weitere Status-Variablen
         self._translation_reset_counter = 0
         self.progress_dialog: Optional[ProgressDialog] = None
 
-        # Tkinter Root Fenster erstellen
         try:
             self.root = tk.Tk()
-            self.root.withdraw()  # Versteckt bis alles fertig ist
-        except Exception as e:
+            self.root.withdraw()
+        except (tk.TclError, RuntimeError) as e:
             raise RuntimeError(f"Tkinter Fehler: {e}")
 
-        # GUI-Batch-Updates
         self._batch_update_interval = 150
         self._last_batch_update = 0.0
         self._last_gui_update_time = 0.0
-
-        # Thread-Lock für Processing
         self._processing_lock = threading.Lock()
 
-        # Historien und Caches
         self.transcript_history: Deque[ExcellenceTranscriptionResult] = deque(maxlen=1000)
         self.translation_history: Deque[ExcellenceTranslationResult] = deque(maxlen=500)
         self._last_transcription_text = ""
         self._last_translation_text = ""
 
-        # Performance-Monitor
         self.performance_monitor = SimplePerformanceTracker()
-
-        # Warteschlangen für GUI-Updates
         self.gui_queue: queue.Queue = queue.Queue(maxsize=200)
         self._text_update_queue: queue.Queue = queue.Queue(maxsize=150)
 
-        # Controller erstellen
         try:
             self.controller = WhisperController(gui_ref=self)
         except Exception as e:
@@ -8869,7 +9328,6 @@ class DragonWhispererGUI:
             self._show_error_and_exit(f"Controller Fehler: {e}")
             return
 
-        # Layout-Manager
         try:
             self.layout = WhisperLayoutManager(gui_ref=self)
         except Exception as e:
@@ -8877,12 +9335,20 @@ class DragonWhispererGUI:
             self._show_error_and_exit(f"Layout Fehler: {e}")
             return
 
-        # Kernkomponenten initialisieren
         try:
-            self.stream_manager = StreamManager(enable_debug=(DEBUG_LEVEL >= 1))
+            # NEW: use_browser_cookies an StreamManager übergeben
+            self.stream_manager = StreamManager(enable_debug=(DEBUG_LEVEL >= 1), use_browser_cookies=self.settings.use_browser_cookies)
             self.ffmpeg_manager = ExcellenceFFmpegManager(self.advanced_settings.config, self.stream_manager)
-            self.transcription_engine = ExcellenceTranscriptionEngine(self.advanced_settings)
-            self.translation_engine = ExcellenceTranslationEngine(self.current_language, self.advanced_settings)
+            if WHISPER_AVAILABLE:
+                self.transcription_engine = ExcellenceTranscriptionEngine(self.advanced_settings)
+            else:
+                self.transcription_engine = DummyTranscriptionEngine(self.advanced_settings)
+
+            if TRANSLATOR_AVAILABLE:
+                self.translation_engine = ExcellenceTranslationEngine(self.current_language, self.advanced_settings)
+            else:
+                self.translation_engine = DummyTranslationEngine(self.current_language, self.advanced_settings)
+
             self.audio_processor = ExcellenceAudioProcessor(
                 controller_ref=self.controller,
                 ffmpeg_manager=self.ffmpeg_manager,
@@ -8898,23 +9364,20 @@ class DragonWhispererGUI:
                 self.performance_optimizer = LinuxPerformanceOptimizer(gui_ref=self)
 
             self._register_signal_handlers()
-        except Exception as e:
+        except (ImportError, OSError, RuntimeError) as e:
             logger.error(f"❌ Engine Initialisierung Fehler: {e}")
             self._show_error_and_exit(f"Engine Fehler: {e}")
             return
 
-        # GUI aufbauen
         try:
             self.layout.setup_gui()
             self._setup_callbacks()
             self.root.after(100, self._start_gui_updaters)
 
-            # URL nach setup_gui sofort setzen, zusätzlich after als Backup
             if hasattr(self, 'url_entry') and self.url_entry.winfo_exists():
                 self.url_entry.delete(0, 'end')
                 self.url_entry.insert(0, self.settings.last_url)
             else:
-                # Falls url_entry noch nicht existiert, später erneut versuchen
                 def set_initial_url() -> None:
                     if hasattr(self, 'url_entry') and self.url_entry.winfo_exists():
                         self.url_entry.delete(0, 'end')
@@ -8928,24 +9391,40 @@ class DragonWhispererGUI:
             self._show_error_and_exit(f"GUI konnte nicht erstellt werden: {e}")
             return
 
-        # Periodische Tasks starten
+        # NEW: Cookie-Hinweis nach GUI-Setup anzeigen
+        if self._show_cookie_notice:
+            self.root.after(500, self._show_cookie_notice_dialog)
+
+        self._bind_shortcuts()
         self.root.after(1000, self._start_system_monitoring)
         self.root.after(2000, self._final_initialization_check)
-
-        # Health-Check per after statt Thread
         self._schedule_gui_health_check()
 
+    def _show_cookie_notice_dialog(self) -> None:
+        """Zeigt den Datenschutzhinweis für Browser-Cookies."""
+        result = DarkMessageBox.askyesno(
+            "Datenschutzhinweis",
+            "Dragon Whisperer kann auf gespeicherte Browser-Cookies zugreifen, "
+            "um YouTube-Streams zuverlässiger abzurufen. Dies kann Ihre Privatsphäre "
+            "beeinträchtigen.\n\nMöchten Sie die Nutzung von Browser-Cookies erlauben?\n\n"
+            "(Sie können diese Einstellung später in den erweiterten Einstellungen ändern.)",
+            parent=self.root
+        )
+        self.settings.use_browser_cookies = result
+        self.settings.cookies_notice_shown = True
+        self.settings.save_to_file()
+        # Einstellung an StreamManager weitergeben
+        if hasattr(self, 'stream_manager'):
+            self.stream_manager.use_browser_cookies = result
+
     def _schedule_gui_health_check(self) -> None:
-        """Plant den nächsten GUI-Health-Check (alle 30 Sekunden)."""
         if not self._shutting_down and hasattr(self, 'root') and self.root.winfo_exists():
             self.root.after(30000, self._perform_gui_health_check)
 
     def _perform_gui_health_check(self) -> None:
-        """Führt einen Gesundheitscheck der GUI durch (im Hauptthread)."""
         try:
             checks: List[str] = []
             check_start = time.time()
-            # update_idletasks nur im Hauptthread – sicher
             self.root.update_idletasks()
             responsiveness_time = time.time() - check_start
             if responsiveness_time > 0.5:
@@ -8958,6 +9437,7 @@ class DragonWhispererGUI:
                 qsize = self.gui_queue.qsize()
                 if qsize > 50:
                     checks.append(f"⚠️ GUI queue backlog: {qsize} items")
+                    self._cleanup_queue(self.gui_queue, 20)  # hier wird die neue Methode aufgerufen
             active_threads = threading.enumerate()
             if len(active_threads) > 15:
                 checks.append(f"⚠️ Many active threads: {len(active_threads)}")
@@ -8971,23 +9451,16 @@ class DragonWhispererGUI:
             if checks:
                 if len(checks) > 0:
                     logger.warning(f"🔍 GUI Health Check Issues: {checks[:3]}")
-            if "queue backlog" in str(checks) and hasattr(self, 'gui_queue'):
-                self._cleanup_queue(self.gui_queue, 30)
             if "memory usage" in str(checks) and hasattr(self, 'memory_manager'):
                 self.memory_manager._aggressive_cleanup()
         except Exception as e:
             logger.warning(f"⚠️ Health check error: {e}")
         finally:
-            # Nächsten Check planen
             self._schedule_gui_health_check()
 
     def _register_signal_handlers(self) -> None:
-        """Registriert alle Cleanup-Funktionen beim SignalHandler."""
         try:
             logger.info("🔧 Registering cleanup handlers with SignalHandler...")
-            if not hasattr(SignalHandler, '_cleanup_operations') or SignalHandler._cleanup_operations is None:
-                logger.warning("⚠️ SignalHandler._cleanup_operations is None - initializing...")
-                SignalHandler._instance = SignalHandler()
             SignalHandler.register_cleanup(
                 self._safe_stop_all_processes,
                 name="StopAllProcesses",
@@ -9009,8 +9482,6 @@ class DragonWhispererGUI:
                     timeout=2.0
                 )
                 logger.info("   ✅ Registered FFmpegManager cleanup")
-            else:
-                logger.info("   ℹ️ No FFmpegManager to register (normal)")
             SignalHandler.register_cleanup(
                 self.transcription_engine.dispose,
                 name="TranscriptionEngineDispose",
@@ -9069,15 +9540,11 @@ class DragonWhispererGUI:
                 pass
             count = sum(len(ops) for ops in SignalHandler._cleanup_operations.values())
             logger.info(f"✅ Registered {count} cleanup handlers")
-            try:
-                SignalHandler.setup(verbose=False, silent=True)
-            except Exception:
-                pass
+            SignalHandler.setup(verbose=False, silent=True)
         except Exception as e:
             logger.warning(f"⚠️ SignalHandler registration error: {e}")
 
     def _safe_stop_all_processes(self) -> None:
-        """Stoppt alle laufenden Prozesse sicher (für SignalHandler)."""
         logger.info("🛑 Safely stopping all processes...")
         self._shutting_down = True
         self.is_processing = False
@@ -9107,7 +9574,6 @@ class DragonWhispererGUI:
                             process = process_info.get('process')
                             if process and hasattr(process, 'pid'):
                                 try:
-                                    # Windows-kompatibel: SIGTERM nur auf Unix
                                     if IS_WINDOWS:
                                         process.terminate()
                                     else:
@@ -9128,7 +9594,6 @@ class DragonWhispererGUI:
         logger.info("✅ All processes stopped")
 
     def _safe_linux_optimizer_cleanup(self) -> None:
-        """Sicheres Aufräumen des Linux-Optimierers."""
         if not IS_LINUX or not hasattr(self, 'performance_optimizer'):
             return
         logger.info("🐧 Safe Linux optimizer cleanup...")
@@ -9157,7 +9622,6 @@ class DragonWhispererGUI:
             logger.warning(f"⚠️ Linux optimizer cleanup error: {e}")
 
     def _cleanup_queues(self) -> None:
-        """Leert alle Warteschlangen beim Shutdown."""
         logger.info("🗑️ Cleaning up queues...")
         try:
             if hasattr(self, 'gui_queue'):
@@ -9187,7 +9651,6 @@ class DragonWhispererGUI:
             logger.warning(f"⚠️ Text queue cleanup error: {e}")
 
     def _safe_exit_dialog(self) -> None:
-        """Zeigt einen Bestätigungsdialog zum Beenden an."""
         if self._shutting_down or self._exit_dialog_active:
             return
         self._exit_dialog_active = True
@@ -9220,7 +9683,6 @@ class DragonWhispererGUI:
                 self._exit_dialog_active = False
 
     def _direct_shutdown(self) -> None:
-        """Führt den sofortigen Shutdown ohne weitere GUI-Interaktion durch."""
         if self._shutting_down:
             logger.warning("⚠️ Shutdown already in progress, skipping...")
             return
@@ -9238,8 +9700,39 @@ class DragonWhispererGUI:
         except Exception as e:
             logger.warning(f"⚠️ GUI shutdown error: {e}")
 
+    # neu: Methode zum Bereinigen der Queue
+    def _cleanup_queue(self, queue_obj: queue.Queue, max_size: int) -> None:
+        """Reduziere die Queue auf max_size, behalte wichtige Nachrichten (status, error)."""
+        if not queue_obj or queue_obj.qsize() <= max_size:
+            return
+        try:
+            items = []
+            # Zuerst alle Nachrichten aus der Queue holen
+            while not queue_obj.empty():
+                try:
+                    items.append(queue_obj.get_nowait())
+                except queue.Empty:
+                    break
+            # Nachrichten sortieren: wichtige zuerst, dann die neuesten
+            important = []
+            others = []
+            for item in items:
+                if isinstance(item, tuple) and len(item) == 2 and item[0] in ('status', 'error', 'file_finished'):
+                    important.append(item)
+                else:
+                    others.append(item)
+            # Behalte alle wichtigen und die neuesten others bis max_size erreicht ist
+            kept = important + others[-(max_size - len(important)):] if len(important) < max_size else important[:max_size]
+            for item in kept:
+                try:
+                    queue_obj.put_nowait(item)
+                except queue.Full:
+                    break
+            logger.debug(f"🧹 Queue cleaned: {len(items)} -> {len(kept)} items")
+        except Exception as e:
+            logger.warning(f"⚠️ Queue cleanup error: {e}")
+
     def run(self) -> None:
-        """Startet die Hauptschleife der GUI."""
         try:
             self.root.title("🐉 Dragon Whisperer")
             self._shutting_down = False
@@ -9258,15 +9751,14 @@ class DragonWhispererGUI:
         except KeyboardInterrupt:
             logger.info("\n🛑 Interrupted by user - showing exit dialog...")
             self._safe_exit_dialog()
-        except SystemExit:
+        except SystemExit as e:
             logger.info("\n🔧 System exit requested")
-            raise
+            raise e
         except Exception as e:
             logger.error(f"💥 Critical error: {type(e).__name__}: {e}")
             self._direct_shutdown()
 
     def _post_mainloop_cleanup(self) -> None:
-        """Aufräumen nachdem die Hauptschleife beendet wurde."""
         logger.info("🧹 Post-mainloop cleanup (no GUI access)...")
         self._shutting_down = True
         self.is_processing = False
@@ -9277,12 +9769,10 @@ class DragonWhispererGUI:
             audio_cache.clear()
         except Exception as e:
             logger.warning(f"⚠️ Cache cleanup error: {e}")
-        import gc
         gc.collect()
         logger.info("✅ Post-mainloop cleanup completed")
 
     def _minimal_emergency_cleanup(self) -> None:
-        """Minimales Notfall-Cleanup, falls alles andere fehlschlägt."""
         logger.info("🆘 MINIMAL emergency cleanup...")
         self._shutting_down = True
         self.is_processing = False
@@ -9306,56 +9796,20 @@ class DragonWhispererGUI:
                             pass
         except Exception:
             pass
-        import gc
         gc.collect()
 
     def safe_controller_stop(self) -> None:
-        """Stoppt den Controller sicher (öffentliche Methode)."""
         if self._shutting_down:
             return
         logger.info("🛑 Safe controller stop...")
         self._safe_stop_all_processes()
 
     def _cleanup_queue(self, queue_obj: queue.Queue, max_size: int) -> None:
-        """Reduziert eine Warteschlange auf eine maximale Größe, priorisiert wichtige Nachrichten."""
-        if not queue_obj or queue_obj.empty():
-            return
-        try:
-            current_size = queue_obj.qsize()
-            if current_size <= max_size:
-                return
-            temp_items: List[Any] = []
-            priority_items: List[Any] = []
-            while not queue_obj.empty():
-                try:
-                    item = queue_obj.get_nowait()
-                    if isinstance(item, tuple) and len(item) == 2:
-                        msg_type, _ = item
-                        if msg_type in ['status', 'error']:
-                            priority_items.append(item)
-                        else:
-                            temp_items.append(item)
-                    else:
-                        temp_items.append(item)
-                    queue_obj.task_done()
-                except queue.Empty:
-                    break
-            all_items = priority_items + temp_items
-            kept_items = all_items[-max_size:] if len(all_items) > max_size else all_items
-            for item in kept_items:
-                try:
-                    queue_obj.put_nowait(item)
-                except queue.Full:
-                    break
-            cleared = current_size - queue_obj.qsize()
-            if cleared > 0:
-                logger.info(f"🧹 Queue cleaned: removed {cleared} items")
-        except Exception as e:
-            logger.warning(f"⚠️ Queue cleanup error: {e}")
+        # bereits oben definiert – für den Aufruf in _perform_gui_health_check
+        pass  # wird hier nicht benötigt, da die Methode bereits vorhanden
 
     @excellence_gui_operation
     def select_file_dark(self) -> None:
-        """Öffnet einen Dateiauswahldialog und setzt die URL."""
         try:
             filename = filedialog.askopenfilename(
                 title="🎬 Select Audio/Video File - Dragon Whisperer",
@@ -9385,7 +9839,6 @@ class DragonWhispererGUI:
 
     @excellence_gui_operation
     def paste_url(self) -> None:
-        """Fügt die URL aus der Zwischenablage ein."""
         try:
             clipboard = self.root.clipboard_get().strip()
             if clipboard:
@@ -9417,21 +9870,21 @@ class DragonWhispererGUI:
             self.update_status(f"❌ Fehler beim Einfügen: {str(e)[:50]}")
 
     def clean_and_validate_url(self, url: str) -> str:
-        """
-        Bereinigt und validiert eine URL.
-        Raises ValueError bei ungültiger URL.
-        """
         url = url.strip()
         if not url:
             raise ValueError("URL cannot be empty")
+        # Zuerst nur bereinigen, dann validieren
+        url = PlatformUtils.sanitize_url(url)
         if url.startswith("file://"):
-            file_path = url[7:]
+            ok, real_path = PlatformUtils.validate_file_path(url)
+            if not ok:
+                raise ValueError(real_path)
+            file_path = real_path
             if not os.path.exists(file_path):
                 raise ValueError(f"File not found: {file_path}")
             return url
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
-        # Einfache URL-Validierung
         parsed = urllib.parse.urlparse(url)
         if not parsed.netloc:
             raise ValueError("Invalid URL format")
@@ -9442,8 +9895,6 @@ class DragonWhispererGUI:
         return url
 
     def analyze_video_language(self, file_path: str) -> None:
-        """Analysiert die Sprache einer lokalen Videodatei (asynchron)."""
-        # Erste GUI-Änderung direkt über after
         if hasattr(self, 'language_info_label'):
             self.root.after(0, lambda: self.language_info_label.config(text="🔍 Analyzing..."))
 
@@ -9483,7 +9934,6 @@ class DragonWhispererGUI:
         detection_thread.start()
 
     def on_url_change(self, event: Optional[tk.Event] = None) -> None:
-        """Callback bei Änderung der URL (z.B. für Live-Analyse)."""
         if not hasattr(self, 'url_entry'):
             return
         url = self.url_entry.get().strip()
@@ -9508,7 +9958,6 @@ class DragonWhispererGUI:
             self.current_video_language = None
 
     def on_language_change(self, event: Optional[tk.Event] = None) -> None:
-        """Callback bei Änderung der Zielsprache."""
         try:
             selected_name = self.lang_var.get()
             lang_code: Optional[str] = None
@@ -9528,38 +9977,44 @@ class DragonWhispererGUI:
             pass
 
     def on_model_change(self, event: Optional[tk.Event] = None) -> None:
-        """Callback bei Modellwechsel."""
         if not hasattr(self, 'model_var'):
             return
         new_model = self.model_var.get()
+        # Validierung
+        if new_model not in WHISPER_MODELS:
+            logger.warning(f"⚠️ Invalid model selected: {new_model}")
+            # Auf aktuelles Modell zurücksetzen
+            current = self.transcription_engine.get_current_model()
+            self.model_var.set(current)
+            return
         if not hasattr(self, 'transcription_engine'):
             return
         current_model = self.transcription_engine.get_current_model()
         if new_model == current_model:
             return
         if self.transcription_engine.is_model_loading():
-            # Status-Update über after
-            self.root.after(0, lambda: self.update_status("🔄 Model loading..."))
+            self.update_status("🔄 Model already loading...")
             return
-        def reload_model_thread() -> None:
-            # Status-Updates im Thread über after in den Hauptthread verschieben
-            self.root.after(0, lambda: self.update_status(f"🔄 Switching model: {new_model}"))
-            success = self.transcription_engine.reload_model(new_model)
-            if success:
-                self.root.after(0, lambda: self.update_status(f"✅ Model: {new_model}"))
-                if hasattr(self, 'settings'):
-                    self.settings.default_model = new_model
+        success = self.transcription_engine.reload_model(new_model)
+        if success:
+            self.update_status(f"🔄 Switching to {new_model}...")
+            self._check_model_loading_complete(new_model)
+        else:
+            self.update_status("❌ Model switch failed")
+            self.model_var.set(current_model)
+
+    def _check_model_loading_complete(self, target_model: str) -> None:
+        if self.transcription_engine.is_model_loading():
+            self.root.after(200, lambda: self._check_model_loading_complete(target_model))
+        else:
+            current = self.transcription_engine.get_current_model()
+            if current == target_model:
+                self.update_status(f"✅ Model switched to {target_model}")
             else:
-                self.root.after(0, lambda: self.update_status("❌ Model switch failed"))
-                if hasattr(self, 'model_var'):
-                    self.model_var.set(current_model)
-        reload_thread = threading.Thread(target=reload_model_thread, daemon=True)
-        if hasattr(self, 'resource_manager'):
-            self.resource_manager.register_thread(reload_thread)
-        reload_thread.start()
+                self.update_status("❌ Model switch failed")
+                self.model_var.set(current)
 
     def toggle_translation(self) -> None:
-        """Schaltet die Übersetzung ein/aus."""
         if hasattr(self, 'translate_toggle') and self.translate_toggle.get():
             if hasattr(self, 'translation_engine'):
                 self.translation_engine.set_target_language(self.current_language)
@@ -9568,34 +10023,29 @@ class DragonWhispererGUI:
             self.update_status("❌ Translation inactive")
 
     def toggle_subtitle_mode(self) -> None:
-        """Schaltet den Untertitel-Modus ein/aus."""
         self.subtitle_mode = not self.subtitle_mode
         if hasattr(self, 'audio_processor'):
             self.audio_processor.enable_subtitle_mode(self.subtitle_mode)
         if hasattr(self, 'subtitle_btn'):
             if self.subtitle_mode:
-                self.subtitle_btn.config(bg=DragonColors.SUBTITLE_ACTIVE, fg=DragonColors.TEXT_PRIMARY)
+                self.subtitle_btn.config(bg=self.current_theme.SUBTITLE_ACTIVE, fg=self.current_theme.TEXT_PRIMARY)
                 self.update_status("🎬 SUBTITLE MODE: Timestamps activated")
             else:
-                self.subtitle_btn.config(bg=DragonColors.SUBTITLE_INACTIVE, fg=DragonColors.TEXT_PRIMARY)
+                self.subtitle_btn.config(bg=self.current_theme.SUBTITLE_INACTIVE, fg=self.current_theme.TEXT_PRIMARY)
                 self.update_status("📝 NORMAL MODE: Continuous text")
 
     def _on_start_click(self):
-        """Entprellter Start-Button: sofort deaktivieren und dann Controller starten."""
-        # Prüfen, ob bereits eine Transkription aktiv ist
         if self.is_processing:
             self.update_status("⚠️ Bereits aktiv")
             return
-            
+
         try:
             self.start_button.config(state="disabled")
         except Exception:
             pass
-        # Controller startet asynchron; Status-Updates aktivieren den Button bei Fehler/Ende wieder.
         self.controller.start_processing()
 
     def toggle_layout(self) -> None:
-        """Schaltet zwischen vertikalem und horizontalem Layout um."""
         try:
             logger.info(f"🔄 Starting layout toggle from {self.layout_mode}")
             old_transcript = ""
@@ -9644,8 +10094,6 @@ class DragonWhispererGUI:
             logger.info("✅ Layout toggle completed successfully")
         except Exception as e:
             logger.error(f"❌ CRITICAL Layout toggle error: {e}")
-            import traceback
-            traceback.print_exc()
             self.update_status("❌ Layout change failed")
             try:
                 self.layout_mode = "vertical"
@@ -9655,7 +10103,6 @@ class DragonWhispererGUI:
                 pass
 
     def clear_all(self) -> None:
-        """Löscht alle Textfelder und den Verlauf."""
         try:
             if hasattr(self, 'transcript_text'):
                 self.transcript_text.delete("1.0", "end")
@@ -9674,7 +10121,6 @@ class DragonWhispererGUI:
         self.update_status("🗑️ Cleared & optimizations reset")
 
     def save_transcript(self) -> None:
-        """Speichert das Transkript in einer Datei."""
         try:
             if not self.transcript_history:
                 DarkMessageBox.showinfo("WARNING", "No transcriptions available to save.", self.root)
@@ -9732,7 +10178,6 @@ class DragonWhispererGUI:
             self.update_status(f"❌ Save failed: {e}")
 
     def export_subtitles(self) -> None:
-        """Exportiert Untertitel im SRT- oder VTT-Format."""
         if not hasattr(self, 'audio_processor') or not self.audio_processor._timed_transcriptions:
             DarkMessageBox.showinfo(
                 "WARNING",
@@ -9756,7 +10201,6 @@ class DragonWhispererGUI:
                 return
             file_ext = Path(filename).suffix.lower()
             format_type = "srt" if file_ext == ".srt" else "vtt"
-            # Lock beim Zugriff auf _timed_transcriptions/_timed_translations verwenden
             with self.audio_processor._subtitle_lock:
                 timed_trans = list(self.audio_processor._timed_transcriptions)
                 timed_transl = list(self.audio_processor._timed_translations)
@@ -9787,22 +10231,14 @@ class DragonWhispererGUI:
             DarkMessageBox.showerror("Error", f"Export failed:\n{str(e)}", self.root)
 
     def show_simple_stats(self) -> None:
-        """Zeigt einfache Statistik an."""
         try:
             stats = self.performance_monitor.get_basic_stats()
             try:
-                # psutil sicher importieren
-                try:
-                    import psutil
-                except ImportError:
-                    cpu = 0.0
-                    memory_used = 0
-                    memory_percent = 0
-                else:
-                    cpu = psutil.cpu_percent()
-                    memory = psutil.virtual_memory()
-                    memory_used = memory.used // (1024**2)
-                    memory_percent = memory.percent
+                import psutil
+                cpu = psutil.cpu_percent()
+                memory = psutil.virtual_memory()
+                memory_used = memory.used // (1024**2)
+                memory_percent = memory.percent
                 health_status = "Healthy" if cpu < 90 and memory_percent < 85 else "Degraded"
             except Exception:
                 cpu = 0.0
@@ -9829,114 +10265,97 @@ class DragonWhispererGUI:
             self.update_status(f"❌ Statistics error: {e}")
 
     def show_advanced_settings(self) -> None:
-        """Öffnet den Dialog für erweiterte Einstellungen (mit optimierten VAD-Tooltips)."""
         settings_dialog = tk.Toplevel(self.root)
         settings_dialog.title("Advanced Settings")
-        settings_dialog.geometry("400x550")  # etwas höher für VAD
-        settings_dialog.configure(bg=DragonColors.BG_PRIMARY)
+        settings_dialog.geometry("400x600")
+        settings_dialog.configure(bg=self.current_theme.BG_PRIMARY)
         settings_dialog.transient(self.root)
         settings_dialog.grab_set()
         settings_dialog.update_idletasks()
         x = self.root.winfo_x() + (self.root.winfo_width() - settings_dialog.winfo_width()) // 2
         y = self.root.winfo_y() + (self.root.winfo_height() - settings_dialog.winfo_height()) // 2
         settings_dialog.geometry(f"+{x}+{y}")
-        main_frame = tk.Frame(settings_dialog, bg=DragonColors.BG_PRIMARY, padx=20, pady=20)
+        main_frame = tk.Frame(settings_dialog, bg=self.current_theme.BG_PRIMARY, padx=20, pady=20)
         main_frame.pack(fill="both", expand=True)
         tk.Label(
             main_frame,
             text="Advanced Settings",
             font=DragonFonts.TITLE,
-            bg=DragonColors.BG_PRIMARY,
-            fg=DragonColors.TEXT_PRIMARY,
+            bg=self.current_theme.BG_PRIMARY,
+            fg=self.current_theme.TEXT_PRIMARY,
         ).pack(pady=(0, 20))
-        settings_frame = tk.Frame(main_frame, bg=DragonColors.BG_PRIMARY)
+        settings_frame = tk.Frame(main_frame, bg=self.current_theme.BG_PRIMARY)
         settings_frame.pack(fill="both", expand=True)
 
-        # Zeile 0: Beam Size
-        tk.Label(
-            settings_frame,
-            text="Beam Size:",
-            bg=DragonColors.BG_PRIMARY,
-            fg=DragonColors.TEXT_PRIMARY,
-        ).grid(row=0, column=0, sticky="w", pady=5)
+        tk.Label(settings_frame, text="Beam Size:", bg=self.current_theme.BG_PRIMARY,
+                 fg=self.current_theme.TEXT_PRIMARY).grid(row=0, column=0, sticky="w", pady=5)
         beam_var = tk.StringVar(value=str(self.advanced_settings.beam_size))
-        beam_entry = tk.Entry(
-            settings_frame,
-            textvariable=beam_var,
-            bg=DragonColors.BG_TERTIARY,
-            fg=DragonColors.TEXT_PRIMARY,
-        )
+        beam_entry = tk.Entry(settings_frame, textvariable=beam_var,
+                              bg=self.current_theme.BG_TERTIARY, fg=self.current_theme.TEXT_PRIMARY)
         beam_entry.grid(row=0, column=1, sticky="ew", pady=5)
 
-        # Zeile 1: Temperature
-        tk.Label(
-            settings_frame,
-            text="Temperature:",
-            bg=DragonColors.BG_PRIMARY,
-            fg=DragonColors.TEXT_PRIMARY,
-        ).grid(row=1, column=0, sticky="w", pady=5)
+        tk.Label(settings_frame, text="Temperature:", bg=self.current_theme.BG_PRIMARY,
+                 fg=self.current_theme.TEXT_PRIMARY).grid(row=1, column=0, sticky="w", pady=5)
         temp_var = tk.StringVar(value=str(self.advanced_settings.temperature))
-        temp_entry = tk.Entry(
-            settings_frame,
-            textvariable=temp_var,
-            bg=DragonColors.BG_TERTIARY,
-            fg=DragonColors.TEXT_PRIMARY,
-        )
+        temp_entry = tk.Entry(settings_frame, textvariable=temp_var,
+                              bg=self.current_theme.BG_TERTIARY, fg=self.current_theme.TEXT_PRIMARY)
         temp_entry.grid(row=1, column=1, sticky="ew", pady=5)
 
-        # Zeile 2: Plugins
         plugin_var = tk.BooleanVar(value=self.settings.enable_plugins)
-        plugin_cb = tk.Checkbutton(
-            settings_frame,
-            text="Enable plugins",
-            variable=plugin_var,
-            bg=DragonColors.BG_PRIMARY,
-            fg=DragonColors.TEXT_PRIMARY,
-            selectcolor=DragonColors.BG_TERTIARY,
-        )
+        plugin_cb = tk.Checkbutton(settings_frame, text="Enable plugins", variable=plugin_var,
+                                   bg=self.current_theme.BG_PRIMARY, fg=self.current_theme.TEXT_PRIMARY,
+                                   selectcolor=self.current_theme.BG_TERTIARY)
         plugin_cb.grid(row=2, column=0, columnspan=2, sticky="w", pady=5)
 
-        # Zeile 3: GPU acceleration
         gpu_var = tk.BooleanVar(value=self.advanced_settings.gpu_acceleration)
-        gpu_cb = tk.Checkbutton(
-            settings_frame,
-            text="Enable GPU acceleration",
-            variable=gpu_var,
-            bg=DragonColors.BG_PRIMARY,
-            fg=DragonColors.TEXT_PRIMARY,
-            selectcolor=DragonColors.BG_TERTIARY,
-        )
+        gpu_cb = tk.Checkbutton(settings_frame, text="Enable GPU acceleration", variable=gpu_var,
+                                bg=self.current_theme.BG_PRIMARY, fg=self.current_theme.TEXT_PRIMARY,
+                                selectcolor=self.current_theme.BG_TERTIARY)
         gpu_cb.grid(row=3, column=0, columnspan=2, sticky="w", pady=5)
 
-        # Zeile 4: VAD Threshold
-        tk.Label(settings_frame, text="VAD Threshold:", bg=DragonColors.BG_PRIMARY, fg=DragonColors.TEXT_PRIMARY).grid(row=4, column=0, sticky="w", pady=5)
+        tk.Label(settings_frame, text="VAD Threshold:", bg=self.current_theme.BG_PRIMARY,
+                 fg=self.current_theme.TEXT_PRIMARY).grid(row=4, column=0, sticky="w", pady=5)
         vad_threshold_var = tk.DoubleVar(value=self.advanced_settings.vad_threshold)
         vad_threshold_scale = tk.Scale(settings_frame, from_=0.0, to=1.0, resolution=0.05,
                                         orient=tk.HORIZONTAL, variable=vad_threshold_var,
-                                        bg=DragonColors.BG_TERTIARY, fg=DragonColors.TEXT_PRIMARY,
+                                        bg=self.current_theme.BG_TERTIARY, fg=self.current_theme.TEXT_PRIMARY,
                                         length=150)
         vad_threshold_scale.grid(row=4, column=1, sticky="ew", pady=5)
         ToolTip(vad_threshold_scale, "Schwellwert für VAD (0.0-1.0). Höher = weniger, aber präzisere Segmente (optimierter Standard: 0.3)")
 
-        # Zeile 5: Min Speech Duration (ms)
-        tk.Label(settings_frame, text="Min Speech Duration (ms):", bg=DragonColors.BG_PRIMARY, fg=DragonColors.TEXT_PRIMARY).grid(row=5, column=0, sticky="w", pady=5)
+        tk.Label(settings_frame, text="Min Speech Duration (ms):", bg=self.current_theme.BG_PRIMARY,
+                 fg=self.current_theme.TEXT_PRIMARY).grid(row=5, column=0, sticky="w", pady=5)
         vad_min_speech_var = tk.IntVar(value=self.advanced_settings.vad_min_speech_duration_ms)
         vad_min_speech_spin = tk.Spinbox(settings_frame, from_=0, to=2000, increment=50,
                                          textvariable=vad_min_speech_var,
-                                         bg=DragonColors.BG_TERTIARY, fg=DragonColors.TEXT_PRIMARY)
+                                         bg=self.current_theme.BG_TERTIARY, fg=self.current_theme.TEXT_PRIMARY)
         vad_min_speech_spin.grid(row=5, column=1, sticky="ew", pady=5)
         ToolTip(vad_min_speech_spin, "Minimale Dauer eines Sprachsegments in ms (optimierter Standard: 200)")
 
-        # Zeile 6: Min Silence Duration (ms)
-        tk.Label(settings_frame, text="Min Silence Duration (ms):", bg=DragonColors.BG_PRIMARY, fg=DragonColors.TEXT_PRIMARY).grid(row=6, column=0, sticky="w", pady=5)
+        tk.Label(settings_frame, text="Min Silence Duration (ms):", bg=self.current_theme.BG_PRIMARY,
+                 fg=self.current_theme.TEXT_PRIMARY).grid(row=6, column=0, sticky="w", pady=5)
         vad_min_silence_var = tk.IntVar(value=self.advanced_settings.vad_min_silence_duration_ms)
         vad_min_silence_spin = tk.Spinbox(settings_frame, from_=0, to=2000, increment=50,
                                           textvariable=vad_min_silence_var,
-                                          bg=DragonColors.BG_TERTIARY, fg=DragonColors.TEXT_PRIMARY)
+                                          bg=self.current_theme.BG_TERTIARY, fg=self.current_theme.TEXT_PRIMARY)
         vad_min_silence_spin.grid(row=6, column=1, sticky="ew", pady=5)
         ToolTip(vad_min_silence_spin, "Minimale Stilledauer zwischen Sprachsegmenten in ms (optimierter Standard: 80)")
 
-        # Spalte 1 dehnbar machen
+        tk.Label(settings_frame, text="Theme:", bg=self.current_theme.BG_PRIMARY,
+                 fg=self.current_theme.TEXT_PRIMARY).grid(row=7, column=0, sticky="w", pady=5)
+        theme_var = tk.StringVar(value=self.settings.theme)
+        theme_combo = ttk.Combobox(settings_frame, textvariable=theme_var,
+                                    values=["dark", "light", "system"],
+                                    width=10, state="readonly")
+        theme_combo.grid(row=7, column=1, sticky="ew", pady=5)
+
+        # NEW: Checkbox für Browser-Cookies
+        cookies_var = tk.BooleanVar(value=self.settings.use_browser_cookies)
+        cookies_cb = tk.Checkbutton(settings_frame, text="Use browser cookies for YouTube", variable=cookies_var,
+                                    bg=self.current_theme.BG_PRIMARY, fg=self.current_theme.TEXT_PRIMARY,
+                                    selectcolor=self.current_theme.BG_TERTIARY)
+        cookies_cb.grid(row=8, column=0, columnspan=2, sticky="w", pady=5)
+
         settings_frame.columnconfigure(1, weight=1)
 
         def save_settings() -> None:
@@ -9945,10 +10364,21 @@ class DragonWhispererGUI:
                 self.advanced_settings.temperature = float(temp_var.get())
                 self.settings.enable_plugins = plugin_var.get()
                 self.advanced_settings.gpu_acceleration = gpu_var.get()
-                # NEU: VAD-Werte übernehmen
                 self.advanced_settings.vad_threshold = vad_threshold_var.get()
                 self.advanced_settings.vad_min_speech_duration_ms = vad_min_speech_var.get()
                 self.advanced_settings.vad_min_silence_duration_ms = vad_min_silence_var.get()
+
+                old_theme = self.settings.theme
+                self.settings.theme = theme_var.get()
+                if old_theme != self.settings.theme:
+                    DarkMessageBox.showinfo("Theme geändert",
+                                            "Das neue Theme wird nach einem Neustart aktiv.",
+                                            self.root)
+
+                # Cookie-Einstellung speichern
+                self.settings.use_browser_cookies = cookies_var.get()
+                if hasattr(self, 'stream_manager'):
+                    self.stream_manager.use_browser_cookies = self.settings.use_browser_cookies
 
                 self.advanced_settings.save_to_file()
                 self.settings.save_to_file()
@@ -9957,39 +10387,25 @@ class DragonWhispererGUI:
                     self.transcription_engine.compute_type = "int8"
                 settings_dialog.destroy()
                 self.update_status("✅ Settings saved")
-            except Exception as e:
+            except (ValueError, TypeError) as e:
                 DarkMessageBox.showerror("Error", f"Invalid settings: {e}", self.root)
 
-        button_frame = tk.Frame(main_frame, bg=DragonColors.BG_PRIMARY)
+        button_frame = tk.Frame(main_frame, bg=self.current_theme.BG_PRIMARY)
         button_frame.pack(fill="x", pady=(20, 0))
-        save_btn = tk.Button(
-            button_frame,
-            text="Save",
-            command=save_settings,
-            bg=DragonColors.SUCCESS,
-            fg=DragonColors.TEXT_PRIMARY,
-            relief="flat",
-            padx=15,
-        )
+        save_btn = tk.Button(button_frame, text="Save", command=save_settings,
+                             bg=self.current_theme.SUCCESS, fg=self.current_theme.TEXT_PRIMARY,
+                             relief="flat", padx=15)
         save_btn.pack(side="right", padx=5)
-        cancel_btn = tk.Button(
-            button_frame,
-            text="Cancel",
-            command=settings_dialog.destroy,
-            bg=DragonColors.BG_TERTIARY,
-            fg=DragonColors.TEXT_PRIMARY,
-            relief="flat",
-            padx=15,
-        )
+        cancel_btn = tk.Button(button_frame, text="Cancel", command=settings_dialog.destroy,
+                               bg=self.current_theme.BG_TERTIARY, fg=self.current_theme.TEXT_PRIMARY,
+                               relief="flat", padx=15)
         cancel_btn.pack(side="right", padx=5)
 
     def _setup_callbacks(self) -> None:
-        """Richtet die Callbacks für den Controller ein."""
         self.controller.ui_update_fn = self._handle_ui_update
         self.controller.status_update_fn = self._handle_status_update
 
     def _handle_ui_update(self, component: str, text: str) -> None:
-        """Verarbeitet UI-Updates aus dem Controller (wird in Queue gestellt)."""
         if not text or not text.strip():
             return
         def update_task() -> None:
@@ -10028,7 +10444,6 @@ class DragonWhispererGUI:
             logger.warning(f"⚠️ Queue put error: {e}")
 
     def _handle_status_update(self, state_info: Dict[str, Any]) -> None:
-        """Verarbeitet Status-Updates aus dem Controller (wird in Queue gestellt)."""
         def update_task() -> None:
             try:
                 if "status" in state_info and hasattr(self, "status_label"):
@@ -10065,7 +10480,6 @@ class DragonWhispererGUI:
                     if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
                         self.stop_button.config(state="normal" if processing else "disabled")
 
-                # NEU: Bei Dateiende Speicherdialog öffnen
                 if state_info.get("file_finished"):
                     logger.info("📂 Dateiende erkannt – öffne Speicherdialog")
                     if self.settings.auto_save_on_completion:
@@ -10085,7 +10499,6 @@ class DragonWhispererGUI:
             pass
 
     def _start_gui_updaters(self) -> None:
-        """Startet die periodischen Updater für die Warteschlangen."""
         def process_gui_queue() -> None:
             try:
                 processed = 0
@@ -10107,14 +10520,20 @@ class DragonWhispererGUI:
                         break
                     except Exception as e:
                         logger.warning(f"⚠️ Queue processing error: {e}")
+                # Queue-Größenprüfung und Cleanup
                 if hasattr(self, "gui_queue"):
                     qsize = self.gui_queue.qsize()
                     if qsize > 30:
                         self._cleanup_queue(self.gui_queue, 20)
+                # Nach dem Verarbeiten erneut planen
+                if hasattr(self, "root") and self.root.winfo_exists():
+                    self.root.after(100, process_gui_queue)
             except Exception as e:
                 logger.error(f"❌ GUI queue processor error: {e}")
-            if hasattr(self, "root") and self.root.winfo_exists():
-                self.root.after(100, process_gui_queue)
+                # Trotz Fehler erneut planen, damit die Updates nicht aufhören
+                if hasattr(self, "root") and self.root.winfo_exists():
+                    self.root.after(100, process_gui_queue)
+
         def process_text_updates() -> None:
             try:
                 if not hasattr(self, "_text_update_queue"):
@@ -10144,25 +10563,26 @@ class DragonWhispererGUI:
                     qsize = self._text_update_queue.qsize()
                     if qsize > 25:
                         self._cleanup_queue(self._text_update_queue, 15)
+                if hasattr(self, "root") and self.root.winfo_exists():
+                    self.root.after(150, process_text_updates)
             except Exception as e:
                 logger.error(f"❌ Text update processor error: {e}")
-            if hasattr(self, "root") and self.root.winfo_exists():
-                self.root.after(150, process_text_updates)
+                if hasattr(self, "root") and self.root.winfo_exists():
+                    self.root.after(150, process_text_updates)
+
         if hasattr(self, "root") and self.root.winfo_exists():
             self.root.after(50, process_gui_queue)
             self.root.after(75, process_text_updates)
 
     def _start_automatic_maintenance(self) -> None:
-        """Startet periodische Wartungsarbeiten (wird jetzt mit after geplant)."""
         def maintenance_worker() -> None:
             if not self._shutting_down and hasattr(self, 'root') and self.root.winfo_exists():
                 self._perform_maintenance()
-                self.root.after(600000, maintenance_worker)  # alle 10 Minuten
+                self.root.after(600000, maintenance_worker)
         if hasattr(self, 'root') and self.root.winfo_exists():
-            self.root.after(60000, maintenance_worker)  # erst nach 1 Minute starten
+            self.root.after(60000, maintenance_worker)
 
     def _perform_maintenance(self) -> None:
-        """Führt Wartungsarbeiten durch (Cache leeren, GC)."""
         logger.info("🛠️ Performing automatic maintenance...")
         try:
             expired_counts = clear_expired_cache_entries()
@@ -10184,7 +10604,6 @@ class DragonWhispererGUI:
         logger.info("✅ Maintenance completed")
 
     def handle_transcription(self, result: ExcellenceTranscriptionResult) -> None:
-        """Verarbeitet ein Transkriptionsergebnis."""
         if not result or not result.text or not result.text.strip():
             return
         current_text = result.text.strip()
@@ -10229,7 +10648,6 @@ class DragonWhispererGUI:
             translation_thread.start()
 
     def handle_translation(self, result: ExcellenceTranslationResult) -> None:
-        """Verarbeitet ein Übersetzungsergebnis."""
         if not result or not result.translated or not result.translated.strip():
             return
         current_text = result.translated.strip()
@@ -10259,14 +10677,12 @@ class DragonWhispererGUI:
             self.root.after(0, update_gui)
 
     def handle_info(self, info_msg: str) -> None:
-        """Verarbeitet eine Informationsmeldung."""
         def update() -> None:
             self.update_status(f"ℹ️ {info_msg}")
         if hasattr(self, 'root') and self.root.winfo_exists():
             self.root.after(0, update)
 
     def handle_error(self, error_msg: str) -> None:
-        """Verarbeitet eine Fehlermeldung."""
         def update() -> None:
             self.update_status(f"❌ {error_msg}")
             if self.is_processing:
@@ -10275,7 +10691,6 @@ class DragonWhispererGUI:
             self.root.after(0, update)
 
     def update_status(self, message: str) -> None:
-        """Aktualisiert das Status-Label."""
         try:
             if hasattr(self, 'status_label') and self.status_label.winfo_exists():
                 self.status_label.config(text=message[:100])
@@ -10283,7 +10698,6 @@ class DragonWhispererGUI:
             pass
 
     def update_stream_info(self, info: StreamInfo) -> None:
-        """Aktualisiert die Stream-Info-Anzeige."""
         def update_gui() -> None:
             try:
                 self.current_stream_info = info
@@ -10301,12 +10715,10 @@ class DragonWhispererGUI:
             self.root.after(0, update_gui)
 
     def _try_fallback_gui(self) -> None:
-        """Fallback, wenn Tkinter nicht verfügbar ist."""
         logger.info("ℹ️ Starte im Kommandozeilen-Modus...")
         raise RuntimeError("Bitte installieren Sie Tkinter: pip install tk")
 
     def _show_error_and_exit(self, message: str) -> None:
-        """Zeigt eine Fehlermeldung an und beendet das Programm."""
         logger.error(f"💥 KRITISCHER FEHLER: {message}")
         try:
             import tkinter.messagebox as mb
@@ -10317,22 +10729,18 @@ class DragonWhispererGUI:
         sys.exit(1)
 
     def _show_warning(self, message: str) -> None:
-        """Zeigt eine Warnung an."""
         logger.warning(f"⚠️ WARNUNG: {message}")
 
     def show_translation_dialog(self) -> None:
-        """Öffnet den Übersetzungsdialog."""
         if hasattr(self, 'translation_engine'):
             TranslationDialog(self.root, self.translation_engine)
         else:
             DarkMessageBox.showerror("Error", "Translation engine not available", self.root)
 
     def show_summarize_dialog(self) -> None:
-        """Öffnet den erweiterten Ollama-Zusammenfassungsdialog."""
         if not OLLAMA_AVAILABLE:
             DarkMessageBox.showerror("Fehler", "Ollama nicht verfügbar (requests nicht installiert)", self.root)
             return
-        # Aktuellen Transkriptionstext holen
         if hasattr(self, 'transcript_text') and self.transcript_text.winfo_exists():
             text = self.transcript_text.get("1.0", "end-1c").strip()
         else:
@@ -10342,19 +10750,20 @@ class DragonWhispererGUI:
             return
         SummarizeDialog(self.root, text, self)
 
+    def show_install_dialog(self) -> None:
+        InstallDependencyDialog(self.root, self)
+
     def _start_system_monitoring(self) -> None:
-        """Startet die periodische Systemüberwachung (CPU, RAM, GPU)."""
         def monitor() -> None:
             try:
-                # psutil sicher importieren
-                try:
-                    import psutil
-                except ImportError:
-                    if hasattr(self, 'system_info_label'):
-                        self.system_info_label.config(text="⚙️ System monitoring unavailable")
-                    if hasattr(self, 'root') and self.root.winfo_exists():
-                        self.root.after(3000, monitor)
-                    return
+                import psutil
+            except ImportError:
+                if hasattr(self, 'system_info_label'):
+                    self.system_info_label.config(text="⚙️ System monitoring unavailable")
+                if hasattr(self, 'root') and self.root.winfo_exists():
+                    self.root.after(3000, monitor)
+                return
+            try:
                 cpu = psutil.cpu_percent(interval=None)
                 memory = psutil.virtual_memory()
                 ram_used = memory.used // (1024**2)
@@ -10364,7 +10773,7 @@ class DragonWhispererGUI:
                     if TORCH_AVAILABLE:
                         torch = FastLazyLoader.load("torch")
                         if torch.cuda.is_available():
-                            torch.cuda.synchronize()  # Warte auf alle CUDA‑Operationen
+                            torch.cuda.synchronize()
                             vram_used = torch.cuda.memory_allocated(0) / (1024**3)
                             vram_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
                             gpu_text = f" | 🎮 VRAM: {vram_used:.1f}/{vram_total:.1f}GB"
@@ -10379,20 +10788,21 @@ class DragonWhispererGUI:
                 current_model = "None"
                 if hasattr(self, 'transcription_engine'):
                     current_model = self.transcription_engine.get_current_model()
+                demo_hint = " | ⚠️ Demo" if getattr(self, 'demo_mode', False) else ""
                 if IS_WINDOWS:
-                    info = f"🪟 Windows | 🔧 CPU: {cpu:.0f}% | 💾 RAM: {ram_used}/{ram_total}MB{gpu_text} | 🤖 Model: {current_model}"
+                    info = f"🪟 Windows | 🔧 CPU: {cpu:.0f}% | 💾 RAM: {ram_used}/{ram_total}MB{gpu_text} | 🤖 Model: {current_model}{demo_hint}"
                 elif IS_MACOS:
                     if IS_ARM:
-                        info = f"🍎 macOS ARM | 🔧 CPU: {cpu:.0f}% | 💾 RAM: {ram_used}/{ram_total}MB{gpu_text} | 🤖 Model: {current_model}"
+                        info = f"🍎 macOS ARM | 🔧 CPU: {cpu:.0f}% | 💾 RAM: {ram_used}/{ram_total}MB{gpu_text} | 🤖 Model: {current_model}{demo_hint}"
                     else:
-                        info = f"🍎 macOS Intel | 🔧 CPU: {cpu:.0f}% | 💾 RAM: {ram_used}/{ram_total}MB{gpu_text} | 🤖 Model: {current_model}"
+                        info = f"🍎 macOS Intel | 🔧 CPU: {cpu:.0f}% | 💾 RAM: {ram_used}/{ram_total}MB{gpu_text} | 🤖 Model: {current_model}{demo_hint}"
                 elif IS_LINUX:
-                    info = f"🐧 Linux | 🔧 CPU: {cpu:.0f}% | 💾 RAM: {ram_used}/{ram_total}MB{gpu_text} | 🤖 Model: {current_model}"
+                    info = f"🐧 Linux | 🔧 CPU: {cpu:.0f}% | 💾 RAM: {ram_used}/{ram_total}MB{gpu_text} | 🤖 Model: {current_model}{demo_hint}"
                 else:
-                    info = f"🌐 System | 🔧 CPU: {cpu:.0f}% | 💾 RAM: {ram_used}/{ram_total}MB{gpu_text} | 🤖 Model: {current_model}"
+                    info = f"🌐 System | 🔧 CPU: {cpu:.0f}% | 💾 RAM: {ram_used}/{ram_total}MB{gpu_text} | 🤖 Model: {current_model}{demo_hint}"
                 if hasattr(self, 'system_info_label'):
                     self.system_info_label.config(text=info)
-            except Exception:
+            except (ImportError, AttributeError):
                 if hasattr(self, 'system_info_label'):
                     self.system_info_label.config(text="⚙️ System monitoring unavailable")
             if hasattr(self, 'root') and self.root.winfo_exists():
@@ -10401,18 +10811,66 @@ class DragonWhispererGUI:
             self.root.after(1000, monitor)
 
     def _final_initialization_check(self) -> None:
-        """Letzte Initialisierungsprüfung."""
         logger.info("✅ Dragon Whisperer initialisiert")
+        if getattr(self, 'demo_mode', False):
+            self.update_status("⚠️ Demo-Modus: Whisper nicht verfügbar – verwende Dummy-Transkriptionen")
 
     def _emergency_cleanup(self) -> None:
-        """Notfall-Cleanup."""
         logger.info("🆘 Emergency cleanup...")
         self._minimal_emergency_cleanup()
 
+    def update_progress(self, processed: int, total: Optional[int], chunks: int) -> None:
+        if not hasattr(self, 'progress_bar') or not self.progress_bar.winfo_exists():
+            return
+        try:
+            if total is not None and total > 0:
+                if not self.progress_bar.winfo_ismapped():
+                    self.progress_bar.pack(side="left", padx=(10, 10))
+                percent = (processed / total) * 100
+                self.progress_bar.config(mode='determinate', value=percent)
+                mb = processed // (1024*1024)
+                tb = total // (1024*1024)
+                self.progress_label.config(text=f"{mb}MB/{tb}MB")
+            else:
+                if self.progress_bar.winfo_ismapped():
+                    self.progress_bar.pack_forget()
+                self.progress_label.config(text=f"Chunks: {chunks}  |  Daten: {processed//1024} KB")
+        except tk.TclError:
+            pass
 
+    def _reset_progress(self):
+        if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
+            self.progress_bar.stop()
+            self.progress_bar.config(mode='determinate', value=0)
+            self._progress_bar_started = False
+        if hasattr(self, 'progress_label'):
+            self.progress_label.config(text="")
+
+    def _bind_shortcuts(self):
+        mod = "Command" if IS_MACOS else "Control"
+
+        self.root.bind(f'<{mod}-o>', lambda e: self.select_file_dark())
+        self.root.bind(f'<{mod}-v>', lambda e: self.paste_url())
+        self.root.bind(f'<{mod}-Return>', lambda e: self._on_start_click())
+        self.root.bind(f'<{mod}-q>', lambda e: self._safe_exit_dialog())
+        self.root.bind(f'<{mod}-s>', lambda e: self.save_transcript())
+        self.root.bind(f'<{mod}-l>', lambda e: self.toggle_layout())
+        self.root.bind(f'<{mod}-t>', lambda e: self.toggle_translation())
+        self.root.bind(f'<{mod}-e>', lambda e: self.export_subtitles())
+        self.root.bind(f'<{mod}-Shift-c>', lambda e: self.clear_all())
+        self.root.bind(f'<{mod}-h>', lambda e: self.show_shortcuts_help())
+        self.root.bind('<F1>', lambda e: self.show_shortcuts_help())
+
+        self.url_entry.bind(f'<{mod}-v>', lambda e: 'break')
+
+    def show_shortcuts_help(self):
+        ShortcutsDialog(self.root)
+
+
+# -----------------------------------------------------------------------------
+# TRANSLATION DIALOG (unverändert)
+# -----------------------------------------------------------------------------
 class TranslationDialog:
-    """Dialog für manuelle Übersetzung von Text."""
-
     def __init__(self, parent: tk.Widget, translation_engine: ExcellenceTranslationEngine) -> None:
         self.parent = parent
         self.engine = translation_engine
@@ -10423,27 +10881,26 @@ class TranslationDialog:
         self.dialog = tk.Toplevel(self.parent)
         self.dialog.title("🐉 Text Translation")
         self.dialog.geometry("600x500")
-        self.dialog.configure(bg=ModernColors.BG_PRIMARY)
+        self.dialog.configure(bg=CURRENT_THEME.BG_PRIMARY)
         self.dialog.transient(self.parent)
         self.dialog.grab_set()
-        main = tk.Frame(self.dialog, bg=ModernColors.BG_PRIMARY, padx=15, pady=15)
+        main = tk.Frame(self.dialog, bg=CURRENT_THEME.BG_PRIMARY, padx=15, pady=15)
         main.pack(fill="both", expand=True)
 
-        # Quelltext mit Kontextmenü
-        tk.Label(main, text="Source text:", bg=ModernColors.BG_PRIMARY,
-                 fg=ModernColors.TEXT_PRIMARY, font=ModernFonts.PRIMARY).pack(anchor="w")
+        tk.Label(main, text="Source text:", bg=CURRENT_THEME.BG_PRIMARY,
+                 fg=CURRENT_THEME.TEXT_PRIMARY, font=DragonFonts.PRIMARY).pack(anchor="w")
         self.source_text = scrolledtext.ScrolledText(
-            main, height=8, bg=ModernColors.BG_TERTIARY, fg=ModernColors.TEXT_PRIMARY,
-            font=ModernFonts.MONOSPACE, wrap=tk.WORD
+            main, height=8, bg=CURRENT_THEME.BG_TERTIARY, fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=DragonFonts.MONOSPACE, wrap=tk.WORD
         )
         self.source_text.pack(fill="x", pady=(0, 10))
         DarkContextMenu(self.source_text)
 
-        lang_frame = tk.Frame(main, bg=ModernColors.BG_PRIMARY)
+        lang_frame = tk.Frame(main, bg=CURRENT_THEME.BG_PRIMARY)
         lang_frame.pack(fill="x", pady=5)
 
-        tk.Label(lang_frame, text="From:", bg=ModernColors.BG_PRIMARY,
-                 fg=ModernColors.TEXT_PRIMARY).pack(side="left", padx=(0, 5))
+        tk.Label(lang_frame, text="From:", bg=CURRENT_THEME.BG_PRIMARY,
+                 fg=CURRENT_THEME.TEXT_PRIMARY).pack(side="left", padx=(0, 5))
         self.src_lang_var = tk.StringVar(value="auto")
         src_combo = ttk.Combobox(
             lang_frame, textvariable=self.src_lang_var,
@@ -10452,8 +10909,8 @@ class TranslationDialog:
         )
         src_combo.pack(side="left", padx=(0, 20))
 
-        tk.Label(lang_frame, text="To:", bg=ModernColors.BG_PRIMARY,
-                 fg=ModernColors.TEXT_PRIMARY).pack(side="left", padx=(0, 5))
+        tk.Label(lang_frame, text="To:", bg=CURRENT_THEME.BG_PRIMARY,
+                 fg=CURRENT_THEME.TEXT_PRIMARY).pack(side="left", padx=(0, 5))
         self.tgt_lang_var = tk.StringVar(value="German")
         tgt_combo = ttk.Combobox(
             lang_frame, textvariable=self.tgt_lang_var,
@@ -10462,32 +10919,31 @@ class TranslationDialog:
         )
         tgt_combo.pack(side="left")
 
-        btn_frame = tk.Frame(main, bg=ModernColors.BG_PRIMARY)
+        btn_frame = tk.Frame(main, bg=CURRENT_THEME.BG_PRIMARY)
         btn_frame.pack(fill="x", pady=10)
         translate_btn = tk.Button(
             btn_frame, text="🌐 Translate", command=self.translate,
-            bg=ModernColors.DRAGON_GREEN, fg=ModernColors.TEXT_PRIMARY,
-            font=ModernFonts.BUTTON, padx=20
+            bg=CURRENT_THEME.DRAGON_GREEN, fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=DragonFonts.BUTTON, padx=20
         )
         translate_btn.pack(side="left")
 
-        tk.Label(main, text="Translation:", bg=ModernColors.BG_PRIMARY,
-                 fg=ModernColors.TEXT_PRIMARY, font=ModernFonts.PRIMARY).pack(anchor="w", pady=(10, 0))
+        tk.Label(main, text="Translation:", bg=CURRENT_THEME.BG_PRIMARY,
+                 fg=CURRENT_THEME.TEXT_PRIMARY, font=DragonFonts.PRIMARY).pack(anchor="w", pady=(10, 0))
         self.target_text = scrolledtext.ScrolledText(
-            main, height=8, bg=ModernColors.BG_TERTIARY, fg=ModernColors.TEXT_PRIMARY,
-            font=ModernFonts.MONOSPACE, wrap=tk.WORD, state="normal"
+            main, height=8, bg=CURRENT_THEME.BG_TERTIARY, fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=DragonFonts.MONOSPACE, wrap=tk.WORD, state="normal"
         )
         self.target_text.pack(fill="both", expand=True, pady=(5, 0))
         DarkContextMenu(self.target_text)
 
         close_btn = tk.Button(
             main, text="Close", command=self.dialog.destroy,
-            bg=ModernColors.BG_TERTIARY, fg=ModernColors.TEXT_PRIMARY
+            bg=CURRENT_THEME.BG_TERTIARY, fg=CURRENT_THEME.TEXT_PRIMARY
         )
         close_btn.pack(pady=10)
 
     def translate(self) -> None:
-        """Führt die Übersetzung durch."""
         source = self.source_text.get("1.0", "end-1c").strip()
         if not source:
             return
@@ -10495,20 +10951,16 @@ class TranslationDialog:
         src_name = self.src_lang_var.get().strip()
         tgt_name = self.tgt_lang_var.get().strip()
 
-        # Gültige Sprachnamen (ohne Trennstriche)
         valid_language_names = [name for name, code in SORTED_LANGUAGES]
 
-        # Quellsprache: Falls ungültig und nicht "auto", auf "auto" zurücksetzen
         if src_name not in valid_language_names and src_name != "auto":
             src_name = "auto"
             self.src_lang_var.set("auto")
 
-        # Zielsprache: Falls ungültig, auf "German" zurücksetzen
         if tgt_name not in valid_language_names:
             tgt_name = "German"
             self.tgt_lang_var.set("German")
 
-        # Codes ermitteln (jetzt sicher, dass die Namen in der Liste sind)
         src_code = "auto" if src_name == "auto" else next(code for name, code in SORTED_LANGUAGES if name == src_name)
         tgt_code = next(code for name, code in SORTED_LANGUAGES if name == tgt_name)
 
@@ -10528,22 +10980,78 @@ class TranslationDialog:
             self.target_text.insert("1.0", f"Error: {str(e)}")
 
 
-# =============================================================================
-# HILFSFUNKTIONEN (plattformabhängig, Debug, System-Check, Hilfe)
-# =============================================================================
+# -----------------------------------------------------------------------------
+# SHORTCUTS DIALOG (unverändert)
+# -----------------------------------------------------------------------------
+class ShortcutsDialog:
+    def __init__(self, parent):
+        self.parent = parent
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("🐉 Tastenkürzel")
+        self.dialog.geometry("500x400")
+        self.dialog.configure(bg=CURRENT_THEME.BG_PRIMARY)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
 
+        main = tk.Frame(self.dialog, bg=CURRENT_THEME.BG_PRIMARY, padx=20, pady=20)
+        main.pack(fill="both", expand=True)
+
+        tk.Label(main, text="Tastenkürzel", font=("Segoe UI", 14, "bold"),
+                 bg=CURRENT_THEME.BG_PRIMARY, fg=CURRENT_THEME.TEXT_PRIMARY).pack(pady=(0,15))
+
+        mod = "Cmd" if IS_MACOS else "Strg"
+        shortcuts = [
+            (f"{mod}+O", "Datei öffnen"),
+            (f"{mod}+V", "URL einfügen"),
+            (f"{mod}+Return", "Transkription starten"),
+            (f"{mod}+Q", "Programm beenden"),
+            (f"{mod}+S", "Transkript speichern"),
+            (f"{mod}+L", "Layout umschalten"),
+            (f"{mod}+T", "Übersetzung ein/aus"),
+            (f"{mod}+E", "Untertitel exportieren"),
+            (f"{mod}+Umschalt+C", "Alles löschen"),
+            ("F1", "Diese Hilfe anzeigen"),
+        ]
+
+        frame = tk.Frame(main, bg=CURRENT_THEME.BG_SECONDARY)
+        frame.pack(fill="both", expand=True)
+
+        for i, (key, desc) in enumerate(shortcuts):
+            row = tk.Frame(frame, bg=CURRENT_THEME.BG_TERTIARY if i % 2 else CURRENT_THEME.BG_SECONDARY)
+            row.pack(fill="x", pady=1)
+
+            key_label = tk.Label(row, text=key, font=("Segoe UI", 10, "bold"),
+                                  bg=row['bg'], fg=CURRENT_THEME.TEXT_ACCENT, width=15, anchor="w")
+            key_label.pack(side="left", padx=(10,5), pady=5)
+
+            desc_label = tk.Label(row, text=desc, font=("Segoe UI", 10),
+                                   bg=row['bg'], fg=CURRENT_THEME.TEXT_PRIMARY, anchor="w")
+            desc_label.pack(side="left", fill="x", expand=True, padx=5, pady=5)
+
+        close_btn = tk.Button(main, text="Schließen", command=self.dialog.destroy,
+                              bg=CURRENT_THEME.BG_TERTIARY, fg=CURRENT_THEME.TEXT_PRIMARY)
+        close_btn.pack(pady=10)
+
+        self.dialog.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() - self.dialog.winfo_width()) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - self.dialog.winfo_height()) // 2
+        self.dialog.geometry(f"+{x}+{y}")
+
+
+# -----------------------------------------------------------------------------
+# HILFSFUNKTIONEN (Konsolen-Setup, Help, System-Check)
+# -----------------------------------------------------------------------------
 _original_console_mode: Optional[int] = None
 _original_codepage: Optional[int] = None
 
 def _save_console_state() -> None:
-    """Speichert den aktuellen Konsolenmodus und die Code-Page (Windows)."""
     global _original_console_mode, _original_codepage
     if not IS_WINDOWS:
         return
     try:
         import ctypes
         kernel32 = ctypes.windll.kernel32
-        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        handle = kernel32.GetStdHandle(-11)
         mode = ctypes.c_ulong()
         if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
             _original_console_mode = mode.value
@@ -10552,7 +11060,6 @@ def _save_console_state() -> None:
         pass
 
 def _restore_console_state() -> None:
-    """Stellt den ursprünglichen Konsolenmodus und die Code-Page wieder her (Windows)."""
     if not IS_WINDOWS:
         return
     try:
@@ -10571,18 +11078,16 @@ _save_console_state()
 atexit.register(_restore_console_state)
 
 def _setup_windows_console() -> None:
-    """Richtet die Windows-Konsole für UTF-8 und ANSI-Farben ein."""
     if not IS_WINDOWS:
         return
     try:
         import codecs
-        sys.stdout = codecs.getwriter("utf-8")(sys.stdout.buffer)  # type: ignore
+        sys.stdout = codecs.getwriter("utf-8")(sys.stdout.buffer)
         import ctypes
         kernel32 = ctypes.windll.kernel32
-        kernel32.SetConsoleOutputCP(65001)                     # UTF-8 Code Page
+        kernel32.SetConsoleOutputCP(65001)
         kernel32.SetConsoleCP(65001)
-        # ANSI-Farben aktivieren
-        handle = kernel32.GetStdHandle(-11)                    # STD_OUTPUT_HANDLE
+        handle = kernel32.GetStdHandle(-11)
         mode = ctypes.c_ulong()
         if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
             ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
@@ -10591,11 +11096,7 @@ def _setup_windows_console() -> None:
     except Exception:
         pass
 
-
 def check_platform_compatibility() -> List[str]:
-    """
-    Überprüft die Plattform-Kompatibilität und gibt eine Liste von Problemen zurück.
-    """
     issues: List[str] = []
     if sys.version_info < (3, 8):
         issues.append(f"Python 3.8+ required (you have {sys.version_info.major}.{sys.version_info.minor})")
@@ -10610,9 +11111,7 @@ def check_platform_compatibility() -> List[str]:
             pass
     return issues
 
-
 def debug_script() -> None:
-    """Gibt umfangreiche Debug-Informationen aus."""
     print("=" * 60)
     print("DRAGON WHISPERER - DEBUG INFORMATION")
     print("=" * 60)
@@ -10639,9 +11138,7 @@ def debug_script() -> None:
     print(f"📁 CWD: {os.getcwd()}")
     print("=" * 60)
 
-
 def setup_platform_environment() -> Dict[str, str]:
-    """Richtet plattformspezifische Umgebungsvariablen ein (z.B. für Subprozesse)."""
     env_vars: Dict[str, str] = {}
     if IS_WINDOWS:
         env_vars.update({
@@ -10654,7 +11151,7 @@ def setup_platform_environment() -> Dict[str, str]:
             "FFMPEG_BINARY": "ffmpeg",
             "YT_DLP_BINARY": "yt-dlp",
         })
-    else:  # Linux
+    else:
         env_vars.update({
             "FFMPEG_BINARY": "ffmpeg",
             "YT_DLP_BINARY": "yt-dlp",
@@ -10663,9 +11160,7 @@ def setup_platform_environment() -> Dict[str, str]:
         os.environ[key] = value
     return env_vars
 
-
 def _print_help() -> None:
-    """Zeigt die Hilfe an."""
     print("🐉 Dragon Whisperer - Ultimate Stream Transcription & Translation")
     print("=" * 60)
     print("\nUsage:")
@@ -10690,9 +11185,7 @@ def _print_help() -> None:
     print("  • Batch processing")
     print("  • Dark mode GUI")
 
-
 def _run_system_check() -> int:
-    """Führt einen System-Check durch und gibt den Exit-Code zurück."""
     issues = check_platform_compatibility()
     print("🔍 Dragon Whisperer - System Compatibility Check")
     print("=" * 50)
@@ -10724,9 +11217,7 @@ def _run_system_check() -> int:
             pass
     return 0 if not issues else 1
 
-
 def _show_user_error(message: str) -> None:
-    """Zeigt eine benutzerfreundliche Fehlermeldung an (GUI oder Konsole)."""
     if IS_WINDOWS and not sys.stdin.isatty():
         try:
             import ctypes
@@ -10735,7 +11226,7 @@ def _show_user_error(message: str) -> None:
                 f"Dragon Whisperer - Setup Required\n\n{message}\n\n"
                 "Please install missing components and try again.",
                 "Setup Error",
-                0x10,  # MB_ICONSTOP
+                0x10,
             )
         except Exception:
             pass
@@ -10754,9 +11245,7 @@ def _show_user_error(message: str) -> None:
         else:
             print(f"\n❌ {message}")
 
-
 def _show_critical_error(message: str) -> None:
-    """Zeigt einen kritischen Fehler an (GUI oder Konsole)."""
     if IS_WINDOWS and not sys.stdin.isatty():
         try:
             import ctypes
@@ -10775,21 +11264,15 @@ def _show_critical_error(message: str) -> None:
         print(f"\n💥 {message}")
 
 
-# =============================================================================
+# -----------------------------------------------------------------------------
 # MAIN
-# =============================================================================
-
+# -----------------------------------------------------------------------------
 def main() -> int:
-    """
-    Hauptfunktion des Programms.
-    Führt Abhängigkeitsprüfung aus, initialisiert GUI und startet Hauptschleife.
-    """
     warnings.filterwarnings("ignore")
 
     if IS_WINDOWS:
         _setup_windows_console()
 
-    # Kommandozeilenargumente auswerten (DEBUG_LEVEL und DEBUG_COMPONENTS bereits global)
     cli_args = {
         "debug": "--debug" in sys.argv,
         "quiet": "--quiet" in sys.argv or "-q" in sys.argv,
@@ -10802,11 +11285,10 @@ def main() -> int:
         _print_help()
         return 0
     if cli_args["version"]:
-        print("🐉 Dragon Whisperer v1.94 - repariert & optimiert")
+        print("🐉 Dragon Whisperer v2.0 - überarbeitet")
         print(f"Platform: {SYSTEM} {'ARM' if IS_ARM else 'x86'}")
         return 0
 
-    # Log-Level entsprechend setzen (bereits am Anfang des Skripts)
     debug_level = DEBUG_LEVEL
 
     if cli_args["check"]:
@@ -10879,7 +11361,6 @@ def main() -> int:
             audio_cache.clear()
         except Exception:
             pass
-        import gc
         gc.collect()
         logger.debug("✅ Shutdown complete")
 
