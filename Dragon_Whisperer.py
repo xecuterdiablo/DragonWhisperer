@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""🐉 THE DRAGON WHISPERER v2.01)"""
+"""🐉 THE DRAGON WHISPERER v2.01 (optimierte Textfeld-Limits)"""
 
 # =============================================================================
 # 1. IMPORTS
@@ -134,11 +134,11 @@ class Constants:
     MAX_GUI_UPDATES_PER_SECOND: int = 30
     MAX_MEMORY_USAGE: int = 8 * 1024 * 1024 * 1024  # 8 GB
     MAX_CACHE_SIZE: int = 500
-    MAX_TEXT_LINES: int = 2000
+    MAX_TEXT_LINES: int = 2000          # für MemoryManager (Ringbuffer)
     DEFAULT_BEAM_SIZE: int = 5
     DEFAULT_TEMPERATURE: float = 0.0
     ENABLE_VAD_FILTER: bool = True
-    MAX_CONSECUTIVE_ERRORS: int = 5  # neu
+    MAX_CONSECUTIVE_ERRORS: int = 5
 
     # Stream
     STREAM_TIMEOUT: int = 10
@@ -214,8 +214,8 @@ class Constants:
     AUDIO_CACHE_TTL: int = 1800
 
     # VAD
-    VAD_THRESHOLD: float = 0.3
-    VAD_MIN_SPEECH_DURATION_MS: int = 200
+    VAD_THRESHOLD: float = 0.25
+    VAD_MIN_SPEECH_DURATION_MS: int = 225
     VAD_MIN_SILENCE_DURATION_MS: int = 80
 
     # Pfad-Validierung (Sicherheit)
@@ -2589,7 +2589,7 @@ class AsianLanguageSupport:
 
 
 # -----------------------------------------------------------------------------
-# ADVANCED SETTINGS (überarbeitet mit Konstanten)
+# ADVANCED SETTINGS (überarbeitet mit konfigurierbaren Zeilenlimits und Übersetzungs-Engine)
 # -----------------------------------------------------------------------------
 class AdvancedSettings:
     def __init__(self,
@@ -2603,7 +2603,14 @@ class AdvancedSettings:
                  max_memory_mb: int = 1024,
                  gpu_acceleration: bool = True,
                  optimize_translations: bool = False,
-                 config_type: str = 'default') -> None:
+                 config_type: str = 'default',
+                 # Neue Parameter für GUI-Zeilenlimits
+                 transcript_max_lines: int = 400,
+                 translation_max_lines: int = 300,
+                 # Neue Parameter für Übersetzungs-Engine
+                 translation_engine: str = "google",
+                 ollama_model: str = "llama3",
+                 ollama_host: str = "http://localhost:11434") -> None:
         self.config = get_config(config_type)
         self.beam_size = beam_size
         self.temperature = temperature
@@ -2616,6 +2623,11 @@ class AdvancedSettings:
         self.enable_speaker_diarization = enable_speaker_diarization
         self.optimize_translations = optimize_translations
         self.chunk_duration = self.config.CHUNK_DURATION
+        self.transcript_max_lines = transcript_max_lines
+        self.translation_max_lines = translation_max_lines
+        self.translation_engine = translation_engine
+        self.ollama_model = ollama_model
+        self.ollama_host = ollama_host
 
         self.vad_threshold: float = Constants.VAD_THRESHOLD
         self.vad_min_speech_duration_ms: int = Constants.VAD_MIN_SPEECH_DURATION_MS
@@ -2632,6 +2644,11 @@ class AdvancedSettings:
         logger.info(f"   VAD_THRESHOLD: {self.vad_threshold} (optimiert)")
         logger.info(f"   VAD_MIN_SPEECH_MS: {self.vad_min_speech_duration_ms} (optimiert)")
         logger.info(f"   VAD_MIN_SILENCE_MS: {self.vad_min_silence_duration_ms} (optimiert)")
+        logger.info(f"   GUI Transcript Max Lines: {self.transcript_max_lines}")
+        logger.info(f"   GUI Translation Max Lines: {self.translation_max_lines}")
+        logger.info(f"   Translation Engine: {self.translation_engine}")
+        if self.translation_engine == "ollama":
+            logger.info(f"   Ollama Model: {self.ollama_model}, Host: {self.ollama_host}")
 
     @classmethod
     def load_from_file(cls, filename: str = "dragon_advanced_settings.json") -> 'AdvancedSettings':
@@ -2656,6 +2673,14 @@ class AdvancedSettings:
                 config_type = data.get('config_type', 'default')
                 if 'config_type' not in filtered_data:
                     filtered_data['config_type'] = config_type
+
+                # Standardwerte für neue Parameter setzen, falls sie in der JSON fehlen
+                filtered_data.setdefault('transcript_max_lines', 400)
+                filtered_data.setdefault('translation_max_lines', 300)
+                filtered_data.setdefault('translation_engine', 'google')
+                filtered_data.setdefault('ollama_model', 'llama3')
+                filtered_data.setdefault('ollama_host', 'http://localhost:11434')
+
                 instance = cls(**filtered_data)
 
                 instance.vad_threshold = data.get('vad_threshold', Constants.VAD_THRESHOLD)
@@ -2721,6 +2746,11 @@ class AdvancedSettings:
                 'vad_threshold': self.vad_threshold,
                 'vad_min_speech_duration_ms': self.vad_min_speech_duration_ms,
                 'vad_min_silence_duration_ms': self.vad_min_silence_duration_ms,
+                'transcript_max_lines': self.transcript_max_lines,
+                'translation_max_lines': self.translation_max_lines,
+                'translation_engine': self.translation_engine,
+                'ollama_model': self.ollama_model,
+                'ollama_host': self.ollama_host,
             }
             try:
                 with open(file_path, 'w', encoding='utf-8') as f:
@@ -2744,6 +2774,21 @@ class AdvancedSettings:
         if not hasattr(self, 'chunk_duration'):
             self.chunk_duration = self.config.CHUNK_DURATION
             repairs_made.append(f'Added chunk_duration from config: {self.chunk_duration}s')
+        if not hasattr(self, 'transcript_max_lines'):
+            self.transcript_max_lines = 400
+            repairs_made.append('Added transcript_max_lines with default 400')
+        if not hasattr(self, 'translation_max_lines'):
+            self.translation_max_lines = 300
+            repairs_made.append('Added translation_max_lines with default 300')
+        if not hasattr(self, 'translation_engine'):
+            self.translation_engine = 'google'
+            repairs_made.append('Added translation_engine with default google')
+        if not hasattr(self, 'ollama_model'):
+            self.ollama_model = 'llama3'
+            repairs_made.append('Added ollama_model with default llama3')
+        if not hasattr(self, 'ollama_host'):
+            self.ollama_host = 'http://localhost:11434'
+            repairs_made.append('Added ollama_host with default http://localhost:11434')
         if not self.config.validate_config():
             logger.warning("⚠️ Config validation failed, resetting to default")
             self.config = ExcellenceConfig()
@@ -2768,6 +2813,14 @@ class AdvancedSettings:
         if not (self.config.MIN_CHUNK_DURATION <= self.config.CHUNK_DURATION <= self.config.MAX_CHUNK_DURATION):
             issues.append(f"Invalid CHUNK_DURATION: {self.config.CHUNK_DURATION}s "
                           f"(should be {self.config.MIN_CHUNK_DURATION}-{self.config.MAX_CHUNK_DURATION}s)")
+        if self.transcript_max_lines < 100 or self.transcript_max_lines > 5000:
+            issues.append(f"Invalid transcript_max_lines: {self.transcript_max_lines} (should be 100-5000)")
+        if self.translation_max_lines < 100 or self.translation_max_lines > 5000:
+            issues.append(f"Invalid translation_max_lines: {self.translation_max_lines} (should be 100-5000)")
+        if self.translation_engine not in ("google", "ollama"):
+            issues.append(f"Invalid translation_engine: {self.translation_engine} (must be 'google' or 'ollama')")
+        if self.translation_engine == "ollama" and not OLLAMA_AVAILABLE:
+            issues.append("Ollama engine selected but 'requests' module is missing (Ollama not available)")
         return issues
 
     def set_config_type(self, config_type: str) -> bool:
@@ -2830,6 +2883,14 @@ class AdvancedSettings:
         logger.info(f"  • Sentiment Analysis: {self.enable_sentiment_analysis}")
         logger.info(f"  • Speaker Diarization: {self.enable_speaker_diarization}")
         logger.info(f"  • Optimize Translations: {self.optimize_translations}")
+        logger.info("\n🖥️ GUI Display:")
+        logger.info(f"  • Transcript Max Lines: {self.transcript_max_lines}")
+        logger.info(f"  • Translation Max Lines: {self.translation_max_lines}")
+        logger.info("\n🌐 Translation Engine:")
+        logger.info(f"  • Engine: {self.translation_engine}")
+        if self.translation_engine == "ollama":
+            logger.info(f"  • Ollama Model: {self.ollama_model}")
+            logger.info(f"  • Ollama Host: {self.ollama_host}")
         config_type = 'default'
         if isinstance(self.config, RealtimeConfig):
             config_type = 'realtime'
@@ -2858,7 +2919,10 @@ class AdvancedSettings:
         return (f"AdvancedSettings(type={config_type}, "
                 f"beam_size={self.beam_size}, "
                 f"chunk={self.config.CHUNK_DURATION}s/{self.config.CHUNK_SIZE_BYTES:,}B, "
-                f"gpu={self.gpu_acceleration})")
+                f"gpu={self.gpu_acceleration}, "
+                f"transcript_lines={self.transcript_max_lines}, "
+                f"translation_lines={self.translation_max_lines}, "
+                f"trans_engine={self.translation_engine})")
 
 
 # -----------------------------------------------------------------------------
@@ -2939,10 +3003,30 @@ class PluginManager:
         return result
 
 
+# =============================================================================
+# 4. ABSTRAKTE BASISKLASSE FÜR ÜBERSETZUNGS-ENGINES
+# =============================================================================
+from abc import ABC, abstractmethod
+
+class BaseTranslationEngine(ABC):
+    """Abstrakte Basisklasse für alle Übersetzungs-Engines."""
+    @abstractmethod
+    def set_target_language(self, target_lang: str) -> None:
+        pass
+
+    @abstractmethod
+    def translate_text(self, text: str, source_lang: str = "auto") -> Optional[ExcellenceTranslationResult]:
+        pass
+
+    @abstractmethod
+    def dispose(self) -> None:
+        pass
+
+
 # -----------------------------------------------------------------------------
-# TRANSLATION ENGINE (überarbeitet mit Thread-Sicherheit und Fehlerbehandlung)
+# TRANSLATION ENGINE (Google) – erbt nun von BaseTranslationEngine
 # -----------------------------------------------------------------------------
-class ExcellenceTranslationEngine:
+class ExcellenceTranslationEngine(BaseTranslationEngine):
     def __init__(self, target_lang: str = "de",
                  advanced_settings: Optional[AdvancedSettings] = None) -> None:
         self.target_lang = target_lang
@@ -3139,7 +3223,116 @@ class ExcellenceTranslationEngine:
 
 
 # -----------------------------------------------------------------------------
-# DUMMY ENGINES (unverändert)
+# OLLAMA TRANSLATION ENGINE (neu)
+# -----------------------------------------------------------------------------
+class OllamaTranslationEngine(BaseTranslationEngine):
+    def __init__(self, target_lang: str = "de",
+                 advanced_settings: Optional[AdvancedSettings] = None,
+                 model: str = "llama3",
+                 host: str = "http://localhost:11434") -> None:
+        self.target_lang = target_lang
+        self.model = model
+        self.host = host.rstrip('/')
+        self.advanced_settings = advanced_settings or AdvancedSettings()
+        self._cache = ExcellenceTTLCache(maxsize=Constants.TRANSLATION_CACHE_SIZE, ttl=Constants.TRANSLATION_CACHE_TTL)
+        self._lock = threading.RLock()
+        self._last_translations: Deque[str] = deque(maxlen=15)   # Kurzzeit-Duplikatserkennung
+        self.last_detected_language = "auto"
+        self.available = OLLAMA_AVAILABLE
+
+    def set_target_language(self, target_lang: str) -> None:
+        if target_lang != self.target_lang:
+            self.target_lang = target_lang
+            with self._lock:
+                self._cache.clear()
+                self._last_translations.clear()
+
+    def _call_ollama(self, prompt: str) -> Optional[str]:
+        if not self.available:
+            logger.error("Ollama nicht verfügbar (requests nicht installiert)")
+            return None
+        try:
+            import requests
+            payload = {
+                "model": self.model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.1
+                }
+            }
+            response = requests.post(f"{self.host}/api/generate", json=payload, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("response", "").strip()
+            else:
+                logger.warning(f"Ollama Fehler {response.status_code}: {response.text}")
+                return None
+        except requests.exceptions.Timeout:
+            logger.warning("Ollama Timeout")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.warning("Ollama nicht erreichbar (läuft der Server?)")
+            return None
+        except Exception as e:
+            logger.warning(f"Ollama Fehler: {e}")
+            return None
+
+    def translate_text(self, text: str, source_lang: str = "auto") -> Optional[ExcellenceTranslationResult]:
+        if source_lang != "auto" and source_lang == self.target_lang:
+            return None
+        if not text or not self.available:
+            return None
+        try:
+            original_text = text.strip()
+            if len(original_text) < 2:
+                return None
+
+            text_hash = hashlib.md5(f"{source_lang}_{self.target_lang}_{original_text}".encode()).hexdigest()[:16]
+            cache_key = f"ollama_trans_{text_hash}"
+
+            # Kurzzeit-Duplikatserkennung
+            with self._lock:
+                if text_hash in self._last_translations:
+                    return None
+                cached_result = self._cache.get(cache_key)
+                if cached_result is not None:
+                    return cached_result
+
+            source_lang_name = "auto"
+            if source_lang != "auto":
+                source_lang_name = SUPPORTED_LANGUAGES.get(source_lang, source_lang)
+            target_lang_name = SUPPORTED_LANGUAGES.get(self.target_lang, self.target_lang)
+
+            prompt = f"Translate the following text from {source_lang_name} to {target_lang_name}. Output only the translation:\n\n{original_text}"
+
+            translated_text = self._call_ollama(prompt)
+            if not translated_text:
+                return None
+
+            result = ExcellenceTranslationResult(
+                original=original_text,
+                translated=translated_text,
+                source_lang=source_lang,
+                target_lang=self.target_lang,
+            )
+            with self._lock:
+                self._cache.put(cache_key, result)
+                self._last_translations.append(text_hash)
+            return result
+        except Exception as e:
+            logger.warning(f"Ollama translate error: {e}")
+            return None
+
+    def dispose(self) -> None:
+        with self._lock:
+            self._cache.clear()
+            self._last_translations.clear()
+            gc.collect()
+
+
+# -----------------------------------------------------------------------------
+# DUMMY ENGINES (unverändert, aber jetzt auch von BaseTranslationEngine erbend?)
 # -----------------------------------------------------------------------------
 class DummyTranscriptionEngine:
     def __init__(self, advanced_settings: Optional[AdvancedSettings] = None):
@@ -3188,7 +3381,8 @@ class DummyTranscriptionEngine:
     def dispose(self) -> None:
         pass
 
-class DummyTranslationEngine:
+
+class DummyTranslationEngine(BaseTranslationEngine):
     def __init__(self, target_lang: str = "de",
                  advanced_settings: Optional[AdvancedSettings] = None):
         self.target_lang = target_lang
@@ -3209,6 +3403,7 @@ class DummyTranslationEngine:
 
     def dispose(self) -> None:
         pass
+
 
 # -----------------------------------------------------------------------------
 # HILFSKLASSEN FÜR TRANSCRIPTION (unverändert)
@@ -3241,7 +3436,7 @@ class _EmergencySegment:
 
 
 # -----------------------------------------------------------------------------
-# TRANSCRIPTION ENGINE (überarbeitet mit Thread-Sicherheit und Fehlerbehandlung)
+# TRANSCRIPTION ENGINE (überarbeitet mit forced_language)
 # -----------------------------------------------------------------------------
 class ExcellenceTranscriptionEngine:
     def __init__(self, advanced_settings: Optional[AdvancedSettings] = None) -> None:
@@ -3260,6 +3455,7 @@ class ExcellenceTranscriptionEngine:
         self._model_loaded_flag = False
         self._disposing = False
         self._model_cache: Dict[Tuple[str, str], Any] = {}
+        self.forced_language: Optional[str] = None  # neu
 
     def _detect_optimal_device(self) -> Tuple[str, str]:
         device = "cpu"
@@ -3554,7 +3750,7 @@ class ExcellenceTranscriptionEngine:
                     logger.exception("Stacktrace:")
                 try:
                     logger.info("🔄 Emergency fallback with minimal parameters...")
-                    minimal_result = self.model.transcribe(audio_np, language=None, task="transcribe", temperature=0.0)
+                    minimal_result = self.model.transcribe(audio_np, language=None, task="transcribe", temperature=0.1)
                     emergency_segments = []
                     for seg in minimal_result.get("segments", []):
                         emergency_segments.append(_EmergencySegment(seg))
@@ -3727,9 +3923,12 @@ class ExcellenceTranscriptionEngine:
                     "min_silence_duration_ms": self.advanced_settings.vad_min_silence_duration_ms,
                 }
 
+            # Sprache: entweder erzwungen oder None
+            language_param = self.forced_language if self.forced_language else None
+
             segments, info = self._universal_transcribe(
                 audio_np,
-                language=None,
+                language=language_param,  # geändert
                 task="transcribe",
                 temperature=self.advanced_settings.temperature,
                 best_of=5,
@@ -3749,7 +3948,7 @@ class ExcellenceTranscriptionEngine:
                 logger.debug("🔄 No segments with thresholds, trying without...")
                 segments, info = self._universal_transcribe(
                     audio_np,
-                    language=None,
+                    language=language_param,  # geändert
                     task="transcribe",
                     temperature=0.0,
                     best_of=5,
@@ -3766,6 +3965,7 @@ class ExcellenceTranscriptionEngine:
                     segment.confidence = enhanced_confidence
                     valid_segments.append(segment)
                     total_confidence += enhanced_confidence
+                    logger.debug(f"🎤 TRANSKRIPTION-RAW [{segment.start:.2f} - {segment.end:.2f}] {text} (conf={enhanced_confidence:.2f})")
             if include_timestamps:
                 results = [
                     ExcellenceTranscriptionResult(
@@ -3869,8 +4069,6 @@ class ExcellenceTranscriptionEngine:
     def get_current_model(self) -> str:
         return self.model_size if self.model_size else "None"
 
-    # is_model_loading ist bereits oben definiert (Zeile ~3408) – hier keine zweite Definition!
-
     def test_model_functionality(self) -> bool:
         if not self.model:
             if DEBUG_LEVEL >= 2:
@@ -3919,9 +4117,11 @@ class ExcellenceTranscriptionEngine:
         gc.collect()
         logger.info("✅ Transcription Engine disposed")
 
+
 # -----------------------------------------------------------------------------
 # STREAM MANAGER (überarbeitet mit Sicherheitsvalidierung der URLs)
 # -----------------------------------------------------------------------------
+
 class StreamManager:
     def __init__(self, enable_debug: bool = False, use_browser_cookies: bool = True) -> None:
         self._platform_cache: OrderedDict[str, Tuple[str, str]] = OrderedDict()
@@ -3929,6 +4129,7 @@ class StreamManager:
         self._live_status_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
         self._stream_info_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
         self._debug = enable_debug
+        self.use_browser_cookies = use_browser_cookies
         self._last_error: Optional[str] = None
         self._last_method: Optional[str] = None
         self._stats = {
@@ -3981,6 +4182,39 @@ class StreamManager:
             if match:
                 return match.group(1)
         return None
+
+    def _run_yt_dlp_command(self, cmd: List[str], timeout: int = 15, method_name: str = "unknown") -> Optional[str]:
+        """
+        Führt einen yt-dlp-Befehl aus, behandelt Fehler und gibt die stdout bei Erfolg zurück.
+        """
+        try:
+            if self._debug:
+                logger.debug(f"  ▶️ Ausführen: {' '.join(cmd)}")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                shell=False,
+                encoding='utf-8',
+                errors='ignore'
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+            else:
+                if result.stderr:
+                    err = result.stderr.strip()
+                    if self._debug:
+                        logger.debug(f"  ⚠️ {method_name} fehlgeschlagen: {err[:100]}")
+                return None
+        except subprocess.TimeoutExpired:
+            if self._debug:
+                logger.debug(f"  ⏰ Timeout bei {method_name} nach {timeout}s")
+            return None
+        except Exception as e:
+            if self._debug:
+                logger.debug(f"  ⚠️ Fehler bei {method_name}: {str(e)[:50]}")
+            return None
 
     def detect_platform(self, url: str) -> Tuple[str, str]:
         if not url:
@@ -4166,9 +4400,8 @@ class StreamManager:
                             '--no-warnings',
                             '--no-check-certificate',
                             '--socket-timeout', '15',
-                            cleaned_url
+                            '--', cleaned_url   # <-- OPTIMIERT: -- vor der URL
                         ]
-                        # URL wird als separates Argument übergeben, keine Shell-Injection möglich
                         process_result = subprocess.run(
                             cmd,
                             capture_output=True,
@@ -4262,7 +4495,7 @@ class StreamManager:
                         '--no-warnings',
                         '--no-check-certificate',
                         '--socket-timeout', '15',
-                        url
+                        '--', url   # <-- OPTIMIERT
                     ]
                     result = subprocess.run(
                         cmd,
@@ -4309,7 +4542,7 @@ class StreamManager:
                     '--user-agent', self._user_agents['desktop'],
                     '--referer', 'https://www.youtube.com/',
                     '--socket-timeout', '15',
-                    url
+                    '--', url   # <-- OPTIMIERT
                 ],
                 'timeout': 20
             },
@@ -4324,7 +4557,7 @@ class StreamManager:
                     '--user-agent', self._user_agents['mobile'],
                     '--referer', 'https://m.youtube.com/',
                     '--socket-timeout', '15',
-                    url
+                    '--', url   # <-- OPTIMIERT
                 ],
                 'timeout': 20
             },
@@ -4337,7 +4570,7 @@ class StreamManager:
                     '--no-warnings',
                     '--no-check-certificate',
                     '--socket-timeout', '15',
-                    url
+                    '--', url   # <-- OPTIMIERT
                 ],
                 'timeout': 20
             },
@@ -4391,7 +4624,7 @@ class StreamManager:
                 '--no-check-certificate',
                 '--user-agent', self._user_agents['desktop'],
                 '--socket-timeout', '20',
-                url
+                '--', url   # <-- OPTIMIERT
             ]
             result = subprocess.run(
                 cmd,
@@ -4440,7 +4673,7 @@ class StreamManager:
 
     def _json_extraction_fallback(self, url: str) -> Optional[str]:
         try:
-            cmd = ['yt-dlp', '--dump-json', '--no-warnings', '--no-check-certificate', url]
+            cmd = ['yt-dlp', '--dump-json', '--no-warnings', '--no-check-certificate', '--', url]   # <-- OPTIMIERT
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -4732,10 +4965,6 @@ class StreamManager:
         if self._debug or DEBUG_LEVEL >= 2:
             logger.debug("🔌 [DEBUG] StreamManager disposed")
 
-
-# -----------------------------------------------------------------------------
-# FFMPEG MANAGER (überarbeitet mit Thread-Sicherheit und Ressourcenmanagement)
-# -----------------------------------------------------------------------------
 class ExcellenceFFmpegManager:
     def __init__(self, config: Optional[ExcellenceConfig] = None,
                  stream_manager: Optional[StreamManager] = None) -> None:
@@ -4770,7 +4999,7 @@ class ExcellenceFFmpegManager:
             logger.info("✅ FFmpegManager: StreamManager linked")
         return self
 
-    def _build_ffmpeg_command_optimized(self, url: str) -> List[str]:
+    def _build_ffmpeg_command_optimized(self, url: str, seek_seconds: Optional[float] = None) -> List[str]:  # <-- GEÄNDERT: seek_seconds-Parameter
         is_live, platform = self._detect_stream_type(url)
         stream_type = "LIVE" if is_live else "VIDEO"
         logger.info(f"\n🎬 Building FFmpeg command for {platform} ({stream_type})")
@@ -4779,7 +5008,6 @@ class ExcellenceFFmpegManager:
 
         if 'youtube.com' in url.lower() or 'youtu.be' in url.lower():
             logger.info("  🎯 Adding YouTube-specific headers")
-            # Header aus der Konfiguration holen (YOUTUBE_HEADERS)
             headers_dict = self.config.get_youtube_headers(is_manifest='manifest.googlevideo.com' in url)
             headers_list = [f"{k}: {v}" for k, v in headers_dict.items()]
             headers_string = '\r\n'.join(headers_list)
@@ -4798,14 +5026,24 @@ class ExcellenceFFmpegManager:
                 '-seekable', '0',
                 '-fflags', '+discardcorrupt+fastseek+genpts',
             ])
+            # Bei Live-Streams ignorieren wir seek_seconds, da es nicht sinnvoll ist
+            if seek_seconds is not None:
+                logger.warning(f"⚠️ seek_seconds={seek_seconds} wird bei Live-Stream ignoriert")
         else:
             logger.info("  🎬 VIDEO: Fast access for non-live content")
             cmd.extend([
                 '-rw_timeout', '10000000',
                 '-accurate_seek',
-                '-ss', '0',
                 '-fflags', '+genpts+discardcorrupt+fastseek',
             ])
+            # Suchpunkt einfügen, falls gewünscht
+            if seek_seconds is not None and seek_seconds > 0:
+                logger.info(f"  ⏩ Seeking to {seek_seconds}s")
+                cmd.extend(['-ss', str(seek_seconds)])
+            else:
+                # Bisher wurde hier fest -ss 0 gesetzt – das ist überflüssig, wir lassen es weg
+                # cmd.extend(['-ss', '0'])  # <-- ENTFERNT
+                pass
 
         cmd.extend(['-i', url])
         cmd.extend([
@@ -4825,19 +5063,28 @@ class ExcellenceFFmpegManager:
         return cmd
 
     def start_stream(self, video_url: str, output_queue: Optional[queue.Queue],
-                     process_id: str, force_refresh_audio_url: bool = False) -> Optional[subprocess.Popen]:
+                     process_id: str, force_refresh_audio_url: bool = False,
+                     audio_url: Optional[str] = None,
+                     seek_seconds: Optional[float] = None) -> Optional[subprocess.Popen]:  # <-- NEU: seek_seconds-Parameter
         logger.info(f"\n🎬 FFmpegManager: Starting stream for: {video_url[:80]}...")
         with self._lock:
             if self.is_active(process_id):
                 logger.warning(f"⚠️ Stream {process_id} already active")
                 return None
-        logger.info("🎵 Resolving audio URL...")
-        audio_url = self.stream_manager.extract_audio_url(video_url, force_refresh=force_refresh_audio_url)
-        if not audio_url:
-            logger.error("❌ Audio URL resolution failed")
-            return None
-        logger.info(f"✅ Resolved URL: {audio_url[:100]}...")
-        cmd = self._build_ffmpeg_command_optimized(audio_url)
+
+        # Nur extrahieren, wenn keine Audio-URL mitgegeben wurde
+        if audio_url is None:
+            logger.info("🎵 Resolving audio URL...")
+            audio_url = self.stream_manager.extract_audio_url(video_url, force_refresh=force_refresh_audio_url)
+            if not audio_url:
+                logger.error("❌ Audio URL resolution failed")
+                return None
+            logger.info(f"✅ Resolved URL: {audio_url[:100]}...")
+        else:
+            logger.info(f"✅ Using pre-resolved audio URL: {audio_url[:100]}...")
+
+        # FFmpeg-Befehl mit optionalem seek_seconds erstellen
+        cmd = self._build_ffmpeg_command_optimized(audio_url, seek_seconds=seek_seconds)  # <-- GEÄNDERT: seek_seconds übergeben
         try:
             process_kwargs = {
                 'stdout': subprocess.PIPE,
@@ -4890,11 +5137,7 @@ class ExcellenceFFmpegManager:
                          output_queue: Optional[queue.Queue], url: str) -> None:
         with self._lock:
             is_live, platform = self._detect_stream_type(url)
-            headers_used = False
-            try:
-                headers_used = ('-headers' in str(self._build_ffmpeg_command_optimized(url)))
-            except Exception:
-                pass
+            headers_used = 'youtube.com' in url.lower() or 'googlevideo.com' in url.lower()
             self._processes[process_id] = {
                 'process': process,
                 'output_queue': output_queue,
@@ -5197,6 +5440,7 @@ class StreamInfo:
     view_count: int
     platform: str
     description: str = ""
+    duration_seconds: Optional[float] = None  # neu
 
 
 class StreamInfoExtractor:
@@ -5242,7 +5486,7 @@ class StreamInfoExtractor:
                 return info
 
         try:
-            cmd = ['yt-dlp', '--dump-json', '--no-warnings', '--no-check-certificate', url]
+            cmd = ['yt-dlp', '--dump-json', '--no-warnings', '--no-check-certificate', '--', url]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, shell=False)
             if result.returncode == 0:
                 info = json.loads(result.stdout)
@@ -5272,7 +5516,8 @@ class StreamInfoExtractor:
                     duration=info.get('duration_string', 'Live'),
                     view_count=info.get('view_count', 0),
                     platform=platform,
-                    description=info.get('description', '')
+                    description=info.get('description', ''),
+                    duration_seconds=info.get('duration'),  # neu: numerische Dauer
                 )
                 return self.current_info
         except Exception as e:
@@ -5352,7 +5597,7 @@ class StreamInfoExtractor:
                 for browser_cmd, browser_name in browsers:
                     methods.append(([
                         'yt-dlp', '--cookies-from-browser', browser_cmd, '--dump-json',
-                        '--no-warnings', '--no-check-certificate', '--playlist-items', '1', url
+                        '--no-warnings', '--no-check-certificate', '--playlist-items', '1', '--', url
                     ], f"{browser_name} Cookies"))
             elif IS_WINDOWS:
                 browsers = [
@@ -5365,7 +5610,7 @@ class StreamInfoExtractor:
                 for browser_cmd, browser_name in browsers:
                     methods.append(([
                         'yt-dlp', '--cookies-from-browser', browser_cmd, '--dump-json',
-                        '--no-warnings', '--no-check-certificate', '--playlist-items', '1', url
+                        '--no-warnings', '--no-check-certificate', '--playlist-items', '1', '--', url
                     ], f"{browser_name} Cookies"))
             else:  # macOS
                 browsers = [
@@ -5378,7 +5623,7 @@ class StreamInfoExtractor:
                 for browser_cmd, browser_name in browsers:
                     methods.append(([
                         'yt-dlp', '--cookies-from-browser', browser_cmd, '--dump-json',
-                        '--no-warnings', '--no-check-certificate', '--playlist-items', '1', url
+                        '--no-warnings', '--no-check-certificate', '--playlist-items', '1', '--', url
                     ], f"{browser_name} Cookies"))
         else:
             if self._debug:
@@ -5386,13 +5631,13 @@ class StreamInfoExtractor:
 
         fallback_methods = [
             (['yt-dlp', '--dump-json', '--no-warnings', '--no-check-certificate',
-              '--playlist-items', '1', '--quiet', url],
+              '--playlist-items', '1', '--quiet', '--', url],
              "No Cookies (Quiet)"),
             (['yt-dlp', '--dump-json', '--no-warnings', '--no-check-certificate',
-              '--playlist-items', '1', url],
+              '--playlist-items', '1', '--', url],
              "Simple JSON"),
             (['yt-dlp', '--get-title', '--get-description', '--get-duration',
-              '--no-warnings', '--no-check-certificate', '--quiet', url],
+              '--no-warnings', '--no-check-certificate', '--quiet', '--', url],
              "Direct Info"),
         ]
         methods.extend(fallback_methods)
@@ -5450,7 +5695,8 @@ class StreamInfoExtractor:
                                 duration=info.get('duration_string', 'Live'),
                                 view_count=info.get('view_count', 0),
                                 platform="youtube",
-                                description=info.get('description', '')[:200] + '...' if len(info.get('description', '')) > 200 else info.get('description', '')
+                                description=info.get('description', '')[:200] + '...' if len(info.get('description', '')) > 200 else info.get('description', ''),
+                                duration_seconds=info.get('duration'),  # neu
                             )
                             logger.info(f"      ✅ Success with {method_name}")
                             logger.info(f"        Title: {self.current_info.title[:60]}...")
@@ -5491,9 +5737,9 @@ class StreamInfoExtractor:
         logger.info("    🔄 Ultimate fallback: Direct title extraction...")
         try:
             cmd_title = ['yt-dlp', '--get-title', '--no-warnings',
-                         '--no-check-certificate', '--quiet', url]
+                         '--no-check-certificate', '--quiet', '--', url]
             cmd_uploader = ['yt-dlp', '--get-filename', '-o', '%(uploader)s',
-                           '--no-warnings', '--no-check-certificate', '--quiet', url]
+                           '--no-warnings', '--no-check-certificate', '--quiet', '--', url]
             with ThreadPoolExecutor(max_workers=2) as executor:
                 title_future = executor.submit(
                     subprocess.run, cmd_title,
@@ -5703,9 +5949,8 @@ class ProgressDialog:
         except Exception:
             pass
 
-
 # -----------------------------------------------------------------------------
-# AUDIO PROCESSOR (überarbeitet mit Thread-Sicherheit und Fehlerbehandlung)
+# AUDIO PROCESSOR
 # -----------------------------------------------------------------------------
 class ExcellenceAudioProcessor:
     def __init__(self, controller_ref: Any, ffmpeg_manager: ExcellenceFFmpegManager,
@@ -5721,7 +5966,7 @@ class ExcellenceAudioProcessor:
         self.chunk_size = self.config.CHUNK_SIZE_BYTES
         self.overlap_size = self.config.OVERLAP_SIZE_BYTES
         self.transcription_engine: Optional[ExcellenceTranscriptionEngine] = None
-        self.translation_engine: Optional[ExcellenceTranslationEngine] = None
+        self.translation_engine: Optional[BaseTranslationEngine] = None
         self.plugin_manager: Optional[PluginManager] = None
         self._stop_event = threading.Event()
         self._processing = False
@@ -5738,11 +5983,12 @@ class ExcellenceAudioProcessor:
         self._subtitle_lock = threading.RLock()
         self.subtitle_mode = False
         self._recent_transcriptions: Deque[str] = deque(maxlen=self.config.RECENT_TRANSCRIPTIONS_SIZE)
-        self._duplicate_lock = threading.RLock()  # neu
+        self._duplicate_lock = threading.RLock()
         self._chunk_counter = 0
         self._empty_reads = 0
         self._stream_start_time: Optional[float] = None
         self._total_bytes_processed = 0
+        self._processed_seconds = 0.0
         self._network_quality_history: Deque[float] = deque(maxlen=20)
         self._performance_history: Deque[float] = deque(maxlen=50)
         self._chunk_processing_times: Deque[float] = deque(maxlen=10)
@@ -5767,12 +6013,19 @@ class ExcellenceAudioProcessor:
         self._last_progress_update = 0.0
         self._progress_update_interval = 0.5
 
+        self._expected_duration: Optional[float] = None
+
         logger.info("✅ AudioProcessor initialized:")
         logger.info(f"   Config Type: {self._get_config_type()}")
         logger.info(f"   Chunk: {self.chunk_duration}s / {self.chunk_size:,} bytes")
         logger.info(f"   Sample Rate: {self.sample_rate} Hz")
         logger.info(f"   Overlap: {self.overlap_size:,} bytes")
         logger.info(f"   Bytes/sec: {self.config.BYTES_PER_SECOND:,}")
+
+    def set_expected_duration(self, duration: Optional[float]) -> None:
+        self._expected_duration = duration
+        if duration is not None:
+            logger.info(f"⏱️ Expected stream duration set: {duration:.1f}s")
 
     def _get_config_type(self) -> str:
         if isinstance(self.config, RealtimeConfig):
@@ -5794,7 +6047,6 @@ class ExcellenceAudioProcessor:
         logger.info(f"   Config Type: {self._get_config_type()}")
         logger.info(f"   Chunk Size: {self.chunk_size:,} bytes")
 
-        # URL validieren
         url = PlatformUtils.sanitize_url(url)
 
         if url.startswith('file://'):
@@ -5830,6 +6082,7 @@ class ExcellenceAudioProcessor:
             self._stream_start_time = time.time()
             self._chunk_counter = 0
             self._total_bytes_processed = 0
+            self._processed_seconds = 0.0
             self._read_error_count = 0
             self._audio_buffer = bytearray()
             self._finished_callback = finished_callback
@@ -5880,7 +6133,8 @@ class ExcellenceAudioProcessor:
                 process = self.ffmpeg_manager.start_stream(
                     video_url=url,
                     output_queue=None,
-                    process_id=self._current_stream_id
+                    process_id=self._current_stream_id,
+                    audio_url=audio_url
                 )
                 if process is None:
                     error_callback("❌ FFmpeg konnte nicht gestartet werden")
@@ -6007,6 +6261,11 @@ class ExcellenceAudioProcessor:
                 consecutive_timeouts = 0
                 backoff = 1.0
 
+            # Toleranz von 1 Sekunde für das Ende
+            if self._expected_duration is not None and self._processed_seconds >= self._expected_duration - 1.0:
+                logger.info(f"⏱️ Expected duration reached ({self._processed_seconds:.1f}s >= {self._expected_duration:.1f}s - 1s), stopping.")
+                break
+
             if self._chunk_counter > 0 and self._chunk_counter % 100 == 0:
                 info_callback(f"📊 {self._chunk_counter} chunks processed...")
             if (self.config.LOG_PERFORMANCE and
@@ -6049,6 +6308,7 @@ class ExcellenceAudioProcessor:
                 self._empty_reads = 0
                 self._chunk_counter += 1
                 self._total_bytes_processed += len(audio_data)
+                self._processed_seconds = self._total_bytes_processed / self.config.BYTES_PER_SECOND
                 if self._chunk_counter <= 3:
                     logger.debug(f"📦 Chunk #{self._chunk_counter}: {len(audio_data)} bytes")
 
@@ -6105,7 +6365,8 @@ class ExcellenceAudioProcessor:
                         video_url=original_video_url,
                         output_queue=None,
                         process_id=self._current_stream_id,
-                        force_refresh_audio_url=True
+                        force_refresh_audio_url=True,
+                        seek_seconds=self._processed_seconds
                     )
                     if process is None:
                         logger.error("❌ Could not restart FFmpeg")
@@ -6139,7 +6400,6 @@ class ExcellenceAudioProcessor:
         refresh_count = 0
         max_refresh_attempts = 3
         current_process = process
-        #current_audio_url = audio_url
 
         while self._processing and not self._stop_event.is_set():
             current_time = time.time()
@@ -6152,12 +6412,21 @@ class ExcellenceAudioProcessor:
                     logger.warning("⚠️ YouTube initial timeout")
                     return False
 
+            # Toleranz von 1 Sekunde für das Ende
+            if self._expected_duration is not None and self._processed_seconds >= self._expected_duration - 1.0:
+                logger.info(f"⏱️ Expected duration reached ({self._processed_seconds:.1f}s >= {self._expected_duration:.1f}s - 1s), stopping.")
+                return True
+
             try:
                 audio_data = self._read_with_timeout(current_process, self.chunk_size, timeout=1.0)
             except (IOError, OSError) as e:
                 logger.warning(f"⚠️ Session read error: {e}")
                 if current_process.poll() is not None:
                     stderr = self._read_stderr(current_process)
+                    # Auch hier Toleranz prüfen
+                    if self._expected_duration is not None and self._processed_seconds >= self._expected_duration - 1.0:
+                        logger.info("⏱️ Expected duration reached, normal end.")
+                        return True
                     if self._needs_url_refresh(stderr):
                         logger.info(f"🔄 Detected URL refresh needed: {stderr[:200]}")
                         new_url = self._refresh_youtube_url(original_video_url)
@@ -6184,6 +6453,10 @@ class ExcellenceAudioProcessor:
             if audio_data is None:
                 if current_process.poll() is not None:
                     stderr = self._read_stderr(current_process)
+                    # Toleranz prüfen
+                    if self._expected_duration is not None and self._processed_seconds >= self._expected_duration - 1.0:
+                        logger.info("⏱️ Expected duration reached, normal end.")
+                        return True
                     if self._needs_url_refresh(stderr):
                         logger.info(f"🔄 Detected URL refresh needed: {stderr[:200]}")
                         new_url = self._refresh_youtube_url(original_video_url)
@@ -6195,7 +6468,6 @@ class ExcellenceAudioProcessor:
                                     logger.error("❌ Failed to restart FFmpeg, aborting session.")
                                     return False
                                 current_process = new_proc
-                                #current_audio_url = new_url
                                 refresh_count = 0
                                 last_successful_chunk_time = time.time()
                                 continue
@@ -6226,6 +6498,7 @@ class ExcellenceAudioProcessor:
                 self._empty_reads = 0
                 self._chunk_counter += 1
                 self._total_bytes_processed += len(audio_data)
+                self._processed_seconds = self._total_bytes_processed / self.config.BYTES_PER_SECOND
                 if self._chunk_counter <= 3:
                     logger.debug(f"📦 YouTube Chunk #{self._chunk_counter}: {len(audio_data)} bytes")
 
@@ -6330,11 +6603,16 @@ class ExcellenceAudioProcessor:
         if self.ffmpeg_manager:
             self.ffmpeg_manager.stop_stream(process_id)
             time.sleep(0.5)
+        seek_seconds = self._processed_seconds
+        if self._expected_duration is not None and seek_seconds > self._expected_duration:
+            seek_seconds = max(0, self._expected_duration - 5)
+            logger.info(f"⏩ Seek adjusted to {seek_seconds:.1f}s (within expected duration)")
         new_process = self.ffmpeg_manager.start_stream(
             video_url=video_url,
             output_queue=None,
             process_id=process_id,
-            force_refresh_audio_url=True
+            force_refresh_audio_url=True,
+            seek_seconds=seek_seconds
         )
         if new_process:
             logger.info(f"✅ Successfully restarted FFmpeg (new PID: {new_process.pid})")
@@ -6410,46 +6688,74 @@ class ExcellenceAudioProcessor:
         if not self.transcription_engine:
             return
         try:
+            with self._resource_lock:
+                bytes_before_chunk = self._total_bytes_processed
+            chunk_start_time = bytes_before_chunk / self.config.BYTES_PER_SECOND
+
             if DEBUG_LEVEL >= 2:
                 start_time = time.perf_counter()
                 audio_len = len(audio_data) / (16000 * 2)
 
-            transcription = self.transcription_engine.safe_transcribe(audio_data)
+            if self.subtitle_mode:
+                segments = self.transcription_engine.transcribe_audio(audio_data, include_timestamps=True)
+                if not segments:
+                    return
+                for segment in segments:
+                    if segment.start is not None:
+                        segment.start += chunk_start_time
+                    if segment.end is not None:
+                        segment.end += chunk_start_time
+                        
+                    logger.info(f"🎤 SEGMENT [{segment.start:.2f} - {segment.end:.2f}] {segment.text.strip()} (Sprache: {getattr(segment, 'language', 'unbekannt')})")
 
-            if transcription and hasattr(transcription, 'confidence'):
-                self.last_confidence = transcription.confidence
+                    if not segment or not segment.text:
+                        continue
+                    clean_text = segment.text.strip()
+                    if (self.config.DUPLICATE_CHECK_ENABLED and
+                        self._is_duplicate_transcription(clean_text)):
+                        continue
+                    self._last_transcription_text = clean_text
+                    if self.config.ENABLE_TIMED_TRANSCRIPTIONS:
+                        self._add_timed_transcription(segment)
+                    transcription_callback(segment)
+                    if (self.translation_engine and self._translation_active and
+                        hasattr(segment, 'language')):
+                        detected_lang = segment.language
+                        self._translate_and_send(clean_text, detected_lang, translation_callback)
             else:
-                self.last_confidence = 0.0
+                transcription = self.transcription_engine.safe_transcribe(audio_data)
+                if transcription and hasattr(transcription, 'confidence'):
+                    self.last_confidence = transcription.confidence
+                else:
+                    self.last_confidence = 0.0
 
-            if DEBUG_LEVEL >= 2 and transcription:
-                elapsed = time.perf_counter() - start_time
-                realtime_factor = elapsed / audio_len if audio_len > 0 else 0
-                logger.debug(f"Chunk {self._chunk_counter}: {audio_len:.2f}s audio, "
-                             f"transcribe {elapsed*1000:.1f}ms ({realtime_factor:.2f}x realtime)")
-                if TORCH_AVAILABLE and self.transcription_engine.whisper_backend == "openai_whisper":
-                    torch = FastLazyLoader.load('torch')
-                    if torch.cuda.is_available():
-                        vram = torch.cuda.memory_allocated() / 1024**3
-                        logger.debug(f"  VRAM: {vram:.2f}GB")
+                if DEBUG_LEVEL >= 2 and transcription:
+                    elapsed = time.perf_counter() - start_time
+                    realtime_factor = elapsed / audio_len if audio_len > 0 else 0
+                    logger.debug(f"Chunk {self._chunk_counter}: {audio_len:.2f}s audio, "
+                                 f"transcribe {elapsed*1000:.1f}ms ({realtime_factor:.2f}x realtime)")
+                    if TORCH_AVAILABLE and self.transcription_engine.whisper_backend == "openai_whisper":
+                        torch = FastLazyLoader.load('torch')
+                        if torch.cuda.is_available():
+                            vram = torch.cuda.memory_allocated() / 1024**3
+                            logger.debug(f"  VRAM: {vram:.2f}GB")
 
-            if not transcription or not transcription.text:
-                return
-            clean_text = transcription.text.strip()
-            if (self.config.DUPLICATE_CHECK_ENABLED and
-                self._is_duplicate_transcription(clean_text)):
-                return
-            self._last_transcription_text = clean_text
-            if self.subtitle_mode and self.config.ENABLE_TIMED_TRANSCRIPTIONS:
-                self._add_timed_transcription(transcription)
-            transcription_callback(transcription)
-            if (self.translation_engine and self._translation_active and
-                hasattr(transcription, 'language')):
-                detected_lang = transcription.language
-                self._translate_and_send(
-                    clean_text,
-                    detected_lang,
-                    translation_callback
-                )
+                if not transcription or not transcription.text:
+                    return
+                clean_text = transcription.text.strip()
+                if (self.config.DUPLICATE_CHECK_ENABLED and
+                    self._is_duplicate_transcription(clean_text)):
+                    return
+                self._last_transcription_text = clean_text
+                transcription_callback(transcription)
+                if (self.translation_engine and self._translation_active and
+                    hasattr(transcription, 'language')):
+                    detected_lang = transcription.language
+                    self._translate_and_send(
+                        clean_text,
+                        detected_lang,
+                        translation_callback
+                    )
         except Exception as e:
             logger.warning(f"⚠️ Audio chunk processing error: {e}")
             if DEBUG_LEVEL >= 2:
@@ -6537,7 +6843,7 @@ class ExcellenceAudioProcessor:
                 self._timed_translations.append(result)
 
     def set_engines(self, transcription_engine: ExcellenceTranscriptionEngine,
-                    translation_engine: ExcellenceTranslationEngine,
+                    translation_engine: BaseTranslationEngine,
                     plugin_manager: Optional[PluginManager] = None) -> None:
         self.transcription_engine = transcription_engine
         self.translation_engine = translation_engine
@@ -6706,9 +7012,6 @@ class ExcellenceAudioProcessor:
             )
         self._audio_buffer.clear()
 
-    def _build_ffmpeg_command_enhanced(self, audio_url: str, detected_lang: Optional[str] = None) -> List[str]:
-        return []
-
     def _test_audio_stream(self, audio_url: str) -> bool:
         logger.info(f"🔍 Testing audio stream: {audio_url[:60]}...")
         is_youtube = 'youtube.com' in audio_url.lower() or 'googlevideo.com' in audio_url
@@ -6785,9 +7088,8 @@ class ExcellenceAudioProcessor:
             return self._process_finished.wait(timeout)
         return True
 
-
 # -----------------------------------------------------------------------------
-# DARK CONTEXT MENUS (unverändert)
+# DARK CONTEXT MENUS
 # -----------------------------------------------------------------------------
 class DarkContextMenu:
     def __init__(self, text_widget: tk.Text) -> None:
@@ -7434,7 +7736,10 @@ class ToolTip:
 
 
 # -----------------------------------------------------------------------------
-# LAYOUT MANAGER (unverändert)
+# LAYOUT MANAGER (überarbeitet, mit konfigurierbaren Limits und Quellsprache)
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# LAYOUT MANAGER (optimiert, mit Button statt Checkbutton für Übersetzung)
 # -----------------------------------------------------------------------------
 class WhisperLayoutManager:
     def __init__(self, gui_ref: Any) -> None:
@@ -7452,7 +7757,7 @@ class WhisperLayoutManager:
                     self.maxsize = maxsize
                     self._items: List[Any] = []
                     self._lock = threading.Lock()
-                    self.Empty = queue.Empty  # neu: echte Empty-Exception
+                    self.Empty = queue.Empty
                 def put(self, item: Any, block: bool = True, timeout: Optional[float] = None) -> None:
                     with self._lock:
                         self._items.append(item)
@@ -7670,6 +7975,30 @@ class WhisperLayoutManager:
 
         center_controls = tk.Frame(control_frame, bg=self.gui_ref.current_theme.BG_PRIMARY)
         center_controls.pack(side="left", padx=15)
+
+        # Quellsprache (Breite leicht reduziert)
+        src_lang_frame = tk.Frame(center_controls, bg=self.gui_ref.current_theme.BG_PRIMARY)
+        src_lang_frame.pack(side="left", padx=5)
+        tk.Label(
+            src_lang_frame,
+            text="From:",
+            bg=self.gui_ref.current_theme.BG_PRIMARY,
+            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            font=DragonFonts.PRIMARY,
+        ).pack(side="left")
+        self.gui_ref.src_lang_var = tk.StringVar(value="Automatisch")
+        self.gui_ref.src_lang_combo = ttk.Combobox(
+            src_lang_frame,
+            textvariable=self.gui_ref.src_lang_var,
+            values=[name for name, code in SORTED_LANGUAGES],
+            width=10,  # vorher 12
+            style="Dark.TCombobox",
+            state="readonly",
+        )
+        self.gui_ref.src_lang_combo.pack(side="left", padx=3)
+        ToolTip(self.gui_ref.src_lang_combo, "Quellsprache (Automatisch = Whisper-Erkennung)")
+
+        # Modell (Breite reduziert)
         model_frame = tk.Frame(center_controls, bg=self.gui_ref.current_theme.BG_PRIMARY)
         model_frame.pack(side="left", padx=5)
         tk.Label(
@@ -7684,7 +8013,7 @@ class WhisperLayoutManager:
             model_frame,
             textvariable=self.gui_ref.model_var,
             values=WHISPER_MODELS,
-            width=10,
+            width=8,  # vorher 10
             style="Dark.TCombobox",
             state="readonly",
         )
@@ -7695,6 +8024,7 @@ class WhisperLayoutManager:
             self.gui_ref.model_combo.config(state="disabled")
             self.gui_ref.model_var.set("dummy (Demo)")
 
+        # Zielsprache (Breite reduziert)
         lang_frame = tk.Frame(center_controls, bg=self.gui_ref.current_theme.BG_PRIMARY)
         lang_frame.pack(side="left", padx=5)
         tk.Label(
@@ -7735,7 +8065,7 @@ class WhisperLayoutManager:
             lang_frame,
             textvariable=self.gui_ref.lang_var,
             values=all_languages,
-            width=14,
+            width=12,  # vorher 14
             style="Dark.TCombobox",
             state="readonly",
         )
@@ -7747,6 +8077,8 @@ class WhisperLayoutManager:
 
         right_controls = tk.Frame(control_frame, bg=self.gui_ref.current_theme.BG_PRIMARY)
         right_controls.pack(side="right")
+
+        # START-Button
         self.gui_ref.start_button = tk.Button(
             right_controls,
             text="🚀 START",
@@ -7760,6 +8092,7 @@ class WhisperLayoutManager:
         self.gui_ref.start_button.pack(side="left", padx=2)
         ToolTip(self.gui_ref.start_button, "Transkription/Übersetzung starten")
 
+        # STOP-Button
         self.gui_ref.stop_button = tk.Button(
             right_controls,
             text="⏹️ STOP",
@@ -7774,22 +8107,21 @@ class WhisperLayoutManager:
         self.gui_ref.stop_button.pack(side="left", padx=2)
         ToolTip(self.gui_ref.stop_button, "Laufende Verarbeitung stoppen")
 
-        self.gui_ref.translate_toggle = tk.BooleanVar(value=True)
-        translate_btn = tk.Checkbutton(
+        # NEU: Übersetzungs-Button (ersetzt Checkbutton)
+        self.gui_ref.translate_btn = tk.Button(
             right_controls,
-            text="Translate",
-            variable=self.gui_ref.translate_toggle,
+            text="🌐 ON" if self.gui_ref.translate_active else "🌐 OFF",
             command=self.gui_ref.toggle_translation,
-            bg=self.gui_ref.current_theme.BG_PRIMARY,
+            bg=self.gui_ref.current_theme.SUCCESS if self.gui_ref.translate_active else self.gui_ref.current_theme.BG_TERTIARY,
             fg=self.gui_ref.current_theme.TEXT_PRIMARY,
-            selectcolor=self.gui_ref.current_theme.BG_TERTIARY,
-            activebackground=self.gui_ref.current_theme.BG_PRIMARY,
-            activeforeground=self.gui_ref.current_theme.TEXT_PRIMARY,
-            font=DragonFonts.PRIMARY,
+            relief="flat",
+            font=("Segoe UI", 9),
+            padx=6,
         )
-        translate_btn.pack(side="left", padx=5)
-        ToolTip(translate_btn, "Übersetzung ein-/ausschalten")
+        self.gui_ref.translate_btn.pack(side="left", padx=2)
+        ToolTip(self.gui_ref.translate_btn, "Übersetzung ein/aus")
 
+        # Untertitel-Button
         self.gui_ref.subtitle_btn = tk.Button(
             right_controls,
             text="🎬",
@@ -7804,6 +8136,7 @@ class WhisperLayoutManager:
         self.gui_ref.subtitle_btn.pack(side="left", padx=5)
         ToolTip(self.gui_ref.subtitle_btn, "Untertitel-Modus (mit Zeitstempeln)")
 
+        # Bindings
         self.gui_ref.model_combo.bind("<<ComboboxSelected>>", self.gui_ref.on_model_change)
 
     def create_text_areas(self) -> Tuple[Optional[scrolledtext.ScrolledText], Optional[scrolledtext.ScrolledText]]:
@@ -8014,14 +8347,18 @@ class WhisperLayoutManager:
         def safe_text_cleanup(event: Optional[tk.Event] = None) -> None:
             try:
                 lines = int(text_widget.index("end-1c").split(".")[0])
-                if lines > 400:
+                if text_widget == self.gui_ref.transcript_text:
+                    max_lines = self.gui_ref.advanced_settings.transcript_max_lines
+                else:
+                    max_lines = self.gui_ref.advanced_settings.translation_max_lines
+                keep_lines = max_lines - 100
+                if lines > max_lines:
                     component = (
                         "transcript"
                         if text_widget == self.gui_ref.transcript_text
                         else "translation"
                     )
                     self.gui_ref.memory_manager.clear_component(component)
-                    keep_lines = 250
                     delete_to = f"{lines - keep_lines}.0"
                     text_widget.delete("1.0", delete_to)
                     gc.collect()
@@ -8243,12 +8580,12 @@ class WhisperLayoutManager:
         try:
             if text_type == 'transcript':
                 widget = self.gui_ref.transcript_text
-                max_lines = 400
-                keep_lines = 300
+                max_lines = self.gui_ref.advanced_settings.transcript_max_lines
+                keep_lines = max_lines - 100
             else:
                 widget = self.gui_ref.translation_text
-                max_lines = 300
-                keep_lines = 200
+                max_lines = self.gui_ref.advanced_settings.translation_max_lines
+                keep_lines = max_lines - 100
             lines = int(widget.index('end-1c').split('.')[0])
             if lines > max_lines:
                 delete_to = f'{lines-keep_lines}.0'
@@ -8324,7 +8661,7 @@ class WhisperLayoutManager:
 
 
 # -----------------------------------------------------------------------------
-# WHISPER CONTROLLER (überarbeitet mit Thread-Sicherheit)
+# WHISPER CONTROLLER (überarbeitet mit Thread-Sicherheit und Quellsprache)
 # -----------------------------------------------------------------------------
 class WhisperController:
     def __init__(self, gui_ref: Any, ui_update_fn: Optional[Callable] = None,
@@ -8385,8 +8722,9 @@ class WhisperController:
         return default_updater
 
     def _processing_finished(self) -> None:
-        self.is_processing = False
-        self.status_update_fn({"processing_state": False, "status": "✅ Processing completed"})
+        with self._processing_lock:
+            self.is_processing = False
+        self.status_update_fn({"processing_state": False, "status": "✅ Processing complete"})
 
     def _append_to_text_widget(self, widget: tk.Text, text: str) -> None:
         try:
@@ -8421,7 +8759,8 @@ class WhisperController:
         if hasattr(self, "_stop_requested") and self._stop_requested:
             return
         self._stop_requested = True
-        self.is_processing = False
+        with self._processing_lock:
+            self.is_processing = False
         try:
             if hasattr(self.gui_ref, "audio_processor"):
                 self.gui_ref.audio_processor._processing = False
@@ -8454,7 +8793,7 @@ class WhisperController:
             self.gui_ref.root.after(0, self.gui_ref.update_progress, processed, total, chunks)
 
     def _start_processing(self) -> None:
-        with self._processing_lock:
+        with self._processing_lock:                       # Lock hinzugefügt
             if self.is_processing:
                 self.status_update_fn({"status": "⚠️ Bereits aktiv"})
                 return
@@ -8515,6 +8854,9 @@ class WhisperController:
                 if stream_info:
                     self.status_update_fn({"stream_info": stream_info})
                     logger.info(f"📡 Stream: {stream_info.title[:50]}...")
+                    # Erwartete Dauer an AudioProcessor übergeben
+                    if hasattr(self.gui_ref, 'audio_processor') and stream_info.duration_seconds is not None:
+                        self.gui_ref.audio_processor.set_expected_duration(stream_info.duration_seconds)
             except Exception as e:
                 logger.warning(f"⚠️ Stream Info Error: {e}")
 
@@ -8557,6 +8899,22 @@ class WhisperController:
             if not model_loaded:
                 self.status_update_fn({"status": "❌ KI-Modell konnte nicht geladen werden"})
                 return
+
+            # Quellsprache setzen
+            try:
+                if hasattr(self.gui_ref, 'src_lang_var'):
+                    src_name = self.gui_ref.src_lang_var.get()
+                    if src_name != "Automatisch":
+                        # Sprachcode ermitteln
+                        for name, code in SORTED_LANGUAGES:
+                            if name == src_name:
+                                self.gui_ref.transcription_engine.forced_language = code
+                                break
+                    else:
+                        self.gui_ref.transcription_engine.forced_language = None
+            except Exception as e:
+                logger.warning(f"⚠️ Quellsprache setzen fehlgeschlagen: {e}")
+                self.gui_ref.transcription_engine.forced_language = None
 
             try:
                 if hasattr(self.gui_ref, "translation_engine") and hasattr(self.gui_ref, "lang_var"):
@@ -8859,21 +9217,43 @@ if IS_LINUX and PSUTIL_AVAILABLE:
                 pass
 
         def _increase_resource_limits(self) -> None:
+            """Erhöht Systemressourcen-Limits für bessere Performance (Linux)."""
             try:
                 import resource
-                soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
-                new_soft = min(hard, 1024 * 1024 * 1024)
-                if new_soft > soft:
-                    resource.setrlimit(resource.RLIMIT_DATA, (new_soft, hard))
-                    logger.info(f"  ↪ Daten-Limit erhöht: {soft} → {new_soft}")
 
-                soft_fd, hard_fd = resource.getrlimit(resource.RLIMIT_NOFILE)
-                new_soft_fd = min(hard_fd, 8192)
-                if new_soft_fd > soft_fd:
-                    resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft_fd, hard_fd))
-                    logger.info(f"  ↪ Dateideskriptoren-Limit erhöht: {soft_fd} → {new_soft_fd}")
+                # Daten-Limit erhöhen
+                try:
+                    soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
+                    # Neues Limit: 1 GB oder das vorhandene Hard-Limit (falls kleiner)
+                    new_soft = min(hard, 1024 * 1024 * 1024)  # 1 GB
+                    if new_soft > soft:
+                        resource.setrlimit(resource.RLIMIT_DATA, (new_soft, hard))
+                        logger.info(f"  ↪ Daten-Limit erhöht: {soft} → {new_soft}")
+                except (resource.error, ValueError) as e:
+                    logger.warning(f"  ⚠️ Daten-Limit konnte nicht erhöht werden: {e}")
+
+                # Dateideskriptoren-Limit erhöhen
+                try:
+                    soft_fd, hard_fd = resource.getrlimit(resource.RLIMIT_NOFILE)
+                    new_soft_fd = min(hard_fd, 8192)  # Maximal 8192 Dateideskriptoren
+                    if new_soft_fd > soft_fd:
+                        resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft_fd, hard_fd))
+                        logger.info(f"  ↪ Dateideskriptoren-Limit erhöht: {soft_fd} → {new_soft_fd}")
+                except (resource.error, ValueError) as e:
+                    logger.warning(f"  ⚠️ Dateideskriptoren-Limit konnte nicht erhöht werden: {e}")
+
+                # CPU-Priorität (nicht essenziell, aber nett)
+                try:
+                    os.nice(-5)  # Priorität leicht erhöhen (benötigt evtl. root)
+                except PermissionError:
+                    pass  # kein Root – ignorieren
+                except Exception as e:
+                    logger.warning(f"  ⚠️ CPU-Priorität konnte nicht angepasst werden: {e}")
+
+            except ImportError:
+                logger.debug("  resource-Modul nicht verfügbar – überspringe Limit-Erhöhung")
             except Exception as e:
-                logger.warning(f"⚠️ Ressourcenlimits konnten nicht erhöht werden: {e}")
+                logger.warning(f"  ⚠️ Unerwarteter Fehler in _increase_resource_limits: {e}")
 
         def _start_performance_monitoring(self) -> None:
             with self._monitoring_lock:
@@ -9218,8 +9598,9 @@ class InstallDependencyDialog:
 
 
 # -----------------------------------------------------------------------------
-# DRAGON WHISPERER GUI (überarbeitet mit Thread-Sicherheit)
+# DRAGON WHISPERER GUI (überarbeitet mit Thread-Sicherheit und Zeitstempel-Korrektur)
 # -----------------------------------------------------------------------------
+
 class DragonWhispererGUI:
     class RateLimiter:
         def __init__(self, max_updates_per_second: int = 30) -> None:
@@ -9255,6 +9636,7 @@ class DragonWhispererGUI:
         self.current_stream_info: Optional[StreamInfo] = None
         self.current_video_language: Optional[str] = None
         self._progress_bar_started = False
+        self.translate_active = True  # ersetzt translate_toggle BooleanVar
 
         if not GUI_AVAILABLE:
             logger.error("❌ Tkinter nicht verfügbar. Versuche Fallback...")
@@ -9279,9 +9661,8 @@ class DragonWhispererGUI:
             self.settings.last_url = ""
             self.advanced_settings = AdvancedSettings()
 
-        # NEW: Cookie-Hinweis anzeigen, wenn noch nicht gezeigt
+        # Cookie-Hinweis anzeigen, wenn noch nicht gezeigt
         if not self.settings.cookies_notice_shown and self.settings.use_browser_cookies:
-            # Wir zeigen den Dialog später, wenn das root-Fenster existiert
             self._show_cookie_notice = True
         else:
             self._show_cookie_notice = False
@@ -9336,7 +9717,6 @@ class DragonWhispererGUI:
             return
 
         try:
-            # NEW: use_browser_cookies an StreamManager übergeben
             self.stream_manager = StreamManager(enable_debug=(DEBUG_LEVEL >= 1), use_browser_cookies=self.settings.use_browser_cookies)
             self.ffmpeg_manager = ExcellenceFFmpegManager(self.advanced_settings.config, self.stream_manager)
             if WHISPER_AVAILABLE:
@@ -9344,10 +9724,33 @@ class DragonWhispererGUI:
             else:
                 self.transcription_engine = DummyTranscriptionEngine(self.advanced_settings)
 
-            if TRANSLATOR_AVAILABLE:
-                self.translation_engine = ExcellenceTranslationEngine(self.current_language, self.advanced_settings)
-            else:
-                self.translation_engine = DummyTranslationEngine(self.current_language, self.advanced_settings)
+            # Übersetzungs-Engine je nach Einstellung wählen (optimiert)
+            if self.advanced_settings.translation_engine == "ollama":
+                if OLLAMA_AVAILABLE:
+                    self.translation_engine = OllamaTranslationEngine(
+                        target_lang=self.current_language,
+                        advanced_settings=self.advanced_settings,
+                        model=self.advanced_settings.ollama_model,
+                        host=self.advanced_settings.ollama_host
+                    )
+                    logger.info("✅ OllamaTranslationEngine aktiviert")
+                else:
+                    logger.warning("⚠️ Ollama translation engine selected but not available (requests missing). Falling back to Google Translate.")
+                    # Optional: GUI-Statusmeldung (wird später über after ausgeführt)
+                    self.root.after(100, lambda: self.update_status("⚠️ Ollama not available, using Google Translate"))
+                    if TRANSLATOR_AVAILABLE:
+                        self.translation_engine = ExcellenceTranslationEngine(self.current_language, self.advanced_settings)
+                        logger.info("✅ ExcellenceTranslationEngine (Google) aktiviert (Fallback)")
+                    else:
+                        self.translation_engine = DummyTranslationEngine(self.current_language, self.advanced_settings)
+                        logger.warning("⚠️ Keine Übersetzungs-Engine verfügbar, verwende Dummy")
+            else:  # google (default) oder andere
+                if TRANSLATOR_AVAILABLE:
+                    self.translation_engine = ExcellenceTranslationEngine(self.current_language, self.advanced_settings)
+                    logger.info("✅ ExcellenceTranslationEngine (Google) aktiviert")
+                else:
+                    self.translation_engine = DummyTranslationEngine(self.current_language, self.advanced_settings)
+                    logger.warning("⚠️ Keine Übersetzungs-Engine verfügbar, verwende Dummy")
 
             self.audio_processor = ExcellenceAudioProcessor(
                 controller_ref=self.controller,
@@ -9391,7 +9794,6 @@ class DragonWhispererGUI:
             self._show_error_and_exit(f"GUI konnte nicht erstellt werden: {e}")
             return
 
-        # NEW: Cookie-Hinweis nach GUI-Setup anzeigen
         if self._show_cookie_notice:
             self.root.after(500, self._show_cookie_notice_dialog)
 
@@ -9413,7 +9815,6 @@ class DragonWhispererGUI:
         self.settings.use_browser_cookies = result
         self.settings.cookies_notice_shown = True
         self.settings.save_to_file()
-        # Einstellung an StreamManager weitergeben
         if hasattr(self, 'stream_manager'):
             self.stream_manager.use_browser_cookies = result
 
@@ -9437,7 +9838,7 @@ class DragonWhispererGUI:
                 qsize = self.gui_queue.qsize()
                 if qsize > 50:
                     checks.append(f"⚠️ GUI queue backlog: {qsize} items")
-                    self._cleanup_queue(self.gui_queue, 20)  # hier wird die neue Methode aufgerufen
+                    self._cleanup_queue(self.gui_queue, 20)
             active_threads = threading.enumerate()
             if len(active_threads) > 15:
                 checks.append(f"⚠️ Many active threads: {len(active_threads)}")
@@ -9700,14 +10101,13 @@ class DragonWhispererGUI:
         except Exception as e:
             logger.warning(f"⚠️ GUI shutdown error: {e}")
 
-    # neu: Methode zum Bereinigen der Queue
     def _cleanup_queue(self, queue_obj: queue.Queue, max_size: int) -> None:
-        """Reduziere die Queue auf max_size, behalte wichtige Nachrichten (status, error)."""
+        """Reduziert die Queue auf max_size, behält wichtige Nachrichten (status, error)."""
         if not queue_obj or queue_obj.qsize() <= max_size:
             return
         try:
             items = []
-            # Zuerst alle Nachrichten aus der Queue holen
+            # Alle Nachrichten aus der Queue holen
             while not queue_obj.empty():
                 try:
                     items.append(queue_obj.get_nowait())
@@ -9804,10 +10204,6 @@ class DragonWhispererGUI:
         logger.info("🛑 Safe controller stop...")
         self._safe_stop_all_processes()
 
-    def _cleanup_queue(self, queue_obj: queue.Queue, max_size: int) -> None:
-        # bereits oben definiert – für den Aufruf in _perform_gui_health_check
-        pass  # wird hier nicht benötigt, da die Methode bereits vorhanden
-
     @excellence_gui_operation
     def select_file_dark(self) -> None:
         try:
@@ -9873,7 +10269,6 @@ class DragonWhispererGUI:
         url = url.strip()
         if not url:
             raise ValueError("URL cannot be empty")
-        # Zuerst nur bereinigen, dann validieren
         url = PlatformUtils.sanitize_url(url)
         if url.startswith("file://"):
             ok, real_path = PlatformUtils.validate_file_path(url)
@@ -9980,10 +10375,8 @@ class DragonWhispererGUI:
         if not hasattr(self, 'model_var'):
             return
         new_model = self.model_var.get()
-        # Validierung
         if new_model not in WHISPER_MODELS:
             logger.warning(f"⚠️ Invalid model selected: {new_model}")
-            # Auf aktuelles Modell zurücksetzen
             current = self.transcription_engine.get_current_model()
             self.model_var.set(current)
             return
@@ -10015,12 +10408,18 @@ class DragonWhispererGUI:
                 self.model_var.set(current)
 
     def toggle_translation(self) -> None:
-        if hasattr(self, 'translate_toggle') and self.translate_toggle.get():
-            if hasattr(self, 'translation_engine'):
-                self.translation_engine.set_target_language(self.current_language)
-            self.update_status("✅ Translation active")
-        else:
-            self.update_status("❌ Translation inactive")
+        """Schaltet die Übersetzung ein/aus (Button-Zustand und AudioProcessor-Flag)."""
+        self.translate_active = not self.translate_active
+        if hasattr(self, 'audio_processor'):
+            self.audio_processor._translation_active = self.translate_active
+        # Button aktualisieren
+        if hasattr(self, 'translate_btn'):
+            if self.translate_active:
+                self.translate_btn.config(text="🌐 ON", bg=self.current_theme.SUCCESS)
+                self.update_status("✅ Translation active")
+            else:
+                self.translate_btn.config(text="🌐 OFF", bg=self.current_theme.BG_TERTIARY)
+                self.update_status("❌ Translation inactive")
 
     def toggle_subtitle_mode(self) -> None:
         self.subtitle_mode = not self.subtitle_mode
@@ -10267,7 +10666,7 @@ class DragonWhispererGUI:
     def show_advanced_settings(self) -> None:
         settings_dialog = tk.Toplevel(self.root)
         settings_dialog.title("Advanced Settings")
-        settings_dialog.geometry("400x600")
+        settings_dialog.geometry("400x650")
         settings_dialog.configure(bg=self.current_theme.BG_PRIMARY)
         settings_dialog.transient(self.root)
         settings_dialog.grab_set()
@@ -10287,74 +10686,130 @@ class DragonWhispererGUI:
         settings_frame = tk.Frame(main_frame, bg=self.current_theme.BG_PRIMARY)
         settings_frame.pack(fill="both", expand=True)
 
+        row = 0
         tk.Label(settings_frame, text="Beam Size:", bg=self.current_theme.BG_PRIMARY,
-                 fg=self.current_theme.TEXT_PRIMARY).grid(row=0, column=0, sticky="w", pady=5)
+                 fg=self.current_theme.TEXT_PRIMARY).grid(row=row, column=0, sticky="w", pady=5)
         beam_var = tk.StringVar(value=str(self.advanced_settings.beam_size))
         beam_entry = tk.Entry(settings_frame, textvariable=beam_var,
                               bg=self.current_theme.BG_TERTIARY, fg=self.current_theme.TEXT_PRIMARY)
-        beam_entry.grid(row=0, column=1, sticky="ew", pady=5)
+        beam_entry.grid(row=row, column=1, sticky="ew", pady=5)
+        row += 1
 
         tk.Label(settings_frame, text="Temperature:", bg=self.current_theme.BG_PRIMARY,
-                 fg=self.current_theme.TEXT_PRIMARY).grid(row=1, column=0, sticky="w", pady=5)
+                 fg=self.current_theme.TEXT_PRIMARY).grid(row=row, column=0, sticky="w", pady=5)
         temp_var = tk.StringVar(value=str(self.advanced_settings.temperature))
         temp_entry = tk.Entry(settings_frame, textvariable=temp_var,
                               bg=self.current_theme.BG_TERTIARY, fg=self.current_theme.TEXT_PRIMARY)
-        temp_entry.grid(row=1, column=1, sticky="ew", pady=5)
+        temp_entry.grid(row=row, column=1, sticky="ew", pady=5)
+        row += 1
 
         plugin_var = tk.BooleanVar(value=self.settings.enable_plugins)
         plugin_cb = tk.Checkbutton(settings_frame, text="Enable plugins", variable=plugin_var,
                                    bg=self.current_theme.BG_PRIMARY, fg=self.current_theme.TEXT_PRIMARY,
                                    selectcolor=self.current_theme.BG_TERTIARY)
-        plugin_cb.grid(row=2, column=0, columnspan=2, sticky="w", pady=5)
+        plugin_cb.grid(row=row, column=0, columnspan=2, sticky="w", pady=5)
+        row += 1
 
         gpu_var = tk.BooleanVar(value=self.advanced_settings.gpu_acceleration)
         gpu_cb = tk.Checkbutton(settings_frame, text="Enable GPU acceleration", variable=gpu_var,
                                 bg=self.current_theme.BG_PRIMARY, fg=self.current_theme.TEXT_PRIMARY,
                                 selectcolor=self.current_theme.BG_TERTIARY)
-        gpu_cb.grid(row=3, column=0, columnspan=2, sticky="w", pady=5)
+        gpu_cb.grid(row=row, column=0, columnspan=2, sticky="w", pady=5)
+        row += 1
 
         tk.Label(settings_frame, text="VAD Threshold:", bg=self.current_theme.BG_PRIMARY,
-                 fg=self.current_theme.TEXT_PRIMARY).grid(row=4, column=0, sticky="w", pady=5)
+                 fg=self.current_theme.TEXT_PRIMARY).grid(row=row, column=0, sticky="w", pady=5)
         vad_threshold_var = tk.DoubleVar(value=self.advanced_settings.vad_threshold)
         vad_threshold_scale = tk.Scale(settings_frame, from_=0.0, to=1.0, resolution=0.05,
                                         orient=tk.HORIZONTAL, variable=vad_threshold_var,
                                         bg=self.current_theme.BG_TERTIARY, fg=self.current_theme.TEXT_PRIMARY,
                                         length=150)
-        vad_threshold_scale.grid(row=4, column=1, sticky="ew", pady=5)
+        vad_threshold_scale.grid(row=row, column=1, sticky="ew", pady=5)
         ToolTip(vad_threshold_scale, "Schwellwert für VAD (0.0-1.0). Höher = weniger, aber präzisere Segmente (optimierter Standard: 0.3)")
+        row += 1
 
         tk.Label(settings_frame, text="Min Speech Duration (ms):", bg=self.current_theme.BG_PRIMARY,
-                 fg=self.current_theme.TEXT_PRIMARY).grid(row=5, column=0, sticky="w", pady=5)
+                 fg=self.current_theme.TEXT_PRIMARY).grid(row=row, column=0, sticky="w", pady=5)
         vad_min_speech_var = tk.IntVar(value=self.advanced_settings.vad_min_speech_duration_ms)
         vad_min_speech_spin = tk.Spinbox(settings_frame, from_=0, to=2000, increment=50,
                                          textvariable=vad_min_speech_var,
                                          bg=self.current_theme.BG_TERTIARY, fg=self.current_theme.TEXT_PRIMARY)
-        vad_min_speech_spin.grid(row=5, column=1, sticky="ew", pady=5)
+        vad_min_speech_spin.grid(row=row, column=1, sticky="ew", pady=5)
         ToolTip(vad_min_speech_spin, "Minimale Dauer eines Sprachsegments in ms (optimierter Standard: 200)")
+        row += 1
 
         tk.Label(settings_frame, text="Min Silence Duration (ms):", bg=self.current_theme.BG_PRIMARY,
-                 fg=self.current_theme.TEXT_PRIMARY).grid(row=6, column=0, sticky="w", pady=5)
+                 fg=self.current_theme.TEXT_PRIMARY).grid(row=row, column=0, sticky="w", pady=5)
         vad_min_silence_var = tk.IntVar(value=self.advanced_settings.vad_min_silence_duration_ms)
         vad_min_silence_spin = tk.Spinbox(settings_frame, from_=0, to=2000, increment=50,
                                           textvariable=vad_min_silence_var,
                                           bg=self.current_theme.BG_TERTIARY, fg=self.current_theme.TEXT_PRIMARY)
-        vad_min_silence_spin.grid(row=6, column=1, sticky="ew", pady=5)
+        vad_min_silence_spin.grid(row=row, column=1, sticky="ew", pady=5)
         ToolTip(vad_min_silence_spin, "Minimale Stilledauer zwischen Sprachsegmenten in ms (optimierter Standard: 80)")
+        row += 1
+
+        tk.Label(settings_frame, text="Transcript Max Lines:", bg=self.current_theme.BG_PRIMARY,
+                 fg=self.current_theme.TEXT_PRIMARY).grid(row=row, column=0, sticky="w", pady=5)
+        transcript_lines_var = tk.IntVar(value=self.advanced_settings.transcript_max_lines)
+        transcript_lines_spin = tk.Spinbox(settings_frame, from_=100, to=5000, increment=100,
+                                           textvariable=transcript_lines_var,
+                                           bg=self.current_theme.BG_TERTIARY, fg=self.current_theme.TEXT_PRIMARY)
+        transcript_lines_spin.grid(row=row, column=1, sticky="ew", pady=5)
+        ToolTip(transcript_lines_spin, "Maximale Zeilen im Transkriptionsfenster (höher = mehr Text, aber evtl. langsamer)")
+        row += 1
+
+        tk.Label(settings_frame, text="Translation Max Lines:", bg=self.current_theme.BG_PRIMARY,
+                 fg=self.current_theme.TEXT_PRIMARY).grid(row=row, column=0, sticky="w", pady=5)
+        translation_lines_var = tk.IntVar(value=self.advanced_settings.translation_max_lines)
+        translation_lines_spin = tk.Spinbox(settings_frame, from_=100, to=5000, increment=100,
+                                            textvariable=translation_lines_var,
+                                            bg=self.current_theme.BG_TERTIARY, fg=self.current_theme.TEXT_PRIMARY)
+        translation_lines_spin.grid(row=row, column=1, sticky="ew", pady=5)
+        ToolTip(translation_lines_spin, "Maximale Zeilen im Übersetzungsfenster (höher = mehr Text, aber evtl. langsamer)")
+        row += 1
+
+        tk.Label(settings_frame, text="Translation Engine:", bg=self.current_theme.BG_PRIMARY,
+                 fg=self.current_theme.TEXT_PRIMARY).grid(row=row, column=0, sticky="w", pady=5)
+        trans_engine_var = tk.StringVar(value=self.advanced_settings.translation_engine)
+        trans_engine_combo = ttk.Combobox(settings_frame, textvariable=trans_engine_var,
+                                          values=["google", "ollama"], width=10, state="readonly")
+        trans_engine_combo.grid(row=row, column=1, sticky="ew", pady=5)
+        ToolTip(trans_engine_combo, "Übersetzungs-Engine: Google oder lokales Ollama")
+        row += 1
+
+        tk.Label(settings_frame, text="Ollama Model:", bg=self.current_theme.BG_PRIMARY,
+                 fg=self.current_theme.TEXT_PRIMARY).grid(row=row, column=0, sticky="w", pady=5)
+        ollama_model_var = tk.StringVar(value=self.advanced_settings.ollama_model)
+        ollama_model_entry = tk.Entry(settings_frame, textvariable=ollama_model_var,
+                                      bg=self.current_theme.BG_TERTIARY, fg=self.current_theme.TEXT_PRIMARY)
+        ollama_model_entry.grid(row=row, column=1, sticky="ew", pady=5)
+        ToolTip(ollama_model_entry, "Ollama-Modellname (z.B. llama3, mistral)")
+        row += 1
+
+        tk.Label(settings_frame, text="Ollama Host:", bg=self.current_theme.BG_PRIMARY,
+                 fg=self.current_theme.TEXT_PRIMARY).grid(row=row, column=0, sticky="w", pady=5)
+        ollama_host_var = tk.StringVar(value=self.advanced_settings.ollama_host)
+        ollama_host_entry = tk.Entry(settings_frame, textvariable=ollama_host_var,
+                                     bg=self.current_theme.BG_TERTIARY, fg=self.current_theme.TEXT_PRIMARY)
+        ollama_host_entry.grid(row=row, column=1, sticky="ew", pady=5)
+        ToolTip(ollama_host_entry, "Ollama-Server-URL (z.B. http://localhost:11434)")
+        row += 1
 
         tk.Label(settings_frame, text="Theme:", bg=self.current_theme.BG_PRIMARY,
-                 fg=self.current_theme.TEXT_PRIMARY).grid(row=7, column=0, sticky="w", pady=5)
+                 fg=self.current_theme.TEXT_PRIMARY).grid(row=row, column=0, sticky="w", pady=5)
         theme_var = tk.StringVar(value=self.settings.theme)
         theme_combo = ttk.Combobox(settings_frame, textvariable=theme_var,
                                     values=["dark", "light", "system"],
                                     width=10, state="readonly")
-        theme_combo.grid(row=7, column=1, sticky="ew", pady=5)
+        theme_combo.grid(row=row, column=1, sticky="ew", pady=5)
+        row += 1
 
-        # NEW: Checkbox für Browser-Cookies
         cookies_var = tk.BooleanVar(value=self.settings.use_browser_cookies)
         cookies_cb = tk.Checkbutton(settings_frame, text="Use browser cookies for YouTube", variable=cookies_var,
                                     bg=self.current_theme.BG_PRIMARY, fg=self.current_theme.TEXT_PRIMARY,
                                     selectcolor=self.current_theme.BG_TERTIARY)
-        cookies_cb.grid(row=8, column=0, columnspan=2, sticky="w", pady=5)
+        cookies_cb.grid(row=row, column=0, columnspan=2, sticky="w", pady=5)
+        row += 1
 
         settings_frame.columnconfigure(1, weight=1)
 
@@ -10367,6 +10822,23 @@ class DragonWhispererGUI:
                 self.advanced_settings.vad_threshold = vad_threshold_var.get()
                 self.advanced_settings.vad_min_speech_duration_ms = vad_min_speech_var.get()
                 self.advanced_settings.vad_min_silence_duration_ms = vad_min_silence_var.get()
+                self.advanced_settings.transcript_max_lines = transcript_lines_var.get()
+                self.advanced_settings.translation_max_lines = translation_lines_var.get()
+                self.advanced_settings.translation_engine = trans_engine_var.get()
+
+                # Ollama‑spezifische Felder validieren
+                ollama_model = ollama_model_var.get().strip()
+                if not ollama_model:
+                    ollama_model = "llama3"  # Fallback auf Standard
+                ollama_host = ollama_host_var.get().strip()
+                if not ollama_host:
+                    ollama_host = "http://localhost:11434"  # Fallback
+                # Protokoll ergänzen, falls es fehlt
+                if not ollama_host.startswith(('http://', 'https://')):
+                    ollama_host = 'http://' + ollama_host
+
+                self.advanced_settings.ollama_model = ollama_model
+                self.advanced_settings.ollama_host = ollama_host
 
                 old_theme = self.settings.theme
                 self.settings.theme = theme_var.get()
@@ -10375,7 +10847,6 @@ class DragonWhispererGUI:
                                             "Das neue Theme wird nach einem Neustart aktiv.",
                                             self.root)
 
-                # Cookie-Einstellung speichern
                 self.settings.use_browser_cookies = cookies_var.get()
                 if hasattr(self, 'stream_manager'):
                     self.stream_manager.use_browser_cookies = self.settings.use_browser_cookies
@@ -10416,8 +10887,9 @@ class DragonWhispererGUI:
                         if hasattr(self, "transcript_scroll_var") and self.transcript_scroll_var.get():
                             self.transcript_text.see("end")
                         lines = int(self.transcript_text.index("end-1c").split(".")[0])
-                        if lines > 400:
-                            keep_lines = 300
+                        max_lines = self.advanced_settings.transcript_max_lines
+                        if lines > max_lines:
+                            keep_lines = max_lines - 100
                             delete_to = f"{lines - keep_lines}.0"
                             self.transcript_text.delete("1.0", delete_to)
                 elif component == "translation" and hasattr(self, "translation_text"):
@@ -10426,8 +10898,9 @@ class DragonWhispererGUI:
                         if hasattr(self, "translation_scroll_var") and self.translation_scroll_var.get():
                             self.translation_text.see("end")
                         lines = int(self.translation_text.index("end-1c").split(".")[0])
-                        if lines > 300:
-                            keep_lines = 200
+                        max_lines = self.advanced_settings.translation_max_lines
+                        if lines > max_lines:
+                            keep_lines = max_lines - 100
                             delete_to = f"{lines - keep_lines}.0"
                             self.translation_text.delete("1.0", delete_to)
             except tk.TclError:
@@ -10520,17 +10993,14 @@ class DragonWhispererGUI:
                         break
                     except Exception as e:
                         logger.warning(f"⚠️ Queue processing error: {e}")
-                # Queue-Größenprüfung und Cleanup
                 if hasattr(self, "gui_queue"):
                     qsize = self.gui_queue.qsize()
                     if qsize > 30:
                         self._cleanup_queue(self.gui_queue, 20)
-                # Nach dem Verarbeiten erneut planen
                 if hasattr(self, "root") and self.root.winfo_exists():
                     self.root.after(100, process_gui_queue)
             except Exception as e:
                 logger.error(f"❌ GUI queue processor error: {e}")
-                # Trotz Fehler erneut planen, damit die Updates nicht aufhören
                 if hasattr(self, "root") and self.root.winfo_exists():
                     self.root.after(100, process_gui_queue)
 
@@ -10612,29 +11082,50 @@ class DragonWhispererGUI:
         self._last_transcription_text = current_text
         self.performance_monitor.log_transcription()
         self.transcript_history.append(result)
-        def update_gui() -> None:
+
+        # Prepare text for GUI update
+        try:
+            if self.subtitle_mode and result.start is not None:
+                timestamp = self.export_manager._format_timestamp_srt(result.start)
+            else:
+                timestamp = datetime.now().strftime("%H:%M:%S")
+            detected_lang = getattr(result, 'language', 'unknown')
+            lang_code = LANGUAGE_SHORT_CODES.get(detected_lang, '??')
+            text = f"[{timestamp}] [{lang_code}] {current_text}\n"
+        except Exception as e:
+            logger.warning(f"⚠️ Error preparing transcription text: {e}")
+            return
+
+        # Queue GUI update
+        if hasattr(self, '_text_update_queue') and self._text_update_queue is not None:
             try:
-                if hasattr(self, 'transcript_text') and self.transcript_text.winfo_exists():
-                    timestamp = datetime.now().strftime("%H:%M:%S")
-                    detected_lang = getattr(result, 'language', 'unknown')
-                    lang_code = LANGUAGE_SHORT_CODES.get(detected_lang, '??')
-                    text = f"[{timestamp}] [{lang_code}] {current_text}\n"
-                    self.transcript_text.insert('end', text)
-                    if hasattr(self, 'transcript_scroll_var') and self.transcript_scroll_var.get():
-                        self.transcript_text.see('end')
-                    lines = int(self.transcript_text.index('end-1c').split('.')[0])
-                    if lines > 400:
-                        keep_lines = 300
-                        delete_to = f'{lines-keep_lines}.0'
-                        self.transcript_text.delete('1.0', delete_to)
-            except tk.TclError:
-                pass
+                self._text_update_queue.put_nowait(("transcript", text))
+            except queue.Full:
+                logger.debug("Transcription queue full, dropping update")
             except Exception as e:
-                logger.warning(f"⚠️ Transcript GUI error: {e}")
-        if hasattr(self, 'root') and self.root.winfo_exists():
-            self.root.after(0, update_gui)
-        if (hasattr(self, 'translate_toggle') and self.translate_toggle.get() and
-            hasattr(self, 'translation_engine') and self.translation_engine):
+                logger.warning(f"⚠️ Failed to queue transcription update: {e}")
+        else:
+            # Fallback if queue missing (should not happen)
+            logger.warning("⚠️ _text_update_queue missing, using direct after()")
+            if hasattr(self, 'root') and self.root.winfo_exists():
+                def fallback_update():
+                    try:
+                        if hasattr(self, 'transcript_text') and self.transcript_text.winfo_exists():
+                            self.transcript_text.insert('end', text)
+                            if hasattr(self, 'transcript_scroll_var') and self.transcript_scroll_var.get():
+                                self.transcript_text.see('end')
+                            lines = int(self.transcript_text.index('end-1c').split('.')[0])
+                            max_lines = self.advanced_settings.transcript_max_lines
+                            if lines > max_lines:
+                                keep_lines = max_lines - 100
+                                delete_to = f'{lines-keep_lines}.0'
+                                self.transcript_text.delete('1.0', delete_to)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Fallback GUI error: {e}")
+                self.root.after(0, fallback_update)
+
+        # Async translation (unchanged)
+        if self.translate_active and hasattr(self, 'translation_engine') and self.translation_engine:
             def async_translation() -> None:
                 try:
                     source_lang = getattr(result, 'language', 'unknown')
@@ -10656,25 +11147,45 @@ class DragonWhispererGUI:
         self._last_translation_text = current_text
         self.performance_monitor.log_translation()
         self.translation_history.append(result)
-        def update_gui() -> None:
+
+        # Prepare text for GUI update
+        try:
+            if self.subtitle_mode and result.start is not None:
+                timestamp = self.export_manager._format_timestamp_srt(result.start)
+            else:
+                timestamp = datetime.now().strftime("%H:%M:%S")
+            text = f"[{timestamp}] {current_text}\n"
+        except Exception as e:
+            logger.warning(f"⚠️ Error preparing translation text: {e}")
+            return
+
+        # Queue GUI update
+        if hasattr(self, '_text_update_queue') and self._text_update_queue is not None:
             try:
-                if hasattr(self, 'translation_text') and self.translation_text.winfo_exists():
-                    timestamp = datetime.now().strftime("%H:%M:%S")
-                    text = f"[{timestamp}] {current_text}\n"
-                    self.translation_text.insert('end', text)
-                    if hasattr(self, 'translation_scroll_var') and self.translation_scroll_var.get():
-                        self.translation_text.see('end')
-                    lines = int(self.translation_text.index('end-1c').split('.')[0])
-                    if lines > 300:
-                        keep_lines = 200
-                        delete_to = f'{lines-keep_lines}.0'
-                        self.translation_text.delete('1.0', delete_to)
-            except tk.TclError:
-                pass
+                self._text_update_queue.put_nowait(("translation", text))
+            except queue.Full:
+                logger.debug("Translation queue full, dropping update")
             except Exception as e:
-                logger.warning(f"⚠️ Translation GUI error: {e}")
-        if hasattr(self, 'root') and self.root.winfo_exists():
-            self.root.after(0, update_gui)
+                logger.warning(f"⚠️ Failed to queue translation update: {e}")
+        else:
+            # Fallback if queue missing
+            logger.warning("⚠️ _text_update_queue missing, using direct after()")
+            if hasattr(self, 'root') and self.root.winfo_exists():
+                def fallback_update():
+                    try:
+                        if hasattr(self, 'translation_text') and self.translation_text.winfo_exists():
+                            self.translation_text.insert('end', text)
+                            if hasattr(self, 'translation_scroll_var') and self.translation_scroll_var.get():
+                                self.translation_text.see('end')
+                            lines = int(self.translation_text.index('end-1c').split('.')[0])
+                            max_lines = self.advanced_settings.translation_max_lines
+                            if lines > max_lines:
+                                keep_lines = max_lines - 100
+                                delete_to = f'{lines-keep_lines}.0'
+                                self.translation_text.delete('1.0', delete_to)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Fallback GUI error: {e}")
+                self.root.after(0, fallback_update)
 
     def handle_info(self, info_msg: str) -> None:
         def update() -> None:
@@ -10857,6 +11368,7 @@ class DragonWhispererGUI:
         self.root.bind(f'<{mod}-l>', lambda e: self.toggle_layout())
         self.root.bind(f'<{mod}-t>', lambda e: self.toggle_translation())
         self.root.bind(f'<{mod}-e>', lambda e: self.export_subtitles())
+        self.root.bind(f'<{mod}-u>', lambda e: self.toggle_subtitle_mode())  # NEU: Untertitel-Modus
         self.root.bind(f'<{mod}-Shift-c>', lambda e: self.clear_all())
         self.root.bind(f'<{mod}-h>', lambda e: self.show_shortcuts_help())
         self.root.bind('<F1>', lambda e: self.show_shortcuts_help())
@@ -10868,25 +11380,38 @@ class DragonWhispererGUI:
 
 
 # -----------------------------------------------------------------------------
-# TRANSLATION DIALOG (unverändert)
+# TRANSLATION DIALOG
 # -----------------------------------------------------------------------------
+
 class TranslationDialog:
-    def __init__(self, parent: tk.Widget, translation_engine: ExcellenceTranslationEngine) -> None:
+    """
+    Ein Dialogfenster zur manuellen Übersetzung von Texten.
+    Verwendet die übergebene Übersetzungs-Engine (BaseTranslationEngine).
+    """
+
+    def __init__(self, parent: tk.Widget, translation_engine: BaseTranslationEngine) -> None:
+        """
+        :param parent: Das Eltern-Widget (üblicherweise das Hauptfenster).
+        :param translation_engine: Eine Instanz einer Übersetzungs-Engine.
+        """
         self.parent = parent
         self.engine = translation_engine
         self.dialog: Optional[tk.Toplevel] = None
         self.create_dialog()
 
     def create_dialog(self) -> None:
+        """Erstellt alle GUI-Elemente des Dialogs."""
         self.dialog = tk.Toplevel(self.parent)
         self.dialog.title("🐉 Text Translation")
         self.dialog.geometry("600x500")
         self.dialog.configure(bg=CURRENT_THEME.BG_PRIMARY)
         self.dialog.transient(self.parent)
         self.dialog.grab_set()
+
         main = tk.Frame(self.dialog, bg=CURRENT_THEME.BG_PRIMARY, padx=15, pady=15)
         main.pack(fill="both", expand=True)
 
+        # Quelltext-Eingabe
         tk.Label(main, text="Source text:", bg=CURRENT_THEME.BG_PRIMARY,
                  fg=CURRENT_THEME.TEXT_PRIMARY, font=DragonFonts.PRIMARY).pack(anchor="w")
         self.source_text = scrolledtext.ScrolledText(
@@ -10896,9 +11421,11 @@ class TranslationDialog:
         self.source_text.pack(fill="x", pady=(0, 10))
         DarkContextMenu(self.source_text)
 
+        # Sprachauswahl
         lang_frame = tk.Frame(main, bg=CURRENT_THEME.BG_PRIMARY)
         lang_frame.pack(fill="x", pady=5)
 
+        # Quellsprache
         tk.Label(lang_frame, text="From:", bg=CURRENT_THEME.BG_PRIMARY,
                  fg=CURRENT_THEME.TEXT_PRIMARY).pack(side="left", padx=(0, 5))
         self.src_lang_var = tk.StringVar(value="auto")
@@ -10909,6 +11436,7 @@ class TranslationDialog:
         )
         src_combo.pack(side="left", padx=(0, 20))
 
+        # Zielsprache
         tk.Label(lang_frame, text="To:", bg=CURRENT_THEME.BG_PRIMARY,
                  fg=CURRENT_THEME.TEXT_PRIMARY).pack(side="left", padx=(0, 5))
         self.tgt_lang_var = tk.StringVar(value="German")
@@ -10919,6 +11447,7 @@ class TranslationDialog:
         )
         tgt_combo.pack(side="left")
 
+        # Übersetzen-Button
         btn_frame = tk.Frame(main, bg=CURRENT_THEME.BG_PRIMARY)
         btn_frame.pack(fill="x", pady=10)
         translate_btn = tk.Button(
@@ -10928,6 +11457,7 @@ class TranslationDialog:
         )
         translate_btn.pack(side="left")
 
+        # Zieltext-Ausgabe
         tk.Label(main, text="Translation:", bg=CURRENT_THEME.BG_PRIMARY,
                  fg=CURRENT_THEME.TEXT_PRIMARY, font=DragonFonts.PRIMARY).pack(anchor="w", pady=(10, 0))
         self.target_text = scrolledtext.ScrolledText(
@@ -10937,6 +11467,7 @@ class TranslationDialog:
         self.target_text.pack(fill="both", expand=True, pady=(5, 0))
         DarkContextMenu(self.target_text)
 
+        # Schließen-Button
         close_btn = tk.Button(
             main, text="Close", command=self.dialog.destroy,
             bg=CURRENT_THEME.BG_TERTIARY, fg=CURRENT_THEME.TEXT_PRIMARY
@@ -10944,6 +11475,7 @@ class TranslationDialog:
         close_btn.pack(pady=10)
 
     def translate(self) -> None:
+        """Führt die Übersetzung des eingegebenen Textes durch."""
         source = self.source_text.get("1.0", "end-1c").strip()
         if not source:
             return
@@ -10953,22 +11485,27 @@ class TranslationDialog:
 
         valid_language_names = [name for name, code in SORTED_LANGUAGES]
 
+        # Validiere Quellsprache
         if src_name not in valid_language_names and src_name != "auto":
             src_name = "auto"
             self.src_lang_var.set("auto")
 
+        # Validiere Zielsprache
         if tgt_name not in valid_language_names:
             tgt_name = "German"
             self.tgt_lang_var.set("German")
 
+        # Konvertiere Anzeigenamen in Sprachcodes
         src_code = "auto" if src_name == "auto" else next(code for name, code in SORTED_LANGUAGES if name == src_name)
         tgt_code = next(code for name, code in SORTED_LANGUAGES if name == tgt_name)
 
         try:
+            # Temporär Zielsprache setzen, übersetzen, dann zurücksetzen
             old_target = self.engine.target_lang
             self.engine.set_target_language(tgt_code)
             result = self.engine.translate_text(source, src_code)
             self.engine.set_target_language(old_target)
+
             if result and result.translated:
                 self.target_text.delete("1.0", "end")
                 self.target_text.insert("1.0", result.translated)
