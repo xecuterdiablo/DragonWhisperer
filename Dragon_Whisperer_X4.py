@@ -3011,20 +3011,20 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
                     logger.debug("GoogleTranslationEngine: translator still not available")
                     return None
 
-            # Für Deutsch: keine Vor- oder Nachbearbeitung, um Verstümmelungen zu vermeiden
-            if target_lang == 'de':
-                logger.debug("GoogleTranslationEngine: direct translation to German (no pre/post-processing)")
+            # Für Deutsch, Englisch, Französisch, Spanisch, Italienisch: direkt übersetzen (kein Pre/Post-Processing)
+            if target_lang in ('de', 'en', 'fr', 'es', 'it'):
+                logger.debug(f"GoogleTranslationEngine: direct translation to {target_lang} (no pre/post-processing)")
                 try:
                     src = self._map_to_google_code(source_lang)
                     translated = self.translator.translate(text, source=src)
                     if logger.isEnabledFor(logging.DEBUG):
-                        log_debug("translate", f"Google raw translation (DE): {translated}")
+                        log_debug("translate", f"Google raw translation ({target_lang}): {translated}")
                     return translated.strip() if translated else None
                 except Exception as e:
-                    logger.debug(f"GoogleTranslationEngine: exception in direct DE translation: {e}", exc_info=True)
+                    logger.debug(f"GoogleTranslationEngine: exception in direct translation: {e}", exc_info=True)
                     raise
 
-            # Für andere Sprachen: normales Pre- und Postprocessing
+            # Für andere Sprachen: normales Pre- und Postprocessing (insbesondere für asiatische Sprachen)
             clean_text = self._preprocess_text(text)
             if not clean_text:
                 logger.debug("GoogleTranslationEngine: preprocessed text empty")
@@ -4757,7 +4757,7 @@ class YtDlpHelper:
         return None
 
     @staticmethod
-    def get_json(url: str, timeout: int = 20, use_cookies: bool = False, browser: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def get_json(url: str, timeout: int = 20, use_cookies: bool = False, browser: Optional[str] = None, proxy: str = "") -> Optional[Dict[str, Any]]:
         cmd = [
             "yt-dlp",
             "--dump-json",
@@ -4765,6 +4765,8 @@ class YtDlpHelper:
             "--no-check-certificate",
             "--socket-timeout", str(timeout),
         ]
+        if proxy:
+            cmd.extend(["--proxy", proxy])
         if use_cookies and browser:
             cmd.extend(["--cookies-from-browser", browser])
         cmd.extend(["--", url])
@@ -4777,7 +4779,7 @@ class YtDlpHelper:
         return None
 
     @staticmethod
-    def get_audio_url(url: str, format_str: str = "bestaudio/best", timeout: int = 15, use_cookies: bool = False, browser: Optional[str] = None) -> Optional[str]:
+    def get_audio_url(url: str, format_str: str = "bestaudio/best", timeout: int = 15, use_cookies: bool = False, browser: Optional[str] = None, proxy: str = "") -> Optional[str]:
         cmd = [
             "yt-dlp",
             "-g",
@@ -4786,6 +4788,8 @@ class YtDlpHelper:
             "--no-check-certificate",
             "--socket-timeout", str(timeout),
         ]
+        if proxy:
+            cmd.extend(["--proxy", proxy])
         if use_cookies and browser:
             cmd.extend(["--cookies-from-browser", browser])
         cmd.extend(["--", url])
@@ -4799,7 +4803,7 @@ class YtDlpHelper:
 
 
 class StreamManager:
-    def __init__(self, enable_debug: bool = False, use_browser_cookies: bool = True) -> None:
+    def __init__(self, enable_debug: bool = False, use_browser_cookies: bool = True, proxy: str = "", proxy_enabled: bool = False) -> None:
         self._platform_cache = TTLCache(maxsize=50, ttl=3600)
         self._audio_url_cache = TTLCache(maxsize=50, ttl=1800)
         self._audio_url_fail_cache = TTLCache(maxsize=50, ttl=300)
@@ -4807,6 +4811,8 @@ class StreamManager:
         self._stream_info_cache = TTLCache(maxsize=30, ttl=600)
         self._debug = enable_debug
         self.use_browser_cookies = use_browser_cookies
+        self._proxy = proxy
+        self._proxy_enabled = proxy_enabled   # NEU
         self._last_error: Optional[str] = None
         self._last_method: Optional[str] = None
         self._stats = {
@@ -4847,6 +4853,13 @@ class StreamManager:
         ]
         self._dvb_processes: List[subprocess.Popen] = []
         self._dvb_lock = threading.RLock()
+
+    def set_proxy(self, proxy: str, enabled: bool = False) -> None:
+        """Aktualisiert die Proxy-URL und den Aktivierungsstatus für yt-dlp-Aufrufe."""
+        self._proxy = proxy
+        self._proxy_enabled = enabled
+        if self._debug:
+            logger.debug(f"🌐 Proxy gesetzt: {proxy} (aktiv: {enabled})")
 
     def detect_platform(self, url: str) -> Tuple[str, str]:
         if not url:
@@ -4933,7 +4946,7 @@ class StreamManager:
             if method:
                 extraction_method = method
         if not result:
-            result = self._json_extraction_fallback(url)
+            result = self._try_json_fallback(url)
             if result:
                 extraction_method = "json_fallback"
         if result:
@@ -5052,10 +5065,14 @@ class StreamManager:
 
     def _extract_generic_audio(self, url: str, platform_id: str) -> Tuple[Optional[str], str]:
         format_list = self._format_priorities.get(platform_id, self._format_priorities["generic"])
+        proxy_arg = self._proxy if self._proxy_enabled else ""  # NEU
         for i, format_str in enumerate(format_list[:2]):
             if self._debug or logger.isEnabledFor(logging.DEBUG):
                 logger.debug(f"  🔄 Versuche Format {i+1}: {format_str}")
-            audio_url = YtDlpHelper.get_audio_url(url, format_str, timeout=15)
+            audio_url = YtDlpHelper.get_audio_url(
+                url, format_str, timeout=15,
+                proxy=proxy_arg  # Proxy nur bei Aktivierung
+            )
             if audio_url:
                 if self._debug or logger.isEnabledFor(logging.DEBUG):
                     logger.debug(f"  ✅ Erfolg mit Format {format_str}")
@@ -5107,6 +5124,7 @@ class StreamManager:
         return None
 
     def _try_browser_cookies(self, url: str) -> Optional[str]:
+        proxy_arg = self._proxy if self._proxy_enabled else ""  # NEU
         for browser_cmd, browser_name in self._browsers:
             if self._debug or logger.isEnabledFor(logging.DEBUG):
                 logger.debug(f"    🧪 Teste mit {browser_name}-Cookies...")
@@ -5115,7 +5133,8 @@ class StreamManager:
                 format_str="bestaudio[ext=m4a]/bestaudio/best",
                 timeout=20,
                 use_cookies=True,
-                browser=browser_cmd
+                browser=browser_cmd,
+                proxy=proxy_arg
             )
             if audio_url:
                 if self._debug or logger.isEnabledFor(logging.DEBUG):
@@ -5124,6 +5143,7 @@ class StreamManager:
         return None
 
     def _try_standard_methods(self, url: str) -> Optional[str]:
+        proxy_arg = self._proxy if self._proxy_enabled else ""  # NEU
         methods = [
             {"name": "Standard yt-dlp", "format": "bestaudio[ext=m4a]/bestaudio/best", "timeout": 20},
             {"name": "Mobile User-Agent", "format": "bestaudio/best", "timeout": 20},
@@ -5132,7 +5152,10 @@ class StreamManager:
         for method in methods:
             if self._debug or logger.isEnabledFor(logging.DEBUG):
                 logger.debug(f"    🧪 Teste: {method['name']}")
-            audio_url = YtDlpHelper.get_audio_url(url, method["format"], timeout=method["timeout"])
+            audio_url = YtDlpHelper.get_audio_url(
+                url, method["format"], timeout=method["timeout"],
+                proxy=proxy_arg
+            )
             if audio_url:
                 if self._debug or logger.isEnabledFor(logging.DEBUG):
                     logger.debug(f"    ✅ Erfolg mit {method['name']}")
@@ -5140,10 +5163,14 @@ class StreamManager:
         return None
 
     def _try_json_fallback(self, url: str) -> Optional[str]:
+        proxy_arg = self._proxy if self._proxy_enabled else ""  # NEU
         try:
             if self._debug or logger.isEnabledFor(logging.DEBUG):
                 logger.debug("    🔄 Versuche JSON-Fallback...")
-            data = YtDlpHelper.get_json(url, timeout=25)
+            data = YtDlpHelper.get_json(
+                url, timeout=25,
+                proxy=proxy_arg
+            )
             if not data:
                 return None
             best_audio = None
@@ -6843,7 +6870,7 @@ class OllamaSummarizer:
                     "model": self.model,
                     "prompt": full_prompt,
                     "stream": True,
-                    "options": {"temperature": temperature, "num_predict": 512},
+                    "options": {"temperature": temperature, "num_predict": 2048},
                 }
                 if self.system_prompt:
                     payload["system"] = self.system_prompt
@@ -8474,7 +8501,7 @@ class AdvancedSettingsDialog:
         )
         self.precision_cb.grid(row=2, column=0, columnspan=2, sticky="w", pady=1)
 
-        # --- NEU: Adaptive Chunk Checkbox ---
+        # Adaptive Chunk Checkbox
         self.adaptive_chunk_var = tk.BooleanVar(value=self.gui.advanced_settings.adaptive_chunk)
         self.adaptive_chunk_cb = tk.Checkbutton(
             adv_frame,
@@ -8489,6 +8516,45 @@ class AdvancedSettingsDialog:
         self.adaptive_chunk_cb.grid(row=3, column=0, columnspan=2, sticky="w", pady=1)
         ToolTip(self.adaptive_chunk_cb, "Chunk-Dauer dynamisch an die tatsächliche Datenrate anpassen (hilft bei schwankenden Streams)")
 
+        # --- Proxy-Einstellungen (mit Checkbutton) ---
+        self.proxy_enabled_var = tk.BooleanVar(value=self.gui.advanced_settings.proxy_enabled)
+        self.proxy_enabled_cb = tk.Checkbutton(
+            adv_frame,
+            text="Proxy aktivieren",
+            variable=self.proxy_enabled_var,
+            command=self._toggle_proxy_entry,
+            bg=self.gui.current_theme.BG_SECONDARY,
+            fg=self.gui.current_theme.TEXT_PRIMARY,
+            selectcolor=self.gui.current_theme.BG_TERTIARY,
+            activebackground=self.gui.current_theme.BG_SECONDARY,
+            font=("Segoe UI", 8),
+        )
+        self.proxy_enabled_cb.grid(row=4, column=0, sticky="w", pady=1)
+
+        tk.Label(
+            adv_frame,
+            text="Proxy (optional):",
+            anchor="w",
+            bg=self.gui.current_theme.BG_SECONDARY,
+            fg=self.gui.current_theme.TEXT_PRIMARY,
+            font=("Segoe UI", 8),
+        ).grid(row=4, column=1, sticky="w", pady=1, padx=(5,0))
+
+        self.proxy_var = tk.StringVar(value=getattr(self.gui.advanced_settings, "proxy_url", "127.0.0.1:18080"))
+        self.proxy_entry = tk.Entry(
+            adv_frame,
+            textvariable=self.proxy_var,
+            width=30,
+            bg=self.gui.current_theme.BG_TERTIARY,
+            fg=self.gui.current_theme.TEXT_PRIMARY,
+            insertbackground=self.gui.current_theme.TEXT_PRIMARY,
+        )
+        self.proxy_entry.grid(row=4, column=2, columnspan=2, sticky="ew", pady=1, padx=5)
+        ToolTip(self.proxy_entry, "Proxy-URL für yt-dlp, z.B. http://proxy:port oder socks5://...")
+
+        # Initialen Zustand setzen
+        self._toggle_proxy_entry()
+
         tk.Label(
             adv_frame,
             text="Max Memory (MB):",
@@ -8496,7 +8562,7 @@ class AdvancedSettingsDialog:
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
-        ).grid(row=4, column=0, sticky="w", pady=1)
+        ).grid(row=5, column=0, sticky="w", pady=1)
         self.max_mem_var = tk.IntVar(value=self.gui.advanced_settings.max_memory_mb)
         self.max_mem_spin = tk.Spinbox(
             adv_frame,
@@ -8510,7 +8576,7 @@ class AdvancedSettingsDialog:
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
             font=("Segoe UI", 8),
         )
-        self.max_mem_spin.grid(row=4, column=1, sticky="w", pady=1)
+        self.max_mem_spin.grid(row=5, column=1, sticky="w", pady=1)
 
         tk.Label(
             adv_frame,
@@ -8519,7 +8585,7 @@ class AdvancedSettingsDialog:
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
-        ).grid(row=4, column=2, sticky="w", pady=1, padx=(10, 0))
+        ).grid(row=5, column=2, sticky="w", pady=1, padx=(10, 0))
         self.auto_save_interval_var = tk.IntVar(
             value=self.gui.advanced_settings.auto_save_interval
         )
@@ -8535,7 +8601,7 @@ class AdvancedSettingsDialog:
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
             font=("Segoe UI", 8),
         )
-        self.auto_save_interval_spin.grid(row=4, column=3, sticky="w", pady=1)
+        self.auto_save_interval_spin.grid(row=5, column=3, sticky="w", pady=1)
 
         self.optimize_var = tk.BooleanVar(
             value=self.gui.advanced_settings.optimize_translations
@@ -8550,7 +8616,7 @@ class AdvancedSettingsDialog:
             activebackground=self.gui.current_theme.BG_SECONDARY,
             font=("Segoe UI", 8),
         )
-        self.optimize_cb.grid(row=5, column=0, columnspan=2, sticky="w", pady=1)
+        self.optimize_cb.grid(row=6, column=0, columnspan=2, sticky="w", pady=1)
 
         self.sentiment_var = tk.BooleanVar(
             value=self.gui.advanced_settings.enable_sentiment_analysis
@@ -8565,7 +8631,7 @@ class AdvancedSettingsDialog:
             activebackground=self.gui.current_theme.BG_SECONDARY,
             font=("Segoe UI", 8),
         )
-        self.sentiment_cb.grid(row=5, column=2, columnspan=2, sticky="w", pady=1)
+        self.sentiment_cb.grid(row=6, column=2, columnspan=2, sticky="w", pady=1)
 
         self.diarize_var = tk.BooleanVar(
             value=self.gui.advanced_settings.enable_speaker_diarization
@@ -8580,7 +8646,7 @@ class AdvancedSettingsDialog:
             activebackground=self.gui.current_theme.BG_SECONDARY,
             font=("Segoe UI", 8),
         )
-        self.diarize_cb.grid(row=6, column=0, columnspan=2, sticky="w", pady=1)
+        self.diarize_cb.grid(row=7, column=0, columnspan=2, sticky="w", pady=1)
 
         # Blacklist
         blacklist_frame = tk.LabelFrame(
@@ -8914,6 +8980,13 @@ class AdvancedSettingsDialog:
 
         self.settings_frame.columnconfigure(0, weight=1)
 
+    def _toggle_proxy_entry(self):
+        """Aktiviert/deaktiviert das Proxy-Eingabefeld basierend auf dem Checkbutton."""
+        if self.proxy_enabled_var.get():
+            self.proxy_entry.config(state="normal")
+        else:
+            self.proxy_entry.config(state="disabled")
+
     def _load_custom_profiles(self) -> Dict[str, Dict[str, Any]]:
         profiles_dir = PlatformUtils.get_platform_config_dir() / "profiles"
         profiles = {}
@@ -8963,6 +9036,8 @@ class AdvancedSettingsDialog:
             "tts_engine": self.tts_engine_var.get(),
             "best_of": self.best_of_var.get(),
             "suppress_tokens": self.suppress_tokens_var.get(),
+            "proxy_url": self.proxy_var.get(),               # NEU
+            "proxy_enabled": self.proxy_enabled_var.get(),   # NEU
         }
         blacklist_text = self.blacklist_text.get("1.0", "end-1c").strip()
         profile_data["blacklist"] = [line.strip() for line in blacklist_text.split("\n") if line.strip()]
@@ -9031,8 +9106,11 @@ class AdvancedSettingsDialog:
         self.comp_ratio_var.set(default.compression_ratio_threshold)
         self.condition_prev_var.set(default.condition_on_previous_text)
         self.suppress_tokens_var.set(default.suppress_tokens)
-        # adaptive_chunk zurücksetzen
         self.adaptive_chunk_var.set(default.adaptive_chunk)
+        # Proxy zurücksetzen
+        self.proxy_enabled_var.set(default.proxy_enabled)
+        self.proxy_var.set(default.proxy_url)
+        self._toggle_proxy_entry()
 
     def save_settings(self):
         # alten GPU-Status speichern
@@ -9088,8 +9166,12 @@ class AdvancedSettingsDialog:
             self.gui.advanced_settings.condition_on_previous_text = self.condition_prev_var.get()
             self.gui.advanced_settings.suppress_tokens = self.suppress_tokens_var.get().strip()
 
-            # --- NEU: adaptive_chunk speichern ---
+            # adaptive_chunk speichern
             self.gui.advanced_settings.adaptive_chunk = self.adaptive_chunk_var.get()
+
+            # Proxy speichern
+            self.gui.advanced_settings.proxy_url = self.proxy_var.get().strip()
+            self.gui.advanced_settings.proxy_enabled = self.proxy_enabled_var.get()
 
             blacklist_text = self.blacklist_text.get("1.0", "end-1c").strip()
             blacklist = [line.strip() for line in blacklist_text.split("\n") if line.strip()]
@@ -9104,6 +9186,9 @@ class AdvancedSettingsDialog:
 
             if hasattr(self.gui, "stream_manager"):
                 self.gui.stream_manager.use_browser_cookies = self.gui.settings.use_browser_cookies
+                # Proxy im StreamManager aktualisieren
+                self.gui.stream_manager.set_proxy(self.gui.advanced_settings.proxy_url,
+                                                   self.gui.advanced_settings.proxy_enabled)
             if hasattr(self.gui, "stream_info_extractor"):
                 self.gui.stream_info_extractor.use_browser_cookies = self.gui.settings.use_browser_cookies
 
@@ -9171,9 +9256,16 @@ class AdvancedSettingsDialog:
         self.comp_ratio_var.set(profil.get("compression_ratio_threshold", 2.8))
         self.condition_prev_var.set(profil.get("condition_on_previous_text", True))
         self.suppress_tokens_var.set(profil.get("suppress_tokens", "-1"))
-        # adaptive_chunk aus Profil übernehmen (optional)
         if "adaptive_chunk" in profil:
             self.adaptive_chunk_var.set(profil["adaptive_chunk"])
+        # Proxy aus Profil übernehmen
+        if "proxy_url" in profil:
+            self.proxy_var.set(profil["proxy_url"])
+        if "proxy_enabled" in profil:
+            self.proxy_enabled_var.set(profil["proxy_enabled"])
+        else:
+            self.proxy_enabled_var.set(False)
+        self._toggle_proxy_entry()
         blacklist = profil.get("blacklist", [])
         self.blacklist_text.delete("1.0", "end")
         self.blacklist_text.insert("1.0", "\n".join(blacklist))
@@ -9405,10 +9497,18 @@ class StreamHandler:
             else:
                 consecutive_timeouts = 0
                 backoff = 1.0
+
+            # !!! HIER WAR DIE PROBLEMATISCHE STELLE !!!
+            # Ursprünglich wurde bei Erreichen der erwarteten Dauer sofort abgebrochen:
+            # if ap._expected_duration is not None and ap._processed_seconds >= ap._expected_duration - 1.0:
+            #     logger.info(f"⏱️ Expected duration reached ({ap._processed_seconds:.1f}s >= {ap._expected_duration:.1f}s - 1s), stopping.")
+            #     normal_ending = True
+            #     break
+            #
+            # Jetzt wird nur eine Information geloggt und die Schleife läuft weiter.
             if ap._expected_duration is not None and ap._processed_seconds >= ap._expected_duration - 1.0:
-                logger.info(f"⏱️ Expected duration reached ({ap._processed_seconds:.1f}s >= {ap._expected_duration:.1f}s - 1s), stopping.")
-                normal_ending = True
-                break
+                logger.info(f"⏱️ Processed seconds ({ap._processed_seconds:.1f}s) exceed expected duration ({ap._expected_duration:.1f}s). Waiting for actual end of stream...")
+
             if platform_id in refresh_platforms and time.time() - last_url_refresh > url_refresh_interval:
                 logger.info(f"🔄 Scheduled URL refresh for {platform_name}")
                 try:
@@ -10073,14 +10173,22 @@ class WhisperController:
                 logger.warning(f"⚠️ Audio Stop Fehler: {e}")
             finally:
                 self._stop_complete.set()
-                if wait is False and gui and hasattr(gui, "root") and gui.root.winfo_exists():
-                    gui.queue_manager.safe_put("gui", ("status", self._set_state_idle))
+                if wait is False:
+                    self._reset_gui_state()  # geändert: jetzt direkt, nicht über Queue
                 with self._stop_lock:
                     self._stop_in_progress = False
 
         self._stop_thread = threading.Thread(target=stop_audio, daemon=True)
         self._stop_thread.start()
-        self._reset_gui_state()
+
+        # --- NEU: Timer für erzwungenen IDLE-Zustand nach 10 Sekunden ---
+        def force_idle():
+            with self._state_lock:
+                if self._state == WhisperController.State.STOPPING:
+                    logger.warning("⏰ Force-resetting state from STOPPING to IDLE after timeout")
+                    self._set_state(WhisperController.State.IDLE)
+
+        threading.Timer(10.0, force_idle).start()
 
         if wait:
             if not self._stop_complete.wait(timeout):
@@ -10162,11 +10270,13 @@ class WhisperController:
         if self.on_status:
             self.on_status({"processing_state": False, "status": f"❌ {message}"})
         self._emergency_cleanup()
-        self._reset_gui_state()
+        self._reset_gui_state()          # direkt aufrufen, nicht über Queue
         with self._state_lock:
-            self._set_state(WhisperController.State.ERROR)
+            if self._state != WhisperController.State.IDLE:
+                self._set_state(WhisperController.State.IDLE)
 
     def _reset_gui_state(self) -> None:
+        """Setzt die GUI zurück (Buttons, Status-Labels) – wird direkt im Hauptthread ausgeführt."""
         gui = self.gui_ref()
         if gui is None:
             return
@@ -10189,9 +10299,26 @@ class WhisperController:
                     raise
                 logger.warning(f"⚠️ GUI Update Fehler: {e}")
 
-        gui.queue_manager.safe_put("gui", ("status", update))
+        # Direkt im Hauptthread ausführen (root.after), um Rate-Limit zu umgehen
+        if hasattr(gui, "root") and gui.root.winfo_exists():
+            gui.root.after(0, update)
+        else:
+            logger.debug("_reset_gui_state: GUI root nicht verfügbar")
 
     def _start_processing(self) -> None:
+        # --- NEU: Warte, falls noch STOPPING ---
+        with self._state_lock:
+            if self._state == WhisperController.State.STOPPING:
+                logger.info("⏳ Waiting for STOPPING state to finish...")
+                # bis zu 5 Sekunden warten
+                for _ in range(50):
+                    if self._state != WhisperController.State.STOPPING:
+                        break
+                    time.sleep(0.1)
+                if self._state == WhisperController.State.STOPPING:
+                    self._handle_error("Stop process did not finish in time")
+                    return
+
         gui = self.gui_ref()
         if gui is None:
             self._handle_error("GUI nicht verfügbar")
@@ -10457,10 +10584,11 @@ class WhisperController:
             if gui.audio_processor._processing.is_set():
                 logger.warning("⚠️ _processing_finished aufgerufen, aber AudioProcessor läuft noch – erzwinge Reset")
         with self._state_lock:
-            if self._state == WhisperController.State.PROCESSING:
+            # Immer auf IDLE setzen, wenn nicht bereits IDLE
+            if self._state != WhisperController.State.IDLE:
                 self._set_state(WhisperController.State.IDLE)
             else:
-                logger.debug(f"_processing_finished: aktueller Zustand {self._state.name} – kein Wechsel nötig")
+                logger.debug(f"_processing_finished: bereits IDLE – kein Wechsel nötig")
         self._reset_gui_state()
         if self.on_status:
             self.on_status({"processing_state": False, "status": "✅ Verarbeitung beendet"})
@@ -10485,7 +10613,8 @@ class AudioProcessor:
         ffmpeg_manager: FFmpegManager,
         settings: Optional["AdvancedSettings"] = None,
         use_browser_cookies: bool = True,
-    ):
+        stream_manager: Optional[StreamManager] = None,
+    ) -> None:
         self._silent_chunk_counter = 0
         self.controller_ref = controller_ref
         self.ffmpeg_manager = ffmpeg_manager
@@ -10575,10 +10704,20 @@ class AudioProcessor:
         self._min_chunk_duration = self.config.MIN_CHUNK_DURATION
 
         self._audio_enhancer = AudioEnhancer(self.config, self.settings)
-        self.stream_manager = StreamManager(
-            enable_debug=(DEBUG_LEVEL >= 1),
-            use_browser_cookies=self.use_browser_cookies,
-        )
+
+        # StreamManager – entweder übergeben oder neu erstellen
+        if stream_manager is not None:
+            self.stream_manager = stream_manager
+            logger.debug("AudioProcessor: Using external StreamManager")
+        else:
+            proxy = self.settings.proxy_url if hasattr(self.settings, 'proxy_url') else ""
+            self.stream_manager = StreamManager(
+                enable_debug=(DEBUG_LEVEL >= 1),
+                use_browser_cookies=self.use_browser_cookies,
+                proxy=proxy,
+            )
+            logger.debug(f"AudioProcessor: Created internal StreamManager with proxy={proxy}")
+
         self._stream_handler = StreamHandler(self, self.stream_manager)
 
         self.last_confidence = 1.0
@@ -12674,7 +12813,7 @@ class SummarizeDialog:
 
         tk.Label(model_frame, text="Temperatur:", bg=CURRENT_THEME.BG_PRIMARY,
                  fg=CURRENT_THEME.TEXT_PRIMARY).pack(side="left", padx=(20,5))
-        self.temp_var = tk.DoubleVar(value=0.0)
+        self.temp_var = tk.DoubleVar(value=0.1)
         temp_scale = tk.Scale(model_frame, from_=0.0, to=1.0, resolution=0.1,
                                orient=tk.HORIZONTAL, variable=self.temp_var, length=150,
                                bg=CURRENT_THEME.BG_PRIMARY, fg=CURRENT_THEME.TEXT_PRIMARY,
@@ -12779,7 +12918,7 @@ class SummarizeDialog:
         self._chunks: List[str] = []
         self._current_chunk = 0
         self._prompt = ""
-        self._temp = 0.0
+        self._temp = 0.1
 
     def _set_default_prompt(self) -> None:
         target = self.summary_lang_var.get()
@@ -13151,6 +13290,9 @@ class TranslationDialog:
         if self.gui and hasattr(self.gui, '_open_dialogs'):
             self.gui._open_dialogs.append(self.dialog)
             self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _log_engine_status(self):
+        logger.debug(f"Translation engine status: {self.engine_var.get()}")
 
     def _on_close(self):
         if self.gui and hasattr(self.gui, '_open_dialogs') and self.dialog in self.gui._open_dialogs:
@@ -14515,9 +14657,12 @@ class DragonWhispererGUI:
         logger.info("🔧 Präzisionsoptimierungen angewendet: VAD=aus, Duplikatschwelle=0.98, adaptive_chunk=aus, chunk_dauer=20s, modell={}".format(self.settings.default_model))
 
     def _init_managers(self) -> None:
+        # --- ÄNDERUNG: proxy_enabled an StreamManager übergeben ---
         self.stream_manager = StreamManager(
             enable_debug=(DEBUG_LEVEL >= 1),
             use_browser_cookies=self.settings.use_browser_cookies,
+            proxy=self.advanced_settings.proxy_url,
+            proxy_enabled=self.advanced_settings.proxy_enabled,
         )
         self.ffmpeg_manager = FFmpegManager(
             self.advanced_settings.config,
@@ -14545,6 +14690,7 @@ class DragonWhispererGUI:
             controller_ref=self.controller,
             ffmpeg_manager=self.ffmpeg_manager,
             settings=self.advanced_settings,
+            stream_manager=self.stream_manager,
         )
         fallback_engine = None
         if self.advanced_settings.translation_engine == "google" and OLLAMA_AVAILABLE:
@@ -16771,6 +16917,9 @@ class AdvancedSettings:
     no_speech_threshold: float = 0.6
     suppress_tokens: str = "-1"
     vad_fallback_enabled: bool = True
+    # --- NEU: Proxy-URL für yt-dlp (optional) ---
+    proxy_url: str = "127.0.0.1:18080"  # Standard für Opera-Proxy (muss als socks5://127.0.0.1:18080 formatiert werden)
+    proxy_enabled: bool = False          # NEU: Proxy aktivieren/deaktivieren
     config: Config = field(init=False, repr=False, compare=False)
     _chunk_duration: float = field(default=Constants.BASE_CHUNK_DURATION, init=False, repr=False)
 
@@ -16835,6 +16984,7 @@ class AdvancedSettings:
                 data = json.load(f)
             valid_fields = {f.name for f in fields(cls) if f.init}
             filtered = {k: v for k, v in data.items() if k in valid_fields}
+            # Typkonvertierungen für bestimmte Felder
             if "beam_size" in filtered:
                 filtered["beam_size"] = int(filtered["beam_size"])
             if "temperature" in filtered:
@@ -16877,6 +17027,10 @@ class AdvancedSettings:
                 filtered["suppress_tokens"] = filtered["suppress_tokens"]
             if "vad_fallback_enabled" in filtered:
                 filtered["vad_fallback_enabled"] = bool(filtered["vad_fallback_enabled"])
+            if "proxy_url" in filtered:
+                filtered["proxy_url"] = filtered["proxy_url"]
+            if "proxy_enabled" in filtered:   # NEU
+                filtered["proxy_enabled"] = bool(filtered["proxy_enabled"])
             # adaptive_chunk ist bereits in valid_fields enthalten, also wird es übernommen
             instance = cls(**filtered)
             if "chunk_duration" in data:
@@ -16987,6 +17141,9 @@ class AdvancedSettings:
             issues.append(f"log_prob_threshold {self.log_prob_threshold} außerhalb -5.0-0.0")
         if not (1.0 <= self.compression_ratio_threshold <= 5.0):
             issues.append(f"compression_ratio_threshold {self.compression_ratio_threshold} außerhalb 1.0-5.0")
+        # Proxy-URL Validierung (optional)
+        if self.proxy_url and not (self.proxy_url.startswith("http://") or self.proxy_url.startswith("https://") or self.proxy_url.startswith("socks4://") or self.proxy_url.startswith("socks5://")):
+            issues.append(f"proxy_url '{self.proxy_url}' sollte mit http://, https://, socks4:// oder socks5:// beginnen")
         return issues
 
     def set_config_type(self, config_type: str) -> bool:
@@ -17081,11 +17238,13 @@ class AdvancedSettings:
             f"  • Condition on previous text: {self.condition_on_previous_text}",
             f"  • Suppress Tokens: {self.suppress_tokens}",
             f"\n🔁 VAD Fallback Enabled: {self.vad_fallback_enabled}",
+            f"\n🌐 Proxy URL: {self.proxy_url if self.proxy_url else '(kein Proxy)'}",
+            f"\n🔌 Proxy Enabled: {self.proxy_enabled}",  # NEU
         ])
         issues = self.validate()
         if issues:
             lines.append("\n⚠️ Validation Issues:")
-            for issue in lines:
+            for issue in issues:
                 lines.append(f"  • {issue}")
         else:
             lines.append("\n✅ All settings valid")
@@ -17101,7 +17260,9 @@ class AdvancedSettings:
             f"trans_engine={self.translation_engine}, "
             f"asian_mode={self.asian_mode}, "
             f"precision_mode={self.precision_mode}, "
-            f"tts_engine={self.tts_engine})"
+            f"tts_engine={self.tts_engine}, "
+            f"proxy={self.proxy_url if self.proxy_url else 'none'}, "
+            f"proxy_enabled={self.proxy_enabled})"
         )
 
 
