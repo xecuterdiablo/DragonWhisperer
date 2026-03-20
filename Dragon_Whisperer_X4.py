@@ -513,9 +513,18 @@ class EventBus:
     """
     Ein robuster, thread-sicherer Event-Bus mit starker Referenzverwaltung.
     Unterstützt asynchrone Ausführung der Callbacks in einem Thread-Pool.
+    Bietet eine shutdown-Methode zum sauberen Beenden des internen Executors.
     """
 
     def __init__(self, debug: bool = False, use_async: bool = True, max_workers: int = 4) -> None:
+        """
+        Initialisiert den EventBus.
+
+        Args:
+            debug: Wenn True, werden zusätzliche Debug-Logs ausgegeben.
+            use_async: Wenn True, werden Callbacks asynchron im Thread-Pool ausgeführt.
+            max_workers: Maximale Anzahl an Threads im Pool (nur relevant wenn use_async=True).
+        """
         self._lock = threading.RLock()
         self._exact: Dict[str, List[Callable]] = defaultdict(list)
         self._patterns: List[Tuple[str, Callable]] = []
@@ -533,18 +542,23 @@ class EventBus:
             self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="EventBus")
 
     def subscribe(self, event_type: str, callback: Callable[[Any], None]) -> None:
+        """Registriert einen Callback für einen exakten Event-Typ."""
         with self._lock:
             self._exact[event_type].append(callback)
         if self._debug:
             logger.debug(f"EventBus: Subscribed to '{event_type}'")
 
     def subscribe_pattern(self, pattern: str, callback: Callable[[Any], None]) -> None:
+        """
+        Registriert einen Callback für Events, deren Typ auf das Muster (fnmatch) passt.
+        """
         with self._lock:
             self._patterns.append((pattern, callback))
         if self._debug:
             logger.debug(f"EventBus: Subscribed to pattern '{pattern}'")
 
     def unsubscribe(self, event_type: str, callback: Callable) -> bool:
+        """Entfernt einen exakten Callback. Gibt True bei Erfolg zurück."""
         with self._lock:
             if event_type not in self._exact:
                 return False
@@ -557,6 +571,7 @@ class EventBus:
                 return False
 
     def unsubscribe_pattern(self, pattern: str, callback: Callable) -> bool:
+        """Entfernt einen Muster-Callback. Gibt True bei Erfolg zurück."""
         with self._lock:
             for i, (p, cb) in enumerate(self._patterns):
                 if p == pattern and cb == callback:
@@ -565,6 +580,11 @@ class EventBus:
             return False
 
     def emit(self, event_type: str, data: Any = None) -> None:
+        """
+        Sendet ein Event an alle registrierten Callbacks.
+        Wenn use_async=True, werden die Callbacks asynchron im Thread-Pool ausgeführt,
+        andernfalls synchron im aktuellen Thread.
+        """
         if self._metrics_enabled:
             with self._lock:
                 self._metrics["total_events"] += 1
@@ -603,6 +623,7 @@ class EventBus:
 
     @contextmanager
     def subscription_context(self, event_type: str, callback: Callable[[Any], None]):
+        """Kontextmanager für temporäre exakte Abonnements."""
         self.subscribe(event_type, callback)
         try:
             yield
@@ -611,6 +632,7 @@ class EventBus:
 
     @contextmanager
     def pattern_subscription_context(self, pattern: str, callback: Callable[[Any], None]):
+        """Kontextmanager für temporäre Muster-Abonnements."""
         self.subscribe_pattern(pattern, callback)
         try:
             yield
@@ -618,6 +640,7 @@ class EventBus:
             self.unsubscribe_pattern(pattern, callback)
 
     def clear(self) -> None:
+        """Entfernt alle registrierten Callbacks."""
         with self._lock:
             self._exact.clear()
             self._patterns.clear()
@@ -625,11 +648,17 @@ class EventBus:
             logger.debug("EventBus: All subscriptions cleared")
 
     def shutdown(self, wait: bool = True) -> None:
-        """Fährt den internen Executor herunter."""
+        """
+        Fährt den internen Executor herunter.
+        Sollte beim Beenden der Anwendung aufgerufen werden.
+        """
         if self._executor:
             self._executor.shutdown(wait=wait)
+            if self._debug:
+                logger.debug("EventBus: Executor shut down")
 
     def get_metrics(self) -> Dict[str, Any]:
+        """Gibt Statistiken über die Events zurück (nur wenn debug=True)."""
         if not self._metrics_enabled:
             return {}
         with self._lock:
@@ -650,7 +679,7 @@ class PeriodicTaskMixin:
     def __init__(self, interval: float, task: Callable, *args,
                  thread_name: Optional[str] = None,
                  initial_delay: float = 0.0,
-                 max_errors: int = 5,                     # ← geändert
+                 max_errors: int = 5,
                  on_error: Optional[Callable[[Exception], None]] = None,
                  **kwargs):
         self._interval = interval
@@ -4349,7 +4378,7 @@ class TranscriptionEngine:
                 model_size,
                 device=self.device,
                 compute_type=self.compute_type,
-                cpu_threads=4,
+                cpu_threads=os.cpu_count() or 4,   # alle Kerne nutzen
                 num_workers=1,
             )
             logger.info(f"✅ faster-whisper '{model_size}' erfolgreich geladen")
@@ -4758,9 +4787,11 @@ class TranscriptionEngine:
 
     def _update_detected_language(self, info: Any) -> None:
         if hasattr(info, "language") and info.language != "unknown":
-            if getattr(info, "language_probability", 1.0) < 0.4:
-                if self._debug:
-                    logger.debug("Low language confidence, using fallback")
+            prob = getattr(info, "language_probability", 1.0)
+            if prob < 0.4:
+                # Nur loggen, wenn Debug-Level >= 2
+                if DEBUG_LEVEL >= 2:
+                    logger.debug("Low language confidence (%.2f), using fallback", prob)
             else:
                 self._last_detected_language = info.language
 
@@ -9247,7 +9278,7 @@ class AudioProcessor:
         "_stream_handler", "last_confidence", "_last_confidence_lock",
         "_noisereduce_counter", "_noisereduce_lock", "_vad_fallback_enabled",
         "_translation_semaphore", "_process_finished", "__weakref__", "_last_gpu_stats_time",
-        "_detected_language", "_lang_lock"   # NEU
+        "_detected_language", "_lang_lock"
     )
 
     def __init__(
@@ -9370,7 +9401,7 @@ class AudioProcessor:
         self._vad_fallback_enabled = True
         self._translation_semaphore = threading.Semaphore(8)
 
-        # --- NEU: Speicherung der erkannten Sprache für Reconnects ---
+        # Speicherung der erkannten Sprache für Reconnects
         self._detected_language: Optional[str] = None
         self._lang_lock = threading.RLock()
 
@@ -9398,7 +9429,7 @@ class AudioProcessor:
             return self._detected_language
 
     # ----------------------------------------------------------------------
-    # Bestehende Methoden (aus dem Original, aber ohne _read_with_timeout)
+    # Bestehende Methoden (mit Optimierungen)
     # ----------------------------------------------------------------------
 
     def _get_config_type(self) -> str:
@@ -9567,7 +9598,7 @@ class AudioProcessor:
             info_callback("🔧 Setting up FFmpeg...")
             logger.info("🚀 Starting FFmpeg process...")
 
-            # --- NEU: Aktuelle Sprache holen ---
+            # Aktuelle Sprache holen
             with self._lang_lock:
                 current_lang = self._detected_language
 
@@ -9577,7 +9608,7 @@ class AudioProcessor:
                     output_queue=None,
                     process_id=self._current_stream_id,
                     audio_url=audio_url,
-                    detected_language=current_lang,  # NEU
+                    detected_language=current_lang,
                 )
                 if process is None:
                     error_callback("❌ FFmpeg konnte nicht gestartet werden")
@@ -9660,7 +9691,7 @@ class AudioProcessor:
                 process,
                 audio_url,
                 url,
-                current_lang,  # NEU: übergebe aktuelle Sprache
+                current_lang,
                 transcription_callback,
                 translation_callback,
                 info_callback,
@@ -9860,6 +9891,29 @@ class AudioProcessor:
                 pass
         return 0.0
 
+    def _is_silent(self, audio_data: bytes, threshold: float = 0.001) -> bool:
+        """
+        Erkennt, ob ein Audioblock stumm ist (RMS unter Schwellwert oder komplett Null).
+        """
+        if len(audio_data) < 160:  # zu kurz für sinnvolle Auswertung
+            return False
+
+        # Schnelltest: alle Bytes Null?
+        if all(b == 0 for b in audio_data):
+            return True
+
+        if self.transcription_engine and self.transcription_engine._np is not None:
+            np = self.transcription_engine._np
+            try:
+                audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+                rms = np.sqrt(np.mean(audio_np ** 2))
+                # Zusätzlich prüfen, ob die Amplitude extrem niedrig ist
+                max_amp = np.max(np.abs(audio_np))
+                return rms < threshold or max_amp < 100
+            except Exception:
+                pass
+        return False
+
     def _handle_normal_transcription(
         self,
         audio_data: bytes,
@@ -9921,7 +9975,7 @@ class AudioProcessor:
         clean_text = transcription.text.strip()
         conf = getattr(transcription, "confidence", 0.0)
 
-        # --- NEU: Sprache speichern ---
+        # Sprache speichern
         if hasattr(transcription, "language"):
             self._update_detected_language(transcription.language)
 
@@ -10050,7 +10104,7 @@ class AudioProcessor:
             clean_text = segment.text.strip()
             conf = getattr(segment, "confidence", 0.0)
 
-            # --- NEU: Sprache speichern ---
+            # Sprache speichern
             if hasattr(segment, "language"):
                 self._update_detected_language(segment.language)
 
@@ -10203,12 +10257,29 @@ class AudioProcessor:
     ) -> None:
         with self._stats_lock:
             chunk_num = self._chunk_counter
+
+        # Stille erkennen
+        is_silent = self._is_silent(audio_data)
+        if is_silent:
+            self._silent_chunk_counter += 1
+            # Wenn zu viele stille Chunks hintereinander, komplett ignorieren
+            if self._silent_chunk_counter > 5:
+                if self._silent_chunk_counter % 50 == 0 and logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"Still receiving silent chunks ({self._silent_chunk_counter} in a row) – skipping processing")
+                # Trotzdem Bytes zählen und Fortschritt aktualisieren
+                with self._stats_lock:
+                    self._total_bytes_processed += len(audio_data)
+                    self._processed_seconds = self._total_bytes_processed / self.config.BYTES_PER_SECOND
+                    self._chunk_counter += 1
+                return  # Keine weitere Verarbeitung
+        else:
+            self._silent_chunk_counter = 0
+
         if chunk_num <= 3:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(f"📦 Chunk #{chunk_num}: {len(audio_data)} bytes")
         if len(audio_data) > 0:
-            is_silent = self._is_silent(audio_data)
-            if is_silent:
+            if self._is_silent(audio_data):
                 self._silent_chunk_counter += 1
                 if self._silent_chunk_counter % 10 == 0 and logger.isEnabledFor(logging.DEBUG):
                     logger.debug(f"Still receiving silent chunks ({self._silent_chunk_counter} in a row)")
@@ -10279,19 +10350,6 @@ class AudioProcessor:
         if chunk_num % 50 == 0:
             info_callback(f"📊 {chunk_num} chunks processed...")
 
-    def _is_silent(self, audio_data: bytes, threshold: float = 0.001) -> bool:
-        if len(audio_data) < 160:
-            return False
-        if self.transcription_engine and self.transcription_engine._np is not None:
-            np = self.transcription_engine._np
-            try:
-                audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
-                rms = np.sqrt(np.mean(audio_np**2))
-                return rms < threshold
-            except Exception:
-                pass
-        return False
-
     def _update_adaptive_chunk(self) -> None:
         if self.subtitle_mode:
             return
@@ -10357,8 +10415,6 @@ class AudioProcessor:
         except Exception as e:
             logger.error(f"Unerwarteter Fehler beim Lesen von stderr: {e}", exc_info=True)
         return ""
-
-    # --- _read_with_timeout wurde entfernt, da es nicht mehr verwendet wird ---
 
     def _log_final_stats(self) -> None:
         if self._chunk_counter == 0:
@@ -12151,97 +12207,153 @@ class ShortcutsDialog(BaseDialog):
 
 
 class InstallDependencyDialog(BaseDialog):
+    """
+    Dialog zum Installieren fehlender Python-Pakete.
+    Erkennt, ob das Skript in einer virtuellen Umgebung läuft, und passt den
+    pip-Befehl entsprechend an (ohne --user in venv).
+    Zeigt die komplette Ausgabe live an und gibt klare Fehlermeldungen.
+    """
+
+    # Liste aller optionalen Pakete mit Anzeigenamen und Prüffunktion
+    OPTIONAL_PACKAGES = [
+        ("faster-whisper", "faster-whisper (Whisper-Backend)", lambda: WHISPER_AVAILABLE),
+        ("deep-translator", "deep-translator (Google Übersetzung)", lambda: TRANSLATOR_AVAILABLE),
+        ("psutil", "psutil (System-Monitoring)", lambda: FastLazyLoader.is_available("psutil")),
+        ("pynvml", "pynvml (detaillierte GPU-Statistiken)", lambda: importlib.util.find_spec("pynvml") is not None),
+        ("argostranslate", "argos-translate (Offline-Übersetzung)", lambda: ARGOS_AVAILABLE),
+        ("noisereduce", "noisereduce (Rauschunterdrückung)", lambda: importlib.util.find_spec("noisereduce") is not None),
+        ("rapidfuzz", "rapidfuzz (schnelle Textähnlichkeit)", lambda: importlib.util.find_spec("rapidfuzz") is not None),
+        ("python-docx", "python-docx (Word-Export)", lambda: importlib.util.find_spec("docx") is not None),
+        ("pyttsx3", "pyttsx3 (Text-to-Speech, Fallback)", lambda: importlib.util.find_spec("pyttsx3") is not None),
+        ("dimits", "dimits (Piper TTS)", lambda: importlib.util.find_spec("dimits") is not None),
+        ("langdetect", "langdetect (Spracherkennung für Zusammenfassungen)", lambda: importlib.util.find_spec("langdetect") is not None),
+    ]
+
     def __init__(self, parent, gui_ref):
         self.gui = gui_ref
         self._install_thread = None
         self._process = None
         self._stop_requested = False
-        super().__init__(parent, "Fehlende Pakete installieren", width=600, height=450, modal=True)
+
+        # Prüfen, ob wir in einer virtuellen Umgebung sind
+        self.in_venv = (hasattr(sys, 'real_prefix') or 
+                        (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix))
+        super().__init__(parent, "Fehlende Pakete installieren", width=700, height=550, modal=True)
 
     def build_ui(self) -> None:
-        tk.Label(self.main, text="Optionale Pakete, die installiert werden können:",
+        tk.Label(self.main, text="Folgende optionale Pakete können installiert werden:",
                  bg=CURRENT_THEME.BG_PRIMARY, fg=CURRENT_THEME.TEXT_PRIMARY,
                  font=Fonts.PRIMARY).pack(anchor="w", pady=(0,10))
-        self.packages = {}
-        frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
-        frame.pack(fill="x")
-        if not WHISPER_AVAILABLE:
-            var = tk.BooleanVar(value=True)
-            cb = tk.Checkbutton(frame, text="faster-whisper (benötigt für Transkription)",
-                                 variable=var, bg=CURRENT_THEME.BG_PRIMARY,
-                                 fg=CURRENT_THEME.TEXT_PRIMARY,
-                                 selectcolor=CURRENT_THEME.BG_TERTIARY,
-                                 activebackground=CURRENT_THEME.BG_HOVER)
-            cb.pack(anchor="w")
-            self.packages["faster-whisper"] = var
-        if not TRANSLATOR_AVAILABLE:
-            var = tk.BooleanVar(value=True)
-            cb = tk.Checkbutton(frame, text="deep-translator (für Übersetzungen)",
-                                 variable=var, bg=CURRENT_THEME.BG_PRIMARY,
-                                 fg=CURRENT_THEME.TEXT_PRIMARY,
-                                 selectcolor=CURRENT_THEME.BG_TERTIARY,
-                                 activebackground=CURRENT_THEME.BG_HOVER)
-            cb.pack(anchor="w")
-            self.packages["deep-translator"] = var
-        if not FastLazyLoader.is_available("psutil"):
-            var = tk.BooleanVar(value=True)
-            cb = tk.Checkbutton(frame, text="psutil (Systemmonitoring)",
-                                 variable=var, bg=CURRENT_THEME.BG_PRIMARY,
-                                 fg=CURRENT_THEME.TEXT_PRIMARY,
-                                 selectcolor=CURRENT_THEME.BG_TERTIARY,
-                                 activebackground=CURRENT_THEME.BG_HOVER)
-            cb.pack(anchor="w")
-            self.packages["psutil"] = var
-        if not FastLazyLoader.is_available("pynvml"):
-            var = tk.BooleanVar(value=True)
-            cb = tk.Checkbutton(frame, text="pynvml (genaue GPU‑Auslastung)",
-                                 variable=var, bg=CURRENT_THEME.BG_PRIMARY,
-                                 fg=CURRENT_THEME.TEXT_PRIMARY,
-                                 selectcolor=CURRENT_THEME.BG_TERTIARY,
-                                 activebackground=CURRENT_THEME.BG_HOVER)
-            cb.pack(anchor="w")
-            self.packages["pynvml"] = var
+
+        # Hinweis zur virtuellen Umgebung
+        if self.in_venv:
+            venv_note = tk.Label(self.main, 
+                                  text="ℹ️ Sie befinden sich in einer virtuellen Umgebung – Pakete werden direkt dorthin installiert.",
+                                  bg=CURRENT_THEME.BG_PRIMARY,
+                                  fg=CURRENT_THEME.INFO,
+                                  font=("Segoe UI", 8, "italic"))
+            venv_note.pack(fill="x", pady=(0,10))
+
+        # Scrollbarer Bereich für Checkbuttons
+        canvas = tk.Canvas(self.main, bg=CURRENT_THEME.BG_PRIMARY, highlightthickness=0)
+        scrollbar = tk.Scrollbar(self.main, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg=CURRENT_THEME.BG_PRIMARY)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        self.packages = {}  # paketname -> {"var": BooleanVar, "widget": Checkbutton}
+
+        # Alle Pakete prüfen und Checkbuttons nur für fehlende anzeigen
+        for pkg_name, display_text, check_func in self.OPTIONAL_PACKAGES:
+            if not check_func():
+                var = tk.BooleanVar(value=True)
+                cb = tk.Checkbutton(
+                    scrollable_frame,
+                    text=display_text,
+                    variable=var,
+                    bg=CURRENT_THEME.BG_PRIMARY,
+                    fg=CURRENT_THEME.TEXT_PRIMARY,
+                    selectcolor=CURRENT_THEME.BG_TERTIARY,
+                    activebackground=CURRENT_THEME.BG_HOVER,
+                    anchor="w",
+                    justify="left"
+                )
+                cb.pack(fill="x", pady=1)
+                self.packages[pkg_name] = {"var": var, "widget": cb}
+
+        # Falls alle Pakete bereits installiert sind
         if not self.packages:
             tk.Label(self.main, text="✅ Alle optionalen Pakete sind bereits installiert.",
                      bg=CURRENT_THEME.BG_PRIMARY, fg=CURRENT_THEME.SUCCESS).pack(pady=20)
             self.dialog.after(2000, self.close)
             return
+
+        # Ausgabebereich
         tk.Label(self.main, text="Installationsausgabe:", bg=CURRENT_THEME.BG_PRIMARY,
                  fg=CURRENT_THEME.TEXT_PRIMARY).pack(anchor="w", pady=(10,2))
-        self.output_text = scrolledtext.ScrolledText(self.main, height=12,
-                                                       bg=CURRENT_THEME.BG_TERTIARY,
-                                                       fg=CURRENT_THEME.TEXT_PRIMARY,
-                                                       font=Fonts.MONOSPACE,
-                                                       wrap=tk.WORD, state="normal")
+
+        self.output_text = scrolledtext.ScrolledText(
+            self.main, height=10,
+            bg=CURRENT_THEME.BG_TERTIARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.MONOSPACE,
+            wrap=tk.WORD, state="normal"
+        )
         self.output_text.pack(fill="both", expand=True, pady=5)
+
         self.status_var = tk.StringVar(value="Bereit")
         status_label = tk.Label(self.main, textvariable=self.status_var,
-                                  bg=CURRENT_THEME.BG_PRIMARY,
-                                  fg=CURRENT_THEME.TEXT_SECONDARY,
-                                  font=Fonts.SMALL)
+                                 bg=CURRENT_THEME.BG_PRIMARY,
+                                 fg=CURRENT_THEME.TEXT_SECONDARY,
+                                 font=Fonts.SMALL)
         status_label.pack(fill="x", pady=(5,0))
+
+        # Button‑Leiste
         btn_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
         btn_frame.pack(fill="x", pady=5)
-        self.install_btn = tk.Button(btn_frame, text="Installieren",
-                                       command=self.install_selected,
-                                       bg=CURRENT_THEME.DRAGON_GREEN,
-                                       fg=CURRENT_THEME.TEXT_PRIMARY,
-                                       font=Fonts.BUTTON, padx=15)
+
+        self.install_btn = tk.Button(
+            btn_frame, text="📦 Ausgewählte installieren",
+            command=self.install_selected,
+            bg=CURRENT_THEME.DRAGON_GREEN,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.BUTTON, padx=15
+        )
         self.install_btn.pack(side="left", padx=5)
-        self.cancel_btn = tk.Button(btn_frame, text="Abbrechen",
-                                      command=self.cancel_installation,
-                                      bg=CURRENT_THEME.ERROR,
-                                      fg=CURRENT_THEME.TEXT_PRIMARY,
-                                      font=Fonts.BUTTON, padx=15,
-                                      state="disabled")
+
+        self.cancel_btn = tk.Button(
+            btn_frame, text="⏹️ Abbrechen",
+            command=self.cancel_installation,
+            bg=CURRENT_THEME.ERROR,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.BUTTON, padx=15,
+            state="disabled"
+        )
         self.cancel_btn.pack(side="left", padx=5)
-        self.close_btn = tk.Button(btn_frame, text="Schließen",
-                                    command=self.close,
-                                    bg=CURRENT_THEME.BG_TERTIARY,
-                                    fg=CURRENT_THEME.TEXT_PRIMARY)
+
+        self.close_btn = tk.Button(
+            btn_frame, text="Schließen",
+            command=self.close,
+            bg=CURRENT_THEME.BG_TERTIARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY
+        )
         self.close_btn.pack(side="right", padx=5)
 
+        # Tooltips
+        ToolTip(self.install_btn, "Installiert die markierten Pakete mit pip")
+        ToolTip(self.cancel_btn, "Bricht die laufende Installation ab")
+        ToolTip(self.close_btn, "Dialog schließen (ohne Installation)")
+
     def cancel_installation(self):
+        """Bricht die laufende Installation ab."""
         if self._process and self._process.poll() is None:
             self._stop_requested = True
             try:
@@ -12256,32 +12368,51 @@ class InstallDependencyDialog(BaseDialog):
                 pass
         self._stop_requested = False
         self._enable_ui(True)
-        self.status_var.set("Installation abgebrochen")
+        self.status_var.set("⏹️ Installation abgebrochen")
 
     def _enable_ui(self, enabled: bool):
+        """Aktiviert oder deaktiviert die UI-Elemente während der Installation."""
         state = "normal" if enabled else "disabled"
         self.install_btn.config(state=state)
         self.cancel_btn.config(state="disabled" if enabled else "normal")
-        for var in self.packages.values():
-            cb = var._widget
-            if cb:
-                cb.config(state=state)
+        for pkg in self.packages.values():
+            widget = pkg["widget"]
+            try:
+                widget.config(state=state)
+            except tk.TclError:
+                pass  # Widget wurde vielleicht zerstört
 
     def install_selected(self):
-        packages = [pkg for pkg, var in self.packages.items() if var.get()]
+        """Startet die Installation der ausgewählten Pakete in einem Hintergrundthread."""
+        packages = [pkg for pkg, data in self.packages.items() if data["var"].get()]
         if not packages:
+            self.status_var.set("❌ Keine Pakete ausgewählt")
             return
+
         self.output_text.delete("1.0", "end")
-        self.output_text.insert("end", f"Starte Installation von: {', '.join(packages)}...\n")
+        self.output_text.insert("end", f"🚀 Starte Installation von: {', '.join(packages)}...\n")
+        self.output_text.see("end")
         self.dialog.update()
         self._enable_ui(False)
-        self.status_var.set("Installation läuft...")
-        self._install_thread = threading.Thread(target=self._install_worker, args=(packages,), daemon=True)
+        self.status_var.set("⚙️ Installation läuft...")
+
+        self._install_thread = threading.Thread(
+            target=self._install_worker, args=(packages,), daemon=True
+        )
         self._install_thread.start()
 
     def _install_worker(self, packages):
+        """Führt pip install im Hintergrund aus und leitet die Ausgabe um."""
         python_exe = sys.executable
-        cmd = [python_exe, "-m", "pip", "install"] + packages
+        # Basisbefehl: pip install
+        cmd = [python_exe, "-m", "pip", "install"]
+
+        # --user nur hinzufügen, wenn nicht in einer virtuellen Umgebung
+        if not self.in_venv:
+            cmd.append("--user")
+
+        cmd.extend(packages)
+
         try:
             self._process = subprocess.Popen(
                 cmd,
@@ -12297,6 +12428,7 @@ class InstallDependencyDialog(BaseDialog):
                     break
                 self.dialog.after(0, self._append_output, line)
                 time.sleep(0.01)
+
             returncode = self._process.wait()
             if self._stop_requested:
                 self.dialog.after(0, self._installation_finished, "abgebrochen")
@@ -12310,6 +12442,7 @@ class InstallDependencyDialog(BaseDialog):
             self._process = None
 
     def _append_output(self, line: str):
+        """Fügt eine Zeile zur Ausgabe hinzu (im Hauptthread)."""
         try:
             self.output_text.insert("end", line)
             self.output_text.see("end")
@@ -12317,16 +12450,26 @@ class InstallDependencyDialog(BaseDialog):
             pass
 
     def _installation_finished(self, status: str):
+        """
+        Wird nach Abschluss der Installation aufgerufen.
+        Zeigt das Ergebnis an und reaktiviert die UI.
+        """
         if status == "erfolgreich":
             self.output_text.insert("end", "\n✅ Installation erfolgreich!\n")
             self.output_text.insert("end", "Bitte starten Sie das Programm neu, um die neuen Pakete zu nutzen.\n")
-            self.status_var.set("✅ Erfolgreich installiert")
+            self.status_var.set("✅ Erfolgreich installiert – Neustart erforderlich")
         elif status == "abgebrochen":
             self.output_text.insert("end", "\n⏹️ Installation abgebrochen.\n")
             self.status_var.set("⏹️ Abgebrochen")
         else:
             self.output_text.insert("end", f"\n❌ {status}\n")
-            self.status_var.set("❌ Fehlgeschlagen")
+            # Zusätzlicher Hinweis für venv-Fehler
+            if "not visible in this virtualenv" in status:
+                self.output_text.insert("end", "\n💡 Tipp: Da Sie sich in einer virtuellen Umgebung befinden,\n"
+                                                "sollten Sie die Pakete manuell mit folgendem Befehl installieren:\n")
+                self.output_text.insert("end", f"    {sys.executable} -m pip install {' '.join([p for p, d in self.packages.items() if d['var'].get()])}\n")
+            self.status_var.set("❌ Fehlgeschlagen – siehe Ausgabe")
+
         self._enable_ui(True)
         self.cancel_btn.config(state="disabled")
         self._install_thread = None
@@ -15425,24 +15568,70 @@ class DragonWhispererGUI:
         self._safe_gui_update(reset, important=True)
 
     def _apply_precision_optimizations(self):
+        """
+        Wendet hardwareabhängige Optimierungen für maximale Präzision/Performance an.
+        """
+        # Basis-Optimierungen (unabhängig von Hardware)
         self.advanced_settings.vad_filter = False
+        self.advanced_settings.enable_duplicate_check = False
         self.advanced_settings.duplicate_similarity_threshold = 0.98
-        self.advanced_settings.chunk_duration = 20.0
-        free_vram = None
+        self.advanced_settings.adaptive_chunk = False
+        self.advanced_settings.chunk_duration = 20.0  # Standard, wird ggf. überschrieben
+
+        gpu_available = False
+        free_vram_gb = None
+
         if TORCH_AVAILABLE:
             try:
                 import torch
                 if torch.cuda.is_available():
+                    gpu_available = True
+                    # Gesamten VRAM ermitteln (freien Speicher können wir nur schätzen)
                     total = torch.cuda.get_device_properties(0).total_memory
-                    free_vram = total / (1024**3)
-                    free_vram = max(0, free_vram - 0.5)
+                    total_gb = total / (1024**3)
+                    # Freien Speicher grob schätzen: total minus Puffer (0.5 GB)
+                    free_vram_gb = max(0, total_gb - 0.5)
+                    logger.debug(f"GPU erkannt: {torch.cuda.get_device_name(0)}, total VRAM: {total_gb:.1f} GB, geschätzt frei: {free_vram_gb:.1f} GB")
+                else:
+                    logger.debug("CUDA nicht verfügbar, verwende CPU")
             except Exception as e:
                 logger.debug(f"Fehler bei GPU-Erkennung: {e}")
-        if free_vram is not None and free_vram > 6:
-            self.settings.default_model = "large-v3"
+
+        if gpu_available and free_vram_gb is not None:
+            # GPU vorhanden – Modell nach VRAM wählen
+            if free_vram_gb > 6:
+                self.settings.default_model = "large-v3"
+                logger.info("✅ Genügend VRAM (>6 GB) – verwende large-v3")
+            elif free_vram_gb > 4:
+                self.settings.default_model = "medium"
+                logger.info("🆗 Mittlerer VRAM (4-6 GB) – verwende medium")
+            else:
+                self.settings.default_model = "small"
+                self.advanced_settings.chunk_duration = 10.0   # kleinere Chunks für kleine GPU
+                logger.info("⚠️ Wenig VRAM (<4 GB) – verwende small mit 10s Chunks")
+            # GPU-spezifische Optimierungen
+            self.advanced_settings.gpu_acceleration = True
         else:
-            self.settings.default_model = "medium"
-        logger.info("🔧 Präzisionsoptimierungen angewendet: VAD=aus, Duplikatschwelle=0.98, adaptive_chunk=aus, chunk_dauer=20s, modell={}".format(self.settings.default_model))
+            # CPU
+            self.settings.default_model = "base"  # base ist für CPU gut geeignet
+            self.advanced_settings.chunk_duration = 10.0   # kleinere Chunks, um Timeouts zu vermeiden
+            self.advanced_settings.gpu_acceleration = False
+            # CPU-spezifische Optimierungen: Beam Size reduzieren
+            self.advanced_settings.beam_size = 5
+            logger.info("💻 CPU-Modus – verwende Modell 'base' mit 10s Chunks und Beam Size 5")
+
+        # Gemeinsame Einstellungen
+        self.advanced_settings.vad_filter = False
+        self.advanced_settings.enable_duplicate_check = False
+        self.advanced_settings.duplicate_similarity_threshold = 0.98
+        self.advanced_settings.adaptive_chunk = False
+
+        logger.info(
+            f"🔧 Präzisionsoptimierungen angewendet: "
+            f"VAD=aus, Duplikatschwelle={self.advanced_settings.duplicate_similarity_threshold}, "
+            f"adaptive_chunk=aus, chunk_dauer={self.advanced_settings.chunk_duration}s, "
+            f"modell={self.settings.default_model}, GPU={gpu_available}"
+        )
 
     def _init_managers(self) -> None:
         self.resource_manager = ResourceManager()
@@ -16865,63 +17054,119 @@ class DragonWhispererGUI:
         logger.info("✅ atexit-Handler registriert")
 
     def _cleanup_resources(self) -> None:
+        """Räumt alle Ressourcen auf (Prozesse, Threads, Caches, Executors)."""
         if self.is_shutting_down():
+            logger.debug("Cleanup already in progress or done, skipping.")
             return
         logger.info("🧹 Führe Ressourcenbereinigung durch...")
         with self._shutdown_lock:
             self._shutting_down = True
+
+        # 1. Stoppe alle Verarbeitungsprozesse zuerst
         try:
             self._safe_stop_all_processes()
         except Exception as e:
             logger.exception(f"Fehler beim Stoppen der Prozesse: {e}")
+
+        # 2. Stoppe periodische Tasks (müssen vor den zugehörigen Managern gestoppt werden)
+        try:
+            if hasattr(self, "memory_manager") and self.memory_manager:
+                self.memory_manager.stop_periodic_task(timeout=2.0)
+                logger.debug("MemoryManager periodic task stopped")
+        except Exception as e:
+            logger.exception(f"Fehler beim Stoppen des MemoryManager-Tasks: {e}")
+
+        try:
+            if hasattr(self, "ffmpeg_manager") and self.ffmpeg_manager:
+                self.ffmpeg_manager.stop_periodic_task(timeout=2.0)
+                logger.debug("FFmpegManager periodic task stopped")
+        except Exception as e:
+            logger.exception(f"Fehler beim Stoppen des FFmpegManager-Tasks: {e}")
+
+        # 3. Entsorge/Beende die Manager
         try:
             if hasattr(self, "ffmpeg_manager") and self.ffmpeg_manager:
                 self.ffmpeg_manager.dispose()
         except Exception as e:
             logger.exception(f"Fehler beim Entsorgen des FFmpegManagers: {e}")
+
         try:
             if hasattr(self, "transcription_engine") and self.transcription_engine:
                 self.transcription_engine.dispose()
         except Exception as e:
             logger.exception(f"Fehler beim Entsorgen der TranscriptionEngine: {e}")
+
         try:
             if hasattr(self, "translation_engine") and self.translation_engine:
                 self.translation_engine.dispose()
         except Exception as e:
             logger.exception(f"Fehler beim Entsorgen der TranslationEngine: {e}")
+
         try:
             if hasattr(self, "memory_manager") and self.memory_manager:
                 self.memory_manager.dispose()
         except Exception as e:
             logger.exception(f"Fehler beim Entsorgen des MemoryManagers: {e}")
+
         try:
             if hasattr(self, "stream_manager") and self.stream_manager:
                 self.stream_manager.dispose()
         except Exception as e:
             logger.exception(f"Fehler beim Entsorgen des StreamManagers: {e}")
+
         try:
             if hasattr(self, "resource_manager") and self.resource_manager:
-                self.resource_manager.cleanup()
+                self.resource_manager.cleanup(timeout=5.0)
         except Exception as e:
             logger.exception(f"Fehler beim Entsorgen des ResourceManagers: {e}")
+
         try:
             if hasattr(self, "tts_manager") and self.tts_manager:
                 self.tts_manager.dispose()
         except Exception as e:
             logger.exception(f"Fehler beim Entsorgen des TTSManagers: {e}")
+
+        # 4. CacheManager und EventBus
         try:
             if self.app_context and self.app_context.cache_manager:
                 self.app_context.cache_manager.dispose()
         except Exception as e:
             logger.exception(f"Fehler beim Entsorgen des CacheManagers: {e}")
+
         try:
-            self.translation_executor.shutdown(wait=False)
+            if self.app_context and self.app_context.event_bus:
+                self.app_context.event_bus.shutdown(wait=False)  # Nicht blockieren
+                logger.debug("EventBus executor shut down")
+        except Exception as e:
+            logger.exception(f"Fehler beim Herunterfahren des EventBus: {e}")
+
+        # 5. Executors
+        try:
+            if hasattr(self, "translation_executor"):
+                self.translation_executor.shutdown(wait=False)
         except Exception as e:
             logger.exception(f"Fehler beim Herunterfahren des Translation-Executors: {e}")
+
         try:
             _EXECUTOR.shutdown(wait=True, cancel_futures=True)
         except Exception as e:
             logger.exception(f"Fehler beim Herunterfahren des globalen Executors: {e}")
+
+        # 6. Linux-Optimierer (falls vorhanden)
+        if IS_LINUX and hasattr(self, "performance_optimizer"):
+            try:
+                self.performance_optimizer.restore_normal_mode()
+            except Exception as e:
+                logger.warning(f"⚠️ restore_normal_mode failed: {e}")
+            try:
+                self.performance_optimizer.dispose()
+            except Exception as e:
+                logger.warning(f"⚠️ dispose failed: {e}")
+
+        # 7. Queues leeren (optional)
+        self._cleanup_queues()
+
+        # 8. Garbage Collection anstoßen
         gc.collect()
         logger.info("✅ Ressourcenbereinigung abgeschlossen")
 
