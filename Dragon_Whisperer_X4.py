@@ -154,7 +154,7 @@ logger = logging.LoggerAdapter(logger, {"component": "main"})
 
 # Drittanbieter-Logger auf INFO beschränken
 logging.getLogger("huggingface_hub").setLevel(logging.INFO)
-logging.getLogger("faster_whisper").setLevel(logging.INFO)
+logging.getLogger("faster_whisper").setLevel(logging.WARNING)
 
 # Laute Bibliotheken drosseln
 for lib in ["httpx", "urllib3", "httpcore"]:
@@ -5019,6 +5019,7 @@ class TranscriptionEngine:
             segments, info = model.transcribe(audio_np, **kwargs)
             segments_list = list(segments)
 
+            # Debug-Ausgaben statt INFO
             if self._debug and segments_list:
                 log_debug("transcribe", f"{len(segments_list)} Segmente erhalten, erste: {segments_list[0].text[:50]}...")
             if DEBUG_LEVEL >= 3:
@@ -13595,6 +13596,9 @@ class AdvancedSettingsDialog(BaseDialog):
         # Hilfetext und Buttons
         self._create_help_and_buttons(row)
 
+        # Tooltips für alle Einstellungen hinzufügen
+        self._add_tooltips()
+
         self.settings_frame.columnconfigure(0, weight=1)
 
     # ----------------------------------------------------------------------
@@ -13979,7 +13983,6 @@ class AdvancedSettingsDialog(BaseDialog):
             insertbackground=self.gui.current_theme.TEXT_PRIMARY,
         )
         self.hotwords_entry.grid(row=2, column=1, columnspan=3, sticky="ew", pady=1, padx=5)
-        ToolTip(self.hotwords_entry, "Kommagetrennte Hotwords für faster-whisper")
 
     # ----------------------------------------------------------------------
     # Transkriptions‑Filter
@@ -14442,7 +14445,6 @@ class AdvancedSettingsDialog(BaseDialog):
             font=("Segoe UI", 8)
         )
         self.adaptive_chunk_cb.grid(row=3, column=0, columnspan=2, sticky="w", pady=1)
-        ToolTip(self.adaptive_chunk_cb, "Chunk-Dauer dynamisch an die tatsächliche Datenrate anpassen (hilft bei schwankenden Streams)")
 
         # Proxy aktivieren
         self.proxy_enabled_var = tk.BooleanVar(value=getattr(self.gui.advanced_settings, 'proxy_enabled', False))
@@ -14478,8 +14480,6 @@ class AdvancedSettingsDialog(BaseDialog):
             insertbackground=self.gui.current_theme.TEXT_PRIMARY,
         )
         self.proxy_entry.grid(row=4, column=2, columnspan=2, sticky="ew", pady=1, padx=5)
-        ToolTip(self.proxy_entry, "Proxy-URL für yt-dlp, z.B. socks5://127.0.0.1:18080 oder http://proxy:8080")
-
         self._toggle_proxy_entry()
 
         # Max Memory (MB)
@@ -14583,6 +14583,7 @@ class AdvancedSettingsDialog(BaseDialog):
     # ----------------------------------------------------------------------
     # Blacklist
     # ----------------------------------------------------------------------
+
     def _create_blacklist_section(self, row):
         blacklist_frame = tk.LabelFrame(
             self.settings_frame,
@@ -14607,7 +14608,7 @@ class AdvancedSettingsDialog(BaseDialog):
             font=("Segoe UI", 8),
         ).pack(side="left")
         self.blacklist_mode_var = tk.StringVar(value=getattr(self.gui.advanced_settings, 'blacklist_mode', 'word'))
-        mode_combo = ttk.Combobox(
+        self.blacklist_mode_combo = ttk.Combobox(
             mode_frame,
             textvariable=self.blacklist_mode_var,
             values=["word", "substring"],
@@ -14615,8 +14616,7 @@ class AdvancedSettingsDialog(BaseDialog):
             state="readonly",
             style="Dark.TCombobox",
         )
-        mode_combo.pack(side="left", padx=5)
-        ToolTip(mode_combo, "word = ganze Wörter, substring = beliebige Teilzeichenkette")
+        self.blacklist_mode_combo.pack(side="left", padx=5)
 
         tk.Label(
             blacklist_frame,
@@ -14676,7 +14676,6 @@ class AdvancedSettingsDialog(BaseDialog):
             style="Dark.TCombobox",
         )
         self.tts_engine_combo.grid(row=0, column=1, sticky="w", pady=1)
-        ToolTip(self.tts_engine_combo, "Text-to-Speech Engine (piper empfohlen)")
 
     # ----------------------------------------------------------------------
     # Optionale Python-Pakete
@@ -14765,7 +14764,6 @@ class AdvancedSettingsDialog(BaseDialog):
             font=("Segoe UI", 8),
         )
         self.best_of_spin.grid(row=0, column=1, sticky="w", pady=1)
-        ToolTip(self.best_of_spin, "Anzahl der Suchpfade (größer = besser, aber langsamer)")
 
         # Patience
         tk.Label(
@@ -14792,7 +14790,6 @@ class AdvancedSettingsDialog(BaseDialog):
             font=("Segoe UI", 8),
         )
         self.patience_scale.grid(row=0, column=3, sticky="ew", pady=1)
-        ToolTip(self.patience_scale, "Geduld bei der Beam-Suche (höher = genauer, aber langsamer)")
 
         # No Speech Threshold
         tk.Label(
@@ -14819,7 +14816,6 @@ class AdvancedSettingsDialog(BaseDialog):
             font=("Segoe UI", 8),
         )
         self.no_speech_scale.grid(row=1, column=1, sticky="ew", pady=1)
-        ToolTip(self.no_speech_scale, "Schwellwert für ‚Keine Sprache‘ (niedriger = mehr Segmente)")
 
         # Log Prob Threshold
         tk.Label(
@@ -14846,7 +14842,6 @@ class AdvancedSettingsDialog(BaseDialog):
             font=("Segoe UI", 8),
         )
         self.log_prob_scale.grid(row=1, column=3, sticky="ew", pady=1)
-        ToolTip(self.log_prob_scale, "Log‑Wahrscheinlichkeits‑Schwelle (höher = weniger Segmente)")
 
         # Compression Ratio
         tk.Label(
@@ -14873,7 +14868,6 @@ class AdvancedSettingsDialog(BaseDialog):
             font=("Segoe UI", 8),
         )
         self.comp_ratio_scale.grid(row=2, column=1, sticky="ew", pady=1)
-        ToolTip(self.comp_ratio_scale, "Maximales Kompressionsverhältnis (höher = mehr Segmente)")
 
         # Condition on previous text
         self.condition_prev_var = tk.BooleanVar(value=getattr(self.gui.advanced_settings, 'condition_on_previous_text', True))
@@ -14888,7 +14882,6 @@ class AdvancedSettingsDialog(BaseDialog):
             font=("Segoe UI", 8),
         )
         self.condition_prev_cb.grid(row=3, column=0, columnspan=2, sticky="w", pady=1)
-        ToolTip(self.condition_prev_cb, "Vorherigen Text als Kontext verwenden (ausschalten reduziert Wiederholungen)")
 
         # Suppress Tokens
         tk.Label(
@@ -14909,7 +14902,6 @@ class AdvancedSettingsDialog(BaseDialog):
             insertbackground=self.gui.current_theme.TEXT_PRIMARY,
         )
         self.suppress_tokens_entry.grid(row=3, column=3, sticky="w", pady=1)
-        ToolTip(self.suppress_tokens_entry, "Komma-getrennte Token-IDs, die unterdrückt werden (z.B. '-1,0,1')")
 
     # ----------------------------------------------------------------------
     # Hilfetext und Buttons
@@ -14980,6 +14972,42 @@ class AdvancedSettingsDialog(BaseDialog):
             font=("Segoe UI", 8),
         )
         cancel_btn.pack(side="left", padx=5)
+
+    # ----------------------------------------------------------------------
+    # Tooltips für alle Einstellungen
+    # ----------------------------------------------------------------------
+
+    def _add_tooltips(self):
+        """Fügt für alle konfigurierbaren Widgets erklärende Tooltips hinzu."""
+        # Audio & VAD
+        ToolTip(self.vad_filter_cb, "Voice Activity Detection – unterdrückt stille Passagen und reduziert Hintergrundgeräusche. Hilft besonders bei asiatischen Sprachen, kann aber bei Musik oder Live-Streams zu aggressiv sein.")
+        ToolTip(self.vad_scale, "Schwellwert für Spracherkennung. Niedrigere Werte erkennen auch leise Sprache, höhere Werte filtern mehr.")
+        ToolTip(self.vad_speech_spin, "Minimale Sprachdauer in Millisekunden. Segmente kürzer als dieser Wert werden als Stille betrachtet.")
+        ToolTip(self.vad_silence_spin, "Minimale Stilledauer in Millisekunden, um eine Pause zu erkennen.")
+        ToolTip(self.profile_combo_audio, "Vordefinierte Audiofilter für verschiedene Szenarien: 'transcription' (neutral), 'realtime' (schneller), 'noisy' (bei Hintergrundgeräuschen), 'podcast' (optimiert für Sprache), 'music' (für Musik).")
+
+        # Modell & Inferenz
+        ToolTip(self.gpu_cb, "Aktiviert GPU-Beschleunigung. Deaktivieren, wenn die Grafikkarte nicht ausreichend VRAM hat oder CPU-Transkription bevorzugt wird.")
+        ToolTip(self.hotwords_entry, "Kommagetrennte Hotwords für faster-whisper, um die Erkennung bestimmter Begriffe zu verbessern. Beispiel: 'Hallo Welt,OpenAI'.")
+
+        # Transkriptions‑Filter
+        ToolTip(self.adaptive_chunk_cb, "Passt die Chunk-Dauer dynamisch an die Wortgeschwindigkeit an. Bei schneller Sprache wird der Chunk verkürzt, bei langsamer verlängert. Hilfreich bei variabler Sprechgeschwindigkeit.")
+
+        # Erweitert & System
+        ToolTip(self.precision_cb, "Erhöht die Genauigkeit auf Kosten der Geschwindigkeit. Aktiviert einen kleineren Chunk, höhere Beam-Size und spezifische VAD-Parameter.")
+        ToolTip(self.asian_cb, "Optimiert für asiatische Sprachen (Chinesisch, Japanisch, Koreanisch, Thailändisch). Setzt Chunk-Dauer auf 10s und passt VAD-Schwellen an.")
+        ToolTip(self.cookies_cb, "Verwendet Browser-Cookies, um YouTube-Streams zuverlässiger zu extrahieren. Kann die Privatsphäre beeinträchtigen.")
+        ToolTip(self.plugin_cb, "Aktiviert externe Plugins (falls vorhanden). Deaktivieren reduziert den Overhead.")
+        ToolTip(self.optimize_cb, "Verkürzt lange Übersetzungen durch intelligente Kürzung, falls die Zielsprache weniger Wörter benötigt. Kann bei komplexen Sätzen Details verlieren.")
+        ToolTip(self.sentiment_cb, "Führt eine Sentiment-Analyse (positiv/negativ/neutral) der Transkription durch. Benötigt zusätzliche Ressourcen.")
+        ToolTip(self.diarize_cb, "Versuch der Sprechertrennung (wer spricht wann). Experimentell und ressourcenintensiv.")
+        ToolTip(self.blacklist_mode_combo, "Modus für die Blacklist: 'word' entfernt nur ganze Wörter, 'substring' entfernt beliebige Zeichenketten. Für asiatische Sprachen 'substring' empfehlenswert.")
+        ToolTip(self.tts_engine_combo, "Text-to-Speech-Engine: 'piper' (bessere Sprachqualität, benötigt Python-Paket 'dimits') oder 'pyttsx3' (einfacher, funktioniert meist out-of-the-box).")
+        ToolTip(self.cache_spin, "Maximale Cache-Größe in MB. Größerer Cache kann Wiederholungen schneller machen, verbraucht aber mehr Arbeitsspeicher.")
+        ToolTip(self.max_mem_spin, "Maximaler Arbeitsspeicher in MB, den das Programm nutzen darf. Bei Überschreitung wird der Puffer optimiert.")
+        ToolTip(self.auto_save_interval_spin, "Intervall in Sekunden, nach dem das Transkript automatisch gespeichert wird (0 = deaktiviert).")
+        ToolTip(self.proxy_entry, "Proxy-URL für yt-dlp, z.B. socks5://127.0.0.1:18080 oder http://proxy:8080. Aktivierung über Checkbox.")
+        ToolTip(self.proxy_enabled_cb, "Aktiviert den konfigurierten Proxy für alle Netzwerkverbindungen (Stream-Extraktion, yt-dlp).")
 
     # ----------------------------------------------------------------------
     # Hilfsmethoden
