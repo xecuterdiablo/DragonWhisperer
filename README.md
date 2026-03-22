@@ -1,4 +1,4 @@
-🐉 Dragon Whisperer v4.0
+🐉 Dragon Whisperer v3.0
 
 Die ultimative Lösung für Live‑Stream‑Transkription und Echtzeit‑Übersetzung
 Plattformunabhängig, GPU‑beschleunigt und mit moderner Dark‑GUI.
