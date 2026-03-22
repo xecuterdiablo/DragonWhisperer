@@ -27,6 +27,8 @@ Dragon Whisperer verwandelt jeden Audio‑ oder Videostream in lesbaren Text –
 📸 Screenshot
 
 (Füge hier einen aktuellen Screenshot ein)
+
+
 📦 Systemanforderungen
 Minimal
 
@@ -88,6 +90,7 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 
 Für ROCm oder MPS folge der offiziellen PyTorch‑Dokumentation.
 
+
 ⚡ Schnellstart
 
     Repository klonen (oder Skript direkt herunterladen)
@@ -123,6 +126,7 @@ Option	Beschreibung
 --version, -v	Versionsinformation anzeigen
 
 --help, -h	Hilfe anzeigen
+
 
 
 🤖 Whisper‑Modelle
