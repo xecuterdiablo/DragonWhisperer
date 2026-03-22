@@ -72,11 +72,11 @@ import os
 import platform
 import queue
 import re
-import resource
 import shutil
 import signal as py_signal
 import subprocess
 import sys
+import argparse
 import tempfile
 import threading
 import time
@@ -548,6 +548,15 @@ class BaseDialog:
     def build_ui(self):
         """Überschreiben in abgeleiteten Klassen."""
         pass
+
+    def _safe_after(self, delay: int, callback: Callable, *args, **kwargs) -> Optional[str]:
+        """
+        Ruft self.dialog.after() nur auf, wenn der Dialog noch existiert.
+        Gibt die after-ID zurück oder None, wenn der Dialog nicht existiert.
+        """
+        if self.dialog and self.dialog.winfo_exists():
+            return self.dialog.after(delay, callback, *args, **kwargs)
+        return None
 
     def close(self):
         if hasattr(self.parent, '_open_dialogs') and self.dialog in self.parent._open_dialogs:
@@ -1837,26 +1846,33 @@ class PlatformUtils:
         return url.strip() if url else ""
 
     @classmethod
-    def validate_file_path(cls, file_url: str) -> Tuple[bool, str]:
+    def validate_file_path(cls, file_url: str, allowed_dirs: Optional[List[str]] = None) -> Tuple[bool, str]:
         """
-        Validiert eine file://-URL und prüft, ob die referenzierte Datei innerhalb
-        der erlaubten Basisverzeichnisse liegt (Sicherheit gegen Path-Traversal).
-        Gibt (True, absoluter Pfad) bei Erfolg zurück, sonst (False, Fehlermeldung).
+        Überprüft, ob eine file://-URL auf eine erlaubte Datei zeigt.
+        Verhindert Path-Traversal-Angriffe durch robuste Pfadprüfung.
+
+        Args:
+            file_url: Die URL im Format file:///pfad/zu/datei
+            allowed_dirs: Zusätzlich erlaubte Verzeichnisse (optional)
+
+        Returns:
+            Tuple (ok, Pfad_oder_Fehlermeldung)
         """
         if not file_url.startswith(Config.ALLOWED_FILE_SCHEME_PREFIX):
             return False, "Keine file://-URL"
 
-        # Pfad aus der URL extrahieren
         try:
+            # Pfad aus URL extrahieren
             if IS_WINDOWS and file_url.startswith("file:///"):
                 path_part = file_url[8:]
                 path_part = urllib.request.url2pathname(path_part)
             else:
                 path_part = file_url[len(Config.ALLOWED_FILE_SCHEME_PREFIX):]
-            if IS_WINDOWS and path_part.startswith("\\\\"):
-                pass
-            else:
+
+            # Normierung nur für Nicht-Windows oder wenn es kein UNC-Pfad ist
+            if not IS_WINDOWS or not path_part.startswith("\\\\"):
                 path_part = os.path.normpath(path_part)
+
         except Exception as e:
             return False, f"Pfad kann nicht extrahiert werden: {e}"
 
@@ -1870,25 +1886,21 @@ class PlatformUtils:
         if not real_path.is_file():
             return False, "Keine gültige Datei (möglicherweise ein Verzeichnis)"
 
-        # Erlaubte Basisverzeichnisse auflösen
+        # Erlaubte Basisverzeichnisse (inkl. tempdir)
         allowed_bases = [Path(p).resolve() for p in Config.ALLOWED_FILE_BASE_DIRS]
-        temp_dir = Path(tempfile.gettempdir()).resolve()
+        if allowed_dirs:
+            allowed_bases.extend([Path(p).resolve() for p in allowed_dirs if p])
+        allowed_bases.append(Path(tempfile.gettempdir()).resolve())
 
-        # Prüfen, ob real_path innerhalb eines erlaubten Verzeichnisses liegt
-        for base in allowed_bases + [temp_dir]:
+        # Prüfung, ob real_path innerhalb eines erlaubten Verzeichnisses liegt
+        for base in allowed_bases:
             try:
-                # Python 3.9+ hat Path.is_relative_to
-                if hasattr(real_path, "is_relative_to"):
-                    if real_path.is_relative_to(base):
-                        return True, str(real_path)
-                else:
-                    # Fallback für ältere Python-Versionen
-                    if str(real_path).startswith(str(base)):
-                        return True, str(real_path)
-            except (ValueError, AttributeError):
+                real_path.relative_to(base)
+                return True, str(real_path)
+            except ValueError:
                 continue
 
-        logger.warning(f"⚠️ Datei außerhalb erlaubter Verzeichnisse: {real_path}")
+        logger.warning(f"⚠️ Datei außerhalb erlaubter Verzeichnisse: {real_path}", extra={"component": "platform"})
         return False, "Datei außerhalb der erlaubten Verzeichnisse (nur Home und aktuelles Verzeichnis)"
 
     @classmethod
@@ -3586,6 +3598,20 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                     log_debug("ollama", f"Model list fetch failed: {e}")
             return self._available_models.copy()
 
+    def _fetch_ollama_models(self):
+        """Holt verfügbare Ollama-Modelle asynchron."""
+        try:
+            import requests
+            host = self.gui.advanced_settings.ollama_host
+            r = requests.get(f"{host}/api/tags", timeout=3)
+            if r.status_code == 200:
+                data = r.json()
+                models = [m["name"] for m in data.get("models", [])]
+                return models
+        except Exception as e:
+            logger.debug(f"Ollama model fetch failed: {e}")
+        return []
+
     def is_model_available(self, model: Optional[str] = None) -> bool:
         check_model = model or self.model
         available = self._fetch_available_models()
@@ -4779,21 +4805,25 @@ class TranscriptionEngine:
     def _load_model_with_checks(
         self, model_size: str, backend: str, cache_key: Tuple[str, str], set_active: bool
     ) -> Optional[Tuple[Any, str]]:
-        """Führt das eigentliche Laden mit VRAM-Check und Fallback durch."""
+        """
+        Lädt ein Modell mit Checks (VRAM, Fallback) und Cache.
+        Thread-sicher durch Locks pro Modellgröße.
+        """
+        # Lock für dieses Modell sicherstellen (thread-sicher mit self._lock)
         with self._lock:
             if model_size not in self._model_locks:
                 self._model_locks[model_size] = threading.Lock()
             model_lock = self._model_locks[model_size]
 
         with model_lock:
-            # Nochmal prüfen (ein anderer Thread könnte inzwischen geladen haben)
+            # Double-Check mit gemeinsamem self._lock, um Cache-Zugriff und Lade-Status zu schützen
             with self._lock:
+                # Wurde das Modell zwischenzeitlich geladen?
                 if cache_key in self._model_cache:
                     model = self._model_cache[cache_key]
                     self._model_cache.move_to_end(cache_key)
                     if set_active:
                         with self._model_usage_lock:
-                            # Altes Modell entladen, wenn vorhanden und nicht das gleiche
                             if self.model is not None and (self.model_size, self.whisper_backend) != cache_key:
                                 self._unload_model(self.model)
                             self.model = model
@@ -4801,36 +4831,41 @@ class TranscriptionEngine:
                             self.whisper_backend = backend
                     return model, backend
 
+                # Verhindert parallele Ladeversuche für dasselbe Modell
                 if self._model_loading_status.get(model_size, False):
-                    if self._debug:
-                        logger.info(f"⏳ Modell {model_size} wird bereits in einem anderen Thread geladen – breche ab.")
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.info(f"⏳ Modell {model_size} wird bereits in einem anderen Thread geladen – breche ab.",
+                                    extra={"component": "transcribe"})
                     return None
                 self._model_loading_status[model_size] = True
 
-            # VRAM-Check und ggf. Fallback
-            fallback_model = self._check_vram_and_fallback(model_size)
-            if fallback_model is not None:
+            # VRAM-Check und Fallback (kann das Modell wechseln, daher außerhalb des Locks)
+            fallback_result = self._check_vram_and_fallback(model_size)
+            if fallback_result is not None:
                 with self._lock:
                     self._model_loading_status[model_size] = False
-                return fallback_model
+                return fallback_result
 
-            # Eigentliches Laden
+            # Modell laden
             try:
                 model = self._perform_load(backend, model_size)
                 if model is None:
-                    logger.error(f"❌ Konnte Modell {model_size} mit Backend {backend} nicht laden.")
+                    logger.error(f"❌ Konnte Modell {model_size} mit Backend {backend} nicht laden.",
+                                 extra={"component": "transcribe"})
                     return None
 
                 with self._lock:
                     self._model_cache[cache_key] = model
+                    # Cache-Größe begrenzen
                     if len(self._model_cache) > self._max_cached_models:
                         oldest_key, old_model = next(iter(self._model_cache.items()))
                         del self._model_cache[oldest_key]
-                        logger.info(f"🧹 Entferne ältestes Modell '{oldest_key[0]}' aus Cache")
+                        logger.info(f"🧹 Entferne ältestes Modell '{oldest_key[0]}' aus Cache",
+                                    extra={"component": "transcribe"})
                         self._unload_model(old_model)
+
                     if set_active:
                         with self._model_usage_lock:
-                            # Altes Modell entlassen, wenn vorhanden
                             if self.model is not None and (self.model_size, self.whisper_backend) != cache_key:
                                 self._unload_model(self.model)
                             self.model = model
@@ -4838,7 +4873,8 @@ class TranscriptionEngine:
                             self.whisper_backend = backend
                 return model, backend
             except Exception as e:
-                logger.exception(f"❌ Unerwarteter Fehler beim Laden von {model_size}: {e}")
+                logger.exception(f"❌ Unerwarteter Fehler beim Laden von {model_size}: {e}",
+                                 extra={"component": "transcribe"})
                 return None
             finally:
                 with self._lock:
@@ -5447,41 +5483,34 @@ class TranscriptionEngine:
                 if self._debug:
                     logger.warning(f"⚠️ Failed to clear GPU cache: {e}")
 
-    def _log_gpu_stats(self) -> None:
-        """
-        Protokolliert GPU-Statistiken (nur im Debug-Modus und höchstens alle 10 Sekunden).
-        """
+    def _log_gpu_stats(self, ap: "AudioProcessor") -> None:
+        """Loggt GPU‑Statistiken, falls Debug aktiviert ist."""
         if not logger.isEnabledFor(logging.DEBUG):
             return
-
-        # Geschützter Zugriff auf self.device
-        with self._model_usage_lock:
-            device = self.device
-
-        if TORCH_AVAILABLE and device == "cuda":
-            torch = FastLazyLoader.load("torch")
-            try:
-                allocated = torch.cuda.memory_allocated() / 1024**3
-                reserved = torch.cuda.memory_reserved() / 1024**3
-                log_debug("gpu", f"GPU memory: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB")
-            except (RuntimeError, AttributeError) as e:
-                log_debug("gpu", f"GPU-Statistik-Fehler: {e}")
-            except Exception as e:
-                logger.error(f"Unerwarteter Fehler bei GPU-Statistik: {e}", exc_info=True)
-
-            if time.time() - self._last_gpu_stats_time > 10:
-                self._last_gpu_stats_time = time.time()
+        if ap._chunk_counter % 5 == 0:
+            if TORCH_AVAILABLE and ap.transcription_engine.device == "cuda":
+                torch = FastLazyLoader.load("torch")
                 try:
-                    import pynvml
-                    pynvml.nvmlInit()
-                    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-                    temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-                    util = pynvml.nvmlDeviceGetUtilizationRates(handle).gpu
-                    log_debug("gpu", f"Temp={temp}°C, Util={util}%")
-                except (ImportError, pynvml.NVMLError) as e:
-                    log_debug("gpu", f"pynvml-Fehler: {e}")
+                    allocated = torch.cuda.memory_allocated() / 1024**3
+                    reserved = torch.cuda.memory_reserved() / 1024**3
+                    log_debug("gpu", f"Chunk {ap._chunk_counter}: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB")
+                except (RuntimeError, AttributeError) as e:
+                    log_debug("gpu", f"GPU-Statistik-Fehler: {e}")
                 except Exception as e:
-                    logger.error(f"Unerwarteter Fehler bei pynvml: {e}", exc_info=True)
+                    logger.error(f"Unerwarteter Fehler bei GPU-Statistik: {e}", exc_info=True, extra={"component": "audio"})
+                if time.time() - ap._last_gpu_stats_time > 10:
+                    ap._last_gpu_stats_time = time.time()
+                    try:
+                        import pynvml
+                        pynvml.nvmlInit()
+                        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                        temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+                        util = pynvml.nvmlDeviceGetUtilizationRates(handle).gpu
+                        log_debug("gpu", f"Temp={temp}°C, Util={util}%")
+                    except (ImportError, pynvml.NVMLError) as e:
+                        log_debug("gpu", f"pynvml-Fehler: {e}")
+                    except Exception as e:
+                        logger.error(f"Unerwarteter Fehler bei pynvml: {e}", exc_info=True, extra={"component": "audio"})
 
 
 # -----------------------------------------------------------------------------
@@ -6265,57 +6294,75 @@ class StreamManager:
 
     def _start_dvb_stream(self, dvb_url: str) -> Optional[str]:
         """
-        Startet einen VLC-Prozess, der einen DVB-S-Stream als HTTP-Stream bereitstellt.
-        Gibt die HTTP-URL zurück (z.B. http://localhost:8080/dvb).
+        Startet einen VLC-Server, der einen DVB-S-Stream als HTTP-Stream bereitstellt.
+        Sicherheitsmaßnahmen:
+            - Whitelist für Parameter
+            - Strenge Zeichen‑Whitelist für Werte (nur alphanumerisch, Punkte, Bindestriche, Unterstriche)
+            - Dynamische Portvergabe (vermeidet Konflikte)
+            - VLC‑Prozess wird mit `shell=False` und Argument‑Liste gestartet
+            - Keine Shell‑Interpretation von Sonderzeichen
+            - Timeout beim Start
         """
+        # 1. Prüfung, ob VLC vorhanden ist
         if not shutil.which("vlc"):
-            logger.error("❌ VLC nicht gefunden – für DVB wird VLC benötigt.")
+            logger.error("❌ VLC nicht gefunden – für DVB wird VLC benötigt.", extra={"component": "stream"})
             return None
 
+        # 2. URL-Format prüfen
         if not dvb_url.startswith("dvb-s://"):
-            logger.error("❌ Bitte vollständige Parameter-URL angeben, z.B. dvb-s://frequency=...")
+            logger.error("❌ Bitte vollständige Parameter-URL angeben, z.B. dvb-s://frequency=...", extra={"component": "stream"})
             return None
 
-        query_string = dvb_url[8:]
+        # 3. Parameter parsen und validieren
+        query_string = dvb_url[8:]  # "dvb-s://" entfernen
         allowed_params = {
             'frequency', 'symbolrate', 'polarization', 'fec',
             'satno', 'dvb_scan', 'program', 'video_pid', 'audio_pid'
         }
         params = {}
 
-        # Parameter parsen und validieren
         for pair in query_string.split('&'):
             if not pair:
                 continue
             if '=' not in pair:
-                logger.error(f"❌ Ungültiger Parameter (kein '='): {pair}")
+                logger.error(f"❌ Ungültiger Parameter (kein '='): {pair}", extra={"component": "stream"})
                 return None
             key, value = pair.split('=', 1)
+
+            # Parametername: nur Buchstaben, Ziffern, Unterstriche
             if not re.match(r'^[a-zA-Z0-9_]+$', key):
-                logger.error(f"❌ Ungültiger Parametername: {key}")
+                logger.error(f"❌ Ungültiger Parametername: {key}", extra={"component": "stream"})
                 return None
-            if '--' in value:
-                logger.error(f"❌ Verdächtiger Wert enthält '--': {value}")
+
+            # Wert: nur Buchstaben, Ziffern, Punkt, Bindestrich, Unterstrich (keine Sonderzeichen)
+            if not re.match(r'^[a-zA-Z0-9._-]+$', value):
+                logger.error(f"❌ Ungültiger Wert: {value} (erlaubt: a-z, A-Z, 0-9, . _ -)", extra={"component": "stream"})
                 return None
-            if not re.match(r'^[a-zA-Z0-9,.\-]*$', value):
-                logger.error(f"❌ Ungültiger Wert: {value}")
-                return None
+
             if key not in allowed_params:
-                logger.error(f"❌ Nicht erlaubter Parameter: {key}")
+                logger.error(f"❌ Nicht erlaubter Parameter: {key}", extra={"component": "stream"})
                 return None
+
             params[key] = value
 
         if 'frequency' not in params:
-            logger.error("❌ 'frequency' ist ein Pflichtparameter für DVB-S.")
+            logger.error("❌ 'frequency' ist ein Pflichtparameter für DVB-S.", extra={"component": "stream"})
             return None
 
-        port = 8080
+        # 4. Dynamischen freien Port suchen
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(('localhost', 0))
+        port = sock.getsockname()[1]
+        sock.close()
         mount = "/dvb"
         http_url = f"http://localhost:{port}{mount}"
 
+        # 5. DVB‑Input‑String sicher zusammenbauen (keine weiteren Sonderzeichen möglich)
         dvb_options = [f"{key}={params[key]}" for key in allowed_params if key in params]
         dvb_input = "dvb-s://" + "&".join(dvb_options)
 
+        # 6. VLC‑Kommando als Liste, ohne Shell
         vlc_cmd = [
             "vlc",
             dvb_input,
@@ -6327,35 +6374,42 @@ class StreamManager:
             "--live-caching", "300",
         ]
 
-        if self._debug:
-            logger.debug(f"🚀 Starte VLC: {' '.join(vlc_cmd)}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"🚀 Starte VLC: {' '.join(vlc_cmd)}", extra={"component": "stream"})
 
+        # 7. Prozess starten mit Timeout (z. B. 10 Sekunden)
         try:
             process = subprocess.Popen(
                 vlc_cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
+                start_new_session=True,   # erleichtert das Beenden der Prozessgruppe
             )
+
+            # Kurz warten und prüfen, ob der Prozess läuft
             time.sleep(2)
-            if process.poll() is None:
-                # Kurz testen, ob der HTTP-Endpunkt erreichbar ist
-                try:
-                    import requests
-                    r = requests.get(http_url, timeout=3)
-                    if r.status_code != 200:
-                        logger.warning(f"⚠️ DVB-Stream antwortet mit Status {r.status_code}, aber VLC läuft.")
-                except Exception as e:
-                    logger.warning(f"⚠️ DVB-Stream-Test fehlgeschlagen: {e}")
-                with self._dvb_lock:
-                    self._dvb_processes.append(process)
-                logger.info(f"✅ VLC-DVB-Server gestartet: {http_url}")
-                return http_url
-            else:
-                logger.error("❌ VLC-Prozess für DVB ist sofort beendet.")
+            if process.poll() is not None:
+                logger.error("❌ VLC-Prozess für DVB ist sofort beendet.", extra={"component": "stream"})
                 return None
+
+            # Optional: Test, ob HTTP-Endpunkt erreichbar ist (mit Timeout)
+            try:
+                import requests
+                r = requests.get(http_url, timeout=3)
+                if r.status_code != 200:
+                    logger.warning(f"⚠️ DVB-Stream antwortet mit Status {r.status_code}, aber VLC läuft.", extra={"component": "stream"})
+            except Exception as e:
+                logger.warning(f"⚠️ DVB-Stream-Test fehlgeschlagen: {e}", extra={"component": "stream"})
+
+            with self._dvb_lock:
+                self._dvb_processes.append(process)
+
+            logger.info(f"✅ VLC-DVB-Server gestartet: {http_url}", extra={"component": "stream"})
+            return http_url
+
         except Exception as e:
-            logger.error(f"❌ Fehler beim Starten von VLC für DVB: {e}")
+            logger.error(f"❌ Fehler beim Starten von VLC für DVB: {e}", exc_info=True, extra={"component": "stream"})
             return None
 
 
@@ -6363,42 +6417,179 @@ class StreamManager:
 # YtDlpHelper
 # ----------------------------------------------------------------------
 class YtDlpHelper:
-    @staticmethod
-    def run_command(cmd: List[str], timeout: int = 15, method_name: str = "unknown") -> Optional[str]:
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"  Ausführen: {' '.join(cmd)}")
-        start = time.perf_counter()
+    """
+    Hilfsklasse für die Ausführung von yt-dlp-Befehlen.
+    Bietet Methoden zum Extrahieren von Audio-URLs und Metadaten.
+
+    Alle Methoden sind statisch und thread-sicher. Die Befehle werden ohne Shell
+    ausgeführt und die URL wird durch `"--"` von Optionen isoliert, um
+    Sicherheitslücken (z.B. Interpretation als Option) zu vermeiden.
+
+    Zusätzliche Validierungen:
+        - Browser-Name wird gegen eine Whitelist geprüft.
+        - Proxy-URL muss ein erlaubtes Schema haben (http, https, socks4, socks5).
+        - Format-String wird auf erlaubte Zeichen eingeschränkt.
+    """
+
+    # Erlaubte Browser für --cookies-from-browser
+    _ALLOWED_BROWSERS = {
+        "firefox", "chrome", "brave", "edge", "chromium",
+        "opera", "vivaldi", "safari"
+    }
+
+    # Erlaubte Proxy-Schemata
+    _ALLOWED_PROXY_SCHEMES = ("http://", "https://", "socks4://", "socks5://")
+
+    # Erlaubte Zeichen im Format-String (yt-dlp Format-Syntax)
+    _ALLOWED_FORMAT_CHARS = set(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/[]=+-"
+    )
+
+    @classmethod
+    def _validate_browser(cls, browser: str) -> bool:
+        """Prüft, ob der Browser-Name erlaubt ist."""
+        return browser in cls._ALLOWED_BROWSERS
+
+    @classmethod
+    def _validate_proxy(cls, proxy: str) -> bool:
+        """Prüft, ob die Proxy-URL ein erlaubtes Schema hat und gültig ist."""
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                shell=False,
-                encoding="utf-8",
-                errors="replace",
-            )
-            duration = (time.perf_counter() - start) * 1000
-            if result.returncode == 0 and result.stdout.strip():
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(f"  ✅ {method_name} erfolgreich in {duration:.2f}ms")
-                return result.stdout.strip()
-            else:
-                if logger.isEnabledFor(logging.DEBUG) and result.stderr:
-                    stderr_preview = result.stderr[:200].replace("\n", " ")
-                    logger.debug(f"  ⚠️ {method_name} fehlgeschlagen (Code {result.returncode}): {stderr_preview}")
-        except subprocess.TimeoutExpired:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"  ⏰ {method_name} Timeout nach {timeout}s")
-        except (OSError, ValueError) as e:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"  ⚠️ {method_name} Fehler: {e}")
-        except Exception as e:
-            logger.error(f"Unerwarteter Fehler in {method_name}: {e}", exc_info=True)
-        return None
+            parsed = urllib.parse.urlparse(proxy)
+            # Schema muss in der Whitelist sein und netloc darf nicht leer sein
+            return parsed.scheme in cls._ALLOWED_PROXY_SCHEMES and bool(parsed.netloc)
+        except Exception:
+            return False
+
+    @classmethod
+    def _validate_format_str(cls, format_str: str) -> bool:
+        """Prüft, ob der Format-String nur erlaubte Zeichen enthält."""
+        return all(c in cls._ALLOWED_FORMAT_CHARS for c in format_str)
 
     @staticmethod
-    def get_json(url: str, timeout: int = 20, use_cookies: bool = False, browser: Optional[str] = None, proxy: str = "") -> Optional[Dict[str, Any]]:
+    def run_command(
+        cmd: List[str],
+        timeout: int = 15,
+        method_name: str = "unknown",
+        prefer_ipv4: bool = False
+    ) -> Optional[str]:
+        """
+        Führt einen externen Befehl aus und gibt die Standardausgabe zurück.
+        """
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"  Ausführen: {' '.join(cmd)}", extra={"component": "ytdlp"})
+
+        start = time.perf_counter()
+        proc = None
+
+        # Stelle sicher, dass die URL (letztes Element) nicht als Option interpretiert wird.
+        # Füge "--" vor der URL ein, falls nicht bereits vorhanden.
+        if "--" not in cmd:
+            # Es gibt noch kein "--" – dann isoliere die URL
+            if cmd and not cmd[-1].startswith("-") and cmd[-1] != "--":
+                url = cmd.pop()
+                cmd.append("--")
+                cmd.append(url)
+        # Wenn bereits "--" vorhanden, tun wir nichts (die URL sollte bereits dahinter stehen)
+
+        # IPv4 bevorzugen, falls gewünscht: Füge "-4" vor dem ersten "--" ein
+        if prefer_ipv4 and "-4" not in cmd:
+            try:
+                dash_index = cmd.index("--")
+                cmd.insert(dash_index, "-4")
+            except ValueError:
+                # Kein "--" vorhanden – dann füge -4 vor die URL ein (vorletztes Element)
+                cmd.insert(-1, "-4")
+
+        # Einfache URL‑Validierung
+        if cmd:
+            url = cmd[-1]
+            if url == "--" and len(cmd) >= 2:
+                url = cmd[-2]   # falls "--" als letztes steht, nimm vorletztes
+            if not url or any(ord(c) < 32 for c in url):
+                logger.error("Ungültige URL enthält Steuerzeichen", extra={"component": "ytdlp"})
+                return None
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                shell=False,
+            )
+            stdout, stderr = proc.communicate(timeout=timeout)
+            duration = (time.perf_counter() - start) * 1000
+            if proc.returncode == 0 and stdout.strip():
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"  ✅ {method_name} erfolgreich in {duration:.2f}ms", extra={"component": "ytdlp"})
+                return stdout.strip()
+            else:
+                if logger.isEnabledFor(logging.DEBUG):
+                    stderr_preview = stderr[:200].replace("\n", " ")
+                    logger.debug(f"  ⚠️ {method_name} fehlgeschlagen (Code {proc.returncode}): {stderr_preview}", extra={"component": "ytdlp"})
+                return None
+        except subprocess.TimeoutExpired:
+            if proc:
+                try:
+                    proc.kill()
+                    proc.communicate(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"  ⏰ {method_name} Timeout nach {timeout}s – Prozess wurde gekillt", extra={"component": "ytdlp"})
+            return None
+        except (OSError, ValueError) as e:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"  ⚠️ {method_name} Fehler: {e}", extra={"component": "ytdlp"})
+            return None
+        except Exception as e:
+            logger.error(f"Unerwarteter Fehler in {method_name}: {e}", exc_info=True, extra={"component": "ytdlp"})
+            return None
+        finally:
+            if proc and proc.poll() is None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1)
+                except Exception:
+                    pass
+
+    @classmethod
+    def get_json(
+        cls,
+        url: str,
+        timeout: int = 20,
+        use_cookies: bool = False,
+        browser: Optional[str] = None,
+        proxy: str = "",
+        prefer_ipv4: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Ruft die JSON-Metadaten einer URL mit yt-dlp ab.
+
+        Args:
+            url: Die Video-URL.
+            timeout: Timeout in Sekunden.
+            use_cookies: Ob Browser-Cookies verwendet werden sollen.
+            browser: Name des Browsers für Cookies (z.B. 'firefox').
+            proxy: Proxy-URL (optional).
+            prefer_ipv4: Wenn True, verwende IPv4.
+
+        Returns:
+            Das geparste JSON-Dictionary oder None bei Fehler.
+        """
+        # Browser-Validierung
+        if use_cookies and browser:
+            if not cls._validate_browser(browser):
+                logger.warning(f"Ungültiger Browser-Name: {browser}, Cookies werden ignoriert", extra={"component": "ytdlp"})
+                use_cookies = False
+
+        # Proxy-Validierung
+        if proxy and not cls._validate_proxy(proxy):
+            logger.warning(f"Ungültige Proxy-URL: {proxy}, Proxy wird ignoriert", extra={"component": "ytdlp"})
+            proxy = ""
+
         cmd = [
             "yt-dlp",
             "--dump-json",
@@ -6410,17 +6601,59 @@ class YtDlpHelper:
             cmd.extend(["--proxy", proxy])
         if use_cookies and browser:
             cmd.extend(["--cookies-from-browser", browser])
-        cmd.extend(["--", url])
-        stdout = YtDlpHelper.run_command(cmd, timeout=timeout, method_name="get_json")
+        cmd.append(url)   # URL wird später in run_command mit "--" geschützt
+
+        stdout = cls.run_command(cmd, timeout=timeout, method_name="get_json", prefer_ipv4=prefer_ipv4)
         if stdout:
             try:
                 return json.loads(stdout)
             except json.JSONDecodeError:
-                pass
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("  ⚠️ get_json: JSON-Decode-Fehler", extra={"component": "ytdlp"})
         return None
 
-    @staticmethod
-    def get_audio_url(url: str, format_str: str = "bestaudio/best", timeout: int = 15, use_cookies: bool = False, browser: Optional[str] = None, proxy: str = "") -> Optional[str]:
+    @classmethod
+    def get_audio_url(
+        cls,
+        url: str,
+        format_str: str = "bestaudio/best",
+        timeout: int = 15,
+        use_cookies: bool = False,
+        browser: Optional[str] = None,
+        proxy: str = "",
+        prefer_ipv4: bool = False
+    ) -> Optional[str]:
+        """
+        Extrahiert die direkte Audio-URL aus einem Video.
+
+        Args:
+            url: Die Video-URL.
+            format_str: Gewünschtes yt-dlp-Format (z.B. "bestaudio[ext=m4a]/bestaudio/best").
+            timeout: Timeout in Sekunden.
+            use_cookies: Ob Browser-Cookies verwendet werden sollen.
+            browser: Name des Browsers für Cookies.
+            proxy: Proxy-URL (optional).
+            prefer_ipv4: Wenn True, verwende IPv4.
+
+        Returns:
+            Die Audio-URL oder None.
+        """
+        # Format-String validieren
+        if not cls._validate_format_str(format_str):
+            logger.warning(f"Ungültiger Format-String: {format_str}, verwende Standard", extra={"component": "ytdlp"})
+            format_str = "bestaudio/best"
+
+        # Browser-Validierung
+        if use_cookies and browser:
+            if not cls._validate_browser(browser):
+                logger.warning(f"Ungültiger Browser-Name: {browser}, Cookies werden ignoriert", extra={"component": "ytdlp"})
+                use_cookies = False
+
+        # Proxy-Validierung
+        if proxy and not cls._validate_proxy(proxy):
+            logger.warning(f"Ungültige Proxy-URL: {proxy}, Proxy wird ignoriert", extra={"component": "ytdlp"})
+            proxy = ""
+
         cmd = [
             "yt-dlp",
             "-g",
@@ -6433,8 +6666,14 @@ class YtDlpHelper:
             cmd.extend(["--proxy", proxy])
         if use_cookies and browser:
             cmd.extend(["--cookies-from-browser", browser])
-        cmd.extend(["--", url])
-        stdout = YtDlpHelper.run_command(cmd, timeout=timeout, method_name=f"get_audio_url_{format_str}")
+        cmd.append(url)   # URL wird später in run_command mit "--" geschützt
+
+        stdout = cls.run_command(
+            cmd,
+            timeout=timeout,
+            method_name=f"get_audio_url_{format_str}",
+            prefer_ipv4=prefer_ipv4
+        )
         if stdout:
             for line in stdout.splitlines():
                 line = line.strip()
@@ -6631,6 +6870,10 @@ class FFmpegManager(PeriodicTaskMixin):
             return None
 
     def stop_stream(self, process_id: str) -> bool:
+        """
+        Stoppt den FFmpeg‑Prozess mit der angegebenen ID.
+        Verwendet psutil für aggressive Prozessgruppen‑Terminierung, falls nötig.
+        """
         with self._lock:
             if process_id not in self._processes:
                 return True
@@ -6640,47 +6883,62 @@ class FFmpegManager(PeriodicTaskMixin):
             pinfo.stopping = True
             process = pinfo.process
             termination_success = False
+
         try:
             if process.poll() is None:
-                logger.info(f"🔄 Stopping process {process_id} ({process.pid})...")
+                logger.info(f"🔄 Stopping process {process_id} (PID: {process.pid})...")
+
+                # 1. Freundlich beenden
                 try:
                     process.terminate()
                     process.wait(timeout=1.0)
                     termination_success = True
                     logger.info(f"✅ Process {process_id} terminated gracefully")
                 except subprocess.TimeoutExpired:
+                    # 2. Hard kill
                     try:
                         process.kill()
-                        process.wait(timeout=1.0)
+                        process.wait(timeout=0.5)
                         termination_success = True
                         logger.info(f"✅ Process {process_id} killed")
                     except subprocess.TimeoutExpired:
-                        try:
-                            import psutil
-                            p = psutil.Process(process.pid)
-                            p.terminate()
-                            gone, alive = psutil.wait_procs([p], timeout=1.0)
-                            if p in alive:
-                                p.kill()
-                                psutil.wait_procs([p], timeout=1.0)
-                            termination_success = True
-                            if logger.isEnabledFor(logging.DEBUG):
-                                log_debug("subprocess", f"Prozess {process.pid} mit psutil beendet")
-                        except ImportError:
+                        # 3. Psutil – gesamte Prozessgruppe
+                        if PSUTIL_AVAILABLE:
+                            try:
+                                import psutil
+                                p = psutil.Process(process.pid)
+                                children = p.children(recursive=True)
+                                for child in children:
+                                    try:
+                                        child.terminate()
+                                    except psutil.NoSuchProcess:
+                                        pass
+                                gone, alive = psutil.wait_procs(children, timeout=1.0)
+                                for child in alive:
+                                    try:
+                                        child.kill()
+                                    except psutil.NoSuchProcess:
+                                        pass
+                                p.terminate()
+                                p.wait(timeout=1.0)
+                                termination_success = True
+                                logger.debug(f"Prozess {process.pid} mit psutil beendet")
+                            except Exception as e:
+                                logger.error(f"❌ psutil error: {e}")
+                                termination_success = False
+                        else:
+                            logger.error(f"❌ Could not terminate {process_id} (psutil missing)")
                             termination_success = False
-                            logger.error(f"❌ Could not terminate {process_id}")
             else:
                 termination_success = True
                 logger.info(f"✅ Process {process_id} already terminated")
         except Exception as e:
-            import traceback
-            traceback.print_exc()
             logger.error(f"❌ Error stopping {process_id}: {e}")
             termination_success = False
         finally:
             self._cleanup_process_resources(process_id, process)
-        if logger.isEnabledFor(logging.DEBUG):
-            log_debug("subprocess", f"stop_stream({process_id}) -> success={termination_success}")
+
+        logger.debug(f"stop_stream({process_id}) -> success={termination_success}")
         return termination_success
 
     def stop_all_streams(self) -> None:
@@ -6935,14 +7193,23 @@ class FFmpegManager(PeriodicTaskMixin):
         logger.debug(f"🧹 Resources cleaned for: {process_id}")
 
     def cleanup_stale_processes(self) -> None:
+        """Entfernt terminierte Prozesse aus der Verwaltung."""
+        # Kopie der Process-IDs erstellen, die als gestorben gelten
+        stale_pids = []
         with self._lock:
-            stale_pids = [pid for pid, pinfo in self._processes.items() if pinfo.process.poll() is not None]
+            for pid, pinfo in self._processes.items():
+                # Sicherheitscheck: process muss existieren, sonst gilt als stale
+                if pinfo.process is not None and pinfo.process.poll() is not None:
+                    stale_pids.append(pid)
+
+        # Bereinigung außerhalb des Locks durchführen, um die Sperrdauer kurz zu halten
         for pid in stale_pids:
             with self._lock:
                 if pid not in self._processes:
                     continue
                 pinfo = self._processes[pid]
                 process = pinfo.process
+
             logger.info(f"🧹 Cleaning terminated process: {pid}")
             self._cleanup_process_resources(pid, process)
 
@@ -8396,38 +8663,38 @@ class QueueManager:
         return False
 
     def _cleanup_queue(self, queue_obj: queue.Queue, max_size: int, lock: threading.RLock, queue_name: str = "") -> None:
-        """
-        Bereinigt eine Queue, indem unwichtige Elemente verworfen werden, bis sie
-        maximal `max_size` Elemente enthält. Wichtige Nachrichtentypen bleiben erhalten.
-        """
+        """Entfernt unwichtige Elemente aus einer Queue, bis sie unter max_size ist."""
         if not queue_obj or self._safe_qsize(queue_obj) <= max_size:
             return
+
+        queue_name_lower = queue_name.lower() if queue_name else "gui"
+
         with lock:
             try:
                 items = []
-                while not queue_obj.empty():
+                # Alle Elemente entnehmen
+                while True:
                     try:
                         items.append(queue_obj.get_nowait())
                     except queue.Empty:
                         break
 
-                # Aufteilen in wichtig/unwichtig basierend auf Queue-Typ
                 important = []
                 others = []
                 for item in items:
-                    if self._is_important_item(item, queue_name.lower() if queue_name else "gui"):
+                    if self._is_important_item(item, queue_name_lower):
                         important.append(item)
                     else:
                         others.append(item)
 
-                # Behalte zuerst alle wichtigen, dann von den unwichtigen so viele wie nötig
+                # Behalten: zuerst alle wichtigen, dann von den anderen so viele, wie in max_size passen
                 if len(important) < max_size:
-                    keep_others = others[-(max_size - len(important)):]  # die neuesten unwichtigen
+                    keep_others = others[-(max_size - len(important)):]
                     kept = important + keep_others
                 else:
-                    kept = important[:max_size]  # nur wichtige, gekürzt
+                    kept = important[:max_size]
 
-                # Zurück in die Queue legen
+                # Zurückstellen
                 for item in kept:
                     try:
                         queue_obj.put_nowait(item)
@@ -8572,6 +8839,8 @@ class StatusBar:
         self.gui.system_info_label.pack(side="left", fill="x", expand=True)
 
     def _create_right_buttons(self, parent: tk.Frame):
+        """Erstellt die Buttons auf der rechten Seite der Statusleiste."""
+        # Exit-Button (rote Hintergrundfarbe, etwas breiter)
         self.gui.exit_button = tk.Button(
             parent,
             text="⏻ EXIT",
@@ -8588,6 +8857,24 @@ class StatusBar:
         self.gui.exit_button.pack(side="right")
         ToolTip(self.gui.exit_button, "Programm beenden (Strg+Q / Cmd+Q)")
 
+        # Speichern als MP3-Button
+        self.gui.save_tts_btn = tk.Button(
+            parent,
+            text="💾🎤",
+            command=self.gui.save_tts_as_mp3,
+            bg=self.gui.current_theme.BG_TERTIARY,
+            fg=self.gui.current_theme.TEXT_PRIMARY,
+            relief="flat",
+            font=("Segoe UI", 9),
+            cursor="hand2",
+            padx=2,
+            pady=1,
+            width=3,
+        )
+        self.gui.save_tts_btn.pack(side="right", padx=2)
+        ToolTip(self.gui.save_tts_btn, "Ausgewählten Text als MP3 speichern")
+
+        # TTS-Button
         self.gui.tts_btn = tk.Button(
             parent,
             text="🔊",
@@ -8604,6 +8891,7 @@ class StatusBar:
         self.gui.tts_btn.pack(side="right", padx=2)
         ToolTip(self.gui.tts_btn, "Ausgewählten Text vorlesen (TTS)")
 
+        # Hilfe-Button (Tastenkürzel)
         help_btn = tk.Button(
             parent,
             text="⌨️",
@@ -8620,6 +8908,7 @@ class StatusBar:
         help_btn.pack(side="right", padx=2)
         ToolTip(help_btn, "Tastenkürzel anzeigen (F1)")
 
+        # Transkriptionskorrektur mit Ollama
         self.gui.correct_btn = tk.Button(
             parent,
             text="🔧",
@@ -8636,6 +8925,7 @@ class StatusBar:
         self.gui.correct_btn.pack(side="right", padx=2)
         ToolTip(self.gui.correct_btn, "Transkript mit Ollama korrigieren")
 
+        # VAD-Fallback-Button
         self.gui.vad_fallback_btn = tk.Button(
             parent,
             text="🔁 VAD ON",
@@ -8651,6 +8941,7 @@ class StatusBar:
         self.gui.vad_fallback_btn.pack(side="right", padx=2)
         ToolTip(self.gui.vad_fallback_btn, "VAD-Fallback aktivieren/deaktivieren (wenn aus, werden leere Chunks ignoriert)")
 
+        # Live-Modus-Button
         self.gui.live_mode_btn = tk.Button(
             parent,
             text="⏱️ 20s",
@@ -8767,48 +9058,35 @@ class WhisperController:
         self._processing_thread = thread
 
     def stop_processing(self, wait: bool = False, timeout: float = _STOP_WAIT_TIMEOUT) -> bool:
-        """
-        Stoppt die laufende Verarbeitung.
-        :param wait: Soll auf das Ende des Stopp-Vorgangs gewartet werden?
-        :param timeout: Maximale Wartezeit in Sekunden (wenn wait=True)
-        :return: True, wenn der Stopp erfolgreich eingeleitet oder abgeschlossen wurde.
-        """
+        # Flag setzen (exklusiv)
         with self._stop_lock:
             if self._stop_in_progress:
                 logger.debug("stop_processing bereits in Gang – überspringe")
                 return True
             self._stop_in_progress = True
 
+        # Zustand unter separatem Lock prüfen (keine Deadlocks, da wir keine anderen Locks halten)
         with self._state_lock:
-            # Bereits im IDLE? Dann nichts zu tun.
             if self._state == WhisperController.State.IDLE:
                 with self._stop_lock:
                     self._stop_in_progress = False
                 return True
-
-            # Im Fehlerzustand direkt auf IDLE setzen.
             if self._state == WhisperController.State.ERROR:
                 logger.debug("stop_processing: switching from ERROR to IDLE")
                 self._set_state(WhisperController.State.IDLE)
                 with self._stop_lock:
                     self._stop_in_progress = False
                 return True
-
-            # Nur wenn nicht bereits stoppend, in STOPPING wechseln.
-            if self._state not in (WhisperController.State.STOPPING,
-                                    WhisperController.State.ERROR):
+            if self._state not in (WhisperController.State.STOPPING, WhisperController.State.ERROR):
                 self._set_state(WhisperController.State.STOPPING)
 
-        # Shutdown-Event setzen, um alle Schleifen zu beenden.
         self._shutdown_event.set()
 
-        # Falls Linux-Performance-Optimierer aktiv, zurücksetzen.
         gui = self.gui_ref()
         if gui is not None and IS_LINUX and hasattr(gui, "performance_optimizer"):
             gui.performance_optimizer.restore_normal_mode()
 
-        # Stop-Thread starten, der die Audio-Ressourcen freigibt.
-        self._stop_complete.clear()   # Event zurücksetzen, bevor der Thread startet
+        self._stop_complete.clear()
         self._stop_thread = threading.Thread(target=self._stop_audio_resources, daemon=True)
         self._stop_thread.start()
 
@@ -8820,7 +9098,6 @@ class WhisperController:
                     self._stop_in_progress = False
                 return False
 
-            # Warten, bis der Processing-Thread (falls vorhanden) beendet ist.
             if self._processing_thread and self._processing_thread.is_alive():
                 self._processing_thread.join(timeout=1.0)
 
@@ -8831,7 +9108,6 @@ class WhisperController:
                 self._stop_in_progress = False
             return True
         else:
-            # Asynchron – wir geben sofort True zurück.
             return True
 
     def safe_exit(self) -> None:
@@ -9235,7 +9511,8 @@ class WhisperController:
     def _stop_audio_resources(self) -> None:
         """
         Stoppt AudioProcessor und FFmpeg-Manager. Läuft in einem eigenen Thread.
-        Setzt am Ende _stop_complete und setzt den Zustand zurück.
+        Setzt am Ende _stop_complete, setzt den Zustand zurück und sendet ein Event,
+        dass kein aktiver Stream mehr vorhanden ist.
         """
         gui = self.gui_ref()
         try:
@@ -9260,6 +9537,8 @@ class WhisperController:
             with self._state_lock:
                 if self._state == WhisperController.State.STOPPING:
                     self._set_state(WhisperController.State.IDLE)
+            # Event senden, dass kein aktiver Stream mehr vorhanden ist
+            self.event_bus.emit("stream_info", None)
 
 
 class StreamHandler:
@@ -9611,12 +9890,15 @@ class StreamHandler:
             return None
 
     def _read_stderr_nonblocking(self, process: subprocess.Popen, max_bytes: int = 4096) -> str:
+        """Liest stderr nicht-blockierend (falls vorhanden)."""
         if not process.stderr:
             return ""
+
         try:
             fd = process.stderr.fileno()
-        except Exception:
+        except (AttributeError, OSError):
             return ""
+
         if not IS_WINDOWS:
             import fcntl
             flags = None
@@ -9626,6 +9908,7 @@ class StreamHandler:
             except Exception as e:
                 logger.debug(f"fcntl fehlgeschlagen: {e}")
                 flags = None
+
         try:
             data = os.read(fd, max_bytes)
             if data:
@@ -9640,6 +9923,7 @@ class StreamHandler:
                     fcntl.fcntl(fd, fcntl.F_SETFL, flags)
                 except Exception:
                     pass
+
         return ""
 
     def _needs_url_refresh(self, stderr: str) -> bool:
@@ -9716,6 +10000,12 @@ class StreamHandler:
 # AUDIO PROCESSOR (mit Semaphore für Übersetzungen und verbessertem Locking)
 # =============================================================================
 class AudioProcessor:
+    """
+    Zentrale Verarbeitungskomponente: Liest Audiodaten aus FFmpeg-Prozess,
+    puffert sie und übergibt sie an die Transkriptions- und Übersetzungs-Engines.
+    Verwaltet Executor-Threadpools, Semaphore und Puffer.
+    """
+
     MAX_BUFFER_SECONDS = 30
 
     def __init__(
@@ -9796,15 +10086,35 @@ class AudioProcessor:
         self._sentence_segments: List[TranscriptionResult] = []
         self._sentence_lock = threading.RLock()
 
+        # --- Executor-Erstellung mit temporären Variablen (robust) ---
         cpu_count = os.cpu_count() or 4
         transcribe_workers = 1
         translate_workers = min(4, max(1, cpu_count // 4))
-        self._transcription_executor = OptimizedThreadPoolExecutor(
-            max_workers=transcribe_workers, thread_name_prefix="Transcribe", max_queue_size=50
-        )
-        self._translation_executor = OptimizedThreadPoolExecutor(
-            max_workers=translate_workers, thread_name_prefix="Translate", max_queue_size=100
-        )
+
+        temp_transcription_executor = None
+        temp_translation_executor = None
+        try:
+            temp_transcription_executor = OptimizedThreadPoolExecutor(
+                max_workers=transcribe_workers, thread_name_prefix="Transcribe", max_queue_size=50
+            )
+            temp_translation_executor = OptimizedThreadPoolExecutor(
+                max_workers=translate_workers, thread_name_prefix="Translate", max_queue_size=100
+            )
+            self._transcription_executor = temp_transcription_executor
+            self._translation_executor = temp_translation_executor
+        except Exception:
+            if temp_transcription_executor:
+                try:
+                    temp_transcription_executor.shutdown(wait=False, cancel_futures=True)
+                except Exception:
+                    pass
+            if temp_translation_executor:
+                try:
+                    temp_translation_executor.shutdown(wait=False, cancel_futures=True)
+                except Exception:
+                    pass
+            raise
+
         self._transcribe_lock = threading.Lock()
 
         self._total_file_size: Optional[int] = None
@@ -9842,7 +10152,7 @@ class AudioProcessor:
 
         self._vad_fallback_enabled = True
 
-        # Semaphore zur Begrenzung der Übersetzungsaufträge (zusätzlich zur Executor-Queue)
+        # Semaphore zur Begrenzung paralleler Übersetzungen
         self._translation_semaphore = threading.Semaphore(8)
 
         logger.info("✅ AudioProcessor initialized (optimized with OptimizedThreadPoolExecutor):")
@@ -9854,6 +10164,9 @@ class AudioProcessor:
         logger.info(f"   Max Buffer: {self._max_buffer_bytes:,} bytes ({self.MAX_BUFFER_SECONDS}s)")
         logger.info(f"   Transcribe Workers: {transcribe_workers}, Translate Workers: {translate_workers}")
 
+    # ----------------------------------------------------------------------
+    # Hilfsmethoden (unverändert)
+    # ----------------------------------------------------------------------
     def _get_config_type(self) -> str:
         if isinstance(self.config, RealtimeConfig):
             return "realtime"
@@ -10711,16 +11024,32 @@ class AudioProcessor:
             info_callback(f"📊 {chunk_num} chunks processed...")
 
     def _is_silent(self, audio_data: bytes, threshold: float = 0.001) -> bool:
+        """
+        Erkennt, ob ein Audioblock stumm ist (RMS unter Schwellwert oder komplett Null).
+        """
+        # Zu kurze Blöcke werden nicht als stumm eingestuft
         if len(audio_data) < 160:
             return False
-        if self.transcription_engine and self.transcription_engine._np is not None:
+
+        # Schnelltest: alle Bytes Null? (C‑optimierte count‑Methode)
+        if audio_data.count(b'\x00') == len(audio_data):
+            return True
+
+        # Wenn NumPy verfügbar ist, präzise RMS-Berechnung
+        if (self.transcription_engine is not None and
+            hasattr(self.transcription_engine, '_np') and
+            self.transcription_engine._np is not None):
             np = self.transcription_engine._np
             try:
                 audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
-                rms = np.sqrt(np.mean(audio_np**2))
-                return rms < threshold
+                rms = np.sqrt(np.mean(audio_np ** 2))
+                max_amp = np.max(np.abs(audio_np))
+                return rms < threshold or max_amp < 100
             except Exception:
                 pass
+
+        # Fallback: Ohne NumPy keine zuverlässige RMS-Berechnung -> nicht stumm
+        # (Schnelltest hat bereits Null-Byte erkannt)
         return False
 
     def _update_adaptive_chunk(self) -> None:
@@ -11032,7 +11361,6 @@ class AudioProcessor:
             }
 
     def stop_processing(self, wait: bool = False, timeout: float = 5.0) -> bool:
-        logger.info("🛑 AudioProcessor: Stopping processing...")
         with self._processing_lock:
             self._stop_event.set()
             self._processing.clear()
@@ -11093,6 +11421,9 @@ class AudioProcessor:
         logger.info("✅ Cleanup completed")
 
     def dispose(self) -> None:
+        """
+        Entsorgt alle Ressourcen, insbesondere die Thread‑Pools.
+        """
         logger.info("🧹 AudioProcessor: Starting dispose...")
         try:
             if hasattr(self, "_stop_event") and hasattr(self._stop_event, "set"):
@@ -11106,20 +11437,11 @@ class AudioProcessor:
                     self.ffmpeg_manager.stop_all_streams()
                 except Exception as e:
                     logger.error(f"Fehler beim Stoppen aller Streams: {e}", exc_info=True)
-            if hasattr(self, "_transcription_executor"):
-                try:
-                    self._transcription_executor.shutdown(wait=True, cancel_futures=True)
-                except TypeError:
-                    self._transcription_executor.shutdown(wait=True)
-                except Exception as e:
-                    logger.error(f"Fehler beim Shutdown des Transcription-Executors: {e}", exc_info=True)
-            if hasattr(self, "_translation_executor"):
-                try:
-                    self._translation_executor.shutdown(wait=True, cancel_futures=True)
-                except TypeError:
-                    self._translation_executor.shutdown(wait=True)
-                except Exception as e:
-                    logger.error(f"Fehler beim Shutdown des Translation-Executors: {e}", exc_info=True)
+
+            # Executors zentral herunterfahren
+            self._shutdown_executor("_transcription_executor")
+            self._shutdown_executor("_translation_executor")
+
             with self._subtitle_lock:
                 self._timed_transcriptions.clear()
                 self._timed_translations.clear()
@@ -11131,6 +11453,21 @@ class AudioProcessor:
             logger.info("✅ AudioProcessor disposed")
         except Exception as e:
             logger.error(f"⚠️ AudioProcessor dispose error: {e}", exc_info=True)
+
+    def _shutdown_executor(self, executor_attr: str) -> None:
+        """
+        Hilfsmethode zum sicheren Herunterfahren eines Executors.
+        """
+        executor = getattr(self, executor_attr, None)
+        if executor is None:
+            return
+        try:
+            executor.shutdown(wait=True, cancel_futures=True)
+        except TypeError:
+            # Ältere Python-Versionen unterstützen cancel_futures nicht
+            executor.shutdown(wait=True)
+        except Exception as e:
+            logger.error(f"Fehler beim Shutdown von {executor_attr}: {e}", exc_info=True, extra={"component": "audio"})
 
 
 # =============================================================================
@@ -11702,107 +12039,417 @@ class ToolTip:
 
 
 class TTSManager:
-    def __init__(self, settings: "AdvancedSettings"):
+    """
+    Text-to-Speech-Manager mit Unterstützung für Piper (bevorzugt) und pyttsx3 (Fallback).
+
+    Piper bietet eine deutlich natürlichere Sprachausgabe und kann über die
+    Kommandozeile mit zusätzlichen Parametern optimiert werden. Der Manager
+    startet Piper als Subprozess und kann diesen bei Bedarf sofort beenden,
+    um die Ausgabe abzubrechen.
+
+    Attribute:
+        settings (AdvancedSettings): Einstellungen mit tts_engine und tts_voice.
+        _process (Optional[subprocess.Popen]): Der laufende Piper-Prozess.
+        _speaking_thread (Optional[threading.Thread]): Thread, der die Ausgabe steuert.
+        _stop_requested (threading.Event): Signal zum Abbruch.
+        _lock (threading.RLock): Schützt den Zugriff auf _process.
+    """
+
+    def __init__(self, settings: "AdvancedSettings") -> None:
+        """
+        Initialisiert den TTSManager mit den angegebenen Einstellungen.
+
+        Args:
+            settings: Erweiterte Einstellungen (mit tts_engine und tts_voice).
+        """
         self.settings = settings
-        self._engine = None
-        self._engine_name = settings.tts_engine
-        self._lock = threading.RLock()
+        self._process: Optional[subprocess.Popen] = None
         self._speaking_thread: Optional[threading.Thread] = None
-        self._stop_requested = False
-        self._piper_available = False
-        self._pyttsx3_available = False
+        self._stop_requested = threading.Event()
+        self._lock = threading.RLock()
+
+        # Stimme aus Einstellungen oder Standard
+        self._voice = getattr(settings, 'tts_voice', 'de_DE-thorsten-medium')
+        # Geschwindigkeitsfaktor (1.0 = normal, 0.9 = langsamer, 1.1 = schneller)
+        self._length_scale = getattr(settings, 'tts_length_scale', 0.9)
+        # Pause zwischen Sätzen in Sekunden
+        self._sentence_silence = getattr(settings, 'tts_sentence_silence', 0.1)
 
     def set_engine(self, engine_name: str) -> None:
-        with self._lock:
-            self._engine_name = engine_name
-            self._engine = None
+        """
+        Wechselt die TTS-Engine (piper oder pyttsx3).
+        Aktuell wird nur 'piper' vollständig unterstützt.
+        """
+        # In dieser Version wird die Engine über settings gesteuert,
+        # aber wir können hier ein Update vornehmen.
+        if hasattr(self.settings, 'tts_engine'):
+            self.settings.tts_engine = engine_name
+
+    def set_voice(self, voice_name: str) -> None:
+        """Setzt die Piper-Stimme (z.B. 'de_DE-thorsten-high')."""
+        self._voice = voice_name
+        if hasattr(self.settings, 'tts_voice'):
+            self.settings.tts_voice = voice_name
 
     def is_available(self) -> bool:
-        if self._piper_available:
-            return True
-        if importlib.util.find_spec("dimits") is not None:
-            self._piper_available = True
-            return True
-        if self._pyttsx3_available:
-            return True
-        if importlib.util.find_spec("pyttsx3") is not None:
-            self._pyttsx3_available = True
-            return True
+        """Prüft, ob eine TTS-Engine verfügbar ist (Piper oder pyttsx3)."""
+        # Piper via subprocess? Wir prüfen einfach, ob Piper im PATH ist.
+        if self.settings.tts_engine == "piper":
+            return shutil.which("piper") is not None
+        elif self.settings.tts_engine == "pyttsx3":
+            return importlib.util.find_spec("pyttsx3") is not None
         return False
 
-    def _load_engine(self) -> bool:
-        with self._lock:
-            if self._engine is not None:
-                return True
-            if self._engine_name == "piper":
-                try:
-                    from dimits import Dimits
-                    self._engine = Dimits("de_DE-thorsten-medium")
-                    logger.info("Piper TTS geladen (de_DE-thorsten-medium)")
-                    self._piper_available = True
-                    return True
-                except ImportError:
-                    logger.warning("Piper (dimits) nicht installiert, versuche pyttsx3")
-                    self._engine_name = "pyttsx3"
-                except Exception as e:
-                    logger.warning(f"Fehler beim Laden von Piper: {e}")
-            if self._engine_name == "pyttsx3":
-                try:
-                    import pyttsx3
-                    self._engine = pyttsx3.init()
-                    self._engine.setProperty('rate', 150)
-                    self._engine.setProperty('volume', 0.9)
-                    logger.info("pyttsx3 TTS geladen")
-                    self._pyttsx3_available = True
-                    return True
-                except ImportError:
-                    logger.error("pyttsx3 nicht installiert – TTS nicht verfügbar")
-                except Exception as e:
-                    logger.error(f"Fehler beim Laden von pyttsx3: {e}")
-            self._engine = None
-            return False
-
     def speak(self, text: str, callback: Optional[Callable[[bool, str], None]] = None) -> None:
+        """
+        Spricht den übergebenen Text asynchron.
+
+        Bei Piper wird ein Subprozess gestartet, der die Audiodaten an aplay/paplay
+        weitergibt. Die Ausgabe kann über `stop()` vorzeitig beendet werden.
+
+        Args:
+            text: Der vorzulesende Text.
+            callback: Wird nach Beendigung aufgerufen (success, message).
+        """
         if not text or not text.strip():
             if callback:
                 callback(False, "Leerer Text")
             return
-        if self._engine is None:
-            if not self._load_engine():
-                if callback:
-                    callback(False, "Keine TTS-Engine verfügbar")
-                return
-        with self._lock:
-            if self._speaking_thread and self._speaking_thread.is_alive():
-                self._stop_requested = True
-                self._speaking_thread.join(timeout=2.0)
-                self._speaking_thread = None
-            self._stop_requested = False
 
-        def _speak_worker():
+        if not self.is_available():
+            if callback:
+                callback(False, f"TTS-Engine '{self.settings.tts_engine}' nicht verfügbar")
+            return
+
+        # Vorherige Ausgabe beenden, falls noch aktiv
+        self.stop()
+
+        self._stop_requested.clear()
+
+        if self.settings.tts_engine == "piper":
+            self._speak_piper(text, callback)
+        else:
+            self._speak_pyttsx3(text, callback)
+
+    def speak_to_file(self, text: str, output_path: str, callback: Optional[Callable[[bool, str], None]] = None) -> None:
+        """
+        Erzeugt eine Audiodatei aus dem Text und speichert sie im angegebenen Pfad.
+        Unterstützt Piper (bevorzugt) und pyttsx3 (Fallback, nur WAV).
+        Für MP3-Konvertierung wird ffmpeg benötigt.
+        """
+        if not text or not text.strip():
+            if callback:
+                callback(False, "Leerer Text")
+            return
+
+        if not self.is_available():
+            if callback:
+                callback(False, f"TTS-Engine '{self.settings.tts_engine}' nicht verfügbar")
+            return
+
+        self.stop()  # Eventuell laufende Wiedergabe abbrechen
+
+        # Dateiendung bestimmen
+        file_ext = os.path.splitext(output_path)[1].lower()
+        if file_ext not in ('.mp3', '.wav'):
+            if callback:
+                callback(False, "Nur .mp3 oder .wav werden unterstützt")
+            return
+
+        if self.settings.tts_engine == "piper":
+            self._speak_to_file_piper(text, output_path, callback)
+        else:
+            self._speak_to_file_pyttsx3(text, output_path, callback)
+
+    def _speak_to_file_piper(self, text: str, output_path: str, callback: Optional[Callable]) -> None:
+        """Erzeugt eine Audiodatei mit Piper (WAV) und konvertiert bei Bedarf zu MP3."""
+        def worker():
+            temp_path = None
             success = False
             message = ""
             try:
-                if self._engine_name == "piper":
-                    self._engine.text_2_speech(text, engine='aplay')
-                    success = True
+                piper_exe = shutil.which("piper")
+                if not piper_exe:
+                    raise Exception("Piper nicht gefunden")
+
+                cache_dir = os.path.expanduser("~/.cache/piper")
+                model_file = f"{self._voice}.onnx"
+                model_path = os.path.join(cache_dir, model_file)
+                if not os.path.exists(model_path):
+                    model_path = self._voice
+
+                need_conversion = output_path.lower().endswith('.mp3')
+                if need_conversion:
+                    temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                    temp_path = temp_wav.name
+                    temp_wav.close()
+                    output_wav = temp_path
                 else:
-                    self._engine.say(text)
-                    self._engine.runAndWait()
-                    success = True
+                    output_wav = output_path
+
+                cmd = [
+                    piper_exe,
+                    "--model", model_path,
+                    "--length_scale", str(self._length_scale),
+                    "--sentence_silence", str(self._sentence_silence),
+                    "--output_file", output_wav,
+                ]
+                logger.debug(f"Piper Datei-Ausgabe: {' '.join(cmd)}")
+                proc = subprocess.run(
+                    cmd,
+                    input=text,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    encoding="utf-8"
+                )
+                if proc.returncode != 0:
+                    raise Exception(f"Piper Fehler (Code {proc.returncode}): {proc.stderr[:200]}")
+
+                if need_conversion:
+                    if not shutil.which("ffmpeg"):
+                        raise Exception("ffmpeg nicht gefunden – kann keine MP3 erzeugen")
+                    conv_cmd = ["ffmpeg", "-i", output_wav, "-y", output_path]
+                    conv_proc = subprocess.run(conv_cmd, capture_output=True, text=True)
+                    if conv_proc.returncode != 0:
+                        raise Exception(f"ffmpeg Fehler: {conv_proc.stderr[:200]}")
+
+                success = True
+                message = f"Gespeichert unter {output_path}"
             except Exception as e:
                 message = str(e)
-                logger.error(f"Fehler bei TTS: {e}")
+                logger.exception(f"Fehler in speak_to_file: {e}")
             finally:
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.unlink(temp_path)
+                    except Exception:
+                        pass
                 if callback:
                     callback(success, message)
+                self._speaking_thread = None
 
-        with self._lock:
-            self._speaking_thread = threading.Thread(target=_speak_worker, daemon=True)
-            self._speaking_thread.start()
+        self._speaking_thread = threading.Thread(target=worker, daemon=True, name="TTS-Piper-File")
+        self._speaking_thread.start()
+
+    def _speak_to_file_pyttsx3(self, text: str, output_path: str, callback: Optional[Callable]) -> None:
+        """Speichert Text als WAV mit pyttsx3 (erfordert pydub + ffmpeg)."""
+        def worker():
+            success = False
+            message = ""
+            try:
+                import pyttsx3
+                engine = pyttsx3.init()
+                engine.setProperty('rate', 150)
+                engine.setProperty('volume', 0.9)
+                # pyttsx3 kann nicht direkt in Datei speichern, daher Umweg über temporäre WAV und Konvertierung
+                temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                temp_wav.close()
+                engine.save_to_file(text, temp_wav.name)
+                engine.runAndWait()
+
+                if output_path.lower().endswith('.mp3'):
+                    if not shutil.which("ffmpeg"):
+                        message = "ffmpeg nicht gefunden – kann keine MP3 erzeugen"
+                        raise Exception(message)
+                    subprocess.run(["ffmpeg", "-i", temp_wav.name, "-y", output_path], check=True)
+                else:
+                    # Direkt als WAV speichern
+                    shutil.copy2(temp_wav.name, output_path)
+                success = True
+                message = f"Gespeichert unter {output_path}"
+            except Exception as e:
+                message = str(e)
+                logger.exception(f"Fehler in pyttsx3 speak_to_file: {e}")
+            finally:
+                if 'temp_wav' in locals() and os.path.exists(temp_wav.name):
+                    try:
+                        os.unlink(temp_wav.name)
+                    except Exception:
+                        pass
+                if callback:
+                    callback(success, message)
+                self._speaking_thread = None
+
+        self._speaking_thread = threading.Thread(target=worker, daemon=True, name="TTS-pyttsx3-File")
+        self._speaking_thread.start()
 
     def stop(self) -> None:
-        self._stop_requested = True
+        """
+        Stoppt die aktuelle Sprachausgabe sofort (killt den Piper-Prozess).
+        """
+        with self._lock:
+            if self._process and self._process.poll() is None:
+                try:
+                    self._process.terminate()
+                    self._process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    self._process.kill()
+                    self._process.wait(timeout=0.5)
+                except Exception as e:
+                    logger.warning(f"Fehler beim Beenden des Piper-Prozesses: {e}")
+                finally:
+                    self._process = None
+            self._stop_requested.set()
+        if self._speaking_thread and self._speaking_thread.is_alive():
+            self._speaking_thread.join(timeout=1.0)
+
+    def dispose(self) -> None:
+        """Gibt alle Ressourcen frei (stoppt aktuelle Ausgabe)."""
+        self.stop()
+
+    # ----------------------------------------------------------------------
+    # Interne Methoden
+    # ----------------------------------------------------------------------
+    def _speak_piper(self, text: str, callback: Optional[Callable]) -> None:
+        """
+        Spricht Text mit Piper (über subprocess).
+        Bei Fehlern wird eine aussagekräftige Meldung an den Callback übergeben.
+        """
+        def worker():
+            process = None
+            success = False
+            message = "Unbekannter Fehler"
+
+            try:
+                # 1. Piper ausführbare Datei finden
+                piper_exe = shutil.which("piper")
+                if not piper_exe:
+                    # Versuche, den Pfad im venv zu finden
+                    import sys
+                    venv_bin = os.path.join(os.path.dirname(sys.executable), "bin", "piper")
+                    if os.path.exists(venv_bin):
+                        piper_exe = venv_bin
+                    else:
+                        message = "Piper nicht im PATH gefunden. Bitte installieren: pip install piper-tts"
+                        logger.error(message)
+                        if callback:
+                            callback(False, message)
+                        return
+
+                # 2. Audio-Player prüfen (nur Linux)
+                if IS_LINUX and not shutil.which("aplay"):
+                    message = "aplay nicht gefunden (ALSA utils fehlen). Bitte installieren: sudo apt install alsa-utils"
+                    logger.error(message)
+                    if callback:
+                        callback(False, message)
+                    return
+
+                # 3. Modell-Pfad bestimmen (absoluter Pfad)
+                cache_dir = os.path.expanduser("~/.cache/piper")
+                model_file = f"{self._voice}.onnx"
+                model_path = os.path.join(cache_dir, model_file)
+                if not os.path.exists(model_path):
+                    # Fallback: nur der Name (Piper sucht dann im Cache)
+                    model_path = self._voice
+                    logger.warning(f"Modell nicht unter {model_path} gefunden, verwende Namen: {model_path}")
+
+                # 4. Piper-Kommando mit korrigierten Parametern
+                cmd = [
+                    piper_exe,
+                    "--model", model_path,
+                    "--length_scale", str(self._length_scale),
+                    "--sentence_silence", str(self._sentence_silence),
+                    "--output-raw",
+                ]
+                if IS_LINUX:
+                    audio_cmd = ["aplay", "-r", "22050", "-f", "S16_LE", "-t", "raw"]
+                else:
+                    audio_cmd = None
+
+                logger.debug(f"Starte Piper: {' '.join(cmd)}")
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8"
+                )
+                with self._lock:
+                    self._process = process
+
+                # Text in stdin schreiben
+                process.stdin.write(text)
+                process.stdin.close()
+
+                # Audio-Player starten
+                if audio_cmd:
+                    logger.debug(f"Starte Audio-Player: {' '.join(audio_cmd)}")
+                    audio = subprocess.Popen(audio_cmd, stdin=process.stdout)
+                    process.stdout.close()
+                    audio.wait()
+                    if audio.returncode != 0:
+                        logger.warning(f"Audio-Player beendet mit Code {audio.returncode}")
+                else:
+                    process.stdout.read()  # Leeren
+
+                # Auf Ende von Piper warten
+                process.wait()
+
+                # Fehler aus stderr auslesen
+                stderr = process.stderr.read()
+                if process.returncode == 0:
+                    success = True
+                    message = ""
+                else:
+                    message = f"Piper beendet mit Code {process.returncode}: {stderr[:500]}"
+                    logger.error(message)
+
+            except subprocess.TimeoutExpired:
+                message = "Timeout bei Piper"
+                logger.warning(message)
+            except FileNotFoundError as e:
+                message = f"Piper nicht gefunden: {e}"
+                logger.error(message)
+            except Exception as e:
+                message = str(e)
+                logger.exception(f"Fehler in Piper-Worker: {e}")
+            finally:
+                if process and process.poll() is None:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+                with self._lock:
+                    if self._process == process:
+                        self._process = None
+                if callback:
+                    callback(success, message)
+                self._speaking_thread = None
+
+        self._speaking_thread = threading.Thread(target=worker, daemon=True, name="TTS-Piper")
+        self._speaking_thread.start()
+
+    def _speak_pyttsx3(self, text: str, callback: Optional[Callable]) -> None:
+        """Spricht Text mit pyttsx3 (Fallback)."""
+        def worker():
+            success = False
+            message = ""
+            engine = None
+            try:
+                import pyttsx3
+                engine = pyttsx3.init()
+                engine.setProperty('rate', 150)
+                engine.setProperty('volume', 0.9)
+                engine.say(text)
+                engine.runAndWait()
+                success = True
+            except Exception as e:
+                message = str(e)
+                logger.error(f"Fehler bei pyttsx3: {e}")
+            finally:
+                if engine:
+                    try:
+                        engine.stop()
+                    except Exception:
+                        pass
+                if callback:
+                    callback(success, message)
+                self._speaking_thread = None
+
+        self._speaking_thread = threading.Thread(target=worker, daemon=True, name="TTS-pyttsx3")
+        self._speaking_thread.start()
 
 
 # -----------------------------------------------------------------------------
@@ -12272,6 +12919,7 @@ class SummarizeDialog(BaseDialog):
             if self._destroyed:
                 return
             try:
+                # Prüfung, ob der Dialog und das Textfeld noch existieren
                 if self.dialog and self.dialog.winfo_exists():
                     if hasattr(self, "summary_text") and self.summary_text.winfo_exists():
                         self.summary_text.insert("end", chunk)
@@ -12280,8 +12928,7 @@ class SummarizeDialog(BaseDialog):
             except tk.TclError:
                 pass
 
-        if self.dialog and not self._destroyed and self.dialog.winfo_exists():
-            self.dialog.after(0, update)
+        self._safe_after(0, update)
 
     def on_error(self, error: str) -> None:
         if self._destroyed:
@@ -12301,8 +12948,7 @@ class SummarizeDialog(BaseDialog):
             except tk.TclError:
                 pass
 
-        if self.dialog and not self._destroyed and self.dialog.winfo_exists():
-            self.dialog.after(0, update)
+        self._safe_after(0, update)
 
     def copy_summary(self) -> None:
         if self._destroyed:
@@ -12629,185 +13275,451 @@ class ShortcutsDialog(BaseDialog):
 # InstallDependencyDialog (als BaseDialog)
 # -----------------------------------------------------------------------------
 class InstallDependencyDialog(BaseDialog):
+    """
+    Dialog zum Installieren fehlender Abhängigkeiten:
+    - Systempakete (ffmpeg, yt-dlp, vlc, espeak)
+    - Python-Pakete (deep-translator, faster-whisper, psutil, pynvml, argostranslate,
+                       noisereduce, rapidfuzz, python-docx, pyttsx3, dimits, pathvalidate)
+    - Piper-Stimmen (de_DE-thorsten-medium, etc.)
+    """
+
+    # Systempakete (plattformabhängig)
+    SYSTEM_PACKAGES = {
+        "ffmpeg": {"apt": "ffmpeg", "pacman": "ffmpeg", "dnf": "ffmpeg"},
+        "yt-dlp": {"apt": "yt-dlp", "pacman": "yt-dlp", "dnf": "yt-dlp"},
+        "vlc": {"apt": "vlc", "pacman": "vlc", "dnf": "vlc"},
+        "espeak": {"apt": "espeak", "pacman": "espeak", "dnf": "espeak-ng"},
+    }
+
+    # Python-Pakete (Name, Anzeigename, Prüffunktion)
+    PYTHON_PACKAGES = [
+        ("faster-whisper", "faster-whisper (Whisper-Backend)", lambda: WHISPER_AVAILABLE),
+        ("deep-translator", "deep-translator (Google Übersetzung)", lambda: TRANSLATOR_AVAILABLE),
+        ("psutil", "psutil (System-Monitoring)", lambda: FastLazyLoader.is_available("psutil")),
+        ("pynvml", "pynvml (detaillierte GPU-Statistiken)", lambda: importlib.util.find_spec("pynvml") is not None),
+        ("argostranslate", "argos-translate (Offline-Übersetzung)", lambda: ARGOS_AVAILABLE),
+        ("noisereduce", "noisereduce (Rauschunterdrückung)", lambda: importlib.util.find_spec("noisereduce") is not None),
+        ("rapidfuzz", "rapidfuzz (schnelle Textähnlichkeit)", lambda: importlib.util.find_spec("rapidfuzz") is not None),
+        ("python-docx", "python-docx (Word-Export)", lambda: importlib.util.find_spec("docx") is not None),
+        ("pyttsx3", "pyttsx3 (Text-to-Speech, Fallback)", lambda: importlib.util.find_spec("pyttsx3") is not None),
+        ("dimits", "dimits (Piper TTS)", lambda: importlib.util.find_spec("dimits") is not None),
+        ("langdetect", "langdetect (Spracherkennung)", lambda: importlib.util.find_spec("langdetect") is not None),
+        ("pathvalidate", "pathvalidate (Piper-Abhängigkeit)", lambda: importlib.util.find_spec("pathvalidate") is not None),
+    ]
+
+    # Piper-Stimmen (Name, Anzeigename)
+    PIPER_VOICES = [
+        ("de_DE-thorsten-medium", "Deutsch (thorsten, medium)"),
+        ("de_DE-thorsten-high", "Deutsch (thorsten, high)"),
+        ("de_DE-ramona-medium", "Deutsch (ramona, medium)"),
+        ("de_DE-karlsson-medium", "Deutsch (karlsson, medium)"),
+    ]
+
     def __init__(self, parent, gui_ref):
         self.gui = gui_ref
         self._install_thread = None
-        self._process = None
         self._stop_requested = False
-        super().__init__(parent, "Fehlende Pakete installieren", width=600, height=450, modal=True)
+        self.in_venv = (hasattr(sys, 'real_prefix') or
+                        (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix))
+        super().__init__(parent, "Fehlende Abhängigkeiten installieren", width=750, height=600, modal=True)
 
     def build_ui(self) -> None:
-        tk.Label(self.main, text="Optionale Pakete, die installiert werden können:",
-                 bg=CURRENT_THEME.BG_PRIMARY, fg=CURRENT_THEME.TEXT_PRIMARY,
-                 font=Fonts.PRIMARY).pack(anchor="w", pady=(0,10))
-        self.packages = {}
-        frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
-        frame.pack(fill="x")
-        if not WHISPER_AVAILABLE:
-            var = tk.BooleanVar(value=True)
-            cb = tk.Checkbutton(frame, text="faster-whisper (benötigt für Transkription)",
-                                 variable=var, bg=CURRENT_THEME.BG_PRIMARY,
-                                 fg=CURRENT_THEME.TEXT_PRIMARY,
-                                 selectcolor=CURRENT_THEME.BG_TERTIARY,
-                                 activebackground=CURRENT_THEME.BG_HOVER)
-            cb.pack(anchor="w")
-            self.packages["faster-whisper"] = var
-        if not TRANSLATOR_AVAILABLE:
-            var = tk.BooleanVar(value=True)
-            cb = tk.Checkbutton(frame, text="deep-translator (für Übersetzungen)",
-                                 variable=var, bg=CURRENT_THEME.BG_PRIMARY,
-                                 fg=CURRENT_THEME.TEXT_PRIMARY,
-                                 selectcolor=CURRENT_THEME.BG_TERTIARY,
-                                 activebackground=CURRENT_THEME.BG_HOVER)
-            cb.pack(anchor="w")
-            self.packages["deep-translator"] = var
-        if not FastLazyLoader.is_available("psutil"):
-            var = tk.BooleanVar(value=True)
-            cb = tk.Checkbutton(frame, text="psutil (Systemmonitoring)",
-                                 variable=var, bg=CURRENT_THEME.BG_PRIMARY,
-                                 fg=CURRENT_THEME.TEXT_PRIMARY,
-                                 selectcolor=CURRENT_THEME.BG_TERTIARY,
-                                 activebackground=CURRENT_THEME.BG_HOVER)
-            cb.pack(anchor="w")
-            self.packages["psutil"] = var
-        if not FastLazyLoader.is_available("pynvml"):
-            var = tk.BooleanVar(value=True)
-            cb = tk.Checkbutton(frame, text="pynvml (genaue GPU‑Auslastung)",
-                                 variable=var, bg=CURRENT_THEME.BG_PRIMARY,
-                                 fg=CURRENT_THEME.TEXT_PRIMARY,
-                                 selectcolor=CURRENT_THEME.BG_TERTIARY,
-                                 activebackground=CURRENT_THEME.BG_HOVER)
-            cb.pack(anchor="w")
-            self.packages["pynvml"] = var
-        if not self.packages:
-            tk.Label(self.main, text="✅ Alle optionalen Pakete sind bereits installiert.",
-                     bg=CURRENT_THEME.BG_PRIMARY, fg=CURRENT_THEME.SUCCESS).pack(pady=20)
-            self.dialog.after(2000, self.close)
-            return
-        tk.Label(self.main, text="Installationsausgabe:", bg=CURRENT_THEME.BG_PRIMARY,
-                 fg=CURRENT_THEME.TEXT_PRIMARY).pack(anchor="w", pady=(10,2))
-        self.output_text = scrolledtext.ScrolledText(self.main, height=12,
-                                                       bg=CURRENT_THEME.BG_TERTIARY,
-                                                       fg=CURRENT_THEME.TEXT_PRIMARY,
-                                                       font=Fonts.MONOSPACE,
-                                                       wrap=tk.WORD, state="normal")
+        # Hauptcontainer mit Scrollbar
+        canvas = tk.Canvas(self.main, bg=CURRENT_THEME.BG_PRIMARY, highlightthickness=0)
+        scrollbar = tk.Scrollbar(self.main, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg=CURRENT_THEME.BG_PRIMARY)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Mausrad-Scrolling (Windows/macOS und Linux)
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _on_mousewheel_linux(event):
+            if event.num == 4:
+                canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                canvas.yview_scroll(1, "units")
+
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        canvas.bind("<Button-4>", _on_mousewheel_linux)
+        canvas.bind("<Button-5>", _on_mousewheel_linux)
+
+        # ===================== SYSTEMPAKETE =====================
+        tk.Label(
+            scrollable_frame,
+            text="Systempakete (ggf. Administratorrechte erforderlich):",
+            bg=CURRENT_THEME.BG_PRIMARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.SUBTITLE,
+        ).pack(anchor="w", pady=(10, 5))
+
+        self.sys_vars = {}
+        for pkg, names in self.SYSTEM_PACKAGES.items():
+            if shutil.which(pkg) is None:
+                var = tk.BooleanVar(value=True)
+                cb = tk.Checkbutton(
+                    scrollable_frame,
+                    text=f"{pkg} (Systempaket)",
+                    variable=var,
+                    bg=CURRENT_THEME.BG_PRIMARY,
+                    fg=CURRENT_THEME.TEXT_PRIMARY,
+                    selectcolor=CURRENT_THEME.BG_TERTIARY,
+                    activebackground=CURRENT_THEME.BG_HOVER,
+                    anchor="w",
+                )
+                cb.pack(fill="x", pady=1)
+                self.sys_vars[pkg] = var
+            else:
+                tk.Label(
+                    scrollable_frame,
+                    text=f"✅ {pkg} (bereits installiert)",
+                    bg=CURRENT_THEME.BG_PRIMARY,
+                    fg=CURRENT_THEME.SUCCESS,
+                    font=Fonts.PRIMARY,
+                ).pack(anchor="w", pady=1)
+
+        # ===================== PYTHON-PAKETE =====================
+        tk.Label(
+            scrollable_frame,
+            text="Python-Pakete (werden in die virtuelle Umgebung installiert):",
+            bg=CURRENT_THEME.BG_PRIMARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.SUBTITLE,
+        ).pack(anchor="w", pady=(15, 5))
+
+        self.py_vars = {}
+        for pkg_name, display_text, check_func in self.PYTHON_PACKAGES:
+            if not check_func():
+                var = tk.BooleanVar(value=True)
+                cb = tk.Checkbutton(
+                    scrollable_frame,
+                    text=display_text,
+                    variable=var,
+                    bg=CURRENT_THEME.BG_PRIMARY,
+                    fg=CURRENT_THEME.TEXT_PRIMARY,
+                    selectcolor=CURRENT_THEME.BG_TERTIARY,
+                    activebackground=CURRENT_THEME.BG_HOVER,
+                    anchor="w",
+                )
+                cb.pack(fill="x", pady=1)
+                self.py_vars[pkg_name] = var
+            else:
+                tk.Label(
+                    scrollable_frame,
+                    text=f"✅ {display_text}",
+                    bg=CURRENT_THEME.BG_PRIMARY,
+                    fg=CURRENT_THEME.SUCCESS,
+                    font=Fonts.PRIMARY,
+                ).pack(anchor="w", pady=1)
+
+        # ===================== PIPER-STIMMEN =====================
+        tk.Label(
+            scrollable_frame,
+            text="Piper-Stimmen (für hochwertige Sprachausgabe):",
+            bg=CURRENT_THEME.BG_PRIMARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.SUBTITLE,
+        ).pack(anchor="w", pady=(15, 5))
+
+        self.voice_vars = {}
+        cache_dir = os.path.expanduser("~/.cache/piper")
+        for voice_name, display_name in self.PIPER_VOICES:
+            model_path = os.path.join(cache_dir, f"{voice_name}.onnx")
+            if not os.path.exists(model_path):
+                var = tk.BooleanVar(value=True)
+                cb = tk.Checkbutton(
+                    scrollable_frame,
+                    text=display_name,
+                    variable=var,
+                    bg=CURRENT_THEME.BG_PRIMARY,
+                    fg=CURRENT_THEME.TEXT_PRIMARY,
+                    selectcolor=CURRENT_THEME.BG_TERTIARY,
+                    activebackground=CURRENT_THEME.BG_HOVER,
+                    anchor="w",
+                )
+                cb.pack(fill="x", pady=1)
+                self.voice_vars[voice_name] = var
+            else:
+                tk.Label(
+                    scrollable_frame,
+                    text=f"✅ {display_name}",
+                    bg=CURRENT_THEME.BG_PRIMARY,
+                    fg=CURRENT_THEME.SUCCESS,
+                    font=Fonts.PRIMARY,
+                ).pack(anchor="w", pady=1)
+
+        # ===================== AUSGABE UND BUTTONS =====================
+        tk.Label(
+            scrollable_frame,
+            text="Installationsausgabe:",
+            bg=CURRENT_THEME.BG_PRIMARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(15, 2))
+
+        self.output_text = scrolledtext.ScrolledText(
+            scrollable_frame,
+            height=10,
+            bg=CURRENT_THEME.BG_TERTIARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.MONOSPACE,
+            wrap=tk.WORD,
+            state="normal",
+        )
         self.output_text.pack(fill="both", expand=True, pady=5)
+
         self.status_var = tk.StringVar(value="Bereit")
-        status_label = tk.Label(self.main, textvariable=self.status_var,
-                                  bg=CURRENT_THEME.BG_PRIMARY,
-                                  fg=CURRENT_THEME.TEXT_SECONDARY,
-                                  font=Fonts.SMALL)
-        status_label.pack(fill="x", pady=(5,0))
-        btn_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
-        btn_frame.pack(fill="x", pady=5)
-        self.install_btn = tk.Button(btn_frame, text="Installieren",
-                                       command=self.install_selected,
-                                       bg=CURRENT_THEME.DRAGON_GREEN,
-                                       fg=CURRENT_THEME.TEXT_PRIMARY,
-                                       font=Fonts.BUTTON, padx=15)
+        status_label = tk.Label(
+            scrollable_frame,
+            textvariable=self.status_var,
+            bg=CURRENT_THEME.BG_PRIMARY,
+            fg=CURRENT_THEME.TEXT_SECONDARY,
+            font=Fonts.SMALL,
+        )
+        status_label.pack(fill="x", pady=(5, 0))
+
+        btn_frame = tk.Frame(scrollable_frame, bg=CURRENT_THEME.BG_PRIMARY)
+        btn_frame.pack(fill="x", pady=10)
+
+        self.install_btn = tk.Button(
+            btn_frame,
+            text="📦 Ausgewählte installieren",
+            command=self.install_selected,
+            bg=CURRENT_THEME.DRAGON_GREEN,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.BUTTON,
+            padx=15,
+        )
         self.install_btn.pack(side="left", padx=5)
-        self.cancel_btn = tk.Button(btn_frame, text="Abbrechen",
-                                      command=self.cancel_installation,
-                                      bg=CURRENT_THEME.ERROR,
-                                      fg=CURRENT_THEME.TEXT_PRIMARY,
-                                      font=Fonts.BUTTON, padx=15,
-                                      state="disabled")
+
+        self.cancel_btn = tk.Button(
+            btn_frame,
+            text="⏹️ Abbrechen",
+            command=self.cancel_installation,
+            bg=CURRENT_THEME.ERROR,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.BUTTON,
+            padx=15,
+            state="disabled",
+        )
         self.cancel_btn.pack(side="left", padx=5)
-        self.close_btn = tk.Button(btn_frame, text="Schließen",
-                                    command=self.close,
-                                    bg=CURRENT_THEME.BG_TERTIARY,
-                                    fg=CURRENT_THEME.TEXT_PRIMARY)
-        self.close_btn.pack(side="right", padx=5)
 
-    def cancel_installation(self):
-        if self._process and self._process.poll() is None:
-            self._stop_requested = True
-            try:
-                self._process.terminate()
-                self._process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                try:
-                    self._process.kill()
-                except Exception:
-                    pass
-            except Exception:
-                pass
-        self._stop_requested = False
+        close_btn = tk.Button(
+            btn_frame,
+            text="Schließen",
+            command=self.close,
+            bg=CURRENT_THEME.BG_TERTIARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+        )
+        close_btn.pack(side="right", padx=5)
+
+        ToolTip(self.install_btn, "Installiert die markierten Pakete und Stimmen")
+        ToolTip(self.cancel_btn, "Bricht die laufende Installation ab")
+
+        # Scrollregion final setzen
+        scrollable_frame.update_idletasks()
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+    def install_selected(self):
+        # Ausgewählte Systempakete, Python-Pakete und Piper-Stimmen sammeln
+        sys_pkgs = [pkg for pkg, var in self.sys_vars.items() if var.get()]
+        py_pkgs = [pkg for pkg, var in self.py_vars.items() if var.get()]
+        voices = [voice for voice, var in self.voice_vars.items() if var.get()]
+
+        if not (sys_pkgs or py_pkgs or voices):
+            self.status_var.set("❌ Nichts ausgewählt")
+            return
+
+        self.output_text.delete("1.0", "end")
+        self.output_text.insert("end", "🚀 Starte Installation...\n")
+        self._enable_ui(False)
+        self.status_var.set("⚙️ Installation läuft...")
+
+        self._install_thread = threading.Thread(
+            target=self._install_worker,
+            args=(sys_pkgs, py_pkgs, voices),
+            daemon=True
+        )
+        self._install_thread.start()
+
+    def _install_worker(self, sys_pkgs, py_pkgs, voices):
+        # 1. Systempakete installieren (falls gewünscht)
+        for pkg in sys_pkgs:
+            if self._stop_requested:
+                break
+            self._append_output(f"📦 Installiere Systempaket: {pkg}\n")
+            success = self._install_system_package(pkg)
+            if not success:
+                self._append_output(f"❌ Fehler bei {pkg}\n")
+                # Bei Fehler abbrechen oder weitermachen? Wir brechen nicht ab, setzen aber Status.
+            else:
+                self._append_output(f"✅ {pkg} installiert\n")
+
+        # 2. Python-Pakete installieren
+        if py_pkgs and not self._stop_requested:
+            self._append_output(f"📦 Installiere Python-Pakete: {', '.join(py_pkgs)}\n")
+            success = self._install_python_packages(py_pkgs)
+            if success:
+                self._append_output("✅ Python-Pakete installiert\n")
+            else:
+                self._append_output("❌ Fehler bei Python-Paketen\n")
+
+        # 3. Piper-Stimmen herunterladen
+        if voices and not self._stop_requested:
+            self._append_output(f"🎤 Lade Piper-Stimmen herunter: {', '.join(voices)}\n")
+            success = self._download_piper_voices(voices)
+            if success:
+                self._append_output("✅ Piper-Stimmen heruntergeladen\n")
+            else:
+                self._append_output("❌ Fehler beim Herunterladen der Stimmen\n")
+
+        if not self._stop_requested:
+            self._append_output("\n✅ Installation abgeschlossen.\n")
+            self.status_var.set("✅ Fertig – Neustart empfohlen")
+        else:
+            self._append_output("\n⏹️ Installation abgebrochen.\n")
+            self.status_var.set("⏹️ Abgebrochen")
+
         self._enable_ui(True)
-        self.status_var.set("Installation abgebrochen")
 
-    def _enable_ui(self, enabled: bool):
+    def _install_system_package(self, pkg):
+        """Installiert ein Systempaket mit sudo/pkexec."""
+        # Paketmanager erkennen
+        if shutil.which("pacman"):
+            cmd = ["sudo", "pacman", "-S", "--noconfirm", pkg]
+        elif shutil.which("apt"):
+            cmd = ["sudo", "apt", "install", "-y", pkg]
+        elif shutil.which("dnf"):
+            cmd = ["sudo", "dnf", "install", "-y", pkg]
+        else:
+            self._append_output("Kein unterstützter Paketmanager gefunden.\n")
+            return False
+
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, bufsize=1)
+            for line in proc.stdout:
+                self._append_output(line)
+            proc.wait()
+            return proc.returncode == 0
+        except Exception as e:
+            self._append_output(f"Fehler: {e}\n")
+            return False
+
+    def _install_python_packages(self, packages):
+        """Installiert Python-Pakete mit pip."""
+        python_exe = sys.executable
+        cmd = [python_exe, "-m", "pip", "install"]
+        if not self.in_venv:
+            cmd.append("--user")
+        cmd.extend(packages)
+
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, bufsize=1)
+            for line in proc.stdout:
+                self._append_output(line)
+            proc.wait()
+            return proc.returncode == 0
+        except Exception as e:
+            self._append_output(f"Fehler: {e}\n")
+            return False
+
+    def _download_piper_voices(self, voices):
+        """Lädt Piper-Stimmen herunter (mit piper-download oder manuellem Download)."""
+        piper_download = shutil.which("piper-download")
+        cache_dir = os.path.expanduser("~/.cache/piper")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        # Mapping von Stimme zu Hugging Face Pfad
+        voice_map = {
+            "de_DE-thorsten-medium": "de/de_DE/thorsten/medium/de_DE-thorsten-medium.onnx",
+            "de_DE-thorsten-high": "de/de_DE/thorsten/high/de_DE-thorsten-high.onnx",
+            "de_DE-ramona-medium": "de/de_DE/ramona/medium/de_DE-ramona-medium.onnx",
+        }
+
+        for voice in voices:
+            if self._stop_requested:
+                break
+            self._append_output(f"Lade {voice} ...\n")
+            model_path = os.path.join(cache_dir, f"{voice}.onnx")
+            if os.path.exists(model_path):
+                self._append_output(f"  ✅ {voice} bereits vorhanden.\n")
+                continue
+
+            # Versuche piper-download
+            if piper_download:
+                try:
+                    proc = subprocess.Popen([piper_download, voice],
+                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                            text=True, bufsize=1)
+                    for line in proc.stdout:
+                        self._append_output(line)
+                    proc.wait()
+                    if proc.returncode == 0 and os.path.exists(model_path):
+                        self._append_output(f"  ✅ {voice} heruntergeladen (via piper-download)\n")
+                        continue
+                    else:
+                        self._append_output("  ⚠️ piper-download fehlgeschlagen, versuche direkten Download...\n")
+                except Exception as e:
+                    self._append_output(f"  Fehler bei piper-download: {e}\n")
+
+            # Fallback: manueller Download
+            if voice not in voice_map:
+                self._append_output(f"  ❌ Unbekannte Stimme: {voice}, kein Download möglich.\n")
+                continue
+
+            url = f"https://huggingface.co/rhasspy/piper-voices/resolve/main/{voice_map[voice]}"
+            self._append_output(f"  Lade von {url}\n")
+            try:
+                # wget oder curl verwenden
+                if shutil.which("wget"):
+                    subprocess.run(["wget", "-q", "-O", model_path, url], check=True, timeout=60)
+                elif shutil.which("curl"):
+                    subprocess.run(["curl", "-L", "-o", model_path, url], check=True, timeout=60)
+                else:
+                    self._append_output("  ❌ Weder wget noch curl gefunden. Bitte installieren.\n")
+                    return False
+                self._append_output(f"  ✅ {voice} heruntergeladen (manuell)\n")
+            except Exception as e:
+                self._append_output(f"  ❌ Download fehlgeschlagen: {e}\n")
+                return False
+        return True
+
+    def _append_output(self, text):
+        """Fügt eine Zeile zur Ausgabe hinzu (threadsicher)."""
+        def update():
+            try:
+                self.output_text.insert("end", text)
+                self.output_text.see("end")
+            except tk.TclError:
+                pass
+        self.dialog.after(0, update)
+
+    def _enable_ui(self, enabled):
+        """Aktiviert/Deaktiviert UI-Elemente während der Installation."""
         state = "normal" if enabled else "disabled"
         self.install_btn.config(state=state)
         self.cancel_btn.config(state="disabled" if enabled else "normal")
-        for var in self.packages.values():
-            cb = var._widget
-            if cb:
-                cb.config(state=state)
+        for var_dict in (self.sys_vars, self.py_vars, self.voice_vars):
+            for widget in var_dict.values():
+                try:
+                    widget.config(state=state)
+                except AttributeError:
+                    pass
 
-    def install_selected(self):
-        packages = [pkg for pkg, var in self.packages.items() if var.get()]
-        if not packages:
-            return
-        self.output_text.delete("1.0", "end")
-        self.output_text.insert("end", f"Starte Installation von: {', '.join(packages)}...\n")
-        self.dialog.update()
-        self._enable_ui(False)
-        self.status_var.set("Installation läuft...")
-        self._install_thread = threading.Thread(target=self._install_worker, args=(packages,), daemon=True)
-        self._install_thread.start()
-
-    def _install_worker(self, packages):
-        python_exe = sys.executable
-        cmd = [python_exe, "-m", "pip", "install"] + packages
-        try:
-            self._process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                encoding="utf-8",
-                errors="ignore",
-            )
-            for line in self._process.stdout:
-                if self._stop_requested:
-                    break
-                self.dialog.after(0, self._append_output, line)
-                time.sleep(0.01)
-            returncode = self._process.wait()
-            if self._stop_requested:
-                self.dialog.after(0, self._installation_finished, "abgebrochen")
-            elif returncode == 0:
-                self.dialog.after(0, self._installation_finished, "erfolgreich")
-            else:
-                self.dialog.after(0, self._installation_finished, f"fehlgeschlagen (Code {returncode})")
-        except Exception as e:
-            self.dialog.after(0, self._installation_finished, f"Fehler: {str(e)}")
-        finally:
-            self._process = None
-
-    def _append_output(self, line: str):
-        try:
-            self.output_text.insert("end", line)
-            self.output_text.see("end")
-        except tk.TclError:
-            pass
-
-    def _installation_finished(self, status: str):
-        if status == "erfolgreich":
-            self.output_text.insert("end", "\n✅ Installation erfolgreich!\n")
-            self.output_text.insert("end", "Bitte starten Sie das Programm neu, um die neuen Pakete zu nutzen.\n")
-            self.status_var.set("✅ Erfolgreich installiert")
-        elif status == "abgebrochen":
-            self.output_text.insert("end", "\n⏹️ Installation abgebrochen.\n")
-            self.status_var.set("⏹️ Abgebrochen")
-        else:
-            self.output_text.insert("end", f"\n❌ {status}\n")
-            self.status_var.set("❌ Fehlgeschlagen")
-        self._enable_ui(True)
+    def cancel_installation(self):
+        self._stop_requested = True
+        self._append_output("\n⏹️ Abbruch durch Benutzer...\n")
         self.cancel_btn.config(state="disabled")
-        self._install_thread = None
 
 
 # -----------------------------------------------------------------------------
@@ -14436,6 +15348,27 @@ class AdvancedSettingsDialog:
         )
         self.high_words_spin.grid(row=1, column=3, sticky="w", pady=1)
 
+    def _fetch_ollama_models(self):
+        """Holt die Liste der verfügbaren Ollama-Modelle und füllt die Combobox."""
+        host = self.ollama_host_var.get().strip()
+        if not host:
+            host = "http://localhost:11434"
+
+        def fetch():
+            try:
+                import requests
+                response = requests.get(f"{host}/api/tags", timeout=3)
+                if response.status_code == 200:
+                    data = response.json()
+                    models = [m["name"] for m in data.get("models", [])]
+                    if models:
+                        self.dialog.after(0, lambda: self.ollama_model_combo.config(values=models))
+                        # Falls das aktuell ausgewählte Modell nicht in der Liste ist, kann man es trotzdem behalten
+            except Exception as e:
+                logger.debug(f"Fehler beim Abrufen der Ollama-Modelle: {e}")
+
+        threading.Thread(target=fetch, daemon=True).start()
+
     # ----------------------------------------------------------------------
     # Übersetzung
     # ----------------------------------------------------------------------
@@ -14475,7 +15408,7 @@ class AdvancedSettingsDialog:
         )
         self.engine_combo.grid(row=0, column=1, sticky="w", pady=1)
 
-        # Ollama Model
+        # Ollama Model (Combobox)
         tk.Label(
             trans_frame,
             text="Ollama Model:",
@@ -14487,18 +15420,18 @@ class AdvancedSettingsDialog:
         self.ollama_model_var = tk.StringVar(
             value=getattr(self.gui.advanced_settings, 'ollama_model', 'llama3.1:8b')
         )
-        self.ollama_model_entry = tk.Entry(
+        self.ollama_model_combo = ttk.Combobox(
             trans_frame,
             textvariable=self.ollama_model_var,
+            values=[],  # wird später gefüllt
             width=15,
-            bg=self.gui.current_theme.BG_TERTIARY,
-            fg=self.gui.current_theme.TEXT_PRIMARY,
-            insertbackground=self.gui.current_theme.TEXT_PRIMARY,
-            font=("Segoe UI", 8),
+            state="normal",
+            style="Dark.TCombobox",
         )
-        self.ollama_model_entry.grid(row=0, column=3, sticky="w", pady=1)
+        self.ollama_model_combo.grid(row=0, column=3, sticky="w", pady=1)
+        ToolTip(self.ollama_model_combo, "Ollama-Modell (kann auch manuell eingegeben werden)")
 
-        # Ollama Host
+        # Ollama Host (wird vor dem Model-Fetch benötigt)
         tk.Label(
             trans_frame,
             text="Ollama Host:",
@@ -14550,6 +15483,9 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         self.test_btn.pack(side="right")
+
+        # Jetzt Modelle abrufen (nachdem ollama_host_var definiert ist)
+        self._fetch_ollama_models()
 
     # ----------------------------------------------------------------------
     # GUI & Display
@@ -14988,6 +15924,7 @@ class AdvancedSettingsDialog:
         tts_frame.grid(row=row, column=0, sticky="ew", pady=5, padx=5)
         tts_frame.columnconfigure(1, weight=1)
 
+        # TTS Engine
         tk.Label(
             tts_frame,
             text="TTS Engine:",
@@ -15003,12 +15940,100 @@ class AdvancedSettingsDialog:
             tts_frame,
             textvariable=self.tts_engine_var,
             values=["piper", "pyttsx3"],
-            width=15,
+            width=10,
             state="readonly",
             style="Dark.TCombobox",
         )
         self.tts_engine_combo.grid(row=0, column=1, sticky="w", pady=1)
-        ToolTip(self.tts_engine_combo, "Text-to-Speech Engine (piper empfohlen)")
+        ToolTip(self.tts_engine_combo, "Wählen Sie die TTS-Engine (Piper = bessere Qualität, benötigt installierte Stimme)")
+
+        # Stimme (nur für Piper)
+        tk.Label(
+            tts_frame,
+            text="Stimme (Piper):",
+            anchor="w",
+            bg=self.gui.current_theme.BG_SECONDARY,
+            fg=self.gui.current_theme.TEXT_PRIMARY,
+            font=("Segoe UI", 8),
+        ).grid(row=1, column=0, sticky="w", pady=1)
+        self.tts_voice_var = tk.StringVar(
+            value=getattr(self.gui.advanced_settings, 'tts_voice', 'de_DE-thorsten-medium')
+        )
+        # Combobox mit verfügbaren deutschen Stimmen
+        voice_options = [
+            "de_DE-thorsten-medium",
+            "de_DE-thorsten-high",
+            "de_DE-ramona-medium",
+            "de_DE-karlsson-medium",
+        ]
+        self.tts_voice_combo = ttk.Combobox(
+            tts_frame,
+            textvariable=self.tts_voice_var,
+            values=voice_options,
+            width=20,
+            state="readonly",
+            style="Dark.TCombobox",
+        )
+        self.tts_voice_combo.grid(row=1, column=1, sticky="w", pady=1)
+        ToolTip(self.tts_voice_combo, "Deutsche Piper-Stimme (je nach installierten Modellen)")
+
+        # Geschwindigkeit (length_scale)
+        tk.Label(
+            tts_frame,
+            text="Geschwindigkeit:",
+            anchor="w",
+            bg=self.gui.current_theme.BG_SECONDARY,
+            fg=self.gui.current_theme.TEXT_PRIMARY,
+            font=("Segoe UI", 8),
+        ).grid(row=2, column=0, sticky="w", pady=1)
+        self.tts_length_scale_var = tk.DoubleVar(
+            value=getattr(self.gui.advanced_settings, 'tts_length_scale', 0.9)
+        )
+        self.tts_length_scale_scale = tk.Scale(
+            tts_frame,
+            from_=0.5,
+            to=1.5,
+            resolution=0.05,
+            orient=tk.HORIZONTAL,
+            variable=self.tts_length_scale_var,
+            length=150,
+            showvalue=True,
+            bg=self.gui.current_theme.BG_SECONDARY,
+            fg=self.gui.current_theme.TEXT_PRIMARY,
+            troughcolor=self.gui.current_theme.BG_TERTIARY,
+            font=("Segoe UI", 8),
+        )
+        self.tts_length_scale_scale.grid(row=2, column=1, sticky="ew", pady=1)
+        ToolTip(self.tts_length_scale_scale, "Sprechgeschwindigkeit (niedriger = langsamer)")
+
+        # Satzpause (sentence_silence)
+        tk.Label(
+            tts_frame,
+            text="Satzpause (s):",
+            anchor="w",
+            bg=self.gui.current_theme.BG_SECONDARY,
+            fg=self.gui.current_theme.TEXT_PRIMARY,
+            font=("Segoe UI", 8),
+        ).grid(row=3, column=0, sticky="w", pady=1)
+        self.tts_sentence_silence_var = tk.DoubleVar(
+            value=getattr(self.gui.advanced_settings, 'tts_sentence_silence', 0.1)
+        )
+        self.tts_sentence_silence_scale = tk.Scale(
+            tts_frame,
+            from_=0.0,
+            to=0.5,
+            resolution=0.01,
+            orient=tk.HORIZONTAL,
+            variable=self.tts_sentence_silence_var,
+            length=150,
+            showvalue=True,
+            bg=self.gui.current_theme.BG_SECONDARY,
+            fg=self.gui.current_theme.TEXT_PRIMARY,
+            troughcolor=self.gui.current_theme.BG_TERTIARY,
+            font=("Segoe UI", 8),
+        )
+        self.tts_sentence_silence_scale.grid(row=3, column=1, sticky="ew", pady=1)
+        ToolTip(self.tts_sentence_silence_scale, "Pause zwischen Sätzen in Sekunden")
 
     # ----------------------------------------------------------------------
     # Optionale Python-Pakete
@@ -15489,6 +16514,9 @@ class AdvancedSettingsDialog:
             self.gui.advanced_settings.hotwords = self.hotwords_var.get().strip()
             self.gui.advanced_settings.blacklist_mode = self.blacklist_mode_var.get()
             self.gui.advanced_settings.tts_engine = self.tts_engine_var.get()
+            self.gui.advanced_settings.tts_voice = self.tts_voice_var.get()
+            self.gui.advanced_settings.tts_length_scale = self.tts_length_scale_var.get()
+            self.gui.advanced_settings.tts_sentence_silence = self.tts_sentence_silence_var.get()
 
             self.gui.advanced_settings.best_of = self.best_of_var.get()
             self.gui.advanced_settings.patience = self.patience_var.get()
@@ -15589,9 +16617,9 @@ class AdvancedSettingsDialog:
         else:
             self.proxy_enabled_var.set(False)
         self._toggle_proxy_entry()
-        blacklist = profil.get("blacklist", [])
-        self.blacklist_text.delete("1.0", "end")
-        self.blacklist_text.insert("1.0", "\n".join(blacklist))
+        #blacklist = profil.get("blacklist", [])
+        #self.blacklist_text.delete("1.0", "end")
+        #self.blacklist_text.insert("1.0", "\n".join(blacklist))
 
     def _open_install_dialog(self):
         InstallDependencyDialog(self.dialog, self.gui)
@@ -15788,7 +16816,7 @@ class DragonWhispererGUI:
         # ------------------------------------------------------------------
         self._gui_update_limiter = self.RateLimiter(max_updates_per_second=30)
         self._shutting_down = False
-        self._shutdown_lock = threading.Lock()          # <-- NEU
+        self._shutdown_lock = threading.Lock()
         self._exit_dialog_active = False
         self.is_processing = False
         self.subtitle_mode = False
@@ -15805,6 +16833,7 @@ class DragonWhispererGUI:
         self.transcript_history: Deque[TranscriptionResult] = deque(maxlen=1000)
         self.translation_history: Deque[TranslationResult] = deque(maxlen=500)
         self._open_dialogs: List[tk.Toplevel] = []
+        self._tts_active = False
 
         if not GUI_AVAILABLE:
             logger.error("❌ Tkinter nicht verfügbar. Versuche Fallback...")
@@ -15927,6 +16956,16 @@ class DragonWhispererGUI:
         self.root.after(2000, self._final_initialization_check)
         self._schedule_gui_health_check()
 
+    def _update_tts_button_state(self):
+        """Setzt Aussehen und Tooltip des TTS-Buttons je nach Aktivitätsstatus."""
+        if hasattr(self, 'tts_btn') and self.tts_btn.winfo_exists():
+            if self._tts_active:
+                self.tts_btn.config(text="🔊 STOP", bg=self.current_theme.SUCCESS, fg=self.current_theme.TEXT_PRIMARY)
+                ToolTip(self.tts_btn, "Stop reading")
+            else:
+                self.tts_btn.config(text="🔊", bg=self.current_theme.BG_TERTIARY, fg=self.current_theme.TEXT_PRIMARY)
+                ToolTip(self.tts_btn, "Read selected text aloud (TTS)")
+
     # ----------------------------------------------------------------------
     # 3. Hilfsmethoden für GUI‑Updates (thread‑sicher)
     # ----------------------------------------------------------------------
@@ -15936,16 +16975,16 @@ class DragonWhispererGUI:
             return self._shutting_down
 
     def _safe_gui_update(self, callback: Callable, important: bool = False):
-        """Stellt eine Funktion zur Ausführung im Hauptthread.
-           Bei important=True wird direkt after_idle verwendet (umgeht Queue & Rate‑Limit)."""
         if self.is_shutting_down():
             return
         if important:
             try:
-                self.root.after_idle(callback)
+                if hasattr(self, "root") and self.root.winfo_exists():
+                    self.root.after_idle(callback)
+                else:
+                    self.queue_manager.safe_put(self.QueueType.GUI.value, ("callback", callback, important))
             except Exception as e:
                 logger.warning(f"after_idle failed for important callback: {e}")
-                # Fallback: doch in Queue
                 self.queue_manager.safe_put(self.QueueType.GUI.value, ("callback", callback, important))
         else:
             self.queue_manager.safe_put(self.QueueType.GUI.value, ("callback", callback, important))
@@ -16170,6 +17209,68 @@ class DragonWhispererGUI:
                 pass
         self._safe_gui_update(reset, important=True)
 
+    @gui_operation_decorator
+    def save_tts_as_mp3(self):
+        """Speichert den aktuell ausgewählten (oder gesamten) Text als MP3-Datei."""
+        # Text aus dem fokussierten Widget holen (wie bei speak_current_text)
+        focused = self.root.focus_get()
+        text = None
+        if focused == self.transcript_text:
+            try:
+                if self.transcript_text.tag_ranges(tk.SEL):
+                    text = self.transcript_text.get(tk.SEL_FIRST, tk.SEL_LAST)
+                else:
+                    text = self.transcript_text.get("1.0", "end-1c")
+            except tk.TclError:
+                pass
+        elif focused == self.translation_text:
+            try:
+                if self.translation_text.tag_ranges(tk.SEL):
+                    text = self.translation_text.get(tk.SEL_FIRST, tk.SEL_LAST)
+                else:
+                    text = self.translation_text.get("1.0", "end-1c")
+            except tk.TclError:
+                pass
+
+        if not text or not text.strip():
+            self.update_status("❌ Kein Text zum Speichern.")
+            return
+
+        # Zeitstempel und Sprachkürzel entfernen (wie beim Vorlesen)
+        cleaned = re.sub(r'^\[\d{2}:\d{2}:\d{2}\]\s*\[[A-Za-z]{3}\]\s*', '', text, flags=re.MULTILINE)
+        cleaned = re.sub(r'^\[\d{2}:\d{2}:\d{2}\]\s*', '', cleaned, flags=re.MULTILINE)
+        cleaned = cleaned.strip()
+        if not cleaned:
+            self.update_status("❌ Nach Entfernen der Zeitstempel kein Text übrig.")
+            return
+
+        # Dateiname vorschlagen
+        base_name = "tts_output"
+        if self.current_stream_info and self.current_stream_info.title:
+            base_name = re.sub(r"[^\w\-_ ]", "", self.current_stream_info.title)[:50]
+        suggested = f"{base_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
+
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".mp3",
+            initialfile=suggested,
+            filetypes=[("MP3 Audio", "*.mp3"), ("WAV Audio", "*.wav"), ("All files", "*.*")],
+            title="Sprachausgabe speichern"
+        )
+        if not filename:
+            return
+
+        if not self.tts_manager.is_available():
+            self.update_status("❌ TTS-Engine nicht verfügbar.")
+            return
+
+        self.update_status("🎤 Erstelle Audio-Datei...")
+        def tts_callback(success: bool, message: str):
+            if success:
+                self.update_status(f"✅ {message}")
+            else:
+                self.update_status(f"❌ Fehler: {message}")
+        self.tts_manager.speak_to_file(cleaned, filename, callback=tts_callback)
+
     # ----------------------------------------------------------------------
     # 5. Initialisierungs‑ und Hilfsmethoden
     # ----------------------------------------------------------------------
@@ -16207,7 +17308,7 @@ class DragonWhispererGUI:
             self.advanced_settings.config,
             self.stream_manager,
             self.advanced_settings,
-            resource_manager=self.resource_manager,   # jetzt existiert es
+            resource_manager=self.resource_manager,
         )
         self.export_manager = ExportManager()
         self.memory_manager = MemoryManager()
@@ -17004,7 +18105,7 @@ class DragonWhispererGUI:
     def show_simple_stats(self) -> None:
         """
         Zeigt detaillierte Statistiken über die aktuelle Session an.
-        Der Dialog bleibt offen, bis der Benutzer ihn schließt.
+        Der Dialog ist scrollbar und bleibt offen, bis der Benutzer ihn schließt.
         """
         try:
             # 1. Performance-Daten aus dem PerformanceMonitor
@@ -17090,17 +18191,6 @@ class DragonWhispererGUI:
                 else:
                     model_info["estimated_gb"] = None
 
-                # Tatsächlich genutzter GPU-Speicher (falls auf GPU)
-                if model_info["device"] == "cuda" and TORCH_AVAILABLE:
-                    try:
-                        import torch
-                        allocated = torch.cuda.memory_allocated() / (1024**3)
-                        model_info["actual_gpu_gb"] = allocated
-                    except Exception:
-                        model_info["actual_gpu_gb"] = None
-                else:
-                    model_info["actual_gpu_gb"] = None
-
             # 8. Konfigurationsinformationen
             config_info = []
             if hasattr(self, "advanced_settings"):
@@ -17173,8 +18263,6 @@ class DragonWhispererGUI:
             lines.append(f"Model location: {model_info.get('device', 'unknown')} ({model_info.get('compute_type', 'unknown')})")
             if model_info.get('estimated_gb'):
                 lines.append(f"Estimated model size: {model_info['estimated_gb']:.1f} GB")
-            if model_info.get('actual_gpu_gb') is not None:
-                lines.append(f"Actual GPU memory used: {model_info['actual_gpu_gb']:.2f} GB")
             lines.append(f"Subtitle mode: {'ACTIVE' if self.subtitle_mode else 'inactive'}")
             lines.append("")
 
@@ -17227,16 +18315,25 @@ class DragonWhispererGUI:
 
             stats_text = "\n".join(lines)
 
-            # Dialog ohne Timeout anzeigen
+            # Scrollbaren Dialog öffnen
             StatisticsDialog(self.root, stats_text)
 
         except Exception as e:
             logger.exception(f"Fehler beim Anzeigen der Statistiken: {e}")
             self.update_status(f"❌ Statistics error: {e}")
 
-    def update_stream_info(self, info: StreamInfo) -> None:
+    @gui_error_handler
+    def update_stream_info(self, info: Optional[StreamInfo]) -> None:
         def update_gui() -> None:
             try:
+                if info is None:
+                    if hasattr(self, "stream_title_label") and self.stream_title_label.winfo_exists():
+                        self.stream_title_label.config(text="📡 Kein aktiver Stream")
+                    if hasattr(self, "stream_details_label") and self.stream_details_label.winfo_exists():
+                        self.stream_details_label.config(text="Bereit für neue Verbindung")
+                    self.current_stream_info = None
+                    return
+
                 self.current_stream_info = info
                 if hasattr(self, "stream_title_label") and self.stream_title_label.winfo_exists():
                     title = info.title[:80] + "..." if len(info.title) > 80 else info.title
@@ -17286,46 +18383,71 @@ class DragonWhispererGUI:
             self.progress_label.config(text="")
 
     def speak_current_text(self):
+        """Liest ausgewählten oder gesamten Text vor, bei erneutem Klick Abbruch."""
+        # Wenn bereits aktiv, TTS abbrechen
+        if self._tts_active:
+            self.tts_manager.stop()
+            self._tts_active = False
+            self._update_tts_button_state()
+            self.update_status("⏹️ Speech stopped.")
+            return
+
+        # Text aus dem fokussierten Widget holen
         focused = self.root.focus_get()
         text = None
         source = ""
+
         if focused == self.transcript_text:
             try:
                 if self.transcript_text.tag_ranges(tk.SEL):
                     text = self.transcript_text.get(tk.SEL_FIRST, tk.SEL_LAST)
-                    source = "Auswahl (Transkript)"
+                    source = "Selection (Transcript)"
                 else:
                     text = self.transcript_text.get("1.0", "end-1c")
-                    source = "gesamtes Transkript"
+                    source = "Full transcript"
             except tk.TclError:
                 pass
         elif focused == self.translation_text:
             try:
                 if self.translation_text.tag_ranges(tk.SEL):
                     text = self.translation_text.get(tk.SEL_FIRST, tk.SEL_LAST)
-                    source = "Auswahl (Übersetzung)"
+                    source = "Selection (Translation)"
                 else:
                     text = self.translation_text.get("1.0", "end-1c")
-                    source = "gesamte Übersetzung"
+                    source = "Full translation"
             except tk.TclError:
                 pass
+
         if not text or not text.strip():
-            self.update_status("❌ Kein Text zum Vorlesen ausgewählt.")
+            self.update_status("❌ No text selected for reading.")
             return
-        cleaned_text = re.sub(r'\[\d{2}:\d{2}:\d{2},\d{3}\]\s*(\[[A-Za-z]{3}\])?\s*', '', text)
+
+        # Zeit- und Sprachmarkierungen entfernen
+        cleaned_text = re.sub(r'^\[\d{2}:\d{2}:\d{2}\]\s*\[[A-Za-z]{3}\]\s*', '', text, flags=re.MULTILINE)
+        cleaned_text = re.sub(r'^\[\d{2}:\d{2}:\d{2}\]\s*', '', cleaned_text, flags=re.MULTILINE)
         cleaned_text = cleaned_text.strip()
+
         if not cleaned_text:
-            self.update_status("❌ Nach Entfernen der Zeitstempel kein Text übrig.")
+            self.update_status("❌ No text left after removing timestamps.")
             return
+
         if not self.tts_manager.is_available():
-            self.update_status("❌ Keine TTS-Engine verfügbar (piper oder pyttsx3 fehlen).")
+            self.update_status("❌ No TTS engine available (piper or pyttsx3 missing).")
             return
-        self.update_status(f"🔊 Lese {source} vor...")
+
+        # TTS starten
+        self._tts_active = True
+        self._update_tts_button_state()
+        self.update_status(f"🔊 Reading {source}...")
+
         def tts_callback(success: bool, message: str):
+            self._tts_active = False
+            self._update_tts_button_state()
             if success:
-                self.update_status("✅ Sprachausgabe beendet.")
+                self.update_status("✅ Speech output finished.")
             else:
-                self.update_status(f"❌ Fehler bei Sprachausgabe: {message}")
+                self.update_status(f"❌ Speech output error: {message}")
+
         self.tts_manager.speak(cleaned_text, callback=tts_callback)
 
     def toggle_vad_fallback(self):
@@ -17340,7 +18462,7 @@ class DragonWhispererGUI:
 
     def _update_vad_fallback_button(self):
         if hasattr(self, 'vad_fallback_btn') and self.vad_fallback_btn.winfo_exists():
-            new_text = "🔁 VAD ON" if self.vad_fallback_enabled.get() else "🔁 VAD OFF"
+            new_text = "🔁 VAD FaLbaK ON" if self.vad_fallback_enabled.get() else "🔁 VAD FaLbaK OFF"
             self._safe_gui_update(lambda: self.vad_fallback_btn.config(text=new_text))
 
     def toggle_live_mode(self):
@@ -17705,13 +18827,11 @@ class DragonWhispererGUI:
         if self.is_shutting_down() or self._exit_dialog_active:
             return
         self._exit_dialog_active = True
-
         try:
             is_processing = self.controller.is_processing
             ExitConfirmDialog(self.root, self.controller, self, is_processing)
         except Exception as e:
             logger.exception(f"Fehler beim Öffnen des Exit-Dialogs: {e}")
-            # Fallback auf einfache MessageBox
             result = DarkMessageBox.askyesno(
                 "🐉 Dragon Whisperer - Exit",
                 "Do you really want to exit?\n\n"
@@ -17724,6 +18844,9 @@ class DragonWhispererGUI:
                 self._direct_shutdown()
         finally:
             self._exit_dialog_active = False
+            # Exit-Button wieder aktivieren, falls nicht heruntergefahren
+            if not self.is_shutting_down() and hasattr(self, "exit_button") and self.exit_button.winfo_exists():
+                self.exit_button.config(state="normal", text=" ⏻ EXIT ")
 
     def _direct_shutdown(self) -> None:
         if self.is_shutting_down():
@@ -18369,6 +19492,9 @@ class AdvancedSettings:
     transcription_workers: int = 2
     translation_workers: int = 1
     tts_engine: str = "piper"
+    tts_voice: str = "de_DE-thorsten-medium"
+    tts_length_scale: float = 0.9
+    tts_sentence_silence: float = 0.1
     best_of: int = 5
     patience: float = 1.0
     log_prob_threshold: float = -1.2
@@ -18858,12 +19984,14 @@ class AppSettings:
 
 
 # =============================================================================
-# 14. HILFSFUNKTIONEN FÜR MAIN (unverändert)
+# 14. HILFSFUNKTIONEN FÜR MAIN (optimiert und erweitert)
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# Windows‑Konsolen‑Management
+# -----------------------------------------------------------------------------
 _original_console_mode: Optional[int] = None
 _original_codepage: Optional[int] = None
-
 
 def _save_console_state() -> None:
     global _original_console_mode, _original_codepage
@@ -18880,7 +20008,6 @@ def _save_console_state() -> None:
     except Exception:
         pass
 
-
 def _restore_console_state() -> None:
     if not IS_WINDOWS:
         return
@@ -18896,10 +20023,8 @@ def _restore_console_state() -> None:
     except Exception:
         pass
 
-
 _save_console_state()
 atexit.register(_restore_console_state)
-
 
 def _setup_windows_console() -> None:
     if not IS_WINDOWS:
@@ -18920,7 +20045,9 @@ def _setup_windows_console() -> None:
     except Exception:
         pass
 
-
+# -----------------------------------------------------------------------------
+# Plattform‑Kompatibilität
+# -----------------------------------------------------------------------------
 def check_platform_compatibility() -> List[str]:
     issues: List[str] = []
     if sys.version_info < (3, 8):
@@ -18936,7 +20063,9 @@ def check_platform_compatibility() -> List[str]:
             pass
     return issues
 
-
+# -----------------------------------------------------------------------------
+# Hilfe und System‑Check
+# -----------------------------------------------------------------------------
 def _print_help() -> None:
     print("🐉 Dragon Whisperer - Ultimate Stream Transcription & Translation")
     print("=" * 60)
@@ -18962,7 +20091,6 @@ def _print_help() -> None:
     print("  • Batch processing")
     print("  • Dark mode GUI")
 
-
 def _run_system_check() -> int:
     issues = check_platform_compatibility()
     print("🔍 Dragon Whisperer - System Compatibility Check")
@@ -18973,6 +20101,7 @@ def _run_system_check() -> int:
             print(f"  • {issue}")
     else:
         print("✅ No compatibility issues")
+
     print("\n📦 Dependency Check:")
     print(f"  FFmpeg:        {'✅' if shutil.which('ffmpeg') else '❌'}")
     print(f"  yt-dlp:        {'✅' if shutil.which('yt-dlp') else '❌'}")
@@ -18995,7 +20124,9 @@ def _run_system_check() -> int:
             pass
     return 0 if not issues else 1
 
-
+# -----------------------------------------------------------------------------
+# Benutzerfreundliche Fehlermeldungen
+# -----------------------------------------------------------------------------
 def _show_user_error(message: str) -> None:
     if IS_WINDOWS and not sys.stdin.isatty():
         try:
@@ -19024,7 +20155,6 @@ def _show_user_error(message: str) -> None:
         else:
             print(f"\n❌ {message}")
 
-
 def _show_critical_error(message: str) -> None:
     if IS_WINDOWS and not sys.stdin.isatty():
         try:
@@ -19043,8 +20173,10 @@ def _show_critical_error(message: str) -> None:
     else:
         print(f"\n💥 {message}")
 
-
-def print_system_info_debug3():
+# -----------------------------------------------------------------------------
+# Detaillierte Systeminformationen (Debug‑Level 3)
+# -----------------------------------------------------------------------------
+def print_system_info_debug3() -> None:
     import platform
     print("\n" + "=" * 60)
     print("🐉 DEBUG LEVEL 3 - SYSTEM INFORMATION")
@@ -19053,6 +20185,7 @@ def print_system_info_debug3():
     print(f"Python: {sys.version}")
     print(f"CPU count: {os.cpu_count()}")
     try:
+        import resource
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         print(f"RLIMIT_NOFILE: soft={soft}, hard={hard}")
     except Exception:
@@ -19094,15 +20227,15 @@ def print_system_info_debug3():
             print("  CUDA not available")
     print("=" * 60 + "\n")
 
-
 # -----------------------------------------------------------------------------
-# Globale Exception-Handler
+# Globale Exception‑Handler
 # -----------------------------------------------------------------------------
 def global_exception_handler(exc_type, exc_value, exc_traceback):
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
         return
-    logger.critical("Unhandled exception in main thread", exc_info=(exc_type, exc_value, exc_traceback))
+    logger.critical("Unhandled exception in main thread",
+                    exc_info=(exc_type, exc_value, exc_traceback))
     try:
         import tkinter.messagebox as mb
         mb.showerror("Dragon Whisperer - Unerwarteter Fehler",
@@ -19122,7 +20255,7 @@ threading.excepthook = thread_exception_handler
 # =============================================================================
 # 15. TESTS (INTERNER TESTMODUS)
 # =============================================================================
-def run_tests():
+def run_tests() -> int:
     import unittest
 
     class TestPlatformUtils(unittest.TestCase):
@@ -19202,50 +20335,137 @@ def run_tests():
     return 0 if result.wasSuccessful() else 1
 
 # =============================================================================
-# 16. MAIN
+# 16. MAIN (optimiert)
 # =============================================================================
+def parse_arguments() -> argparse.Namespace:
+    """
+    Parst die Kommandozeilenargumente und gibt ein Namespace‑Objekt zurück.
+    """
+    parser = argparse.ArgumentParser(
+        description="🐉 Dragon Whisperer - Livestream Transcription & Translation",
+        epilog="For more information, visit: https://github.com/your-repo/dragon-whisperer"
+    )
+    parser.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        help="Suppress all output except errors (quiet mode)"
+    )
+    parser.add_argument(
+        "--debug",
+        action="store",
+        nargs="?",
+        const="1",
+        default="0",
+        help="Enable debug output. Optional level (1-3) or component name(s) e.g. '--debug=2' or '--debug=vad,network'"
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Run system compatibility check and exit"
+    )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Run internal unit tests and exit"
+    )
+    parser.add_argument(
+        "--version", "-v",
+        action="store_true",
+        help="Show version information and exit"
+    )
+    return parser.parse_args()
 
-def main() -> int:
-    warnings.filterwarnings("ignore")
+def configure_logging(debug_level: int, debug_components: List[str], quiet: bool) -> None:
+    """
+    Richtet das Logging basierend auf den Argumenten ein.
+    """
+    log_level = logging.WARNING
+    if debug_level >= 1:
+        log_level = logging.DEBUG
+    if quiet:
+        log_level = logging.ERROR
+
+    logging.basicConfig(
+        level=log_level,
+        format="[%(asctime)s.%(msecs)03d] [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    # Drittanbieter‑Logger drosseln
+    for lib in ["huggingface_hub", "faster_whisper", "httpx", "urllib3", "httpcore"]:
+        logging.getLogger(lib).setLevel(logging.INFO)
+
+    # Debug‑Filter für komponentenspezifisches Debugging
+    class DebugFilter(logging.Filter):
+        def filter(self, record):
+            if debug_level >= 3:
+                return True
+            component = getattr(record, "component", None)
+            if component and component in debug_components:
+                return True
+            return record.levelno >= logging.WARNING
+
+    logging.getLogger("dragon").addFilter(DebugFilter())
+
+def setup_platform_environment() -> None:
+    """
+    Führt plattformspezifische Umgebungsinitialisierung durch.
+    """
+    # Windows‑Konsole vorbereiten
     if IS_WINDOWS:
         _setup_windows_console()
 
-    cli_args = {
-        "debug": "--debug" in sys.argv,
-        "quiet": "--quiet" in sys.argv or "-q" in sys.argv,
-        "check": "--check" in sys.argv,
-        "help": "--help" in sys.argv or "-h" in sys.argv,
-        "version": "--version" in sys.argv or "-v" in sys.argv,
-        "test": "--test" in sys.argv,
-    }
+    # Terminal‑Einstellungen speichern (bereits in PlatformUtils geschehen)
+    # Hier rufen wir die vorhandene Methode auf
+    PlatformUtils.setup_platform_environment()
 
-    if cli_args["help"]:
-        _print_help()
-        return 0
+def main() -> int:
+    """
+    Hauptfunktion des Programms. Gibt einen Exit‑Code zurück.
+    """
+    # 1. Argumente parsen
+    args = parse_arguments()
 
-    if cli_args["version"]:
-        print("🐉 Dragon Whisperer v3.0 - optimierte Version mit Architekturverbesserungen")
+    # 2. Debug‑Level und Komponenten ermitteln
+    debug_level = 0
+    debug_components = []
+    if args.debug != "0":
+        if args.debug.isdigit():
+            debug_level = int(args.debug)
+        else:
+            debug_components = args.debug.split(",")
+            debug_level = 1   # mindestens Level 1, wenn Komponenten angegeben sind
+
+    # 3. Logging konfigurieren
+    configure_logging(debug_level, debug_components, args.quiet)
+
+    # 4. Plattform‑Umgebung einrichten
+    setup_platform_environment()
+
+    # 5. Spezialmodi abfangen
+    if args.version:
+        print("🐉 Dragon Whisperer v4.0 (optimized)")
         print(f"Platform: {SYSTEM} {'ARM' if IS_ARM else 'x86'}")
         return 0
 
-    debug_level = DEBUG_LEVEL
-
-    if cli_args["check"]:
+    if args.check:
         return _run_system_check()
 
-    if cli_args["test"]:
+    if args.test:
         return run_tests()
 
-    if DEBUG_LEVEL >= 3:
+    # 6. Detaillierte Systeminformationen bei --debug=3
+    if debug_level >= 3:
         print_system_info_debug3()
 
-    app: Optional[DragonWhispererGUI] = None
-    exit_code = 0
-
+    # 7. Normaler Programmablauf
+    logger = logging.getLogger("dragon")
+    app = None
     try:
         logger.info("🐉 Dragon Whisperer starting...")
         logger.debug("🔍 Checking dependencies...")
 
+        # Kritische Abhängigkeiten prüfen
         try:
             PlatformUtils.check_platform_dependencies()
         except RuntimeError as e:
@@ -19258,9 +20478,11 @@ def main() -> int:
             raise RuntimeError("Tkinter/GUI not available. Install with: pip install tk")
 
         logger.debug("🖥️ Initializing GUI...")
+        from dwai import DragonWhispererGUI  # Import erst hier, um Import‑Zyklen zu vermeiden
         app = DragonWhispererGUI()
 
-        if debug_level >= 1 and not cli_args["quiet"]:
+        # Willkommensmeldung bei Debug
+        if debug_level >= 1 and not args.quiet:
             print("\n" + "=" * 50)
             print("🐉 DRAGON WHISPERER READY")
             print("=" * 50)
@@ -19276,16 +20498,17 @@ def main() -> int:
         logger.info("🚀 Starting main loop...")
         app.run()
         logger.info("✅ Application closed normally")
+        return 0
 
     except KeyboardInterrupt:
         logger.info("\n🛑 Interrupted by user")
-        exit_code = 0
+        return 0
 
     except RuntimeError as e:
         error_msg = str(e)
         logger.error(f"❌ {error_msg}")
         _show_user_error(error_msg)
-        exit_code = 1
+        return 1
 
     except Exception as e:
         error_msg = str(e)
@@ -19294,7 +20517,7 @@ def main() -> int:
             import traceback
             traceback.print_exc()
         _show_critical_error(error_msg)
-        exit_code = 2
+        return 2
 
     finally:
         logger.debug("🧹 Final minimal cleanup...")
@@ -19306,50 +20529,32 @@ def main() -> int:
                     app.app_context.cache_manager.transcription_cache.clear()
                     app.app_context.cache_manager.translation_cache.clear()
                     app.app_context.cache_manager.audio_cache.clear()
-                app = None
             except Exception as e:
                 logger.exception(f"⚠️ App cleanup error: {e}")
-
         try:
             _EXECUTOR.shutdown(wait=True)
         except Exception as e:
             logger.exception(f"⚠️ Executor shutdown error: {e}")
-
         if IS_WINDOWS:
             _restore_console_state()
-
+        import gc
         gc.collect()
         logger.debug("✅ Shutdown complete")
 
-    return exit_code
-
-
+# =============================================================================
+# 17. EINTRITTSPUNKT
+# =============================================================================
 if __name__ == "__main__":
+    # Arbeitsverzeichnis auf das Skriptverzeichnis setzen, um relative Pfade zu gewährleisten
     try:
         if "__file__" in globals():
             script_dir = os.path.dirname(os.path.abspath(__file__))
             if os.getcwd() != script_dir:
                 os.chdir(script_dir)
+                # Nur bei Debug Level >= 1 eine Meldung ausgeben
                 if DEBUG_LEVEL >= 1:
                     print(f"📁 Working directory set to: {script_dir}")
-        exit_code = main()
-        sys.exit(exit_code)
-    except KeyboardInterrupt:
-        print("\n🛑 Program interrupted by user (KeyboardInterrupt)")
-        sys.exit(0)
-    except SystemExit as e:
-        raise e
-    except Exception as e:
-        error_type = type(e).__name__
-        error_msg = str(e)
-        print(f"\n💥 FATAL ERROR in main guard: {error_type}: {error_msg}")
-        if DEBUG_LEVEL >= 2:
-            import traceback
-            traceback.print_exc()
-            print("\n🔧 Debug Info:")
-            print(f"  Python: {sys.version}")
-            print(f"  Platform: {sys.platform}")
-            print(f"  Executable: {sys.executable}")
-            print(f"  CWD: {os.getcwd()}")
-            print(f"  Script: {__file__ if '__file__' in globals() else 'Unknown'}")
-        sys.exit(99)
+    except Exception:
+        pass
+
+    sys.exit(main())
