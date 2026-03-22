@@ -2,6 +2,7 @@
 
 Die ultimative Lösung für Live‑Stream‑Transkription und Echtzeit‑Übersetzung
 Plattformunabhängig, GPU‑beschleunigt und mit moderner Dark‑GUI.
+
 🚀 Überblick
 
 Dragon Whisperer verwandelt jeden Audio‑ oder Videostream in lesbaren Text – live, genau und in über 50 Sprachen übersetzt. Egal ob YouTube, Twitch, lokale Dateien oder HLS‑Streams – die intelligente Streaming‑Engine extrahiert zuverlässig die Tonspur und liefert dir die Transkription direkt ins moderne, dunkle GUI.
@@ -105,6 +106,7 @@ Für ROCm oder MPS folge der offiziellen PyTorch‑Dokumentation.
     START klicken und den Magic erleben! ✨
 
 🛠️ Kommandozeilenoptionen
+
 Option	Beschreibung
 --debug	Ausführliche Debug‑Ausgaben (optional --debug=2 oder --debug=vad,network)
 --quiet, -q	Nur Fehlermeldungen anzeigen
