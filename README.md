@@ -114,12 +114,19 @@ Option	Beschreibung
 --test	Interne Unit‑Tests ausführen
 --version, -v	Versionsinformation anzeigen
 --help, -h	Hilfe anzeigen
+
 🤖 Whisper‑Modelle
+
 Modell	RAM (ca.)	Geschwindigkeit	Genauigkeit	Empfehlung
+
 tiny	~1 GB	🚀 extrem schnell	🔴 gering	Echtzeit, low‑resource
+
 base	~1,5 GB	🚀 sehr schnell	🟡 mittel	Alltagstauglich
+
 small	~2,5 GB	🟡 mittel	🟢 gut	Gute Balance
+
 medium	~6 GB	🔴 langsam	🟢 sehr gut	Für anspruchsvolle Audios
+
 large	>10 GB	🐢 sehr langsam	💎 exzellent	Höchste Präzision
 
 Die Modellauswahl erfolgt über das Dropdown‑Menü in der GUI. Bei GPU‑Nutzung verkürzen sich die Ladezeiten und die Verarbeitung wird flüssiger.
