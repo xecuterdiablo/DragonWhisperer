@@ -107,13 +107,21 @@ Für ROCm oder MPS folge der offiziellen PyTorch‑Dokumentation.
 
 🛠️ Kommandozeilenoptionen
 
+
 Option	Beschreibung
+
 --debug	Ausführliche Debug‑Ausgaben (optional --debug=2 oder --debug=vad,network)
+
 --quiet, -q	Nur Fehlermeldungen anzeigen
+
 --check	Systemkompatibilität prüfen
+
 --test	Interne Unit‑Tests ausführen
+
 --version, -v	Versionsinformation anzeigen
+
 --help, -h	Hilfe anzeigen
+
 
 🤖 Whisper‑Modelle
 
@@ -175,12 +183,19 @@ Alle Einstellungen werden automatisch gespeichert und beim nächsten Start wiede
     macOS – Apple Silicon (M1/M2) wird via MPS‑Backend erkannt und genutzt; Intel‑Macs verwenden CPU oder CUDA (sofern verfügbar).
 
 🆘 Fehlerbehebung
+
 Problem	Lösung
+
 ffmpeg not found	Installiere ffmpeg (siehe Abhängigkeiten) und stelle sicher, dass es im PATH ist.
+
 yt-dlp not found	Installiere yt-dlp: pip install yt-dlp (oder Systempaket).
+
 Keine Audiowiedergabe bei YouTube‑Streams	YouTube ändert häufig seine Streaming‑Protokolle. Starte das Skript mit --debug, um die Extraktion zu verfolgen, und aktualisiere ggf. yt-dlp: pip install -U yt-dlp.
+
 GUI startet nicht (Linux)	Fehlt tkinter: sudo apt install python3-tk (Debian/Ubuntu) oder sudo pacman -S tk (Arch).
+
 GPU wird nicht erkannt	Prüfe die PyTorch‑Installation:
+
 bash
 
 python -c "import torch; print(torch.cuda.is_available())"
