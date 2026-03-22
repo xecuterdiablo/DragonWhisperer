@@ -6,6 +6,7 @@ Plattformunabhängig, GPU‑beschleunigt und mit moderner Dark‑GUI.
 🚀 Überblick
 
 Dragon Whisperer verwandelt jeden Audio‑ oder Videostream in lesbaren Text – live, genau und in über 50 Sprachen übersetzt. Egal ob YouTube, Twitch, lokale Dateien oder HLS‑Streams – die intelligente Streaming‑Engine extrahiert zuverlässig die Tonspur und liefert dir die Transkription direkt ins moderne, dunkle GUI.
+
 ✨ Highlights
 
     🎤 Echtzeit‑Transkription mit Whisper AI (wahlweise faster-whisper oder openai-whisper)
@@ -86,6 +87,7 @@ bash
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 
 Für ROCm oder MPS folge der offiziellen PyTorch‑Dokumentation.
+
 ⚡ Schnellstart
 
     Repository klonen (oder Skript direkt herunterladen)
@@ -138,6 +140,7 @@ medium	~6 GB	🔴 langsam	🟢 sehr gut	Für anspruchsvolle Audios
 large	>10 GB	🐢 sehr langsam	💎 exzellent	Höchste Präzision
 
 Die Modellauswahl erfolgt über das Dropdown‑Menü in der GUI. Bei GPU‑Nutzung verkürzen sich die Ladezeiten und die Verarbeitung wird flüssiger.
+
 🎛️ Erweiterte Einstellungen
 
 Über das Zahnrad‑Symbol ⚙️ in der Statusleiste gelangst du zu den Advanced Settings. Hier kannst du:
@@ -173,6 +176,7 @@ Die Modellauswahl erfolgt über das Dropdown‑Menü in der GUI. Bei GPU‑Nutzu
     Temperatur und Modell für den Ollama‑Summarizer
 
 Alle Einstellungen werden automatisch gespeichert und beim nächsten Start wiederhergestellt.
+
 🐧 Plattform‑Hinweise
 
     Linux – Das Skript wurde primär unter Arch Linux entwickelt und getestet.
@@ -205,9 +209,11 @@ Falls False, installiere die passende torch‑Version für deine CUDA/ROCm/MPS. 
 | Fehler beim Export von DOCX | Installiere python-docx: pip install python-docx (Fallback auf TXT). |
 
 Weitere Hilfe: Erstelle ein Issue auf GitHub und füge die Ausgabe von python dragon_whisperer.py --debug bei.
+
 📄 Lizenz
 
 Dieses Projekt steht unter der MIT‑Lizenz. Siehe LICENSE für Details.
+
 🙏 Danksagung
 
     OpenAI Whisper
