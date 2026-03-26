@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🐉 DRAGON WHISPERER – (v3.0) – Final mit Architekturverbesserungen
+🐉 THE DRAGON WHISPERER (v4.0) - Ultimate Stream Transcription & Translation
 """
 
 # =============================================================================
@@ -40,7 +40,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as Futur
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
-from enum import Enum
+from enum import Enum, auto
 from functools import wraps, lru_cache
 from pathlib import Path
 from typing import (Any, Callable, Deque, Dict, List, Optional, Tuple,
@@ -2659,20 +2659,28 @@ def gui_operation_decorator(func: Callable) -> Callable:
 
 
 class MemoryManager(PeriodicTaskMixin):
+    """
+    Verwaltung von Textpuffern mit automatischer Größenbegrenzung,
+    parallelen Größen‑Deques und dynamischer Speicherbereinigung.
+    """
     __slots__ = (
-        "_buffers", "_buffer_sizes", "_lock", "_max_memory_per_component",
+        "_buffers", "_size_deques", "_buffer_sizes", "_lock", "_max_memory_per_component",
         "_last_gc_time", "_gc_interval", "_memory_warning_threshold",
         "_long_term_monitor", "_monitoring_active", "_psutil",
-        "_cache_stats", "_debug"
+        "_cache_stats", "_debug", "_max_text_size_bytes"
     )
+
+    # Maximale Größe eines einzelnen Textes (in Bytes), bevor er gekürzt wird
+    MAX_TEXT_SIZE_BYTES = 2 * 1024 * 1024  # 2 MB
 
     def __init__(self) -> None:
         PeriodicTaskMixin.__init__(self, interval=60, task=self._perform_periodic_maintenance)
 
         self._buffers: Dict[str, deque] = {}
+        self._size_deques: Dict[str, deque] = {}          # parallele Deques für Größen
         self._buffer_sizes: Dict[str, int] = {}
         self._lock = threading.RLock()
-        self._max_memory_per_component = 100 * 1024 * 1024
+        self._max_memory_per_component = 100 * 1024 * 1024  # 100 MB pro Komponente
         self._last_gc_time = time.time()
         self._gc_interval = 300
         self._memory_warning_threshold = 0.8
@@ -2682,16 +2690,11 @@ class MemoryManager(PeriodicTaskMixin):
         self._cache_stats = {"total_allocated": 0, "total_freed": 0}
         self._debug = logger.isEnabledFor(logging.DEBUG)
 
-    def _get_psutil(self):
-        if self._psutil is None:
-            try:
-                import psutil
-                self._psutil = psutil
-            except ImportError:
-                self._psutil = False
-        return self._psutil if self._psutil is not False else None
-
+    # -------------------------------------------------------------------------
+    #  Periodische Wartung (von PeriodicTaskMixin)
+    # -------------------------------------------------------------------------
     def _perform_periodic_maintenance(self) -> None:
+        """Wird periodisch aufgerufen, führt Speicher‑Health‑Check durch."""
         try:
             self._perform_memory_health_check()
         except Exception as e:
@@ -2699,6 +2702,7 @@ class MemoryManager(PeriodicTaskMixin):
                 log_debug("memory", f"Maintenance worker error: {e}")
 
     def _perform_memory_health_check(self) -> None:
+        """Prüft Speicherverbrauch und löst ggf. aggressive Bereinigung aus."""
         with self._lock:
             total_memory = sum(self._buffer_sizes.values())
             memory_usage_percent = total_memory / self._max_memory_per_component
@@ -2756,35 +2760,89 @@ class MemoryManager(PeriodicTaskMixin):
             if self._debug:
                 log_debug("memory", f"Health check error: {e}")
 
+    # -------------------------------------------------------------------------
+    #  Hilfsmethoden für Speicherdruck und Größen
+    # -------------------------------------------------------------------------
+    def _get_psutil(self):
+        if self._psutil is None:
+            try:
+                import psutil
+                self._psutil = psutil
+            except ImportError:
+                self._psutil = False
+        return self._psutil if self._psutil is not False else None
+
+    def _get_target_ratio(self) -> float:
+        """
+        Bestimmt den Anteil der maximalen Speichergrenze,
+        der nach der Bereinigung angestrebt wird.
+        Bei hohem Systemdruck wird aggressiver bereinigt.
+        """
+        try:
+            psutil = self._get_psutil()
+            if psutil is not None:
+                mem = psutil.virtual_memory()
+                if mem.percent > 90:
+                    return 0.5      # sehr aggressiv
+                if mem.percent > 80:
+                    return 0.6
+                if mem.percent > 70:
+                    return 0.7
+        except Exception:
+            pass
+        return 0.7
+
+    def _size_of_text(self, text: str) -> int:
+        """Gibt die ungefähre Speichergröße eines Strings in Bytes zurück."""
+        # Verwende sys.getsizeof für realistischere Werte (inkl. Python-Overhead)
+        import sys
+        return sys.getsizeof(text)
+
+    # -------------------------------------------------------------------------
+    #  Öffentliche Methoden
+    # -------------------------------------------------------------------------
     def add_text(self, component: str, text: str) -> None:
+        """Fügt einen Text in den Puffer ein, mit optionaler Kürzung zu großer Texte."""
         if not text or not text.strip():
             return
+
+        # Optional: sehr große Texte kürzen, um den Puffer nicht zu sprengen
+        if len(text) > self.MAX_TEXT_SIZE_BYTES * 2:   # Heuristik: Zeichen vs. Bytes
+            text = text[:self.MAX_TEXT_SIZE_BYTES] + "... [truncated]"
+            if self._debug:
+                log_debug("memory", f"Truncated oversized text for {component}")
 
         with self._lock:
             if component not in self._buffers:
                 self._buffers[component] = deque(maxlen=Config.MAX_TEXT_LINES)
+                self._size_deques[component] = deque(maxlen=Config.MAX_TEXT_LINES)
                 self._buffer_sizes[component] = 0
 
-            text_size = len(text.encode("utf-8"))
+            text_size = self._size_of_text(text)
             current_size = self._buffer_sizes[component]
 
             if current_size + text_size > self._max_memory_per_component:
                 self._optimize_buffer(component)
 
             self._buffers[component].append(text)
+            self._size_deques[component].append(text_size)
             self._buffer_sizes[component] += text_size
             self._cache_stats["total_allocated"] += text_size
 
     def get_text(self, component: str) -> str:
+        """Gibt den gesamten Puffer einer Komponente als verketteten String zurück."""
         with self._lock:
             if component not in self._buffers:
                 return ""
             return "\n".join(self._buffers[component])
 
     def clear_component(self, component: str) -> None:
+        """Löscht den gesamten Puffer einer Komponente."""
         with self._lock:
             if component in self._buffers:
                 del self._buffers[component]
+            if component in self._size_deques:
+                del self._size_deques[component]
             if component in self._buffer_sizes:
                 del self._buffer_sizes[component]
             if self._debug:
@@ -2792,51 +2850,69 @@ class MemoryManager(PeriodicTaskMixin):
 
     def _optimize_buffer(self, component: str) -> None:
         """
-        Entfernt alte Einträge aus dem Puffer, um die Speichernutzung zu reduzieren.
-
-        Diese Methode wird aufgerufen, wenn die Gesamtgröße des Puffers für eine
-        Komponente das zulässige Maximum überschreitet. Sie entfernt so lange die
-        ältesten Einträge, bis die Zielgröße (70 % des Maximalwerts) erreicht ist.
-
-        Falls mehr als 10 MB Speicher freigegeben werden, wird eine explizite
-        Garbage Collection angestoßen, um den Speicher möglichst schnell
-        an das Betriebssystem zurückzugeben.
-
-        Args:
-            component: Name der Komponente (z.B. 'transcript', 'translation').
+        Entfernt alte Einträge aus dem Puffer, bis die dynamische Zielgröße erreicht ist.
+        Verwendet parallele Größen‑Deques für schnellen Zugriff.
         """
         with self._lock:
             if component not in self._buffers:
                 return
 
             dq = self._buffers[component]
-            current_size = self._buffer_sizes[component]
+            size_dq = self._size_deques[component]
+            current_size = self._buffer_sizes.get(component, 0)
 
-            # Zielgröße: 70 % des maximal erlaubten Speichers pro Komponente
-            target_size = int(self._max_memory_per_component * 0.7)
+            # Zielgröße dynamisch berechnen
+            target_ratio = self._get_target_ratio()
+            target_size = int(self._max_memory_per_component * target_ratio)
+
+            if current_size <= target_size:
+                return
+
             removed_bytes = 0
             removed_count = 0
+            max_iterations = 10000
+            iterations = 0
 
-            # Älteste Einträge entfernen, bis Zielgröße erreicht ist
-            while current_size > target_size and dq:
-                oldest = dq.popleft()
-                removed_bytes += len(oldest.encode("utf-8"))
+            # Entferne so lange, bis Zielgröße erreicht ist
+            while current_size > target_size and dq and iterations < max_iterations:
+                # Entferne ältesten Eintrag aus beiden Deques
+                dq.popleft()
+                size = size_dq.popleft()
+                removed_bytes += size
                 removed_count += 1
-                current_size -= removed_bytes
+                current_size -= size
+                iterations += 1
 
-            # Aktualisierte Größe speichern und Statistik aktualisieren
-            self._buffer_sizes[component] = current_size
+            if iterations >= max_iterations:
+                logger.warning(
+                    f"Buffer optimization for {component} reached iteration limit "
+                    f"({max_iterations}) – may be stuck"
+                )
+
+            # Aktualisiere gespeicherte Größe (negativ vermeiden)
+            self._buffer_sizes[component] = max(0, current_size)
             self._cache_stats["total_freed"] += removed_bytes
 
-            # Debug-Ausgabe, falls aktiviert
+            # Konsistenzprüfung: tatsächliche Größe aus den Deques neu berechnen
+            actual_size = sum(size_dq)
+            if actual_size != current_size:
+                logger.warning(
+                    f"Buffer size mismatch for {component}: stored {current_size}, "
+                    f"actual {actual_size}. Correcting."
+                )
+                self._buffer_sizes[component] = actual_size
+                current_size = actual_size
+
+            # Debug‑Ausgabe
             if removed_count > 0 and self._debug:
                 log_debug(
                     "memory",
                     f"Buffer {component} optimized: removed {removed_count} entries, "
-                    f"freed {removed_bytes} bytes"
+                    f"freed {removed_bytes} bytes, new size {current_size} bytes, "
+                    f"remaining entries: {len(dq)}"
                 )
 
-                # Garbage Collection anregen, wenn mehr als 10 MB freigegeben wurden
+                # Garbage Collection bei größeren Freigaben anregen
                 if removed_bytes > 10 * 1024 * 1024:
                     gc.collect()
                     log_debug(
@@ -2845,6 +2921,7 @@ class MemoryManager(PeriodicTaskMixin):
                     )
 
     def aggressive_cleanup(self) -> None:
+        """Entfernt aggressiv Einträge aus allen Puffern, um Speicher freizugeben."""
         logger.info("🧹 Starting aggressive memory cleanup...")
         with self._lock:
             components = list(self._buffers.keys())
@@ -2855,18 +2932,23 @@ class MemoryManager(PeriodicTaskMixin):
                     if component not in self._buffers:
                         continue
                     dq = self._buffers[component]
+                    size_dq = self._size_deques[component]
                     current_len = len(dq)
                     if current_len > 100:
                         keep_count = max(50, current_len // 2)
                         removed_bytes = 0
                         removed_count = 0
                         while len(dq) > keep_count:
-                            oldest = dq.popleft()
-                            removed_bytes += len(oldest.encode("utf-8"))
+                            dq.popleft()
+                            size = size_dq.popleft()
+                            removed_bytes += size
                             removed_count += 1
                         self._buffer_sizes[component] -= removed_bytes
                         self._cache_stats["total_freed"] += removed_bytes
-                        logger.info(f"  ↪ {component}: {current_len} → {len(dq)} entries")
+                        logger.info(
+                            f"  ↪ {component}: {current_len} → {len(dq)} entries, "
+                            f"freed {removed_bytes} bytes"
+                        )
             except Exception as e:
                 logger.warning(f"⚠️ Cleanup error for {component}: {e}")
 
@@ -2874,6 +2956,7 @@ class MemoryManager(PeriodicTaskMixin):
         logger.info("✅ Aggressive cleanup completed")
 
     def optimize_all_buffers(self) -> None:
+        """Optimiert alle Puffer (ruft _optimize_buffer für jede Komponente auf)."""
         logger.info("🧹 Optimizing all buffers...")
         with self._lock:
             components = list(self._buffers.keys())
@@ -2883,6 +2966,7 @@ class MemoryManager(PeriodicTaskMixin):
         logger.info("✅ All buffers optimized")
 
     def get_memory_stats(self) -> Dict[str, Any]:
+        """Liefert detaillierte Speicherstatistiken."""
         psutil = self._get_psutil()
         if psutil is None:
             return {}
@@ -2924,35 +3008,49 @@ class MemoryManager(PeriodicTaskMixin):
             return 0
 
     def get_buffer_stats(self, component: str) -> Dict[str, Any]:
+        """Liefert detaillierte Informationen über einen einzelnen Puffer."""
         with self._lock:
             if component not in self._buffers:
                 return {"type": "not_found"}
             dq = self._buffers[component]
+            size_dq = self._size_deques[component]
             return {
                 "type": "deque",
                 "size": len(dq),
                 "capacity": Config.MAX_TEXT_LINES,
                 "memory_bytes": self._buffer_sizes.get(component, 0),
                 "maxlen": dq.maxlen,
+                "avg_entry_size_bytes": (
+                    self._buffer_sizes[component] / len(dq) if dq else 0
+                ),
+                "min_entry_size_bytes": min(size_dq) if size_dq else 0,
+                "max_entry_size_bytes": max(size_dq) if size_dq else 0,
             }
 
     def list_components(self) -> List[str]:
+        """Listet alle vorhandenen Pufferkomponenten auf."""
         with self._lock:
             return list(self._buffers.keys())
 
     def get_total_memory_usage(self) -> int:
+        """Summe der Bytes in allen Puffern."""
         with self._lock:
             return sum(self._buffer_sizes.values())
 
     def print_debug_info(self) -> None:
+        """Gibt detaillierte Debug‑Informationen aus."""
         stats = self.get_memory_stats()
         logger.info("\n" + "=" * 50)
         logger.info("🧠 MEMORY MANAGER DEBUG INFO")
         logger.info("=" * 50)
-        logger.info(f"System Memory: {stats.get('system_used_mb', 0)}MB / "
-                    f"{stats.get('system_total_mb', 0)}MB ({stats.get('system_usage_percent', 0):.1f}%)")
-        logger.info(f"Process Memory: {stats.get('process_used_mb', 0)}MB "
-                    f"({stats.get('process_usage_percent', 0):.1f}%)")
+        logger.info(
+            f"System Memory: {stats.get('system_used_mb', 0)}MB / "
+            f"{stats.get('system_total_mb', 0)}MB ({stats.get('system_usage_percent', 0):.1f}%)"
+        )
+        logger.info(
+            f"Process Memory: {stats.get('process_used_mb', 0)}MB "
+            f"({stats.get('process_usage_percent', 0):.1f}%)"
+        )
         logger.info(f"Buffer Components: {stats.get('buffer_components', 0)}")
         logger.info(f"Total Buffer Size: {stats.get('total_buffer_size_mb', 0)}MB")
         logger.info(f"Long Term Samples: {stats.get('long_term_samples', 0)}")
@@ -2962,8 +3060,11 @@ class MemoryManager(PeriodicTaskMixin):
             logger.info(f"\nActive Components ({len(components)}):")
             for comp in components[:5]:
                 comp_stats = self.get_buffer_stats(comp)
-                logger.info(f"  • {comp}: {comp_stats['type']}, "
-                            f"size: {comp_stats.get('size', 0)}")
+                logger.info(
+                    f"  • {comp}: {comp_stats['type']}, "
+                    f"size: {comp_stats.get('size', 0)}, "
+                    f"avg size: {comp_stats.get('avg_entry_size_bytes', 0):.0f} bytes"
+                )
             if len(components) > 5:
                 logger.info(f"  ... and {len(components) - 5} more")
         logger.info("=" * 50)
@@ -2976,6 +3077,7 @@ class MemoryManager(PeriodicTaskMixin):
             logger.warning("⚠️ MemoryManager cleanup thread did not terminate within timeout")
         with self._lock:
             self._buffers.clear()
+            self._size_deques.clear()
             self._buffer_sizes.clear()
             self._long_term_monitor.clear()
         gc.collect()
@@ -18131,9 +18233,7 @@ class DragonWhispererGUI:
 
         if hasattr(self, "audio_processor"):
             try:
-                self.audio_processor._processing.clear()
-                if hasattr(self.audio_processor, "_stop_event"):
-                    self.audio_processor._stop_event.set()
+                self.audio_processor.stop_processing(wait=False)
             except Exception as e:
                 logger.warning(f"⚠️ Audio processor stop error: {e}")
 
@@ -18462,9 +18562,8 @@ class WhisperController:
         if gui is not None:
             if hasattr(gui, "audio_processor"):
                 try:
-                    gui.audio_processor._processing.clear()
-                    if hasattr(gui.audio_processor, "_stop_event"):
-                        gui.audio_processor._stop_event.set()
+                    # Verwende die öffentliche Methode
+                    gui.audio_processor.stop_processing(wait=False)
                 except Exception:
                     pass
             if hasattr(gui, "ffmpeg_manager"):
@@ -18715,10 +18814,8 @@ class WhisperController:
         try:
             if gui is not None:
                 if hasattr(gui, "audio_processor"):
-                    ap = gui.audio_processor
-                    ap._processing.clear()
-                    if hasattr(ap, "_stop_event"):
-                        ap._stop_event.set()
+                    # Nutze die öffentliche Methode zum Stoppen
+                    gui.audio_processor.stop_processing(wait=False)
 
                 if hasattr(gui, "ffmpeg_manager"):
                     gui.ffmpeg_manager.stop_all_streams()
@@ -18797,7 +18894,7 @@ class StreamHandler:
                 error_callback("❌ FFmpegManager nicht verfügbar")
                 break
 
-            if not ap._processing.is_set() or ap._stop_event.is_set():
+            if ap._state != AudioProcessor.State.PROCESSING or ap._stop_event.is_set():
                 logger.info("Processing stopped by user.")
                 break
 
@@ -18836,7 +18933,7 @@ class StreamHandler:
                 break
 
             # ----- Lesen der Audiodaten -----
-            if ap._stop_event.is_set() or not ap._processing.is_set():
+            if ap._stop_event.is_set() or ap._state != AudioProcessor.State.PROCESSING:
                 logger.info("Stop detected before reading, breaking loop.")
                 break
 
@@ -18846,7 +18943,7 @@ class StreamHandler:
                 logger.error(f"Fehler beim Lesen der Audiodaten: {e}", exc_info=True)
                 audio_data = None
 
-            if ap._stop_event.is_set() or not ap._processing.is_set():
+            if ap._stop_event.is_set() or ap._state != AudioProcessor.State.PROCESSING:
                 logger.info("Stop detected after read, discarding chunk")
                 break
 
@@ -18934,22 +19031,23 @@ class StreamHandler:
 
 class AudioProcessor:
     """
-    Zentrale Audio‑Verarbeitungsklasse.
-
-    Diese Klasse verwaltet den gesamten Audio‑Streaming‑Workflow:
-        - Starten und Stoppen von FFmpeg‑Prozessen (über FFmpegManager)
-        - Lesen von Audiodaten aus dem Stream
-        - Puffern von Audiodaten
-        - Aufruf der Transkription (über TranscriptionEngine)
-        - Übersetzung (über TranslationEngine) mit asynchronen Tasks
-        - Satzpufferung für fließende Ausgabe
-        - Fortschritts‑ und Status‑Updates
-
-    Die Klasse ist thread‑sicher und verwendet interne Locks sowie einen
-    ThreadPoolExecutor für parallele Übersetzungen.
+    Optimierte Audioverarbeitung mit Zustandsmaschine, Lock-Entflechtung,
+    effizienter Pufferung und verbesserter Fehlerbehandlung.
     """
 
+    # -------------------------------------------------------------------------
+    #  Zustandsmaschine
+    # -------------------------------------------------------------------------
+    class State(Enum):
+        IDLE = auto()
+        STARTING = auto()
+        PROCESSING = auto()
+        STOPPING = auto()
+        ERROR = auto()
+
+    # Konstanten (werden aus Config übernommen)
     MAX_BUFFER_SECONDS = 30
+    PROGRESS_UPDATE_INTERVAL = Config.PROGRESS_UPDATE_INTERVAL
 
     def __init__(
         self,
@@ -18959,10 +19057,7 @@ class AudioProcessor:
         use_browser_cookies: bool = True,
         stream_manager: Optional[StreamManager] = None,
     ) -> None:
-        """
-        Initialisiert den AudioProcessor.
-        """
-        self._silent_chunk_counter = 0
+        """Initialisiert den AudioProcessor (optimierte Version)."""
         self.controller_ref = controller_ref
         self.ffmpeg_manager = ffmpeg_manager
         self.settings = settings or AdvancedSettings()
@@ -18981,20 +19076,22 @@ class AudioProcessor:
         self._fallback_translation_engine: Optional["BaseTranslationEngine"] = None
         self.plugin_manager: Optional["PluginManager"] = None
 
-        # Steuerungs‑Events
+        # Zustand (ersetzt _processing, _stop_event, _cleanup_done)
+        self._state = AudioProcessor.State.IDLE
+        self._state_lock = threading.RLock()
+        self._state_condition = threading.Condition(self._state_lock)
+
+        # Internes Stop‑Event für Worker‑Thread (wird nur noch zum Signal verwendet)
         self._stop_event = threading.Event()
-        self._processing = threading.Event()
-        self._processing_lock = threading.RLock()
+
+        # Weitere Flags
         self._current_stream_id: Optional[str] = None
-        self._last_successful_read_time = time.time()
-        self._consecutive_empty_chunks = 0
         self._cleanup_done = False
         self._resource_lock = threading.RLock()
 
         # Übersetzung
         self._translation_enabled = threading.Event()
         self._translation_enabled.set()
-        # Neu: Sequenznummer für Übersetzungen
         self._translation_seq = 0
         self._translation_seq_lock = threading.RLock()
 
@@ -19020,7 +19117,7 @@ class AudioProcessor:
         self._slow_chunks = 0
         self._last_realtime_factor = 0.0
 
-        # Statistik
+        # Statistik (eigener Lock)
         self._stats_lock = threading.RLock()
         self._chunk_counter = 0
         self._empty_reads = 0
@@ -19034,31 +19131,35 @@ class AudioProcessor:
         self._read_error_count = 0
         self._max_backoff = Config.MAX_BACKOFF
 
-        # Audio‑Puffer
-        self._audio_buffer = bytearray()
-        self._max_buffer_size = self.config.MAX_CHUNK_BYTES * 5
-        self._last_buffer_flush = time.time()
+        # Audio‑Puffer (Ringpuffer mit deque)
+        self._audio_chunks: deque = deque()          # Liste von Bytes
+        self._audio_total_bytes = 0
+        self._max_buffer_chunks = self._max_buffer_bytes // self.config.MIN_CHUNK_BYTES + 10
         self._buffer_lock = threading.RLock()
+        self._last_buffer_flush = time.time()
 
-        # Satzpuffer mit Timer
-        self._sentence_buffer = ""
+        # Satzpuffer (Liste für Teile, vermeidet String‑Konkatenation)
+        self._sentence_parts: List[str] = []
         self._sentence_segments: List[TranscriptionResult] = []
         self._last_sentence_time = time.time()
         self._sentence_flush_interval = getattr(self.settings, 'sentence_flush_interval', 2.0)
         self._sentence_flush_word_threshold = getattr(self.settings, 'sentence_flush_word_threshold', 20)
         self._sentence_lock = threading.RLock()
 
-        # Worker‑Anzahl anpassen
+        # Executors (Worker‑Anzahl aus Settings)
         cpu_count = os.cpu_count() or 4
-        transcribe_workers = max(1, cpu_count // 8)
-        translate_workers = min(8, max(1, cpu_count // 4))
+        transcribe_workers = getattr(self.settings, 'transcription_workers', max(1, cpu_count // 8))
+        translate_workers = getattr(self.settings, 'translation_workers', min(8, max(1, cpu_count // 4)))
 
-        # Executors
         self._transcription_executor = OptimizedThreadPoolExecutor(
-            max_workers=transcribe_workers, thread_name_prefix="Transcribe", max_queue_size=50
+            max_workers=transcribe_workers,
+            thread_name_prefix="Transcribe",
+            max_queue_size=50
         )
         self._translation_executor = OptimizedThreadPoolExecutor(
-            max_workers=translate_workers, thread_name_prefix="Translate", max_queue_size=100
+            max_workers=translate_workers,
+            thread_name_prefix="Translate",
+            max_queue_size=100
         )
         self._transcribe_lock = threading.Lock()
 
@@ -19066,7 +19167,6 @@ class AudioProcessor:
         self._total_file_size: Optional[int] = None
         self._progress_callback: Optional[Callable[[int, Optional[int], int], None]] = None
         self._last_progress_update = 0.0
-        self._progress_update_interval = Config.PROGRESS_UPDATE_INTERVAL
         self._expected_duration: Optional[float] = None
         self._finished_callback: Optional[Callable] = None
         self._min_chunk_duration = self.config.MIN_CHUNK_DURATION
@@ -19077,16 +19177,14 @@ class AudioProcessor:
         # StreamManager
         if stream_manager is not None:
             self.stream_manager = stream_manager
-            logger.debug("AudioProcessor: Using external StreamManager")
         else:
-            proxy = self.settings.proxy_url if hasattr(self.settings, 'proxy_url') else ""
+            proxy = getattr(self.settings, 'proxy_url', "")
             self.stream_manager = StreamManager(
                 enable_debug=(DEBUG_LEVEL >= 1),
                 use_browser_cookies=self.use_browser_cookies,
                 proxy=proxy,
-                proxy_enabled=self.settings.proxy_enabled,
+                proxy_enabled=getattr(self.settings, 'proxy_enabled', False),
             )
-            logger.debug(f"AudioProcessor: Created internal StreamManager with proxy={proxy}")
 
         self._stream_handler = StreamHandler(self, self.stream_manager)
 
@@ -19101,10 +19199,10 @@ class AudioProcessor:
         # VAD‑Fallback
         self._vad_fallback_enabled = True
 
-        # Semaphor für Übersetzungen
+        # Übersetzungssemaphor
         self._translation_semaphore = threading.Semaphore(8)
 
-        logger.info("✅ AudioProcessor initialized (optimized with OptimizedThreadPoolExecutor):")
+        logger.info("✅ AudioProcessor initialized (optimized):")
         logger.info(f"   Config Type: {self._get_config_type()}")
         logger.info(f"   Chunk: {self.config.CHUNK_DURATION}s / {self.chunk_size:,} bytes")
         logger.info(f"   Sample Rate: {self.sample_rate} Hz")
@@ -19114,7 +19212,7 @@ class AudioProcessor:
         logger.info(f"   Transcribe Workers: {transcribe_workers}, Translate Workers: {translate_workers}")
 
     # -------------------------------------------------------------------------
-    #  Öffentliche Methoden
+    #  Öffentliche Methoden (unveränderte Schnittstelle)
     # -------------------------------------------------------------------------
     def _get_config_type(self) -> str:
         if isinstance(self.config, RealtimeConfig):
@@ -19160,12 +19258,7 @@ class AudioProcessor:
         self.subtitle_mode = enabled
         logger.info(f"🎬 Subtitle mode: {'ENABLED' if enabled else 'DISABLED'}")
 
-    # Neu: Methode zum Aktualisieren der Zielsprache
     def update_target_language(self, lang_code: str) -> None:
-        """
-        Aktualisiert die Zielsprache und erhöht die Sequenznummer,
-        um alle noch ausstehenden Übersetzungs-Tasks zu invalidieren.
-        """
         if hasattr(self, "translation_engine"):
             self.translation_engine.set_target_language(lang_code)
         with self._translation_seq_lock:
@@ -19181,108 +19274,118 @@ class AudioProcessor:
         error_callback: ErrorCallback,
         finished_callback: Optional[FinishedCallback] = None,
     ) -> None:
-        """Startet die Audioverarbeitung für eine gegebene URL."""
+        """Startet die Audioverarbeitung."""
         logger.info(f"\n🔊 [START_PROCESSING] URL: {url[:80]}...")
-        logger.info(f"   Config Type: {self._get_config_type()}")
-        logger.info(f"   Chunk Size: {self.chunk_size:,} bytes")
+        with self._state_lock:
+            if self._state != AudioProcessor.State.IDLE:
+                error_callback("⚠️ Already processing")
+                return
+            self._state = AudioProcessor.State.STARTING
 
+        # URL validieren und vorbereiten
         url = PlatformUtils.sanitize_url(url)
-
         if url.startswith("file://"):
             try:
                 ok, real_path = PlatformUtils.validate_file_path(url)
                 if not ok:
                     error_callback(f"❌ {real_path}")
+                    self._set_state(AudioProcessor.State.IDLE)
                     return
                 file_path = real_path
                 self._total_file_size = os.path.getsize(file_path)
                 logger.info(f"📁 Lokale Datei, Größe: {self._total_file_size} bytes")
             except OSError as e:
                 error_callback(f"❌ Dateizugriffsfehler: {e}")
-                return
-            except Exception as e:
-                logger.error(f"Unerwarteter Fehler bei Dateiprüfung: {e}", exc_info=True)
-                error_callback("❌ Fehler bei der Dateiprüfung")
+                self._set_state(AudioProcessor.State.IDLE)
                 return
         else:
             self._total_file_size = None
 
-        try:
-            health_issues = self._platform_specific_health_check()
-            if health_issues:
-                for issue in health_issues:
-                    logger.warning(f"⚠️ {issue}")
-                    info_callback(f"⚠️ {issue}")
-        except Exception as e:
-            logger.error(f"Fehler beim Health-Check: {e}", exc_info=True)
+        # Zustand vorbereiten
+        self._stop_event.clear()
+        self._current_stream_id = f"stream_{int(time.time())}"
+        with self._stats_lock:
+            self._chunk_counter = 0
+            self._total_bytes_processed = 0
+            self._processed_seconds = 0.0
+            self._read_error_count = 0
+            self._consecutive_timeouts = 0
+            self._consecutive_errors = 0
+            self._consecutive_successes = 0
+            self._low_conf_counter = 0
+            self._slow_chunks = 0
+            self._last_realtime_factor = 0.0
+        with self._buffer_lock:
+            self._audio_chunks.clear()
+            self._audio_total_bytes = 0
+        self._finished_callback = finished_callback
+        with self._word_count_lock:
+            self._word_count_history.clear()
+            self._smoothed_word_count = None
+        self._last_chunk_duration = self.config.CHUNK_DURATION
+        self._chunk_stable_counter = 0
 
-        with self._processing_lock:
-            if self._processing.is_set():
-                logger.warning("⚠️ Vorheriger Prozess läuft noch – stoppe diesen zuerst.")
-                if not self.stop_processing(wait=True, timeout=10.0):
-                    error_callback("❌ Vorheriger Prozess konnte nicht gestoppt werden")
-                    return
-            self._processing.set()
-            self._stop_event.clear()
-            self._current_stream_id = f"stream_{int(time.time())}"
-            self._stream_start_time = time.time()
-            with self._stats_lock:
-                self._chunk_counter = 0
-                self._total_bytes_processed = 0
-                self._processed_seconds = 0.0
-                self._read_error_count = 0
-                self._consecutive_timeouts = 0
-                self._consecutive_errors = 0
-                self._consecutive_successes = 0
-                self._low_conf_counter = 0
-                self._slow_chunks = 0
-                self._last_realtime_factor = 0.0
-            with self._buffer_lock:
-                self._audio_buffer = bytearray()
-            self._finished_callback = finished_callback
-            with self._word_count_lock:
-                self._word_count_history.clear()
-                self._smoothed_word_count = None
-            self._last_chunk_duration = self.config.CHUNK_DURATION
-            self._chunk_stable_counter = 0
-            logger.info(f"✅ Flags gesetzt: processing=True, ID={self._current_stream_id}")
+        def _process_thread():
+            try:
+                self._process_loop_enhanced(
+                    url,
+                    transcription_callback,
+                    translation_callback,
+                    info_callback,
+                    error_callback,
+                    finished_callback,
+                )
+            except Exception as e:
+                logger.exception(f"❌ Unhandled exception in processing thread: {e}")
+                error_callback(f"Internal error: {e}")
+            finally:
+                with self._state_lock:
+                    if self._state == AudioProcessor.State.STOPPING:
+                        self._set_state(AudioProcessor.State.IDLE)
+                    elif self._state == AudioProcessor.State.PROCESSING:
+                        self._set_state(AudioProcessor.State.IDLE)
+                    else:
+                        self._set_state(AudioProcessor.State.IDLE)
+                self._stop_event.set()
 
-        thread = threading.Thread(
-            target=self._process_loop_enhanced,
-            args=(
-                url,
-                transcription_callback,
-                translation_callback,
-                info_callback,
-                error_callback,
-            ),
-            daemon=True,
-            name=f"AudioProc_{self._current_stream_id}",
-        )
+        thread = threading.Thread(target=_process_thread, daemon=True, name=f"AudioProc_{self._current_stream_id}")
         thread.start()
-        logger.info(f"✅ Processing thread gestartet: {thread.name}")
+        with self._state_lock:
+            if self._state == AudioProcessor.State.STARTING:
+                self._set_state(AudioProcessor.State.PROCESSING)
+        logger.info("✅ Processing thread started")
 
     def stop_processing(self, wait: bool = False, timeout: float = 5.0) -> bool:
-        with self._processing_lock:
+        """Stoppt die Verarbeitung."""
+        with self._state_lock:
+            if self._state not in (AudioProcessor.State.PROCESSING, AudioProcessor.State.STARTING):
+                return True
+            self._set_state(AudioProcessor.State.STOPPING)
             self._stop_event.set()
-            self._processing.clear()
-        if self._current_stream_id:
-            logger.info(f"📛 Stream {self._current_stream_id} stopped by user")
-            if self.ffmpeg_manager:
-                try:
-                    self.ffmpeg_manager.stop_stream(self._current_stream_id)
-                except Exception as e:
-                    logger.error(f"Fehler beim Stoppen des Streams: {e}", exc_info=True)
+
+        if self._current_stream_id and self.ffmpeg_manager:
+            try:
+                self.ffmpeg_manager.stop_stream(self._current_stream_id)
+            except Exception as e:
+                logger.error(f"Fehler beim Stoppen des Streams: {e}")
+
+        # Auf Beendigung warten, falls gewünscht
+        if wait:
+            # Einfache Warteschleife – könnte später durch Thread-Join ersetzt werden
+            start = time.time()
+            while self._state != AudioProcessor.State.IDLE and time.time() - start < timeout:
+                time.sleep(0.1)
+            return self._state == AudioProcessor.State.IDLE
         return True
 
     def emergency_reset(self, force: bool = False) -> bool:
+        """Setzt den Prozessor zurück (auch während der Verarbeitung)."""
         logger.info(f"\n🚨 [EMERGENCY_RESET] force={force}")
         with self._resource_lock:
-            with self._processing_lock:
-                self._processing.clear()
+            with self._state_lock:
+                self._set_state(AudioProcessor.State.IDLE)
             self._stop_event.set()
             self._current_stream_id = None
-            self._consecutive_empty_chunks = 0
             with self._stats_lock:
                 self._consecutive_errors = 0
                 self._consecutive_timeouts = 0
@@ -19297,7 +19400,8 @@ class AudioProcessor:
                     self._recent_transcriptions.clear()
                     self._last_transcription_text = ""
             with self._buffer_lock:
-                self._audio_buffer.clear()
+                self._audio_chunks.clear()
+                self._audio_total_bytes = 0
         logger.info("✅ Reset completed")
         return True
 
@@ -19310,12 +19414,13 @@ class AudioProcessor:
             return list(self._timed_translations)
 
     def get_status(self) -> Dict[str, Any]:
+        with self._state_lock:
+            state_name = self._state.name
         with self._stats_lock:
             return {
-                "processing": self._processing.is_set(),
+                "processing": self._state == AudioProcessor.State.PROCESSING,
                 "stop_event_set": self._stop_event.is_set(),
                 "current_stream_id": self._current_stream_id,
-                "consecutive_empty_chunks": self._consecutive_empty_chunks,
                 "cleanup_done": self._cleanup_done,
                 "config_type": self._get_config_type(),
                 "chunk_size": self.chunk_size,
@@ -19330,6 +19435,7 @@ class AudioProcessor:
                 "low_conf_counter": self._low_conf_counter,
                 "slow_chunks": self._slow_chunks,
                 "last_realtime_factor": self._last_realtime_factor,
+                "state": state_name,
             }
 
     def get_processed_seconds(self) -> float:
@@ -19340,20 +19446,19 @@ class AudioProcessor:
         logger.info("🧹 AudioProcessor: Starting dispose...")
         try:
             self._stop_event.set()
-            with self._processing_lock:
-                self._processing.clear()
+            with self._state_lock:
+                self._set_state(AudioProcessor.State.IDLE)
             self._cleanup_done = True
 
             if self.ffmpeg_manager:
                 self.ffmpeg_manager.stop_all_streams()
 
-            for name, exec_ in [("transcription", self._transcription_executor),
-                                ("translation", self._translation_executor)]:
+            for exec_ in (self._transcription_executor, self._translation_executor):
                 if exec_ is not None:
                     try:
                         exec_.shutdown(wait=False, cancel_futures=True)
                     except Exception as e:
-                        logger.warning(f"⚠️ Fehler beim Shutdown von {name}‑Executor: {e}")
+                        logger.warning(f"⚠️ Fehler beim Shutdown des Executors: {e}")
 
             if self.plugin_manager is not None:
                 try:
@@ -19368,46 +19473,109 @@ class AudioProcessor:
                 self._recent_transcriptions.clear()
                 self._last_transcription_text = ""
             with self._buffer_lock:
-                self._audio_buffer.clear()
+                self._audio_chunks.clear()
+                self._audio_total_bytes = 0
 
             logger.info("✅ AudioProcessor disposed")
         except Exception as e:
             logger.error(f"⚠️ AudioProcessor dispose error: {e}", exc_info=True)
 
     # -------------------------------------------------------------------------
-    #  Private Hilfsmethoden
+    #  Hilfsmethoden (State)
     # -------------------------------------------------------------------------
-    def _shutdown_executor(self, executor_attr: str, timeout: float = 2.0) -> None:
-        executor = getattr(self, executor_attr, None)
-        if executor is None:
-            return
-        try:
-            def shutdown_task():
-                executor.shutdown(wait=True, cancel_futures=True)
-            thread = threading.Thread(target=shutdown_task, daemon=True)
-            thread.start()
-            thread.join(timeout)
-            if thread.is_alive():
-                logger.warning(f"⚠️ Executor {executor_attr} konnte nicht innerhalb von {timeout}s beendet werden")
-        except Exception as e:
-            logger.error(f"Fehler beim Shutdown von {executor_attr}: {e}", exc_info=True)
-
-    def _platform_specific_health_check(self) -> List[str]:
-        issues: List[str] = []
-        if IS_WINDOWS:
-            try:
-                import psutil
-                memory = psutil.virtual_memory()
-                if memory.percent > 85:
-                    issues.append("High memory usage - consider closing other applications")
-            except ImportError:
-                pass
-            except Exception as e:
-                logger.error(f"Fehler beim Health-Check: {e}", exc_info=True)
-        return issues
+    def _set_state(self, new_state: "AudioProcessor.State") -> None:
+        with self._state_lock:
+            old = self._state
+            if old == new_state:
+                return
+            self._state = new_state
+            self._state_condition.notify_all()
+            logger.debug(f"AudioProcessor state: {old.name} -> {new_state.name}")
 
     # -------------------------------------------------------------------------
-    #  Kern‑Processing‑Methoden
+    #  Zentrale Fehlerbehandlung
+    # -------------------------------------------------------------------------
+    def _handle_error(
+        self,
+        error: Exception,
+        context: str,
+        error_callback: Optional[ErrorCallback] = None,
+        fatal: bool = False,
+        retry: bool = True,
+    ) -> bool:
+        """
+        Zentrale Fehlerbehandlung.
+        Gibt True zurück, wenn der Fehler behandelt wurde und die Verarbeitung
+        fortgesetzt werden kann (nur bei nicht‑fatalen Fehlern).
+        """
+        logger.warning(f"⚠️ {context}: {error}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.exception("Stacktrace:")
+
+        with self._stats_lock:
+            self._consecutive_errors += 1
+            if fatal or self._consecutive_errors >= self.config.MAX_CONSECUTIVE_ERRORS:
+                logger.critical(
+                    f"🚨 Too many consecutive errors ({self._consecutive_errors}), stopping processing."
+                )
+                with self._sentence_lock:
+                    self._sentence_parts.clear()
+                    self._sentence_segments.clear()
+                self._stop_event.set()
+                with self._state_lock:
+                    self._set_state(AudioProcessor.State.ERROR)
+                if error_callback:
+                    error_callback(f"Fatal error: {context}")
+                return False
+
+            if retry and self._consecutive_errors < 5:
+                delay = min(5.0, 0.5 * (2 ** (self._consecutive_errors - 1)))
+                logger.info(f"⏳ Waiting {delay:.1f}s before retry...")
+                time.sleep(delay)
+            return True
+
+    # -------------------------------------------------------------------------
+    #  Audio‑Puffer (Ringpuffer mit deque)
+    # -------------------------------------------------------------------------
+    def _add_audio_to_buffer(self, audio_data: bytes) -> None:
+        """Fügt Audiodaten zum Ringpuffer hinzu, verwirft alte Daten bei Überlauf."""
+        with self._buffer_lock:
+            self._audio_chunks.append(audio_data)
+            self._audio_total_bytes += len(audio_data)
+            # Alte Chunks entfernen, bis Gesamtgröße unter Limit
+            while self._audio_total_bytes > self._max_buffer_bytes and self._audio_chunks:
+                oldest = self._audio_chunks.popleft()
+                self._audio_total_bytes -= len(oldest)
+
+    def _get_audio_chunk_for_processing(self) -> Optional[bytes]:
+        """
+        Holt einen ausreichend großen Chunk aus dem Puffer (unter Lock).
+        Gibt die zusammengefügten Bytes zurück und entfernt sie aus dem Puffer.
+        """
+        with self._buffer_lock:
+            if self._audio_total_bytes < self.config.MIN_CHUNK_BYTES:
+                # Falls der Puffer zu lange nicht geflushed wurde, trotzdem verarbeiten
+                if self._audio_chunks and time.time() - self._last_buffer_flush > 5.0:
+                    # Nur verarbeiten, wenn überhaupt Daten vorhanden
+                    pass
+                else:
+                    return None
+
+            # Sammle genügend Chunks, um MIN_CHUNK_BYTES zu erreichen
+            chunks = []
+            size = 0
+            while self._audio_chunks and size < self.config.MIN_CHUNK_BYTES:
+                chunk = self._audio_chunks.popleft()
+                chunks.append(chunk)
+                size += len(chunk)
+            if not chunks:
+                return None
+            self._audio_total_bytes -= size
+            self._last_buffer_flush = time.time()
+            return b''.join(chunks)
+
+    # -------------------------------------------------------------------------
+    #  Haupt‑Processing‑Loop (zerlegt)
     # -------------------------------------------------------------------------
     def _process_loop_enhanced(
         self,
@@ -19416,264 +19584,173 @@ class AudioProcessor:
         translation_callback: TranslationCallback,
         info_callback: InfoCallback,
         error_callback: ErrorCallback,
+        finished_callback: Optional[FinishedCallback],
     ) -> None:
-        """
-        Hauptschleife für die Audioverarbeitung mit StreamHandler.
-        Startet FFmpeg, extrahiert Audio-URL und ruft den StreamHandler auf.
-        """
-        process: Optional[subprocess.Popen] = None
-        detected_language: Optional[str] = None
+        """Hauptschleife (koordiniert Extraktion, FFmpeg und StreamHandler)."""
+        callbacks = {
+            "transcription": transcription_callback,
+            "translation": translation_callback,
+            "info": info_callback,
+            "error": error_callback,
+            "finished": finished_callback,
+        }
         error_occurred = False
         normal_ending_container = [False]
 
         try:
-            logger.info(f"\n🎬 [PROCESS_LOOP] Start für: {url[:60]}...")
-            info_callback("🔍 Extracting audio URL...")
-
-            try:
-                audio_url = self.stream_manager.extract_audio_url(url)
-            except Exception as e:
-                logger.error(f"Fehler bei der Audio-URL-Extraktion: {e}", exc_info=True)
-                error_callback("❌ Audio-URL konnte nicht extrahiert werden")
-                return
-
+            audio_url = self._extract_audio_url(url, callbacks["error"])
             if not audio_url:
-                error_callback("❌ Could not extract audio URL")
                 error_occurred = True
                 return
 
-            logger.info(f"✅ Audio URL: {audio_url[:80]}...")
-            info_callback("🔍 Testing audio stream...")
-
-            if not self._test_audio_stream(audio_url):
-                logger.warning("⚠️ Stream test failed, trying anyway...")
-
-            info_callback("🔧 Setting up FFmpeg...")
-            logger.info("🚀 Starting FFmpeg process...")
-
-            try:
-                process = self.ffmpeg_manager.start_stream(
-                    video_url=url,
-                    output_queue=None,
-                    process_id=self._current_stream_id,
-                    audio_url=audio_url,
-                    detected_language=detected_language,
-                )
-                if process is None:
-                    error_callback("❌ FFmpeg konnte nicht gestartet werden")
-                    error_occurred = True
-                    return
-
-                if process.poll() is not None:
-                    try:
-                        stderr = process.stderr.read(1000).decode("utf-8", errors="ignore")
-                        error_msg = f"FFmpeg died immediately: {stderr[:200]}"
-                        logger.error(f"❌ {error_msg}")
-                        error_callback(f"❌ {error_msg}")
-                    except Exception as e:
-                        logger.error(f"Fehler beim Lesen von FFmpeg stderr: {e}")
-                        error_callback("❌ FFmpeg failed to start immediately")
-                    error_occurred = True
-                    return
-
-            except FileNotFoundError:
-                error_callback("❌ FFmpeg not found - please install")
-                error_occurred = True
-                return
-            except (OSError, PermissionError) as e:
-                error_callback(f"❌ FFmpeg konnte nicht gestartet werden: {e}")
-                error_occurred = True
-                return
-            except Exception as e:
-                logger.error(f"Unerwarteter Fehler beim Starten von FFmpeg: {e}", exc_info=True)
-                error_callback("❌ Unerwarteter Fehler beim Starten von FFmpeg")
+            detected_language = None  # später via LanguageDetector
+            process = self._start_ffmpeg_process(url, audio_url, detected_language, callbacks["error"])
+            if not process:
                 error_occurred = True
                 return
 
-            logger.info(f"✅ FFmpeg started (PID: {process.pid})")
-
-            wait_time = self.config.INITIAL_BUFFER_SECONDS
-            if any(keyword in audio_url.lower() for keyword in ["hls", ".m3u8", "manifest.googlevideo.com"]):
-                wait_time = 3.0
-                logger.info(f"🎯 HLS/Live stream detected, waiting {wait_time}s...")
-            time.sleep(wait_time)
-
-            if process.poll() is not None:
-                try:
-                    stderr = process.stderr.read(1000).decode("utf-8", errors="ignore")
-                    error_msg = f"FFmpeg died: {stderr[:200]}"
-                    logger.error(f"❌ {error_msg}")
-                    error_callback(f"❌ {error_msg}")
-                except Exception as e:
-                    logger.error(f"Fehler beim Lesen von FFmpeg stderr: {e}", exc_info=True)
-                    error_callback("❌ FFmpeg failed to start")
-                error_occurred = True
-                return
-
-            info_callback("✅ Stream connected - starting transcription...")
-            is_youtube = any(domain in audio_url for domain in ["youtube.com", "youtu.be", "googlevideo.com"])
-            if logger.isEnabledFor(logging.DEBUG):
-                log_debug("audio", f"Detected stream type: {'YouTube' if is_youtube else 'Standard'}")
-
-            logger.info("🎯 Using {} streaming loop".format("YouTube-optimized" if is_youtube else "standard"))
-
-            self._stream_handler.run_loop(
-                process,
-                audio_url,
-                url,
-                detected_language,
-                transcription_callback,
-                translation_callback,
-                info_callback,
-                error_callback,
-                is_youtube=is_youtube,
-                normal_ending_container=normal_ending_container,
-                process_id=self._current_stream_id,
+            self._run_stream_loop(
+                process, audio_url, url, detected_language,
+                callbacks, normal_ending_container
             )
-            logger.info(f"🔚 [LOOP END] Reason: {'Stop requested' if self._stop_event.is_set() else 'Process ended'}")
-
-        except subprocess.TimeoutExpired as e:
-            error_callback(f"❌ Timeout - stream not reachable: {e}")
-            error_occurred = True
-        except FileNotFoundError:
-            error_callback("❌ FFmpeg not found - please install")
-            error_occurred = True
-        except OSError as e:
-            error_msg = f"OS error: {str(e)[:100]}"
-            logger.error(f"❌ {error_msg}")
-            error_callback(f"❌ {error_msg}")
-            error_occurred = True
         except Exception as e:
-            error_msg = f"Unexpected error: {str(e)[:100]}"
-            logger.error(f"❌ {error_msg}")
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.exception("Stacktrace:")
-            error_callback(f"❌ {error_msg}")
+            logger.error(f"Unexpected error in processing loop: {e}", exc_info=True)
             error_occurred = True
-
         finally:
-            with self._sentence_lock:
-                if self._sentence_buffer.strip():
-                    sentence = self._sentence_buffer.strip()
-                    if self.translation_engine and self._translation_enabled.is_set():
-                        detected_lang = self.transcription_engine._last_detected_language if self.transcription_engine else "auto"
-                        first = self._sentence_segments[0] if self._sentence_segments else None
-                        last = self._sentence_segments[-1] if self._sentence_segments else None
-                        self._translate_and_send_async(
-                            sentence,
-                            detected_lang,
-                            translation_callback,
-                            start=first.start if first and hasattr(first, "start") else None,
-                            end=last.end if last and hasattr(last, "end") else None,
-                        )
-                    self._sentence_buffer = ""
-                    self._sentence_segments.clear()
-            self._flush_audio_buffer(transcription_callback, translation_callback)
-
-            if process:
-                self.ffmpeg_manager.stop_stream(self._current_stream_id)
-
-            self._log_final_stats()
+            self._cleanup_after_stream(normal_ending_container[0], error_occurred, callbacks)
             self._guaranteed_cleanup()
 
-            self._current_stream_id = None
-
-            if not self._stop_event.is_set() and not error_occurred:
-                if normal_ending_container[0]:
-                    logger.info("✅ Stream normal beendet – rufe finished_callback auf")
-                    if self._finished_callback:
-                        try:
-                            self._finished_callback()
-                        except Exception as e:
-                            logger.error(f"Fehler im finished_callback: {e}", exc_info=True)
-                else:
-                    error_callback("❌ Stream wurde unerwartet beendet – versuche Neuverbindung...")
-            elif not self._stop_event.is_set() and error_occurred:
-                pass
-            else:
-                logger.info("Stream processing stopped by user.")
-
-            logger.info("✅ Processing loop ended")
-
-    def _test_audio_stream(self, audio_url: str) -> bool:
-        logger.info(f"🔍 Testing audio stream: {audio_url[:60]}...")
-        is_youtube = "youtube.com" in audio_url.lower() or "googlevideo.com" in audio_url
-        is_hls = ".m3u8" in audio_url.lower() or "manifest.googlevideo.com" in audio_url
-        if is_hls:
-            logger.info("🎯 HLS stream detected – skipping quick test (often too slow)")
-            return True
-        try:
-            timeout = Config.YOUTUBE_STREAM_TEST_TIMEOUT if is_youtube else self.config.STREAM_TIMEOUT
-            test_cmd = [
-                "ffmpeg",
-                "-i",
-                audio_url,
-                "-t", "2",
-                "-f", "null",
-                "-",
-                "-loglevel", "error",
-            ]
-            result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=timeout, shell=False)
-            if result.returncode == 0:
-                logger.info("✅ Stream test successful")
-                return True
-            else:
-                error_msg = result.stderr[:100] if result.stderr else "Unknown error"
-                logger.error(f"❌ Stream test failed: {error_msg}")
-                return False
-        except subprocess.TimeoutExpired as e:
-            logger.warning(f"⏰ Stream test timeout after {timeout}s: {e}")
-            return False
-        except Exception as e:
-            logger.warning(f"⚠️ Stream test error: {e}")
-            return True
-
-    def emergency_diagnosis(self, url: str) -> bool:
-        logger.info(f"🔍 [EMERGENCY_DIAGNOSIS] Testing: {url[:80]}...")
+    def _extract_audio_url(self, url: str, error_callback: ErrorCallback) -> Optional[str]:
+        """Extrahiert die Audio‑URL über den StreamManager."""
         try:
             audio_url = self.stream_manager.extract_audio_url(url)
             if not audio_url:
-                logger.info("  ❌ Could not extract audio URL")
-                return False
-            logger.info(f"  ✅ Audio URL extracted: {audio_url[:80]}...")
-            is_youtube = "youtube.com" in audio_url.lower() or "googlevideo.com" in audio_url
-            test_cmd = [
-                "ffmpeg",
-                "-i", audio_url,
-                "-t", "3",
-                "-f", "null",
-                "-",
-                "-loglevel", "error",
-            ]
-            timeout = Config.YOUTUBE_STREAM_TEST_TIMEOUT if is_youtube else Config.STREAM_TEST_TIMEOUT
-            try:
-                result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=timeout, shell=False)
-            except subprocess.TimeoutExpired as e:
-                logger.info(f"  ⏰ Stream test timeout: {e}")
-                if is_youtube:
-                    logger.info("  ⚠️ YouTube timeout – trying anyway...")
-                    return True
-                else:
-                    logger.info("  ❌ Timeout – stream not reachable")
-                    return False
-            except (OSError, PermissionError) as e:
-                logger.info(f"  ⚠️ Emergency diagnosis OS error: {e}")
-                return False
-
-            if result.returncode == 0:
-                logger.info("  ✅ Stream connection successful")
-                return True
-            else:
-                error_msg = result.stderr[:100] if result.stderr else "Unknown error"
-                logger.info(f"  ❌ Stream test failed: {error_msg}")
-                if is_youtube and "403" in error_msg:
-                    logger.info("  ⚠️ YouTube 403 error – trying anyway...")
-                    return True
-                return False
+                if error_callback:
+                    error_callback("❌ Could not extract audio URL")
+                return None
+            logger.info(f"✅ Audio URL: {audio_url[:80]}...")
+            return audio_url
         except Exception as e:
-            logger.info(f"  ⚠️ Emergency diagnosis error: {e}")
-            return False
+            logger.error(f"Fehler bei der Audio-URL-Extraktion: {e}", exc_info=True)
+            if error_callback:
+                error_callback("❌ Audio-URL konnte nicht extrahiert werden")
+            return None
 
+    def _start_ffmpeg_process(
+        self,
+        video_url: str,
+        audio_url: str,
+        detected_language: Optional[str],
+        error_callback: ErrorCallback,
+    ) -> Optional[subprocess.Popen]:
+        """Startet FFmpeg (direkt oder im Pipe‑Modus)."""
+        try:
+            process = self.ffmpeg_manager.start_stream(
+                video_url=video_url,
+                output_queue=None,
+                process_id=self._current_stream_id,
+                audio_url=audio_url,
+                detected_language=detected_language,
+            )
+            if process is None:
+                if error_callback:
+                    error_callback("❌ FFmpeg konnte nicht gestartet werden")
+                return None
+            if process.poll() is not None:
+                stderr = self._read_stderr(process)
+                if error_callback:
+                    error_callback(f"❌ FFmpeg died immediately: {stderr[:200]}")
+                return None
+            logger.info(f"✅ FFmpeg started (PID: {process.pid})")
+            return process
+        except FileNotFoundError:
+            if error_callback:
+                error_callback("❌ FFmpeg not found - please install")
+            return None
+        except (OSError, PermissionError) as e:
+            if error_callback:
+                error_callback(f"❌ FFmpeg konnte nicht gestartet werden: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unerwarteter Fehler beim Starten von FFmpeg: {e}", exc_info=True)
+            if error_callback:
+                error_callback("❌ Unerwarteter Fehler beim Starten von FFmpeg")
+            return None
+
+    def _run_stream_loop(
+        self,
+        process: subprocess.Popen,
+        audio_url: str,
+        original_url: str,
+        detected_language: Optional[str],
+        callbacks: Dict[str, Callable],
+        normal_ending_container: List[bool],
+    ) -> None:
+        """Ruft den StreamHandler auf und aktualisiert normal_ending_container."""
+        is_youtube = any(domain in audio_url for domain in ["youtube.com", "youtu.be", "googlevideo.com"])
+        self._stream_handler.run_loop(
+            process,
+            audio_url,
+            original_url,
+            detected_language,
+            callbacks["transcription"],
+            callbacks["translation"],
+            callbacks["info"],
+            callbacks["error"],
+            is_youtube=is_youtube,
+            normal_ending_container=normal_ending_container,
+            process_id=self._current_stream_id,
+        )
+
+    def _cleanup_after_stream(
+        self,
+        normal_ending: bool,
+        error_occurred: bool,
+        callbacks: Dict[str, Callable],
+    ) -> None:
+        """Führt finale Bereinigungen durch und ruft ggf. finished_callback auf."""
+        with self._sentence_lock:
+            if self._sentence_parts:
+                sentence = " ".join(self._sentence_parts).strip()
+                if sentence and self.translation_engine and self._translation_enabled.is_set():
+                    detected_lang = "auto"
+                    if self._sentence_segments:
+                        first = self._sentence_segments[0]
+                        last = self._sentence_segments[-1]
+                        self._translate_and_send_async(
+                            sentence,
+                            detected_lang,
+                            callbacks["translation"],
+                            start=first.start if hasattr(first, "start") else None,
+                            end=last.end if hasattr(last, "end") else None,
+                        )
+                self._sentence_parts.clear()
+                self._sentence_segments.clear()
+        self._flush_audio_buffer(callbacks["transcription"], callbacks["translation"])
+        if self._current_stream_id and self.ffmpeg_manager:
+            self.ffmpeg_manager.stop_stream(self._current_stream_id)
+        self._log_final_stats()
+        self._current_stream_id = None
+
+        if not self._stop_event.is_set() and not error_occurred:
+            if normal_ending:
+                logger.info("✅ Stream normal beendet – rufe finished_callback auf")
+                if callbacks.get("finished"):
+                    try:
+                        callbacks["finished"]()
+                    except Exception as e:
+                        logger.error(f"Fehler im finished_callback: {e}", exc_info=True)
+            else:
+                if callbacks.get("error"):
+                    callbacks["error"]("❌ Stream wurde unerwartet beendet")
+        elif not self._stop_event.is_set() and error_occurred:
+            pass
+        else:
+            logger.info("Stream processing stopped by user.")
+
+    # -------------------------------------------------------------------------
+    #  Audio‑Verarbeitung (Chunk‑Verarbeitung)
+    # -------------------------------------------------------------------------
     def _process_audio_data(
         self,
         audio_data: bytes,
@@ -19682,33 +19759,11 @@ class AudioProcessor:
         info_callback: InfoCallback,
         error_callback: ErrorCallback,
     ) -> None:
+        """Verarbeitet eingehende Audiodaten (wird vom StreamHandler aufgerufen)."""
         with self._stats_lock:
             chunk_num = self._chunk_counter
 
-        if chunk_num <= 3:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"📦 Chunk #{chunk_num}: {len(audio_data)} bytes")
-
-        if len(audio_data) > 0:
-            is_silent = self._is_silent(audio_data)
-            if is_silent:
-                self._silent_chunk_counter += 1
-                if self._silent_chunk_counter % 10 == 0 and logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(f"Still receiving silent chunks ({self._silent_chunk_counter} in a row)")
-            else:
-                self._silent_chunk_counter = 0
-
-        if self._progress_callback:
-            now = time.time()
-            if now - self._last_progress_update >= self._progress_update_interval:
-                self._last_progress_update = now
-                try:
-                    with self._stats_lock:
-                        total_bytes = self._total_bytes_processed
-                    self._progress_callback(total_bytes, self._total_file_size, chunk_num)
-                except Exception as e:
-                    logger.error(f"Fehler im progress_callback: {e}", exc_info=True)
-
+        # Enhancement
         with self._last_confidence_lock:
             last_conf = self.last_confidence
         apply_enhancement = (last_conf < 0.3)
@@ -19725,37 +19780,19 @@ class AudioProcessor:
         else:
             enhanced_audio = audio_data
 
-        with self._buffer_lock:
-            self._audio_buffer.extend(enhanced_audio)
+        # Pufferung (Ringpuffer)
+        self._add_audio_to_buffer(enhanced_audio)
 
-            if len(self._audio_buffer) > self._max_buffer_bytes:
-                excess = len(self._audio_buffer) - self._max_buffer_bytes
-                self._audio_buffer = self._audio_buffer[excess:]
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(f"⚠️ Audio buffer truncated by {excess} bytes (max {self._max_buffer_bytes} bytes)")
+        # Chunk zur Verarbeitung holen
+        chunk_to_process = self._get_audio_chunk_for_processing()
+        if chunk_to_process and self.transcription_engine:
+            self._process_audio_chunk(
+                chunk_to_process,
+                transcription_callback,
+                translation_callback
+            )
 
-            if len(self._audio_buffer) > 0 and time.time() - self._last_buffer_flush > 5.0:
-                chunk_to_process = bytes(self._audio_buffer)
-                self._audio_buffer.clear()
-                if self.transcription_engine:
-                    self._process_audio_chunk(chunk_to_process, transcription_callback, translation_callback)
-                self._last_buffer_flush = time.time()
-
-            if len(self._audio_buffer) >= self.config.MIN_CHUNK_BYTES:
-                chunk_to_process = bytes(self._audio_buffer)
-                self._audio_buffer.clear()
-                if self.transcription_engine:
-                    self._process_audio_chunk(chunk_to_process, transcription_callback, translation_callback)
-                self._last_buffer_flush = time.time()
-
-            if len(self._audio_buffer) > self._max_buffer_size:
-                logger.warning(f"⚠️ Audio buffer too large ({len(self._audio_buffer)} bytes) – forcing flush")
-                chunk_to_process = bytes(self._audio_buffer)
-                self._audio_buffer.clear()
-                if self.transcription_engine:
-                    self._process_audio_chunk(chunk_to_process, transcription_callback, translation_callback)
-                self._last_buffer_flush = time.time()
-
+        # Statistik
         with self._stats_lock:
             self._chunk_counter += 1
             self._total_bytes_processed += len(audio_data)
@@ -19770,196 +19807,53 @@ class AudioProcessor:
         transcription_callback: TranscriptionCallback,
         translation_callback: TranslationCallback,
     ) -> None:
+        """Startet die Transkription für einen kompletten Chunk."""
         if not self.transcription_engine:
             return
 
-        start_time = None
-        audio_len = 0.0
-        if logger.isEnabledFor(logging.DEBUG):
-            start_time = time.perf_counter()
-            audio_len = len(audio_data) / (16000 * 2)
-        if DEBUG_LEVEL >= 3:
-            rms = self._calculate_rms(audio_data)
-            logger.debug(f"Chunk {self._chunk_counter}: {len(audio_data)} bytes, RMS={rms:.4f}")
-
         try:
-            self._process_chunk_core(
-                audio_data,
-                transcription_callback,
-                translation_callback,
-                start_time,
-                audio_len,
-            )
-        except FutureTimeout as e:
-            self._handle_chunk_error(e, "Timeout in audio chunk processing")
-        except TimeoutError as e:
-            self._handle_chunk_error(e, "Timeout in audio chunk processing")
-        except (ValueError, TypeError, RuntimeError) as e:
-            self._handle_chunk_error(e, "Audio chunk processing error", log_exception=True)
-        except Exception as e:
-            self._handle_chunk_error(e, "Unexpected error in audio chunk processing", log_exception=True, critical=True)
-
-    def _process_chunk_core(
-        self,
-        audio_data: bytes,
-        transcription_callback: TranscriptionCallback,
-        translation_callback: TranslationCallback,
-        start_time: Optional[float],
-        audio_len: float,
-    ) -> None:
-        try:
-            with self._resource_lock:
-                bytes_before_chunk = self._total_bytes_processed
-            chunk_start_time = bytes_before_chunk / self.config.BYTES_PER_SECOND
-
-            if logger.isEnabledFor(logging.DEBUG):
-                chunk_start = time.perf_counter()
-
-            transcribe_start = time.perf_counter()
             if self.subtitle_mode:
                 self._handle_subtitle_transcription(
-                    audio_data,
-                    transcription_callback,
-                    translation_callback,
-                    chunk_start_time,
+                    audio_data, transcription_callback, translation_callback
                 )
             else:
                 self._handle_normal_transcription(
-                    audio_data,
-                    transcription_callback,
-                    translation_callback,
-                    start_time,
-                    audio_len,
+                    audio_data, transcription_callback, translation_callback
                 )
-
-            transcribe_duration = time.perf_counter() - transcribe_start
-            if audio_len > 0:
-                self._last_realtime_factor = transcribe_duration / audio_len
-            else:
-                self._last_realtime_factor = 0.0
-
-            if self._last_realtime_factor > 1.5:
-                self._slow_chunks += 1
-            else:
-                self._slow_chunks = 0
-
+        except (FutureTimeout, TimeoutError) as e:
+            if not self._handle_error(e, "Timeout in audio chunk processing", None, fatal=False, retry=False):
+                return
             with self._stats_lock:
-                self._consecutive_errors = 0
-                self._consecutive_successes += 1
-
-            if self.settings.adaptive_chunk:
-                self._update_adaptive_chunk()
-
-            if logger.isEnabledFor(logging.DEBUG):
-                chunk_duration = (time.perf_counter() - chunk_start) * 1000
-                log_debug(
-                    "time",
-                    f"Chunk {self._chunk_counter} processing took {chunk_duration:.2f}ms total "
-                    f"(realtime factor: {self._last_realtime_factor:.2f})",
-                )
-
-            self._log_gpu_stats()
-            self._log_queue_stats()
-            self._log_cache_stats()
-
-        except FutureTimeout as e:
-            self._handle_chunk_error(e, "Timeout in audio chunk processing")
+                self._consecutive_timeouts += 1
+                if self._consecutive_timeouts >= 3:
+                    self._reload_model_on_timeout()
         except (ValueError, TypeError, RuntimeError) as e:
-            self._handle_chunk_error(e, "Audio chunk processing error", log_exception=True)
+            self._handle_error(e, "Audio chunk processing error", None, fatal=False, retry=True)
         except Exception as e:
-            self._handle_chunk_error(e, "Unexpected error in audio chunk processing", log_exception=True, critical=True)
-
-    def _handle_chunk_error(
-        self,
-        error: Exception,
-        message: str,
-        log_exception: bool = False,
-        critical: bool = False,
-    ) -> None:
-        logger.warning(f"⚠️ {message}: {error}")
-        if log_exception and logger.isEnabledFor(logging.DEBUG):
-            logger.exception("Stacktrace:")
-
-        with self._stats_lock:
-            self._consecutive_errors += 1
-            self._consecutive_successes = 0
-
-            if self._consecutive_errors >= self.config.MAX_CONSECUTIVE_ERRORS:
-                logger.critical(
-                    f"🚨 Too many consecutive errors ({self._consecutive_errors}), stopping processing."
-                )
-                with self._sentence_lock:
-                    if self._sentence_buffer:
-                        logger.debug("Clearing sentence buffer due to errors")
-                        self._sentence_buffer = ""
-                        self._sentence_segments.clear()
-                self._stop_event.set()
-                self._processing.clear()
-
-    def _calculate_rms(self, audio_data: bytes) -> float:
-        if self.transcription_engine and self.transcription_engine._np is not None:
-            np = self.transcription_engine._np
-            try:
-                audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
-                rms = np.sqrt(np.mean(audio_np**2))
-                return float(rms)
-            except Exception:
-                pass
-        return 0.0
+            self._handle_error(e, "Unexpected error in audio chunk processing", None, fatal=True, retry=False)
 
     def _handle_normal_transcription(
         self,
         audio_data: bytes,
         transcription_callback: TranscriptionCallback,
         translation_callback: TranslationCallback,
-        start_time: float,
-        audio_len: float,
     ) -> None:
-        if logger.isEnabledFor(logging.DEBUG):
-            log_debug("thread", f"Starte Transkription in Thread {threading.current_thread().name}")
-        try:
-            timeout_val = max(30, self.config.CHUNK_DURATION * 3)
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"⏳ Normal-Transkription, Timeout={timeout_val}s")
-            with self._transcribe_lock:
-                transcription = self._transcription_executor.submit_with_timeout(
-                    self.transcription_engine.safe_transcribe, timeout_val, audio_data
-                )
-        except TimeoutError as e:
-            logger.error(f"⏰ safe_transcribe Timeout nach {self.config.CHUNK_DURATION*3}s: {e}")
-            with self._stats_lock:
-                self._consecutive_timeouts += 1
-                if self._consecutive_timeouts >= 3:
-                    self._reload_model_on_timeout()
-            return
-        except Exception as e:
-            logger.warning(f"⚠️ Transkriptionsfehler: {e}")
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.exception("Stacktrace:")
-            with self._stats_lock:
-                self._consecutive_errors += 1
-                if self._consecutive_errors >= self.config.MAX_CONSECUTIVE_ERRORS:
-                    logger.critical(f"🚨 Zu viele Fehler ({self._consecutive_errors}), stoppe.")
-                    self._stop_event.set()
-                    self._processing.clear()
-            return
-        with self._stats_lock:
-            self._consecutive_timeouts = 0
+        """Transkription für normalen Modus (keine Zeitstempel)."""
+        timeout_val = max(30, self.config.CHUNK_DURATION * 3)
+        with self._transcribe_lock:
+            transcription = self._transcription_executor.submit_with_timeout(
+                self.transcription_engine.safe_transcribe, timeout_val, audio_data
+            )
         if transcription and hasattr(transcription, "confidence"):
             with self._last_confidence_lock:
                 self.last_confidence = transcription.confidence
         else:
             with self._last_confidence_lock:
                 self.last_confidence = 0.0
-        if logger.isEnabledFor(logging.DEBUG) and start_time is not None and transcription:
-            elapsed = time.perf_counter() - start_time
-            realtime_factor = elapsed / audio_len if audio_len > 0 else 0
-            logger.debug(
-                f"Chunk {self._chunk_counter}: {audio_len:.2f}s audio, "
-                f"transcribe {elapsed*1000:.1f}ms ({realtime_factor:.2f}x realtime)"
-            )
+
         if not transcription or not transcription.text:
             return
+
         clean_text = transcription.text.strip()
         conf = getattr(transcription, "confidence", 0.0)
         with self._stats_lock:
@@ -19967,6 +19861,8 @@ class AudioProcessor:
                 self._low_conf_counter += 1
             else:
                 self._low_conf_counter = 0
+
+        # Duplikatprüfung
         if self.settings.enable_duplicate_check and self.config.DUPLICATE_CHECK_ENABLED:
             with self._duplicate_lock:
                 if self._audio_enhancer.is_duplicate(
@@ -19980,12 +19876,12 @@ class AudioProcessor:
                 self._last_transcription_text = clean_text
                 self._recent_transcriptions.append(self._audio_enhancer._normalize_text(clean_text))
 
+        # Satzpufferung
         with self._sentence_lock:
             now = time.time()
-
-            if (self._sentence_buffer and
-                (now - self._last_sentence_time) > self._sentence_flush_interval):
-                sentence = self._sentence_buffer.strip()
+            # Prüfen, ob aufgrund von Zeitablauf geflushed werden muss
+            if self._sentence_parts and (now - self._last_sentence_time) > self._sentence_flush_interval:
+                sentence = " ".join(self._sentence_parts).strip()
                 if sentence and self.translation_engine and self._translation_enabled.is_set():
                     detected_lang = transcription.language or "auto"
                     first = self._sentence_segments[0] if self._sentence_segments else None
@@ -19997,53 +19893,52 @@ class AudioProcessor:
                         start=first.start if first and hasattr(first, "start") else None,
                         end=last.end if last and hasattr(last, "end") else None,
                     )
-                self._sentence_buffer = ""
+                self._sentence_parts.clear()
                 self._sentence_segments.clear()
                 self._last_sentence_time = now
 
-            self._sentence_buffer += " " + clean_text if self._sentence_buffer else clean_text
+            # Neuen Teil hinzufügen
+            self._sentence_parts.append(clean_text)
             self._sentence_segments.append(transcription)
             self._last_sentence_time = now
 
+            # Prüfen, ob Satzende
             if clean_text and clean_text[-1] in ".!?。！？":
-                sentence = self._sentence_buffer.strip()
-                if sentence:
-                    if self.translation_engine and self._translation_enabled.is_set() and hasattr(transcription, "language"):
-                        detected_lang = transcription.language or "auto"
-                        if self._sentence_segments:
-                            first = self._sentence_segments[0]
-                            last = self._sentence_segments[-1]
-                            self._translate_and_send_async(
-                                sentence,
-                                detected_lang,
-                                translation_callback,
-                                start=first.start if hasattr(first, "start") else None,
-                                end=last.end if hasattr(last, "end") else None,
-                            )
-                self._sentence_buffer = ""
+                sentence = " ".join(self._sentence_parts).strip()
+                if sentence and self.translation_engine and self._translation_enabled.is_set():
+                    detected_lang = transcription.language or "auto"
+                    first = self._sentence_segments[0]
+                    last = transcription
+                    self._translate_and_send_async(
+                        sentence,
+                        detected_lang,
+                        translation_callback,
+                        start=first.start,
+                        end=last.end,
+                    )
+                self._sentence_parts.clear()
                 self._sentence_segments.clear()
                 self._last_sentence_time = time.time()
-            else:
-                if len(self._sentence_buffer.split()) > self._sentence_flush_word_threshold:
-                    sentence = self._sentence_buffer.strip()
-                    if sentence and self.translation_engine and self._translation_enabled.is_set():
-                        detected_lang = transcription.language or "auto"
-                        first = self._sentence_segments[0] if self._sentence_segments else None
-                        last = transcription
-                        self._translate_and_send_async(
-                            sentence,
-                            detected_lang,
-                            translation_callback,
-                            start=first.start if first and hasattr(first, "start") else None,
-                            end=last.end if hasattr(last, "end") else None,
-                        )
-                    self._sentence_buffer = ""
-                    self._sentence_segments.clear()
-                    self._last_sentence_time = time.time()
+            elif len(self._sentence_parts) > self._sentence_flush_word_threshold:
+                sentence = " ".join(self._sentence_parts).strip()
+                if sentence and self.translation_engine and self._translation_enabled.is_set():
+                    detected_lang = transcription.language or "auto"
+                    first = self._sentence_segments[0] if self._sentence_segments else None
+                    last = transcription
+                    self._translate_and_send_async(
+                        sentence,
+                        detected_lang,
+                        translation_callback,
+                        start=first.start if first and hasattr(first, "start") else None,
+                        end=last.end,
+                    )
+                self._sentence_parts.clear()
+                self._sentence_segments.clear()
+                self._last_sentence_time = time.time()
 
         transcription_callback(transcription)
-        with self._stats_lock:
-            self._consecutive_errors = 0
+
+        # Wortzahl für adaptive Chunk
         word_count = len(clean_text.split())
         with self._word_count_lock:
             self._word_count_history.append(word_count)
@@ -20053,53 +19948,17 @@ class AudioProcessor:
         audio_data: bytes,
         transcription_callback: TranscriptionCallback,
         translation_callback: TranslationCallback,
-        chunk_start_time: float,
     ) -> None:
-        if logger.isEnabledFor(logging.DEBUG):
-            log_debug("thread", f"Starte Transkription in Thread {threading.current_thread().name}")
-        try:
-            timeout_val = max(30, self.config.CHUNK_DURATION * 3)
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"⏳ Subtitle-Transkription, Timeout={timeout_val}s")
-            with self._transcribe_lock:
-                segments = self._transcription_executor.submit_with_timeout(
-                    self.transcription_engine.transcribe_audio,
-                    timeout_val,
-                    audio_data,
-                    True,
-                )
-        except TimeoutError as e:
-            logger.error(f"⏰ Transkriptions-Timeout (Subtitle-Modus) nach {self.config.CHUNK_DURATION*3}s: {e}")
-            with self._stats_lock:
-                self._consecutive_timeouts += 1
-                if self._consecutive_timeouts >= 3:
-                    self._reload_model_on_timeout()
-            return
-        except Exception as e:
-            logger.warning(f"⚠️ Transkriptionsfehler (Subtitle-Modus): {e}")
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.exception("Stacktrace:")
-            with self._stats_lock:
-                self._consecutive_errors += 1
-                if self._consecutive_errors >= self.config.MAX_CONSECUTIVE_ERRORS:
-                    logger.critical(f"🚨 Zu viele Fehler ({self._consecutive_errors}), stoppe.")
-                    self._stop_event.set()
-                    self._processing.clear()
-            return
+        """Transkription für Untertitel‑Modus (mit Zeitstempeln)."""
+        timeout_val = max(30, self.config.CHUNK_DURATION * 3)
+        with self._transcribe_lock:
+            segments = self._transcription_executor.submit_with_timeout(
+                self.transcription_engine.transcribe_audio, timeout_val, audio_data, True
+            )
         if not segments:
             return
-        if logger.isEnabledFor(logging.DEBUG):
-            log_debug("subtitle", f"Received {len(segments)} segments")
+
         for segment in segments:
-            if segment.start is not None:
-                segment.start += chunk_start_time
-            if segment.end is not None:
-                segment.end += chunk_start_time
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.info(
-                    f"🎤 SEGMENT [{segment.start:.2f} - {segment.end:.2f}] {segment.text.strip()} "
-                    f"(Sprache: {getattr(segment, 'language', 'unbekannt')})"
-                )
             if not segment or not segment.text:
                 continue
             clean_text = segment.text.strip()
@@ -20111,6 +19970,7 @@ class AudioProcessor:
                     self._low_conf_counter += 1
                 else:
                     self._low_conf_counter = 0
+
             if self.settings.enable_duplicate_check and self.config.DUPLICATE_CHECK_ENABLED and not self.subtitle_mode:
                 with self._duplicate_lock:
                     if self._audio_enhancer.is_duplicate(
@@ -20123,22 +19983,21 @@ class AudioProcessor:
                         continue
                     self._last_transcription_text = clean_text
                     self._recent_transcriptions.append(self._audio_enhancer._normalize_text(clean_text))
+
             if not self.transcription_engine.is_valid_segment(clean_text, conf):
                 continue
+
             if self.config.ENABLE_TIMED_TRANSCRIPTIONS:
                 with self._subtitle_lock:
                     self._timed_transcriptions.append(segment)
-            transcription_callback(segment)
-            word_count = len(clean_text.split())
-            with self._word_count_lock:
-                self._word_count_history.append(word_count)
 
+            transcription_callback(segment)
+
+            # Satzpufferung für Untertitel (ähnlich wie normal)
             with self._sentence_lock:
                 now = time.time()
-
-                if (self._sentence_buffer and
-                    (now - self._last_sentence_time) > self._sentence_flush_interval):
-                    sentence = self._sentence_buffer.strip()
+                if self._sentence_parts and (now - self._last_sentence_time) > self._sentence_flush_interval:
+                    sentence = " ".join(self._sentence_parts).strip()
                     if sentence and self.translation_engine and self._translation_enabled.is_set():
                         detected_lang = segment.language or "auto"
                         first = self._sentence_segments[0] if self._sentence_segments else None
@@ -20150,16 +20009,16 @@ class AudioProcessor:
                             start=first.start if first and hasattr(first, "start") else None,
                             end=last.end if last and hasattr(last, "end") else None,
                         )
-                    self._sentence_buffer = ""
+                    self._sentence_parts.clear()
                     self._sentence_segments.clear()
                     self._last_sentence_time = now
 
-                self._sentence_buffer += " " + clean_text if self._sentence_buffer else clean_text
+                self._sentence_parts.append(clean_text)
                 self._sentence_segments.append(segment)
                 self._last_sentence_time = now
 
                 if clean_text and clean_text[-1] in ".!?。！？":
-                    sentence = self._sentence_buffer.strip()
+                    sentence = " ".join(self._sentence_parts).strip()
                     if sentence and self.translation_engine and self._translation_enabled.is_set():
                         detected_lang = segment.language or "auto"
                         first = self._sentence_segments[0]
@@ -20171,33 +20030,37 @@ class AudioProcessor:
                             start=first.start,
                             end=last.end,
                         )
-                    self._sentence_buffer = ""
+                    self._sentence_parts.clear()
                     self._sentence_segments.clear()
                     self._last_sentence_time = time.time()
-                else:
-                    if len(self._sentence_buffer.split()) > self._sentence_flush_word_threshold:
-                        sentence = self._sentence_buffer.strip()
-                        if sentence and self.translation_engine and self._translation_enabled.is_set():
-                            detected_lang = segment.language or "auto"
-                            first = self._sentence_segments[0] if self._sentence_segments else None
-                            last = segment
-                            self._translate_and_send_async(
-                                sentence,
-                                detected_lang,
-                                translation_callback,
-                                start=first.start if first and hasattr(first, "start") else None,
-                                end=last.end if hasattr(last, "end") else None,
-                            )
-                        self._sentence_buffer = ""
-                        self._sentence_segments.clear()
-                        self._last_sentence_time = time.time()
+                elif len(self._sentence_parts) > self._sentence_flush_word_threshold:
+                    sentence = " ".join(self._sentence_parts).strip()
+                    if sentence and self.translation_engine and self._translation_enabled.is_set():
+                        detected_lang = segment.language or "auto"
+                        first = self._sentence_segments[0] if self._sentence_segments else None
+                        last = segment
+                        self._translate_and_send_async(
+                            sentence,
+                            detected_lang,
+                            translation_callback,
+                            start=first.start if first and hasattr(first, "start") else None,
+                            end=last.end,
+                        )
+                    self._sentence_parts.clear()
+                    self._sentence_segments.clear()
+                    self._last_sentence_time = time.time()
+
+            # Wortzahl für adaptive Chunk
+            word_count = len(clean_text.split())
+            with self._word_count_lock:
+                self._word_count_history.append(word_count)
 
         with self._stats_lock:
             self._consecutive_timeouts = 0
             self._consecutive_errors = 0
 
     # -------------------------------------------------------------------------
-    #  Übersetzung (asynchron) – optimiert mit Sequenzprüfung
+    #  Übersetzung (asynchron mit Sequenzprüfung)
     # -------------------------------------------------------------------------
     def _translate_and_send_async(
         self,
@@ -20207,10 +20070,7 @@ class AudioProcessor:
         start: Optional[float] = None,
         end: Optional[float] = None,
     ) -> None:
-        """
-        Übersetzt einen Text asynchron mit Semaphor‑Schutz und Sequenzprüfung.
-        Verwendet primäre und fallback Übersetzungs‑Engine.
-        """
+        """Übersetzt einen Text asynchron mit Semaphor und Sequenzprüfung."""
         if not self._translation_enabled.is_set():
             return
         if source_lang != "auto" and source_lang == self.translation_engine.default_target_lang:
@@ -20225,7 +20085,6 @@ class AudioProcessor:
             self._translation_semaphore.release()
             return
 
-        # Aktuelle Sequenznummer für diesen Task speichern
         with self._translation_seq_lock:
             current_seq = self._translation_seq
 
@@ -20261,12 +20120,11 @@ class AudioProcessor:
                             else:
                                 log_debug("translate", f"Fallback error: {e}")
 
-                # Performance‑Logging
                 duration_ms = (time.perf_counter() - start_time) * 1000
                 if logger.isEnabledFor(logging.DEBUG):
                     log_debug("time", f"_translate_and_send took {duration_ms:.2f}ms for {len(text)} chars")
 
-                # Prüfen, ob die Sequenznummer noch aktuell ist
+                # Sequenzprüfung
                 with self._translation_seq_lock:
                     if current_seq != self._translation_seq:
                         logger.debug(f"Übersetzung verworfen: Sequenz {current_seq} != aktuell {self._translation_seq}")
@@ -20279,7 +20137,6 @@ class AudioProcessor:
                         with self._subtitle_lock:
                             self._timed_translations.append(translation)
                     translation_callback(translation)
-
             except Exception as e:
                 logger.error(f"❌ Unerwarteter Fehler in Übersetzungs‑Task: {e}", exc_info=True)
             finally:
@@ -20470,28 +20327,31 @@ class AudioProcessor:
                 logger.error(f"Fehler beim Abrufen der Cache-Statistiken: {e}", exc_info=True)
 
     def _flush_audio_buffer(
-        self, transcription_callback: TranscriptionCallback, translation_callback: TranslationCallback
+        self,
+        transcription_callback: TranscriptionCallback,
+        translation_callback: TranslationCallback,
     ) -> None:
+        """Verarbeitet restliche Audiodaten am Ende des Streams."""
         with self._buffer_lock:
-            if not self._audio_buffer:
+            if not self._audio_chunks:
                 return
-            buffer_len = len(self._audio_buffer)
-            logger.info(f"🧹 Flushing audio buffer ({buffer_len} bytes) at end of stream")
-            if self.transcription_engine:
-                try:
-                    self._process_audio_chunk(bytes(self._audio_buffer), transcription_callback, translation_callback)
-                except Exception as e:
-                    logger.error(f"❌ Fehler beim Verarbeiten des finalen Audio-Chunks: {e}", exc_info=True)
-            self._audio_buffer.clear()
+            # Alle verbleibenden Chunks zusammenfügen
+            remaining = b''.join(self._audio_chunks)
+            self._audio_chunks.clear()
+            self._audio_total_bytes = 0
+        if remaining and self.transcription_engine:
+            try:
+                self._process_audio_chunk(remaining, transcription_callback, translation_callback)
+            except Exception as e:
+                logger.error(f"❌ Fehler beim Verarbeiten des finalen Audio-Chunks: {e}", exc_info=True)
 
     def _guaranteed_cleanup(self) -> None:
+        """Stellt sicher, dass alle Ressourcen freigegeben werden."""
         logger.info("\n🧹 [GUARANTEED_CLEANUP]")
         with self._resource_lock:
-            with self._processing_lock:
-                self._processing.clear()
+            with self._state_lock:
+                self._set_state(AudioProcessor.State.IDLE)
             self._current_stream_id = None
-            self._consecutive_empty_chunks = 0
-            self._empty_reads = 0
             with self._stats_lock:
                 self._chunk_counter = 0
                 self._total_bytes_processed = 0
@@ -20501,9 +20361,114 @@ class AudioProcessor:
                 self._slow_chunks = 0
                 self._last_realtime_factor = 0.0
             with self._buffer_lock:
-                self._audio_buffer.clear()
+                self._audio_chunks.clear()
+                self._audio_total_bytes = 0
             self._cleanup_done = True
         logger.info("✅ Cleanup completed")
+
+    # -------------------------------------------------------------------------
+    #  Weitere Hilfsmethoden (unverändert, aber hier der Vollständigkeit halber)
+    # -------------------------------------------------------------------------
+    def _read_stderr(self, process: subprocess.Popen) -> str:
+        try:
+            if process.stderr:
+                return process.stderr.read(300).decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+        return ""
+
+    def _test_audio_stream(self, audio_url: str) -> bool:
+        logger.info(f"🔍 Testing audio stream: {audio_url[:60]}...")
+        is_youtube = "youtube.com" in audio_url.lower() or "googlevideo.com" in audio_url
+        is_hls = ".m3u8" in audio_url.lower() or "manifest.googlevideo.com" in audio_url
+        if is_hls:
+            logger.info("🎯 HLS stream detected – skipping quick test (often too slow)")
+            return True
+        try:
+            timeout = Config.YOUTUBE_STREAM_TEST_TIMEOUT if is_youtube else self.config.STREAM_TIMEOUT
+            test_cmd = [
+                "ffmpeg",
+                "-i",
+                audio_url,
+                "-t", "2",
+                "-f", "null",
+                "-",
+                "-loglevel", "error",
+            ]
+            result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=timeout, shell=False)
+            if result.returncode == 0:
+                logger.info("✅ Stream test successful")
+                return True
+            else:
+                error_msg = result.stderr[:100] if result.stderr else "Unknown error"
+                logger.error(f"❌ Stream test failed: {error_msg}")
+                return False
+        except subprocess.TimeoutExpired as e:
+            logger.warning(f"⏰ Stream test timeout after {timeout}s: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"⚠️ Stream test error: {e}")
+            return True
+
+    def emergency_diagnosis(self, url: str) -> bool:
+        logger.info(f"🔍 [EMERGENCY_DIAGNOSIS] Testing: {url[:80]}...")
+        try:
+            audio_url = self.stream_manager.extract_audio_url(url)
+            if not audio_url:
+                logger.info("  ❌ Could not extract audio URL")
+                return False
+            logger.info(f"  ✅ Audio URL extracted: {audio_url[:80]}...")
+            is_youtube = "youtube.com" in audio_url.lower() or "googlevideo.com" in audio_url
+            test_cmd = [
+                "ffmpeg",
+                "-i", audio_url,
+                "-t", "3",
+                "-f", "null",
+                "-",
+                "-loglevel", "error",
+            ]
+            timeout = Config.YOUTUBE_STREAM_TEST_TIMEOUT if is_youtube else Config.STREAM_TEST_TIMEOUT
+            try:
+                result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=timeout, shell=False)
+            except subprocess.TimeoutExpired as e:
+                logger.info(f"  ⏰ Stream test timeout: {e}")
+                if is_youtube:
+                    logger.info("  ⚠️ YouTube timeout – trying anyway...")
+                    return True
+                else:
+                    logger.info("  ❌ Timeout – stream not reachable")
+                    return False
+            except (OSError, PermissionError) as e:
+                logger.info(f"  ⚠️ Emergency diagnosis OS error: {e}")
+                return False
+
+            if result.returncode == 0:
+                logger.info("  ✅ Stream connection successful")
+                return True
+            else:
+                error_msg = result.stderr[:100] if result.stderr else "Unknown error"
+                logger.info(f"  ❌ Stream test failed: {error_msg}")
+                if is_youtube and "403" in error_msg:
+                    logger.info("  ⚠️ YouTube 403 error – trying anyway...")
+                    return True
+                return False
+        except Exception as e:
+            logger.info(f"  ⚠️ Emergency diagnosis error: {e}")
+            return False
+
+    def _platform_specific_health_check(self) -> List[str]:
+        issues: List[str] = []
+        if IS_WINDOWS:
+            try:
+                import psutil
+                memory = psutil.virtual_memory()
+                if memory.percent > 85:
+                    issues.append("High memory usage - consider closing other applications")
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.error(f"Fehler beim Health-Check: {e}", exc_info=True)
+        return issues
 
 
 class WhisperLayoutManager:
