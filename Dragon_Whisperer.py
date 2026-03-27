@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🐉 DRAGON WHISPERER – (v3.0) – Final mit Architekturverbesserungen
-
-Kernkomponenten: Event‑Bus, Controller, Audio‑Pipeline, Manager, GUI.
-Alle GUI‑Updates threadsicher über Queue. Basisklassen für Dialoge und Kontextmenüs.
+🐉 THE DRAGON WHISPERER (v4.0) - Ultimate Stream Transcription & Translation
 """
 
 # =============================================================================
@@ -23,13 +20,13 @@ import queue
 import re
 import shutil
 import signal as py_signal
+import struct
 import subprocess
 import sys
 import argparse
 import tempfile
 import threading
 import time
-import unicodedata
 import urllib.parse
 import urllib.request
 import socket
@@ -38,13 +35,12 @@ import weakref
 import fnmatch
 from abc import ABC, abstractmethod
 from collections import OrderedDict, deque, defaultdict
-from concurrent.futures import Future, ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeout
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeout
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
-from enum import Enum
-from functools import wraps, lru_cache
+from enum import Enum, auto
+from functools import wraps
 from pathlib import Path
 from typing import (Any, Callable, Deque, Dict, List, Optional, Tuple,
                     TypeVar, Union, Literal)
@@ -62,7 +58,7 @@ except ImportError:
 # =============================================================================
 try:
     import tkinter as tk
-    from tkinter import filedialog, scrolledtext, ttk
+    from tkinter import filedialog, scrolledtext, ttk, simpledialog
     GUI_AVAILABLE = True
 except ImportError:
     GUI_AVAILABLE = False
@@ -662,7 +658,7 @@ class DarkTheme:
     CHECKBOX_BG = "#0d1117"
     CHECKBOX_FG = "#e6edf3"
     CHECKBOX_SELECTED = "#238636"
-    CHECKBOX_ACTIVE = "#000000"
+    CHECKBOX_ACTIVE = "#0d1117"
     SUBTITLE_ACTIVE = "#8957e5"
     SUBTITLE_INACTIVE = "#30363d"
     STATUS_BAR_BG = "#0d1117"
@@ -803,30 +799,41 @@ CURRENT_THEME = DarkTheme()
 # =============================================================================
 # 10. KONFIGURATION (ConfigDefaults, Config, RealtimeConfig, HighAccuracyConfig, YouTubeOptimizedConfig, get_config)
 # =============================================================================
+
 class ConfigDefaults:
+    """Statische Standardkonstanten für die Anwendung (Klassenvariablen)."""
+
+    # -------------------------------------------------------------------------
+    # Audio‑Grundlagen
+    # -------------------------------------------------------------------------
     SAMPLE_RATE: int = 16000
     CHANNELS: int = 1
     AUDIO_FORMAT: str = "s16le"
     BYTES_PER_SAMPLE: int = 2
 
-    BASE_CHUNK_DURATION: int = 20
-    CHUNK_OVERLAP: float = 2.0
-    MIN_CHUNK_DURATION: int = 2
-    MAX_CHUNK_DURATION: int = 30
-
-    MAX_SUBPROCESSES: int = 8
-    SUBPROCESS_TIMEOUT: int = 60
-    GUI_OPERATION_TIMEOUT: float = 10.0
-    MEMORY_CHECK_INTERVAL: int = 15
-    MAX_GUI_UPDATES_PER_SECOND: int = 60
-    MAX_MEMORY_USAGE: int = 8 * 1024 * 1024 * 1024
-    MAX_CACHE_SIZE: int = 500
-    MAX_TEXT_LINES: int = 2000
+    # -------------------------------------------------------------------------
+    # Allgemeine Konfiguration (wird u. a. von AdvancedSettings verwendet)
+    # -------------------------------------------------------------------------
     DEFAULT_BEAM_SIZE: int = 10
     DEFAULT_TEMPERATURE: float = 0.0
+    MAX_MEMORY_USAGE: int = 8 * 1024 * 1024 * 1024
+    MAX_GUI_UPDATES_PER_SECOND: int = 60
+    MAX_CACHE_SIZE: int = 500
+    MAX_TEXT_LINES: int = 2000
     ENABLE_VAD_FILTER: bool = True
     MAX_CONSECUTIVE_ERRORS: int = 5
 
+    # -------------------------------------------------------------------------
+    # Chunk‑Parameter
+    # -------------------------------------------------------------------------
+    BASE_CHUNK_DURATION: int = 20
+    MIN_CHUNK_DURATION: int = 2
+    MAX_CHUNK_DURATION: int = 30
+    CHUNK_OVERLAP: float = 2.0
+
+    # -------------------------------------------------------------------------
+    # Streaming & Netzwerk
+    # -------------------------------------------------------------------------
     STREAM_TIMEOUT: int = 25
     INITIAL_BUFFER_SECONDS: float = 2.0
     MAX_EMPTY_READS: int = 30
@@ -835,27 +842,69 @@ class ConfigDefaults:
     YOUTUBE_TIMEOUT: int = 10000000
     NORMAL_TIMEOUT: int = 30000000
     MAX_STREAM_RECONNECTS: int = 5
+    STREAM_RECONNECT_DELAY: int = 2
+    STREAM_RECONNECT_BACKOFF_FACTOR: float = 2.0
+    READ_EMPTY_SLEEP_BASE: float = 0.1
+    READ_ERROR_BACKOFF_BASE: float = 0.1
+    YOUTUBE_IDLE_TIMEOUT: int = 25
+    YOUTUBE_INITIAL_TIMEOUT: int = 25
+    YOUTUBE_URL_REFRESH_INTERVAL: int = 600
+    YOUTUBE_URL_REFRESH_MAX_ATTEMPTS: int = 3
+    YOUTUBE_LOW_QUALITY_MAX_CHUNKS: int = 5
+    YOUTUBE_INITIAL_WAIT: float = 3.0
+    FFMPEG_START_WAIT: float = 1.5
+    STREAM_TEST_TIMEOUT: int = 8
+    YOUTUBE_STREAM_TEST_TIMEOUT: int = 8
+    READ_WITH_TIMEOUT_SELECT_INTERVAL: float = 0.001
+    READ_WITH_TIMEOUT_EMPTY_LOG_INTERVAL: int = 10
+    MAX_BACKOFF: int = 30
+    BUFFER_FLUSH_INACTIVITY: float = 10.0
+    BUFFER_FLUSH_TIMEOUT: float = 30.0
+    PROGRESS_UPDATE_INTERVAL: float = 0.5
+    ERRORS_BEFORE_CHUNK_REDUCTION: int = 3
+    SUCCESSES_BEFORE_CHUNK_INCREASE: int = 5
 
+    # -------------------------------------------------------------------------
+    # FFmpeg
+    # -------------------------------------------------------------------------
     FFMPEG_BUFSIZE: str = "2048k"
     FFMPEG_THREADS: int = 1
     FFMPEG_PROBESIZE: str = "32"
     FFMPEG_ANALYZE_DURATION: str = "0"
 
+    # -------------------------------------------------------------------------
+    # Audio‑Enhancement
+    # -------------------------------------------------------------------------
     AUDIO_ENHANCEMENT_ENABLED: bool = True
     MIN_RMS_THRESHOLD: float = 0.002
     TARGET_RMS: float = 0.2
     MAX_GAIN: float = 5.0
     CLIPPING_THRESHOLD: float = 0.9
+    NOISEREDUCE_INTERVAL: int = 10
+    NOISEREDUCE_MIN_LENGTH: int = 32000
+    AUDIO_ENHANCEMENT_MIN_LENGTH: int = 1600
+    LOW_QUALITY_CHUNK_THRESHOLD_FACTOR: float = 0.15
+    LOW_QUALITY_CHUNK_LOG_LEVEL: int = 4
+    LOW_QUALITY_CHUNK_LOG_INTERVAL: int = 10
 
+    # -------------------------------------------------------------------------
+    # Duplikaterkennung
+    # -------------------------------------------------------------------------
     DUPLICATE_CHECK_ENABLED: bool = False
     RECENT_TRANSCRIPTIONS_SIZE: int = 10
     MIN_TEXT_LENGTH: int = 3
     MIN_UNIQUE_WORDS_RATIO: float = 0.3
 
+    # -------------------------------------------------------------------------
+    # Untertitel (Timed Transcripts)
+    # -------------------------------------------------------------------------
     SUBTITLE_BUFFER_SIZE: int = 1000
     ENABLE_TIMED_TRANSCRIPTIONS: bool = True
     ENABLE_TIMED_TRANSLATIONS: bool = True
 
+    # -------------------------------------------------------------------------
+    # Logging
+    # -------------------------------------------------------------------------
     ENABLE_DEBUG_LOGGING: bool = True
     LOG_CHUNK_PROCESSING: bool = False
     LOG_AUDIO_STATS: bool = True
@@ -863,9 +912,11 @@ class ConfigDefaults:
     LOG_STREAM_EVENTS: bool = True
     PERFORMANCE_LOG_INTERVAL: int = 50
 
+    # -------------------------------------------------------------------------
+    # Caching
+    # -------------------------------------------------------------------------
     MAX_CACHE_SIZE_MB: int = 100
     CACHE_ENABLED: bool = True
-
     TRANSCRIPTION_CACHE_SIZE: int = 200
     TRANSCRIPTION_CACHE_TTL: int = 300
     TRANSLATION_CACHE_SIZE: int = 500
@@ -873,10 +924,14 @@ class ConfigDefaults:
     AUDIO_CACHE_SIZE: int = 128
     AUDIO_CACHE_TTL: int = 1800
 
+    # -------------------------------------------------------------------------
+    # VAD (Voice Activity Detection)
+    # -------------------------------------------------------------------------
     VAD_THRESHOLD: float = 0.25
     VAD_MIN_SPEECH_DURATION_MS: int = 225
     VAD_MIN_SILENCE_DURATION_MS: int = 80
 
+    # Sprachspezifische VAD‑Überschreibungen
     LANGUAGE_VAD: Dict[str, Dict[str, Any]] = {
         "ja": {"threshold": 0.3, "min_speech_ms": 300, "min_silence_ms": 100},
         "ko": {"threshold": 0.3, "min_speech_ms": 300, "min_silence_ms": 100},
@@ -885,14 +940,19 @@ class ConfigDefaults:
         "vi": {"threshold": 0.3, "min_speech_ms": 250, "min_silence_ms": 90},
     }
 
+    # -------------------------------------------------------------------------
+    # Datei‑ und URL‑Konfiguration
+    # -------------------------------------------------------------------------
     ALLOWED_FILE_SCHEME_PREFIX: str = "file://"
     ALLOWED_FILE_BASE_DIRS: List[str] = [
         str(Path.home()),
         os.getcwd(),
     ]
-
     URL_ALLOWED_CHARS: str = r"a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%"
 
+    # -------------------------------------------------------------------------
+    # YouTube & Plattform‑spezifisch
+    # -------------------------------------------------------------------------
     YOUTUBE_HEADERS: Dict[str, str] = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Referer": "https://www.youtube.com/",
@@ -900,7 +960,6 @@ class ConfigDefaults:
         "Accept": "*/*",
         "Accept-Language": "en-US,en;q=0.9",
     }
-
     PLATFORM_CONFIG: Dict[str, Dict[str, Any]] = {
         "windows": {
             "ffmpeg_flags": ["-reconnect", "1", "-reconnect_streamed", "1"],
@@ -916,62 +975,42 @@ class ConfigDefaults:
         },
     }
 
-    YOUTUBE_IDLE_TIMEOUT: int = 25
-    READ_CHUNK_TIMEOUT: float = 0.5
-    STREAM_RECONNECT_DELAY: int = 2
-    STREAM_RECONNECT_BACKOFF_FACTOR: float = 2.0
-    MAX_STREAM_RECONNECT_ATTEMPTS: int = 5
-    READ_EMPTY_SLEEP_BASE: float = 0.1
-    READ_ERROR_BACKOFF_BASE: float = 0.1
-    YOUTUBE_SESSION_IDLE_TIMEOUT: int = 25
-    YOUTUBE_INITIAL_TIMEOUT: int = 25
-    YOUTUBE_URL_REFRESH_INTERVAL: int = 600
-    YOUTUBE_URL_REFRESH_MAX_ATTEMPTS: int = 3
-    YOUTUBE_LOW_QUALITY_MAX_CHUNKS: int = 5
-    YOUTUBE_INITIAL_WAIT: float = 3.0
-    FFMPEG_START_WAIT: float = 1.5
-    STREAM_TEST_TIMEOUT: int = 8
-    YOUTUBE_STREAM_TEST_TIMEOUT: int = 8
-    AUDIO_ENHANCEMENT_MIN_LENGTH: int = 1600
-    NOISEREDUCE_INTERVAL: int = 10
-    NOISEREDUCE_MIN_LENGTH: int = 32000
-    LOW_QUALITY_CHUNK_THRESHOLD_FACTOR: float = 0.15
-    BUFFER_FLUSH_INACTIVITY: float = 10.0
-    READ_WITH_TIMEOUT_SELECT_INTERVAL: float = 0.001
-    READ_WITH_TIMEOUT_EMPTY_LOG_INTERVAL: int = 10
-    MAX_BACKOFF: int = 30
-    PROGRESS_UPDATE_INTERVAL: float = 0.5
-    BUFFER_FLUSH_TIMEOUT: float = 30.0
-    ADAPTIVE_CHUNK_MIN_SAMPLES: int = 5
-    ADAPTIVE_CHUNK_SMOOTHING_ALPHA: float = 0.3
-    ADAPTIVE_CHUNK_STABLE_THRESHOLD: int = 2
-    ERRORS_BEFORE_CHUNK_REDUCTION: int = 3
-    SUCCESSES_BEFORE_CHUNK_INCREASE: int = 5
-
+    # -------------------------------------------------------------------------
+    # GUI & Queue
+    # -------------------------------------------------------------------------
     GUI_QUEUE_MAX_SIZE: int = 200
     GUI_QUEUE_CLEANUP_TARGET: int = 100
     TEXT_QUEUE_MAX_SIZE: int = 150
     TEXT_QUEUE_CLEANUP_TARGET: int = 75
 
-    LOW_QUALITY_CHUNK_LOG_LEVEL: int = 4
-    LOW_QUALITY_CHUNK_LOG_INTERVAL: int = 10
+    # -------------------------------------------------------------------------
+    # Adaptive Chunk
+    # -------------------------------------------------------------------------
+    ADAPTIVE_CHUNK_MIN_SAMPLES: int = 5
+    ADAPTIVE_CHUNK_SMOOTHING_ALPHA: float = 0.3
+    ADAPTIVE_CHUNK_STABLE_THRESHOLD: int = 2
 
+    # -------------------------------------------------------------------------
+    # Whisper‑Modelle
+    # -------------------------------------------------------------------------
     WHISPER_MODELS: List[str] = [
-        "tiny",
-        "tiny.en",
-        "base",
-        "base.en",
-        "small",
-        "small.en",
-        "medium",
-        "medium.en",
-        "large-v2",
-        "large-v3",
+        "tiny", "tiny.en", "base", "base.en", "small", "small.en",
+        "medium", "medium.en", "large-v2", "large-v3",
     ]
+
+    # -------------------------------------------------------------------------
+    # URL‑Refresh (für Twitch, YouTube, etc.) – neu
+    # -------------------------------------------------------------------------
+    MAX_REFRESH_ATTEMPTS: int = 3
+    REFRESH_RETRY_DELAY_BASE: float = 2.0
+    REFRESH_RETRY_DELAY_MAX: float = 10.0
+    STALLED_RECONNECT_LOG_INTERVAL: float = 10.0
 
 
 @dataclass
 class Config(ConfigDefaults):
+    """Dynamische Konfiguration, die von ConfigDefaults erbt."""
+
     _base_chunk_duration: int = ConfigDefaults.BASE_CHUNK_DURATION
     CHUNK_OVERLAP: float = ConfigDefaults.CHUNK_OVERLAP
     MIN_CHUNK_DURATION: int = ConfigDefaults.MIN_CHUNK_DURATION
@@ -983,9 +1022,7 @@ class Config(ConfigDefaults):
 
     AUDIO_FILTER: str = "aresample=16000"
     LANGUAGE_FILTERS: Dict[str, str] = field(
-        default_factory=lambda: {
-            k: "aresample=16000" for k in ConfigDefaults.LANGUAGE_VAD
-        }
+        default_factory=lambda: {k: "aresample=16000" for k in ConfigDefaults.LANGUAGE_VAD}
     )
     FILTER_PROFILES: Dict[str, str] = field(
         default_factory=lambda: {
@@ -1005,7 +1042,7 @@ class Config(ConfigDefaults):
         default_factory=lambda: ConfigDefaults.PLATFORM_CONFIG.copy()
     )
 
-    AUDIO_ENHANCEMENT_ENABLED: bool = False
+    AUDIO_ENHANCEMENT_ENABLED: bool = False          # überschreibt ConfigDefaults.TRUE
     MIN_RMS_THRESHOLD: float = ConfigDefaults.MIN_RMS_THRESHOLD
     TARGET_RMS: float = ConfigDefaults.TARGET_RMS
     MAX_GAIN: float = ConfigDefaults.MAX_GAIN
@@ -1476,14 +1513,18 @@ class PlatformStderrFilter:
         self.original_stderr.flush()
 
 
-sys.stderr = PlatformStderrFilter(sys.stderr)
+if DEBUG_LEVEL < 3:
+    sys.stderr = PlatformStderrFilter(sys.stderr)
+else:
+    sys.stderr = sys.__stderr__
 
 
 class PlatformUtils:
     """Plattformunabhängige Hilfsfunktionen für Dragon Whisperer.
+    
     Kümmert sich um Umgebungsvariablen, Konsolen-Setup, Prozessverwaltung,
     URL‑ und Pfad‑Validierung sowie Terminal‑Einstellungen.
-    Thread‑sicher und mit lazy‑Initialisierung für Config‑Abhängigkeiten.
+    Alle öffentlichen Methoden sind thread‑sicher.
     """
 
     # =========================================================================
@@ -1494,6 +1535,7 @@ class PlatformUtils:
     _dependencies_checked = False
     _dependencies_lock = threading.RLock()
     _ffmpeg_path: Optional[str] = None
+    _ffmpeg_path_lock = threading.RLock()
     _terminal_settings_saved = False
     _original_stty_settings: Optional[str] = None
     _terminal_lock = threading.Lock()
@@ -1513,23 +1555,20 @@ class PlatformUtils:
 
     @classmethod
     def get_platform_config_dir(cls) -> Path:
-        """Liefert das plattformspezifische Konfigurationsverzeichnis."""
-        try:
-            if IS_WINDOWS:
-                config_dir = Path(os.environ.get("APPDATA", "")) / "DragonWhisperer"
-            elif IS_MACOS:
-                config_dir = Path.home() / "Library" / "Application Support" / "DragonWhisperer"
-            else:
-                config_dir = Path.home() / ".config" / "dragonwhisperer"
+        """Gibt das plattformspezifische Konfigurationsverzeichnis zurück (ohne es zu erstellen)."""
+        if IS_WINDOWS:
+            return Path(os.environ.get("APPDATA", "")) / "DragonWhisperer"
+        elif IS_MACOS:
+            return Path.home() / "Library" / "Application Support" / "DragonWhisperer"
+        else:
+            return Path.home() / ".config" / "dragonwhisperer"
 
-            config_dir.mkdir(parents=True, exist_ok=True)
-            return config_dir
-        except Exception as e:
-            logger = logging.getLogger("dragon")
-            logger.warning(f"⚠️ Config directory error: {e}")
-            fallback_dir = Path.home() / ".dragonwhisperer"
-            fallback_dir.mkdir(parents=True, exist_ok=True)
-            return fallback_dir
+    @classmethod
+    def ensure_platform_config_dir(cls) -> Path:
+        """Stellt sicher, dass das Konfigurationsverzeichnis existiert, und gibt es zurück."""
+        config_dir = cls.get_platform_config_dir()
+        config_dir.mkdir(parents=True, exist_ok=True)
+        return config_dir
 
     @classmethod
     def kill_process_tree(cls, pid: int) -> bool:
@@ -1700,45 +1739,47 @@ class PlatformUtils:
 
     @classmethod
     def get_ffmpeg_path(cls) -> Optional[str]:
-        """Ermittelt den Pfad zur FFmpeg‑Executable (cached)."""
-        if cls._ffmpeg_path is not None:
-            return cls._ffmpeg_path
-
-        env_path = os.environ.get('FFMPEG_PATH')
-        if env_path and os.path.exists(env_path):
-            cls._ffmpeg_path = env_path
-            return cls._ffmpeg_path
-
-        ffmpeg_path = shutil.which("ffmpeg")
-        if ffmpeg_path:
-            cls._ffmpeg_path = ffmpeg_path
-            return cls._ffmpeg_path
-
-        if IS_WINDOWS:
-            paths = [
-                "C:\\ffmpeg\\bin\\ffmpeg.exe",
-                "C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe",
-                "C:\\Program Files (x86)\\ffmpeg\\bin\\ffmpeg.exe",
-            ]
-        elif IS_MACOS:
-            paths = [
-                "/usr/local/bin/ffmpeg",
-                "/opt/homebrew/bin/ffmpeg",
-                "/usr/bin/ffmpeg",
-            ]
-        else:
-            paths = [
-                "/usr/bin/ffmpeg",
-                "/usr/local/bin/ffmpeg",
-            ]
-
-        for path in paths:
-            if os.path.exists(path):
-                cls._ffmpeg_path = path
+        """Ermittelt den Pfad zur FFmpeg‑Executable (cached, thread‑sicher)."""
+        with cls._ffmpeg_path_lock:
+            if cls._ffmpeg_path is not None:
                 return cls._ffmpeg_path
 
-        cls._ffmpeg_path = None
-        return None
+            env_path = os.environ.get('FFMPEG_PATH')
+            if env_path and os.path.exists(env_path):
+                cls._ffmpeg_path = env_path
+                return cls._ffmpeg_path
+
+            ffmpeg_path = shutil.which("ffmpeg")
+            if ffmpeg_path:
+                cls._ffmpeg_path = ffmpeg_path
+                return cls._ffmpeg_path
+
+            # Plattformspezifische Fallback‑Pfade
+            if IS_WINDOWS:
+                paths = [
+                    "C:\\ffmpeg\\bin\\ffmpeg.exe",
+                    "C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe",
+                    "C:\\Program Files (x86)\\ffmpeg\\bin\\ffmpeg.exe",
+                ]
+            elif IS_MACOS:
+                paths = [
+                    "/usr/local/bin/ffmpeg",
+                    "/opt/homebrew/bin/ffmpeg",
+                    "/usr/bin/ffmpeg",
+                ]
+            else:
+                paths = [
+                    "/usr/bin/ffmpeg",
+                    "/usr/local/bin/ffmpeg",
+                ]
+
+            for path in paths:
+                if os.path.exists(path):
+                    cls._ffmpeg_path = path
+                    return cls._ffmpeg_path
+
+            cls._ffmpeg_path = None
+            return None
 
     @classmethod
     def get_platform_info(cls) -> Dict[str, Any]:
@@ -1832,6 +1873,11 @@ class PlatformUtils:
             allowed_bases.extend([Path(p).resolve() for p in allowed_dirs if p])
         allowed_bases.append(Path(tempfile.gettempdir()).resolve())
 
+        if not allowed_bases:
+            logger = logging.getLogger("dragon")
+            logger.warning("Keine erlaubten Verzeichnisse definiert – Zugriff verweigert")
+            return False, "Keine erlaubten Verzeichnisse definiert"
+
         for base in allowed_bases:
             try:
                 real_path.relative_to(base)
@@ -1878,21 +1924,23 @@ class PlatformUtils:
     # =========================================================================
     @classmethod
     def _get_allowed_dirs(cls) -> List[Path]:
-        """Lazy‑Initialisierung der erlaubten Verzeichnisse."""
+        """Lazy‑Initialisierung der erlaubten Verzeichnisse (thread‑sicher)."""
         with cls._allowed_dirs_lock:
             if cls._allowed_dirs is None:
-                # Standard: Home, aktuelles Arbeitsverzeichnis, temporäres Verzeichnis
+                # Standard‑Verzeichnisse
                 cls._allowed_dirs = [
                     Path.home().resolve(),
                     Path.cwd().resolve(),
                     Path(tempfile.gettempdir()).resolve(),
                 ]
-                # Optional: Cache‑Verzeichnis von Dragon Whisperer (falls vorhanden)
                 cache_dir = Path.home() / ".cache" / "dragonwhisperer"
                 if cache_dir.exists():
                     cls._allowed_dirs.append(cache_dir.resolve())
-                # Optional: Weitere Verzeichnisse aus den erweiterten Einstellungen laden
+
+                # Benutzerdefinierte Verzeichnisse aus den erweiterten Einstellungen laden
                 try:
+                    # Relativer Import, um Import‑Zirkel zu vermeiden
+                    from .advanced_settings import AdvancedSettings
                     settings = AdvancedSettings.load_from_file()
                     if hasattr(settings, 'allowed_dirs') and settings.allowed_dirs:
                         for d in settings.allowed_dirs:
@@ -1903,8 +1951,13 @@ class PlatformUtils:
                                         cls._allowed_dirs.append(p)
                                 except Exception:
                                     pass
-                except Exception:
+                except ImportError:
+                    # AdvancedSettings noch nicht verfügbar – ignorieren
                     pass
+                except Exception as e:
+                    logger = logging.getLogger("dragon")
+                    logger.debug(f"Fehler beim Laden benutzerdefinierter Verzeichnisse: {e}")
+
             return cls._allowed_dirs
 
     @classmethod
@@ -2033,35 +2086,59 @@ else:
 
 
 class DummyQueue:
+    """
+    Dummy‑Implementierung eines thread‑sicheren Queues für Umgebungen ohne echte Queue.
+    Verwendet eine Liste und ein Lock. Die Methoden entsprechen denen von queue.Queue.
+    """
+
     def __init__(self, maxsize: int = 0) -> None:
+        """
+        Initialisiert die DummyQueue.
+
+        Args:
+            maxsize: Maximale Anzahl Elemente (0 = unbegrenzt). Bei Überschreitung
+                     werden älteste Elemente verworfen.
+        """
         self.maxsize = maxsize
         self._items: List[Any] = []
-        self._lock = threading.Lock()
-        self.Empty = queue.Empty
+        self._lock = threading.RLock()
 
     def put(self, item: Any, block: bool = True, timeout: Optional[float] = None) -> None:
+        """
+        Fügt ein Element ein. Bei Überschreitung von maxsize wird das älteste Element entfernt.
+        block und timeout werden ignoriert (immer nicht‑blockierend).
+        """
         with self._lock:
             self._items.append(item)
             if self.maxsize > 0 and len(self._items) > self.maxsize:
                 self._items.pop(0)
 
     def get(self, block: bool = True, timeout: Optional[float] = None) -> Any:
+        """
+        Entfernt und gibt das älteste Element zurück.
+        block und timeout werden ignoriert (immer nicht‑blockierend). Bei leerer Queue wird
+        queue.Empty geworfen.
+        """
         with self._lock:
             if self._items:
                 return self._items.pop(0)
-            raise self.Empty()
+            raise queue.Empty()
 
     def put_nowait(self, item: Any) -> None:
+        """Nicht‑blockierendes Einfügen (Alias für put)."""
         self.put(item, block=False)
 
     def get_nowait(self) -> Any:
+        """Nicht‑blockierendes Entnehmen (Alias für get)."""
         return self.get(block=False)
 
     def empty(self) -> bool:
+        """Gibt zurück, ob die Queue leer ist."""
         with self._lock:
             return len(self._items) == 0
 
     def qsize(self) -> int:
+        """Gibt die aktuelle Anzahl Elemente zurück."""
         with self._lock:
             return len(self._items)
 
@@ -2584,20 +2661,28 @@ def gui_operation_decorator(func: Callable) -> Callable:
 
 
 class MemoryManager(PeriodicTaskMixin):
+    """
+    Verwaltung von Textpuffern mit automatischer Größenbegrenzung,
+    parallelen Größen‑Deques und dynamischer Speicherbereinigung.
+    """
     __slots__ = (
-        "_buffers", "_buffer_sizes", "_lock", "_max_memory_per_component",
+        "_buffers", "_size_deques", "_buffer_sizes", "_lock", "_max_memory_per_component",
         "_last_gc_time", "_gc_interval", "_memory_warning_threshold",
         "_long_term_monitor", "_monitoring_active", "_psutil",
-        "_cache_stats", "_debug"
+        "_cache_stats", "_debug", "_max_text_size_bytes"
     )
+
+    # Maximale Größe eines einzelnen Textes (in Bytes), bevor er gekürzt wird
+    MAX_TEXT_SIZE_BYTES = 2 * 1024 * 1024  # 2 MB
 
     def __init__(self) -> None:
         PeriodicTaskMixin.__init__(self, interval=60, task=self._perform_periodic_maintenance)
 
         self._buffers: Dict[str, deque] = {}
+        self._size_deques: Dict[str, deque] = {}          # parallele Deques für Größen
         self._buffer_sizes: Dict[str, int] = {}
         self._lock = threading.RLock()
-        self._max_memory_per_component = 100 * 1024 * 1024
+        self._max_memory_per_component = 100 * 1024 * 1024  # 100 MB pro Komponente
         self._last_gc_time = time.time()
         self._gc_interval = 300
         self._memory_warning_threshold = 0.8
@@ -2607,16 +2692,11 @@ class MemoryManager(PeriodicTaskMixin):
         self._cache_stats = {"total_allocated": 0, "total_freed": 0}
         self._debug = logger.isEnabledFor(logging.DEBUG)
 
-    def _get_psutil(self):
-        if self._psutil is None:
-            try:
-                import psutil
-                self._psutil = psutil
-            except ImportError:
-                self._psutil = False
-        return self._psutil if self._psutil is not False else None
-
+    # -------------------------------------------------------------------------
+    #  Periodische Wartung (von PeriodicTaskMixin)
+    # -------------------------------------------------------------------------
     def _perform_periodic_maintenance(self) -> None:
+        """Wird periodisch aufgerufen, führt Speicher‑Health‑Check durch."""
         try:
             self._perform_memory_health_check()
         except Exception as e:
@@ -2624,6 +2704,7 @@ class MemoryManager(PeriodicTaskMixin):
                 log_debug("memory", f"Maintenance worker error: {e}")
 
     def _perform_memory_health_check(self) -> None:
+        """Prüft Speicherverbrauch und löst ggf. aggressive Bereinigung aus."""
         with self._lock:
             total_memory = sum(self._buffer_sizes.values())
             memory_usage_percent = total_memory / self._max_memory_per_component
@@ -2681,64 +2762,168 @@ class MemoryManager(PeriodicTaskMixin):
             if self._debug:
                 log_debug("memory", f"Health check error: {e}")
 
+    # -------------------------------------------------------------------------
+    #  Hilfsmethoden für Speicherdruck und Größen
+    # -------------------------------------------------------------------------
+    def _get_psutil(self):
+        if self._psutil is None:
+            try:
+                import psutil
+                self._psutil = psutil
+            except ImportError:
+                self._psutil = False
+        return self._psutil if self._psutil is not False else None
+
+    def _get_target_ratio(self) -> float:
+        """
+        Bestimmt den Anteil der maximalen Speichergrenze,
+        der nach der Bereinigung angestrebt wird.
+        Bei hohem Systemdruck wird aggressiver bereinigt.
+        """
+        try:
+            psutil = self._get_psutil()
+            if psutil is not None:
+                mem = psutil.virtual_memory()
+                if mem.percent > 90:
+                    return 0.5      # sehr aggressiv
+                if mem.percent > 80:
+                    return 0.6
+                if mem.percent > 70:
+                    return 0.7
+        except Exception:
+            pass
+        return 0.7
+
+    def _size_of_text(self, text: str) -> int:
+        """Gibt die ungefähre Speichergröße eines Strings in Bytes zurück."""
+        # Verwende sys.getsizeof für realistischere Werte (inkl. Python-Overhead)
+        import sys
+        return sys.getsizeof(text)
+
+    # -------------------------------------------------------------------------
+    #  Öffentliche Methoden
+    # -------------------------------------------------------------------------
     def add_text(self, component: str, text: str) -> None:
+        """Fügt einen Text in den Puffer ein, mit optionaler Kürzung zu großer Texte."""
         if not text or not text.strip():
             return
+
+        # Optional: sehr große Texte kürzen, um den Puffer nicht zu sprengen
+        if len(text) > self.MAX_TEXT_SIZE_BYTES * 2:   # Heuristik: Zeichen vs. Bytes
+            text = text[:self.MAX_TEXT_SIZE_BYTES] + "... [truncated]"
+            if self._debug:
+                log_debug("memory", f"Truncated oversized text for {component}")
 
         with self._lock:
             if component not in self._buffers:
                 self._buffers[component] = deque(maxlen=Config.MAX_TEXT_LINES)
+                self._size_deques[component] = deque(maxlen=Config.MAX_TEXT_LINES)
                 self._buffer_sizes[component] = 0
 
-            text_size = len(text.encode("utf-8"))
+            text_size = self._size_of_text(text)
             current_size = self._buffer_sizes[component]
 
             if current_size + text_size > self._max_memory_per_component:
                 self._optimize_buffer(component)
 
             self._buffers[component].append(text)
+            self._size_deques[component].append(text_size)
             self._buffer_sizes[component] += text_size
             self._cache_stats["total_allocated"] += text_size
 
     def get_text(self, component: str) -> str:
+        """Gibt den gesamten Puffer einer Komponente als verketteten String zurück."""
         with self._lock:
             if component not in self._buffers:
                 return ""
             return "\n".join(self._buffers[component])
 
     def clear_component(self, component: str) -> None:
+        """Löscht den gesamten Puffer einer Komponente."""
         with self._lock:
             if component in self._buffers:
                 del self._buffers[component]
+            if component in self._size_deques:
+                del self._size_deques[component]
             if component in self._buffer_sizes:
                 del self._buffer_sizes[component]
             if self._debug:
                 logger.info(f"🧹 Component {component} cleared")
 
     def _optimize_buffer(self, component: str) -> None:
+        """
+        Entfernt alte Einträge aus dem Puffer, bis die dynamische Zielgröße erreicht ist.
+        Verwendet parallele Größen‑Deques für schnellen Zugriff.
+        """
         with self._lock:
             if component not in self._buffers:
                 return
-            dq = self._buffers[component]
-            current_size = self._buffer_sizes[component]
 
-            target_size = int(self._max_memory_per_component * 0.7)
+            dq = self._buffers[component]
+            size_dq = self._size_deques[component]
+            current_size = self._buffer_sizes.get(component, 0)
+
+            # Zielgröße dynamisch berechnen
+            target_ratio = self._get_target_ratio()
+            target_size = int(self._max_memory_per_component * target_ratio)
+
+            if current_size <= target_size:
+                return
+
             removed_bytes = 0
             removed_count = 0
+            max_iterations = 10000
+            iterations = 0
 
-            while current_size > target_size and dq:
-                oldest = dq.popleft()
-                removed_bytes += len(oldest.encode("utf-8"))
+            # Entferne so lange, bis Zielgröße erreicht ist
+            while current_size > target_size and dq and iterations < max_iterations:
+                # Entferne ältesten Eintrag aus beiden Deques
+                dq.popleft()
+                size = size_dq.popleft()
+                removed_bytes += size
                 removed_count += 1
-                current_size -= removed_bytes
+                current_size -= size
+                iterations += 1
 
-            self._buffer_sizes[component] = current_size
+            if iterations >= max_iterations:
+                logger.warning(
+                    f"Buffer optimization for {component} reached iteration limit "
+                    f"({max_iterations}) – may be stuck"
+                )
+
+            # Aktualisiere gespeicherte Größe (negativ vermeiden)
+            self._buffer_sizes[component] = max(0, current_size)
             self._cache_stats["total_freed"] += removed_bytes
 
+            # Konsistenzprüfung: tatsächliche Größe aus den Deques neu berechnen
+            actual_size = sum(size_dq)
+            if actual_size != current_size:
+                logger.warning(
+                    f"Buffer size mismatch for {component}: stored {current_size}, "
+                    f"actual {actual_size}. Correcting."
+                )
+                self._buffer_sizes[component] = actual_size
+                current_size = actual_size
+
+            # Debug‑Ausgabe
             if removed_count > 0 and self._debug:
-                log_debug("memory", f"Buffer {component} optimized: removed {removed_count} entries, freed {removed_bytes} bytes")
+                log_debug(
+                    "memory",
+                    f"Buffer {component} optimized: removed {removed_count} entries, "
+                    f"freed {removed_bytes} bytes, new size {current_size} bytes, "
+                    f"remaining entries: {len(dq)}"
+                )
+
+                # Garbage Collection bei größeren Freigaben anregen
+                if removed_bytes > 10 * 1024 * 1024:
+                    gc.collect()
+                    log_debug(
+                        "memory",
+                        f"Triggered GC after freeing {removed_bytes / 1024 / 1024:.1f} MB"
+                    )
 
     def aggressive_cleanup(self) -> None:
+        """Entfernt aggressiv Einträge aus allen Puffern, um Speicher freizugeben."""
         logger.info("🧹 Starting aggressive memory cleanup...")
         with self._lock:
             components = list(self._buffers.keys())
@@ -2749,18 +2934,23 @@ class MemoryManager(PeriodicTaskMixin):
                     if component not in self._buffers:
                         continue
                     dq = self._buffers[component]
+                    size_dq = self._size_deques[component]
                     current_len = len(dq)
                     if current_len > 100:
                         keep_count = max(50, current_len // 2)
                         removed_bytes = 0
                         removed_count = 0
                         while len(dq) > keep_count:
-                            oldest = dq.popleft()
-                            removed_bytes += len(oldest.encode("utf-8"))
+                            dq.popleft()
+                            size = size_dq.popleft()
+                            removed_bytes += size
                             removed_count += 1
                         self._buffer_sizes[component] -= removed_bytes
                         self._cache_stats["total_freed"] += removed_bytes
-                        logger.info(f"  ↪ {component}: {current_len} → {len(dq)} entries")
+                        logger.info(
+                            f"  ↪ {component}: {current_len} → {len(dq)} entries, "
+                            f"freed {removed_bytes} bytes"
+                        )
             except Exception as e:
                 logger.warning(f"⚠️ Cleanup error for {component}: {e}")
 
@@ -2768,6 +2958,7 @@ class MemoryManager(PeriodicTaskMixin):
         logger.info("✅ Aggressive cleanup completed")
 
     def optimize_all_buffers(self) -> None:
+        """Optimiert alle Puffer (ruft _optimize_buffer für jede Komponente auf)."""
         logger.info("🧹 Optimizing all buffers...")
         with self._lock:
             components = list(self._buffers.keys())
@@ -2777,6 +2968,7 @@ class MemoryManager(PeriodicTaskMixin):
         logger.info("✅ All buffers optimized")
 
     def get_memory_stats(self) -> Dict[str, Any]:
+        """Liefert detaillierte Speicherstatistiken."""
         psutil = self._get_psutil()
         if psutil is None:
             return {}
@@ -2818,35 +3010,49 @@ class MemoryManager(PeriodicTaskMixin):
             return 0
 
     def get_buffer_stats(self, component: str) -> Dict[str, Any]:
+        """Liefert detaillierte Informationen über einen einzelnen Puffer."""
         with self._lock:
             if component not in self._buffers:
                 return {"type": "not_found"}
             dq = self._buffers[component]
+            size_dq = self._size_deques[component]
             return {
                 "type": "deque",
                 "size": len(dq),
                 "capacity": Config.MAX_TEXT_LINES,
                 "memory_bytes": self._buffer_sizes.get(component, 0),
                 "maxlen": dq.maxlen,
+                "avg_entry_size_bytes": (
+                    self._buffer_sizes[component] / len(dq) if dq else 0
+                ),
+                "min_entry_size_bytes": min(size_dq) if size_dq else 0,
+                "max_entry_size_bytes": max(size_dq) if size_dq else 0,
             }
 
     def list_components(self) -> List[str]:
+        """Listet alle vorhandenen Pufferkomponenten auf."""
         with self._lock:
             return list(self._buffers.keys())
 
     def get_total_memory_usage(self) -> int:
+        """Summe der Bytes in allen Puffern."""
         with self._lock:
             return sum(self._buffer_sizes.values())
 
     def print_debug_info(self) -> None:
+        """Gibt detaillierte Debug‑Informationen aus."""
         stats = self.get_memory_stats()
         logger.info("\n" + "=" * 50)
         logger.info("🧠 MEMORY MANAGER DEBUG INFO")
         logger.info("=" * 50)
-        logger.info(f"System Memory: {stats.get('system_used_mb', 0)}MB / "
-                    f"{stats.get('system_total_mb', 0)}MB ({stats.get('system_usage_percent', 0):.1f}%)")
-        logger.info(f"Process Memory: {stats.get('process_used_mb', 0)}MB "
-                    f"({stats.get('process_usage_percent', 0):.1f}%)")
+        logger.info(
+            f"System Memory: {stats.get('system_used_mb', 0)}MB / "
+            f"{stats.get('system_total_mb', 0)}MB ({stats.get('system_usage_percent', 0):.1f}%)"
+        )
+        logger.info(
+            f"Process Memory: {stats.get('process_used_mb', 0)}MB "
+            f"({stats.get('process_usage_percent', 0):.1f}%)"
+        )
         logger.info(f"Buffer Components: {stats.get('buffer_components', 0)}")
         logger.info(f"Total Buffer Size: {stats.get('total_buffer_size_mb', 0)}MB")
         logger.info(f"Long Term Samples: {stats.get('long_term_samples', 0)}")
@@ -2856,44 +3062,85 @@ class MemoryManager(PeriodicTaskMixin):
             logger.info(f"\nActive Components ({len(components)}):")
             for comp in components[:5]:
                 comp_stats = self.get_buffer_stats(comp)
-                logger.info(f"  • {comp}: {comp_stats['type']}, "
-                            f"size: {comp_stats.get('size', 0)}")
+                logger.info(
+                    f"  • {comp}: {comp_stats['type']}, "
+                    f"size: {comp_stats.get('size', 0)}, "
+                    f"avg size: {comp_stats.get('avg_entry_size_bytes', 0):.0f} bytes"
+                )
             if len(components) > 5:
                 logger.info(f"  ... and {len(components) - 5} more")
         logger.info("=" * 50)
 
     def dispose(self) -> None:
+        """Gibt alle Ressourcen des MemoryManagers frei."""
         self._monitoring_active = False
-        self.stop_periodic_task()
-        self.wait_for_stop()
+        self.stop_periodic_task()   # setzt das Stop‑Event, wartet aber nicht
+        if not self.wait_for_stop(timeout=2.0):
+            logger.warning("⚠️ MemoryManager cleanup thread did not terminate within timeout")
         with self._lock:
             self._buffers.clear()
+            self._size_deques.clear()
             self._buffer_sizes.clear()
             self._long_term_monitor.clear()
         gc.collect()
         if self._debug:
             logger.info("✅ MemoryManager disposed")
 
+
 # =============================================================================
-# 12. ÜBERSETZUNGS-ENGINES (BaseTranslationEngine, ErrorHandlingMixin, BaseCachedTranslationEngine, Google, Ollama, Argos, Dummy)
+# 12. ÜBERSETZUNGS-ENGINES
 # =============================================================================
+
 class BaseTranslationEngine(ABC):
+    """
+    Abstrakte Basisklasse für alle Übersetzungs‑Engines.
+
+    Definiert das Interface, das jede Engine implementieren muss.
+    """
+
     @abstractmethod
     def set_target_language(self, target_lang: str) -> None:
+        """
+        Setzt die Zielsprache für die Übersetzung.
+
+        Args:
+            target_lang: ISO‑Sprachcode (z.B. 'de', 'en', 'zh-tw').
+        """
         pass
 
     @abstractmethod
     def translate_text(
         self, text: str, source_lang: str = "auto"
     ) -> Optional[TranslationResult]:
+        """
+        Übersetzt einen Text von der Quellsprache in die Zielsprache.
+
+        Args:
+            text: Der zu übersetzende Text.
+            source_lang: ISO‑Sprachcode der Quelle oder 'auto' für automatische Erkennung.
+
+        Returns:
+            TranslationResult-Objekt oder None, wenn keine Übersetzung möglich.
+        """
         pass
 
     @abstractmethod
     def dispose(self) -> None:
+        """Gibt alle Ressourcen der Engine frei."""
         pass
 
 
 class ErrorHandlingMixin:
+    """
+    Mixin für robuste Fehlerbehandlung mit automatischer Deaktivierung bei zu vielen Fehlern.
+
+    Attributes:
+        _error_count (int): Anzahl aufgetretener Fehler.
+        _disabled_until (float): Zeitpunkt, bis zu dem die Engine deaktiviert ist.
+        _max_errors (int): Maximale Fehleranzahl, bevor deaktiviert wird.
+        _disable_duration (float): Dauer der Deaktivierung in Sekunden.
+    """
+
     def __init__(self, max_errors: int = 5, disable_duration: float = 300.0):
         self._error_count = 0
         self._disabled_until = 0.0
@@ -2901,15 +3148,23 @@ class ErrorHandlingMixin:
         self._disable_duration = disable_duration
         self._error_lock = threading.RLock()
 
-    def _check_disable(self):
+    def _check_disable(self) -> None:
+        """Prüft, ob die Engine aufgrund zu vieler Fehler deaktiviert werden soll."""
         with self._error_lock:
             if self._error_count >= self._max_errors and self._disabled_until == 0.0:
                 self._disabled_until = time.time() + self._disable_duration
                 logger.warning(
-                    f"⚠️ {self.__class__.__name__} vorübergehend deaktiviert für {self._disable_duration}s wegen {self._error_count} Fehlern"
+                    f"⚠️ {self.__class__.__name__} vorübergehend deaktiviert "
+                    f"für {self._disable_duration}s wegen {self._error_count} Fehlern"
                 )
 
     def is_functional(self) -> bool:
+        """
+        Gibt zurück, ob die Engine aktuell nutzbar ist (nicht deaktiviert).
+
+        Returns:
+            True, wenn die Engine verwendet werden kann.
+        """
         with self._error_lock:
             if self._disabled_until > time.time():
                 return False
@@ -2922,21 +3177,44 @@ class ErrorHandlingMixin:
                     return False
             return True
 
-    def _reinitialize(self):
+    def _reinitialize(self) -> None:
+        """Wird aufgerufen, wenn die Engine nach einer Deaktivierung reaktiviert wird."""
         pass
 
-    def _record_success(self):
+    def _record_success(self) -> None:
+        """Setzt den Fehlerzähler zurück (Erfolg)."""
         with self._error_lock:
             self._error_count = 0
             self._disabled_until = 0.0
 
-    def _record_error(self):
+    def _record_error(self) -> None:
+        """Erhöht den Fehlerzähler und prüft auf Deaktivierung."""
         with self._error_lock:
             self._error_count += 1
             self._check_disable()
 
 
 class BaseCachedTranslationEngine(BaseTranslationEngine, ErrorHandlingMixin):
+    """
+    Basisklasse für Übersetzungs‑Engines mit Caching und automatischer Fehlerbehandlung.
+
+    Verwaltet einen Cache für Übersetzungsergebnisse, eine Historie der letzten
+    Übersetzungen (zur Vermeidung von Duplikaten) und Qualitätsprüfungen.
+
+    Attributes:
+        default_target_lang (str): Standard‑Zielsprache.
+        settings (AdvancedSettings): Einstellungen (optional).
+        _max_retries (int): Anzahl Wiederholungsversuche bei API‑Fehlern.
+        _retry_delay_base (float): Basis‑Wartezeit zwischen Versuchen.
+        _retry_delay_max (float): Maximale Wartezeit.
+        _cache_manager (CacheManager): Cache‑Manager für Translationen.
+        _last_translations (Deque[str]): Letzte übersetzte Texte (Duplikatschutz).
+        last_detected_language (str): Zuletzt erkannte Quellsprache.
+        _low_quality_count (int): Zähler für niedrige Qualität.
+        _max_low_quality (int): Maximale Anzahl niedriger Qualität bevor deaktiviert.
+        _lock (threading.RLock): Lock für Thread‑Sicherheit.
+    """
+
     def __init__(
         self,
         default_target_lang: str = "de",
@@ -2949,7 +3227,7 @@ class BaseCachedTranslationEngine(BaseTranslationEngine, ErrorHandlingMixin):
         disable_duration: float = 300.0,
     ):
         BaseTranslationEngine.__init__(self)
-        ErrorHandlingMixin.__init__(self, max_errors=10, disable_duration=60.0)
+        ErrorHandlingMixin.__init__(self, max_errors=max_errors, disable_duration=disable_duration)
         self.default_target_lang = default_target_lang
         self.settings = settings or AdvancedSettings()
         self._max_retries = max_retries
@@ -2963,6 +3241,7 @@ class BaseCachedTranslationEngine(BaseTranslationEngine, ErrorHandlingMixin):
         self._max_low_quality = 3
 
     def set_target_language(self, target_lang: str) -> None:
+        """Setzt die Zielsprache und leert den Cache."""
         if target_lang != self.default_target_lang:
             self.default_target_lang = target_lang
             with self._lock:
@@ -2975,9 +3254,30 @@ class BaseCachedTranslationEngine(BaseTranslationEngine, ErrorHandlingMixin):
     def _call_translation_api(
         self, text: str, source_lang: str, target_lang: str
     ) -> Optional[str]:
+        """
+        Ruft die eigentliche Übersetzungs‑API auf.
+
+        Args:
+            text: Der zu übersetzende Text.
+            source_lang: ISO‑Sprachcode der Quelle.
+            target_lang: ISO‑Sprachcode des Ziels.
+
+        Returns:
+            Übersetzter Text oder None bei Fehler.
+        """
         pass
 
     def _is_valid_translation(self, original: str, translated: str) -> bool:
+        """
+        Prüft, ob eine Übersetzung sinnvoll ist (nicht leer, nicht identisch, nicht zu lang).
+
+        Args:
+            original: Originaltext.
+            translated: Übersetzter Text.
+
+        Returns:
+            True, wenn die Übersetzung gültig ist.
+        """
         if not translated or len(translated) < 2:
             return False
         if translated.lower() == original.lower():
@@ -2987,6 +3287,16 @@ class BaseCachedTranslationEngine(BaseTranslationEngine, ErrorHandlingMixin):
         return True
 
     def _rate_translation_quality(self, original: str, translated: str) -> float:
+        """
+        Bewertet die Qualität einer Übersetzung (0.0 bis 1.0).
+
+        Args:
+            original: Originaltext.
+            translated: Übersetzter Text.
+
+        Returns:
+            Qualitätswert zwischen 0.0 (schlecht) und 1.0 (gut).
+        """
         if not translated or len(translated) < 2:
             return 0.0
         orig_words = len(original.split())
@@ -3006,62 +3316,115 @@ class BaseCachedTranslationEngine(BaseTranslationEngine, ErrorHandlingMixin):
     def translate_text(
         self, text: str, source_lang: str = "auto", target_lang: Optional[str] = None
     ) -> Optional[TranslationResult]:
+        """
+        Übersetzt einen Text mit Caching und Wiederholungsversuchen.
+
+        Die Methode verwendet einen internen Cache, um wiederholte Übersetzungen
+        desselben Originaltextes in die gleiche Zielsprache zu vermeiden.
+        Bei Fehlern wird bis zu `self._max_retries` Mal wiederholt, mit
+        exponentieller Backoff-Zeit.
+
+        Der Duplikatschutz verhindert, dass derselbe Text mehrfach in kurzer
+        Zeit übersetzt wird (Historie der letzten 15 Übersetzungen). Bei
+        niedriger Qualität der Übersetzung (gemessen durch `_rate_translation_quality`)
+        wird ein Fehler gezählt und bei zu vielen Fehlern die Engine vorübergehend
+        deaktiviert.
+
+        Args:
+            text: Der zu übersetzende Text (wird vorher getrimmt).
+            source_lang: Quellsprache als ISO-Code (z.B. 'de', 'en') oder 'auto'
+                         für automatische Erkennung.
+            target_lang: Zielsprache als ISO-Code. Wenn None, wird die
+                         aktuelle `default_target_lang` verwendet.
+
+        Returns:
+            Ein TranslationResult-Objekt mit Original, Übersetzung,
+            Quell- und Zielsprache sowie Zeitstempel, oder None, wenn
+            die Übersetzung fehlschlägt oder ungültig ist.
+
+        Raises:
+            Keine. Alle internen Exceptions werden abgefangen und führen
+            zu None oder einem Log-Eintrag.
+        """
+        # Prüfen, ob die Engine funktionsfähig ist (nicht deaktiviert)
         if not self.is_functional():
             log_debug("translate", f"{self.__class__.__name__} derzeit deaktiviert – überspringe")
             return None
+
         target = target_lang or self.default_target_lang
+        # Wenn Quelle und Ziel gleich sind, keine Übersetzung nötig
         if source_lang != "auto" and source_lang == target:
             return None
+
+        # Text vorbereiten
         if not text:
             return None
         original_text = text.strip()
         if len(original_text) < 2:
             return None
+
+        # Duplikatschutz: Verhindert wiederholte Übersetzung identischer Texte
         with self._lock:
             if original_text in self._last_translations:
                 return None
             cached = self._cache_manager.get_cached_translation(original_text, target)
             if cached is not None:
                 return cached
-        logger.debug(f"translate_text: Original text length = {len(original_text)}")
+
         last_exception = None
+        # Versuche mit exponentieller Backoff
         for attempt in range(self._max_retries):
             try:
                 translated_text = self._call_translation_api(
                     original_text, source_lang, target
                 )
-                logger.debug(f"translate_text: Translated text length = {len(translated_text) if translated_text else 0}")
                 if not translated_text or not translated_text.strip():
+                    # Leere Antwort – warte und wiederhole
                     time.sleep(self._retry_delay_base * (2**attempt))
                     continue
+
+                # Gültigkeitsprüfung (Länge, keine Identität)
                 if not self._is_valid_translation(original_text, translated_text):
                     continue
+
+                # Ergebnis erstellen
                 result = TranslationResult(
                     original=original_text,
                     translated=translated_text.strip(),
                     source_lang=source_lang,
                     target_lang=target,
                 )
+
+                # Qualitätsbewertung
                 quality = self._rate_translation_quality(original_text, translated_text)
                 if quality < 0.5:
                     self._record_error()
                 else:
                     self._record_success()
+
+                # In Cache und Historie aufnehmen
                 with self._lock:
                     self._cache_manager.cache_translation(result)
                     self._last_translations.append(original_text)
+
                 return result
+
             except Exception as e:
                 last_exception = e
                 self._record_error()
                 if attempt < self._max_retries - 1:
                     delay = min(self._retry_delay_max, self._retry_delay_base * (2**attempt))
                     time.sleep(delay)
+
+        # Alle Versuche fehlgeschlagen
         if last_exception:
-            logger.warning(f"Übersetzung fehlgeschlagen nach {self._max_retries} Versuchen: {last_exception}")
+            logger.warning(
+                f"Übersetzung fehlgeschlagen nach {self._max_retries} Versuchen: {last_exception}"
+            )
         return None
 
     def dispose(self) -> None:
+        """Räumt Ressourcen auf (Cache, Historie)."""
         with self._lock:
             self._cache_manager.translation_cache.clear()
             self._last_translations.clear()
@@ -3072,21 +3435,31 @@ class BaseCachedTranslationEngine(BaseTranslationEngine, ErrorHandlingMixin):
 
 
 class GoogleTranslationEngine(BaseCachedTranslationEngine):
-    __slots__ = ("translator",)
+    """
+    Übersetzungs‑Engine mit Google Translate, persistenter Session und robustem Fallback.
 
-    MAX_ERRORS = 10
-    DISABLE_DURATION = 60.0
+    Verwendet zuerst eine direkte HTTP-Anfrage an die Google Translate Web API mit
+    persistenter Session (inkl. Retry-Adapter). Bei wiederholten Fehlern wird
+    automatisch auf deep_translator umgeschaltet. Alle Operationen sind thread-sicher.
+    """
 
+    # Maximale Fehler für die direkte API, bevor sie deaktiviert wird
+    MAX_DIRECT_FAILURES = 5
+    # Dauer der Deaktivierung (Sekunden)
+    DIRECT_DISABLE_DURATION = 300.0
+
+    __slots__ = (
+        "translator", "_session", "_direct_failures", "_direct_failures_lock",
+        "_use_direct", "_direct_disabled_until", "_requests"
+    )
+
+    # Optimierte Pre‑Processing‑Regeln
     _preprocess_rules = [
-        (r"\s+", " "),
-        (r"[ ]+([.,!?])", r"\1"),
-        (r"([.,!?])[ ]*", r"\1 "),
-        ("bass communi", "best community"),
-        (" ,", ","),
-        (" .", "."),
-        ("„", '"'),
-        ("“", '"'),
-        (r"(?<=[a-zA-Z])\.(?=[a-zA-Z])", " "),
+        (r"\s+", " "),                      # Mehrfache Leerzeichen normalisieren
+        (r"\n\s*\n", "\n\n"),               # Absätze erhalten
+        (r"[ ]+([.,!?])", r"\1"),           # Leerzeichen vor Satzzeichen entfernen
+        (r"([.,!?])[ ]*", r"\1 "),          # Ein Satzzeichen + Leerzeichen
+        (r"\.{2,}", "."),                   # Mehrfachpunkte auf einen Punkt reduzieren
     ]
 
     _postprocess_rules = [
@@ -3101,22 +3474,22 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
     _preprocess_patterns = [(re.compile(p, re.UNICODE), r) for p, r in _preprocess_rules]
     _postprocess_patterns = [(re.compile(p, re.UNICODE), r) for p, r in _postprocess_rules]
 
+    # Mapping für Google Translate (vereinfachte Codes)
     _GOOGLE_LANG_MAP = {
         'zh': 'zh-CN',
+        'zh-cn': 'zh-CN',
+        'zh-tw': 'zh-TW',
         'he': 'iw',
+        'fil': 'tl',
+        'ht': 'ht',
     }
-
-    def _map_to_google_code(self, lang_code: str) -> str:
-        if lang_code == 'auto':
-            return 'auto'
-        return self._GOOGLE_LANG_MAP.get(lang_code, lang_code)
 
     def __init__(
         self,
         target_lang: str = "de",
         settings: Optional["AdvancedSettings"] = None,
         cache_manager: Optional[CacheManager] = None,
-    ):
+    ) -> None:
         super().__init__(
             target_lang,
             settings,
@@ -3124,65 +3497,127 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
             retry_delay_base=1.0,
             retry_delay_max=5.0,
             cache_manager=cache_manager,
-            max_errors=self.MAX_ERRORS,
-            disable_duration=self.DISABLE_DURATION,
+            max_errors=10,
+            disable_duration=60.0,
         )
         self.translator = None
+        self._session = None
+        self._direct_failures = 0
+        self._direct_failures_lock = threading.RLock()
+        self._use_direct = True
+        self._direct_disabled_until = 0.0
+        self._requests = None
+
+        self._setup_session()
         self._setup_translator()
+
+    # -------------------------------------------------------------------------
+    # Session & Fallback
+    # -------------------------------------------------------------------------
+    def _setup_session(self) -> None:
+        """Initialisiert eine persistente Session mit Retry‑Adapter."""
+        try:
+            import requests
+            from requests.adapters import HTTPAdapter
+            from urllib3.util.retry import Retry
+
+            self._requests = requests
+            self._session = self._requests.Session()
+
+            # Retry-Strategie für temporäre Fehler
+            retry_strategy = Retry(
+                total=2,
+                backoff_factor=0.5,
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["GET"]
+            )
+            adapter = HTTPAdapter(max_retries=retry_strategy)
+            self._session.mount("https://", adapter)
+            self._session.mount("http://", adapter)
+
+            self._session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            })
+
+            self._direct_failures = 0
+            self._use_direct = True
+            if DEBUG_LEVEL >= 3:
+                logger.debug("GoogleTranslationEngine: Persistent session initialized with retry adapter")
+        except ImportError as e:
+            if DEBUG_LEVEL >= 3:
+                logger.debug(f"GoogleTranslationEngine: requests not available, direct API disabled: {e}")
+            self._session = None
 
     def _setup_translator(self) -> None:
-        with self._lock:
-            try:
-                if TRANSLATOR_AVAILABLE:
-                    GoogleTranslator = FastLazyLoader.load("deep_translator")
-                    target = self._map_to_google_code(self.default_target_lang)
-                    self.translator = GoogleTranslator(source="auto", target=target, timeout=10)
-                    self._record_success()
-                else:
-                    self.translator = None
-            except ImportError as e:
-                logger.warning(f"deep_translator nicht verfügbar: {e}")
+        """Initialisiert den deep_translator als Fallback."""
+        try:
+            if TRANSLATOR_AVAILABLE:
+                GoogleTranslator = FastLazyLoader.load("deep_translator")
+                # Sicherstellen, dass target ein Code ist
+                target = self.default_target_lang
+                # Wenn target ein Name ist, Code suchen
+                if target not in self._GOOGLE_LANG_MAP and target not in SUPPORTED_LANGUAGES:
+                    for code, name in SUPPORTED_LANGUAGES.items():
+                        if name == target:
+                            target = code
+                            break
+                target = self._map_to_google_code(target)
+                self.translator = GoogleTranslator(source="auto", target=target, timeout=10)
+                self._record_success()
+                if DEBUG_LEVEL >= 3:
+                    logger.debug("GoogleTranslationEngine: deep_translator fallback initialized")
+            else:
                 self.translator = None
-                self._record_error()
-            except Exception:
-                self.translator = None
-                self._record_error()
+                if DEBUG_LEVEL >= 3:
+                    logger.debug("GoogleTranslationEngine: deep_translator not available")
+        except Exception as e:
+            logger.warning(f"GoogleTranslationEngine: deep_translator initialization failed: {e}")
+            self.translator = None
+            self._record_error()
 
-    def _reinitialize(self):
+    def _reinitialize(self) -> None:
+        """Wird nach einer Deaktivierung aufgerufen – baut Session und Translator neu auf."""
+        logger.info("GoogleTranslationEngine: Reinitializing after disable period")
+        self._setup_session()
         self._setup_translator()
+        self._direct_failures = 0
+        self._use_direct = True
+        self._direct_disabled_until = 0.0
 
     def set_target_language(self, target_lang: str) -> None:
+        """Setzt die Zielsprache und reinitialisiert die Engines."""
+        # Wenn target_lang ein Name ist, in Code umwandeln
+        if target_lang not in self._GOOGLE_LANG_MAP and target_lang not in SUPPORTED_LANGUAGES:
+            # Versuche, den Namen in Code zu übersetzen
+            for code, name in SUPPORTED_LANGUAGES.items():
+                if name == target_lang:
+                    target_lang = code
+                    break
         super().set_target_language(target_lang)
+        self._setup_session()
         self._setup_translator()
+        self._direct_failures = 0
+        self._use_direct = True
+        self._direct_disabled_until = 0.0
 
-    @staticmethod
-    @lru_cache(maxsize=1024)
-    def _is_asian_char(c: str) -> bool:
-        try:
-            name = unicodedata.name(c)
-            asian_scripts = ("CJK", "HANGUL", "HIRAGANA", "KATAKANA", "THAI", "LAO", "MYANMAR", "KHMER")
-            return any(script in name for script in asian_scripts)
-        except ValueError:
-            return False
-
-    def _contains_asian(self, text: str) -> bool:
-        return any(self._is_asian_char(c) for c in text)
-
-    def _is_valid_translation(self, original: str, translated: str) -> bool:
-        if self._contains_asian(original) or self._contains_asian(translated):
-            if not translated or not translated.strip():
-                return False
-            trans_clean = translated.strip()
-            if len(trans_clean) < 1:
-                return False
-            asian_chars = sum(1 for c in trans_clean if self._is_asian_char(c))
-            if asian_chars == 0 and not any(c.isalnum() for c in trans_clean):
-                return False
-            return True
-        else:
-            return super()._is_valid_translation(original, translated)
+    # -------------------------------------------------------------------------
+    # Hilfsmethoden
+    # -------------------------------------------------------------------------
+    @classmethod
+    def _map_to_google_code(cls, lang_code: str) -> str:
+        """Konvertiert ISO‑Code in Google‑kompatiblen Code."""
+        if lang_code == 'auto':
+            return 'auto'
+        lower = lang_code.lower()
+        return cls._GOOGLE_LANG_MAP.get(lower, lower)
 
     def _clean_common_errors(self, text: str) -> str:
+        """Behebt häufige Fehler in der Übersetzung."""
         corrections = {
             "bass communi": "best community",
             "thc": "the",
@@ -3194,13 +3629,17 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
         return text
 
     def _preprocess_text(self, text: str) -> str:
+        """Bereinigt den Text vor der Übersetzung (minimalinvasiv)."""
         if not text:
             return ""
         clean_text = text.strip()
+        # Mehrfachpunkte reduzieren
         clean_text = re.sub(r"\.{2,}", ".", clean_text)
+        # Regeln anwenden
         for pattern, repl in self._preprocess_patterns:
             clean_text = pattern.sub(repl, clean_text)
         clean_text = self._clean_common_errors(clean_text)
+        # Maximale Länge: 500 Zeichen (wie bisher)
         MAX_LENGTH = 500
         if len(clean_text) > MAX_LENGTH:
             cut_pos = clean_text.rfind(' ', 0, MAX_LENGTH)
@@ -3210,83 +3649,224 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
         return clean_text.strip()
 
     def _postprocess_translation(self, translated: str, original: str) -> str:
+        """Bereinigt die Übersetzung nach dem API‑Aufruf."""
         if not translated:
             return ""
+
+        # DEBUG: Eingabe-Log
+        if DEBUG_LEVEL >= 3:
+            logger.debug(f"Postprocess input: '{translated[:100]}...'")
+
         result = translated.strip()
+        # Punkt am Ende hinzufügen, wenn Satz nicht endet
         if result and result[-1] not in (".", "!", "?", ":", ";"):
             result += "."
+        # Erster Buchstabe groß
         if result and result[0].islower():
             result = result[0].upper() + result[1:]
+
         result = re.sub(r"\s+", " ", result)
         for pattern, repl in self._postprocess_patterns:
             result = pattern.sub(repl, result)
         result = re.sub(r"(?<=[a-zA-Z])\.(?=[a-zA-Z])", " ", result)
         result = re.sub(r"\s+", " ", result)
+
+        # Plausibilitätsprüfung: Anteil Buchstaben
         alpha_count = sum(c.isalpha() for c in result)
         total_len = len(result)
         alpha_ratio = alpha_count / max(total_len, 1)
         if alpha_ratio < 0.5 and total_len > 10:
+            if DEBUG_LEVEL >= 3:
+                logger.debug(f"Postprocess discarded: low alpha ratio {alpha_ratio:.2f}")
             return ""
-        return result.strip()
 
+        final = result.strip()
+
+        # DEBUG: Ausgabe-Log
+        if DEBUG_LEVEL >= 3:
+            logger.debug(f"Postprocess output: '{final[:100]}...'")
+
+        return final
+
+    # -------------------------------------------------------------------------
+    # Direkte API (persistente Session)
+    # -------------------------------------------------------------------------
+    def _call_google_api_direct(self, text: str, src: str, target: str) -> Optional[str]:
+        """
+        Direkter API-Aufruf über persistente Session mit Retry und Circuit‑Breaker.
+        Bei zu vielen Fehlern wird die direkte API vorübergehend deaktiviert.
+        """
+        with self._direct_failures_lock:
+            now = time.time()
+            if not self._use_direct:
+                if now < self._direct_disabled_until:
+                    return None
+                else:
+                    # Reaktivierung nach Ablauf der Deaktivierungszeit
+                    self._use_direct = True
+                    self._direct_failures = 0
+                    if DEBUG_LEVEL >= 3:
+                        logger.debug("GoogleTranslationEngine: Reactivating direct API after cooldown")
+            if self._session is None:
+                return None
+
+        url = "https://translate.google.com/m"
+        params = {'tl': target, 'sl': src, 'q': text}
+        try:
+            response = self._session.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                # Erfolg – Fehlerzähler zurücksetzen
+                with self._direct_failures_lock:
+                    self._direct_failures = 0
+                # Extraktion des übersetzten Textes
+                import html
+                match = re.search(r'<div[^>]*class="result-container"[^>]*>(.*?)</div>', response.text, re.DOTALL)
+                if match:
+                    translated = match.group(1)
+                    translated = html.unescape(translated)
+                    translated = re.sub(r'\s+', ' ', translated).strip()
+                    if translated:
+                        return translated
+            # Fehlerbehandlung (Status != 200 oder keine Übersetzung)
+            with self._direct_failures_lock:
+                self._direct_failures += 1
+                if self._direct_failures >= self.MAX_DIRECT_FAILURES:
+                    self._use_direct = False
+                    self._direct_disabled_until = time.time() + self.DIRECT_DISABLE_DURATION
+                    logger.warning(
+                        f"Google direct API deactivated for {self.DIRECT_DISABLE_DURATION}s due to "
+                        f"{self._direct_failures} failures"
+                    )
+            return None
+        except Exception as e:
+            with self._direct_failures_lock:
+                self._direct_failures += 1
+                if self._direct_failures >= self.MAX_DIRECT_FAILURES:
+                    self._use_direct = False
+                    self._direct_disabled_until = time.time() + self.DIRECT_DISABLE_DURATION
+                    logger.warning(f"Google direct API deactivated due to exception: {e}")
+            if DEBUG_LEVEL >= 3:
+                logger.debug(f"Direct Google API error: {e}")
+            return None
+
+    # -------------------------------------------------------------------------
+    # Haupt-Übersetzungsmethode
+    # -------------------------------------------------------------------------
     def _call_translation_api(
         self, text: str, source_lang: str, target_lang: str
     ) -> Optional[str]:
+        """
+        Führt den API‑Aufruf mit Pre‑/Post‑Processing durch.
+        Nutzt zuerst die direkte API (persistente Session), bei Fehlern deep_translator.
+        """
         with self._lock:
             if not self.translator:
                 self._setup_translator()
-                if not self.translator:
-                    return None
-            if target_lang in ('de', 'en', 'fr', 'es', 'it'):
-                try:
-                    src = self._map_to_google_code(source_lang)
-                    translated = self.translator.translate(text, source=src)
-                    return translated.strip() if translated else None
-                except Exception:
-                    raise
+
             clean_text = self._preprocess_text(text)
             if not clean_text:
                 return None
+
+            src = self._map_to_google_code(source_lang)
+            target = self._map_to_google_code(target_lang)
+
+            if DEBUG_LEVEL >= 3:
+                logger.debug(
+                    f"Google Translate request: source={src}, target={target}, "
+                    f"text='{clean_text[:100]}...'"
+                )
+
+            translated = None
+            used_fallback = False
+
             try:
-                src = self._map_to_google_code(source_lang)
-                translated = self.translator.translate(clean_text, source=src)
-                if translated:
-                    if target_lang == 'zh':
-                        cleaned = re.sub(r'[.,!?;:()\[\]{}<>"\'\s]', '', translated)
-                        if cleaned:
-                            chinese_chars = sum(1 for c in cleaned if '\u4e00' <= c <= '\u9fff')
-                            chinese_ratio = chinese_chars / len(cleaned)
-                            if chinese_ratio < 0.3:
-                                raise ValueError("Antwort enthält zu wenige chinesische Zeichen")
-                    if translated.count('.') > 10 and text.count('.') < 3:
-                        raise ValueError("Antwort enthält zu viele Punkte – vermutlich fehlerhaft")
-                    special_ratio = sum(not c.isalnum() for c in translated) / max(len(translated), 1)
-                    if special_ratio > 0.3:
-                        raise ValueError("Antwort enthält zu viele Sonderzeichen")
+                # Versuch 1: Direkte API (falls aktiv)
+                if self._use_direct:
+                    translated = self._call_google_api_direct(clean_text, src, target)
+
+                # Versuch 2: deep_translator (Fallback)
+                if not translated and self.translator:
+                    try:
+                        translated = self.translator.translate(clean_text, source=src, target=target)
+                        used_fallback = True
+                    except Exception as e:
+                        if DEBUG_LEVEL >= 3:
+                            logger.debug(f"deep_translator fallback failed: {e}")
+                        translated = None
+
                 if not translated:
                     return None
+
+                if DEBUG_LEVEL >= 3 and used_fallback:
+                    logger.debug("Used deep_translator fallback for translation")
+
+                # DEBUG: Response-Log (gekürzt)
+                if DEBUG_LEVEL >= 3:
+                    logger.debug(f"Google Translate response: '{translated[:100]}...'")
+
+                # Zusätzliche Prüfung für Chinesisch
+                if target_lang in ('zh-cn', 'zh-tw', 'zh'):
+                    cleaned = re.sub(r'[.,!?;:()\[\]{}<>"\'\s]', '', translated)
+                    if cleaned:
+                        chinese_chars = sum(1 for c in cleaned if '\u4e00' <= c <= '\u9fff')
+                        chinese_ratio = chinese_chars / len(cleaned)
+                        if chinese_ratio < 0.3:
+                            raise ValueError("Antwort enthält zu wenige chinesische Zeichen")
+
+                # Prüfe auf zu viele Punkte (abgeschwächt)
+                if translated.count('.') > 15 and text.count('.') < 3:
+                    raise ValueError("Antwort enthält zu viele Punkte – vermutlich fehlerhaft")
+
+                # Prüfe auf zu viele Sonderzeichen (abgeschwächt)
+                special_ratio = sum(not c.isalnum() and not c.isspace() for c in translated) / max(len(translated), 1)
+                if special_ratio > 0.4:
+                    raise ValueError("Antwort enthält zu viele Sonderzeichen")
+
                 final = self._postprocess_translation(translated, clean_text)
                 return final
-            except ValueError as e:
+
+            except Exception as e:
+                # DEBUG: Fehler detailliert loggen
+                if DEBUG_LEVEL >= 3:
+                    logger.exception(f"Google Translate API error: {e}")
+
+                # Fehlerbehandlung: Bei Sprachcode-Problem evtl. mit auto versuchen
                 if "language" in str(e).lower() and src != 'auto':
                     logger.warning(f"Ungültiger Quellcode {src}, versuche mit 'auto'")
                     try:
-                        translated = self.translator.translate(clean_text, source='auto')
+                        translated = self.translator.translate(clean_text, source='auto', target=target_lang)
                         if translated:
                             final = self._postprocess_translation(translated, clean_text)
                             return final
                     except Exception as fallback_e:
+                        if DEBUG_LEVEL >= 3:
+                            logger.exception(f"Fallback translation error: {fallback_e}")
                         logger.warning(f"Auch Fallback fehlgeschlagen: {fallback_e}")
                 raise
-            except Exception:
-                raise
 
+    # -------------------------------------------------------------------------
+    # Ressourcenfreigabe
+    # -------------------------------------------------------------------------
     def dispose(self) -> None:
+        """Gibt Ressourcen frei, schließt die HTTP‑Session."""
         super().dispose()
+        if self._session:
+            try:
+                self._session.close()
+            except Exception:
+                pass
+            self._session = None
         self.translator = None
 
 
 class OllamaTranslationEngine(BaseCachedTranslationEngine):
+    """
+    Übersetzungs‑Engine mit lokalem Ollama‑Modell.
+
+    Nutzt die Ollama‑API für Übersetzungen, mit Modell‑Auswahl,
+    Speicherprüfung und automatischer Wiederherstellung bei Fehlern.
+    """
+
     def __init__(
         self,
         target_lang: str = "de",
@@ -3322,6 +3902,7 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         self._fetch_available_models()
 
     def _fetch_available_models(self) -> List[str]:
+        """Holt die Liste der verfügbaren Modelle vom Ollama‑Server."""
         if not self.available:
             return []
         with self._lock:
@@ -3341,6 +3922,7 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
             return self._available_models.copy()
 
     def is_model_available(self, model: Optional[str] = None) -> bool:
+        """Prüft, ob ein bestimmtes Modell auf dem Server verfügbar ist."""
         check_model = model or self.model
         available = self._fetch_available_models()
         if not available:
@@ -3351,6 +3933,7 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         super().set_target_language(target_lang)
 
     def set_model(self, model: str) -> None:
+        """Wechselt das verwendete Ollama‑Modell."""
         with self._lock:
             self.model = model
             self._models_cache_time = 0
@@ -3359,6 +3942,7 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         logger.info(f"Ollama model geändert zu: {model}")
 
     def _estimate_model_memory(self) -> Optional[float]:
+        """Schätzt den benötigten RAM für ein Modell (in GB)."""
         model_lower = self.model.lower()
         if "70b" in model_lower:
             return 140.0
@@ -3375,6 +3959,7 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         return None
 
     def _check_memory_before_call(self) -> Optional[str]:
+        """Prüft, ob genügend RAM für das Modell verfügbar ist."""
         estimated = self._estimate_model_memory()
         if estimated is None:
             return None
@@ -3392,14 +3977,18 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         return None
 
     def _call_ollama(self, prompt: str) -> Optional[str]:
+        """Sendet einen Prompt an die Ollama‑API und gibt die Antwort zurück."""
         if not self.available or self._session is None:
             raise RuntimeError("Ollama nicht verfügbar (requests nicht installiert)")
+
         if not self.is_model_available():
             model_list = ", ".join(self._available_models) if self._available_models else "keine"
             raise RuntimeError(f"Ollama-Modell '{self.model}' nicht auf Server gefunden. Verfügbare Modelle: {model_list}")
+
         mem_warning = self._check_memory_before_call()
         if mem_warning:
             logger.warning(mem_warning)
+
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -3408,6 +3997,7 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         }
         if self.system_prompt:
             payload["system"] = self.system_prompt
+
         try:
             response = self._session.post(f"{self.host}/api/generate", json=payload, timeout=self.timeout)
             if response.status_code == 200:
@@ -3430,6 +4020,7 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
             raise RuntimeError(f"Ollama Fehler: {str(e)}")
 
     def _reinitialize(self):
+        """Wird nach einer Deaktivierung aufgerufen – aktualisiert die Modellliste."""
         logger.info("🔄 OllamaTranslationEngine wird reinitialisiert...")
         with self._lock:
             self._models_cache_time = 0
@@ -3446,6 +4037,7 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                 logger.warning(f"⚠️ Testaufruf fehlgeschlagen: {e}")
 
     def _is_valid_translation(self, original: str, translated: str) -> bool:
+        """Einfache Gültigkeitsprüfung für Ollama‑Antworten."""
         if not translated or len(translated) < 2:
             return False
         if translated.lower() == original.lower():
@@ -3457,29 +4049,53 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
     def _call_translation_api(
         self, text: str, source_lang: str, target_lang: str
     ) -> Optional[str]:
+        """Erzeugt den Prompt und ruft Ollama auf."""
         if not self.available:
             return None
+
         if not self.is_model_available():
             log_debug("ollama", f"Modell '{self.model}' nicht verfügbar")
             self._record_error()
             return None
+
         source_lang_name = "auto"
         if source_lang != "auto":
             source_lang_name = SUPPORTED_LANGUAGES.get(source_lang, source_lang)
         target_lang_name = SUPPORTED_LANGUAGES.get(target_lang, target_lang)
+
         prompt = (
             f"Translate the following text from {source_lang_name} to {target_lang_name}. "
             f"Preserve the original formatting, including line breaks, paragraphs, and bullet points. "
             f"Output only the translation, without any additional commentary.\n\n{text}"
         )
+
+        # DEBUG: Request-Log
+        if DEBUG_LEVEL >= 3:
+            logger.debug(
+                f"Ollama translation request: model={self.model}, "
+                f"prompt='{prompt[:100]}...'"
+            )
+
         try:
-            return self._call_ollama(prompt)
+            translated = self._call_ollama(prompt)
+
+            # DEBUG: Response-Log (gekürzt)
+            if DEBUG_LEVEL >= 3 and translated:
+                logger.debug(f"Ollama translation response: '{translated[:100]}...'")
+
+            return translated
+
         except RuntimeError as e:
-            logger.error(f"Ollama translation error: {e}")
+            # DEBUG: Fehler detailliert loggen
+            if DEBUG_LEVEL >= 3:
+                logger.exception(f"Ollama translation error: {e}")
+            else:
+                logger.error(f"Ollama translation error: {e}")
             self._record_error()
             raise
 
     def dispose(self) -> None:
+        """Gibt Ressourcen frei (Session schließen)."""
         super().dispose()
         if self._session:
             try:
@@ -3491,11 +4107,26 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
 
 
 class ArgosTranslateEngine(BaseCachedTranslationEngine):
+    """
+    Übersetzungs‑Engine mit argos‑translate (offline, OpenNMT).
+
+    Lädt oder installiert automatisch benötigte Sprachpakete.
+    Unterstützt Sprach‑Mappings für die argos‑Codes.
+    """
+
     __slots__ = ("_translators", "_package_lock")
 
-    _ARGOS_LANG_MAP = {}
+    # Mapping von ISO‑Codes zu argos‑internen Codes
+    _ARGOS_LANG_MAP = {
+        'zh-cn': 'zh',
+        'zh-tw': 'zh',
+        'fil': 'tl',
+        'ht': 'ht',
+        # Weitere nach Bedarf
+    }
 
     def _normalize_argos_code(self, lang_code: str) -> str:
+        """Wandelt ISO‑Code in argos‑internen Code um."""
         if lang_code == 'auto':
             return 'auto'
         normalized = lang_code.lower().replace('_', '-')
@@ -3519,18 +4150,22 @@ class ArgosTranslateEngine(BaseCachedTranslationEngine):
         )
         self._translators: Dict[str, Any] = {}
         self._package_lock = threading.RLock()
+
         if not ARGOS_AVAILABLE:
             logger.warning("⚠️ argos-translate nicht installiert – Engine wird nicht funktionieren")
             self._disabled_until = time.time() + self._disable_duration
             self._error_count = self._max_errors
             return
+
         norm_target = self._normalize_argos_code(self.default_target_lang)
         if norm_target != self.default_target_lang:
             logger.debug(f"Argos: Zielcode normalisiert: {self.default_target_lang} -> {norm_target}")
             self.default_target_lang = norm_target
+
         self._load_translator(self.default_target_lang)
 
     def set_target_language(self, target_lang: str) -> None:
+        """Setzt die Zielsprache und lädt den entsprechenden Übersetzer."""
         norm_target = self._normalize_argos_code(target_lang)
         if norm_target != target_lang:
             logger.debug(f"Argos: Zielcode normalisiert: {target_lang} -> {norm_target}")
@@ -3555,7 +4190,6 @@ class ArgosTranslateEngine(BaseCachedTranslationEngine):
             try:
                 from argostranslate import package, translate
 
-                # Installierte Sprachen abrufen
                 installed_languages = translate.get_installed_languages()
 
                 # Zielsprache finden
@@ -3594,9 +4228,7 @@ class ArgosTranslateEngine(BaseCachedTranslationEngine):
                         source_lang_obj = lang
                         break
 
-                # Falls Englisch nicht verfügbar, versuche jede installierte Sprache als Quelle
                 if source_lang_obj is None and installed_languages:
-                    # Suche nach einem Übersetzer von einer installierten Sprache zur Zielsprache
                     for lang in installed_languages:
                         translator = lang.get_translator(target_lang_obj)
                         if translator is not None:
@@ -3622,9 +4254,11 @@ class ArgosTranslateEngine(BaseCachedTranslationEngine):
                 return None
 
     def _reinitialize(self) -> None:
+        """Wird nach einer Deaktivierung aufgerufen – lädt den Übersetzer neu."""
         self._load_translator(self.default_target_lang)
 
     def _load_specific_translator(self, from_lang: str, to_lang: str) -> Optional[Any]:
+        """Lädt einen Übersetzer von einer bestimmten Quellsprache zur Zielsprache."""
         norm_from = self._normalize_argos_code(from_lang)
         norm_to = self._normalize_argos_code(to_lang)
         try:
@@ -3650,19 +4284,23 @@ class ArgosTranslateEngine(BaseCachedTranslationEngine):
     def _call_translation_api(
         self, text: str, source_lang: str, target_lang: str
     ) -> Optional[str]:
+        """Führt die Übersetzung mit argos durch."""
         norm_source = self._normalize_argos_code(source_lang)
         norm_target = self._normalize_argos_code(target_lang)
+
         translator = self._translators.get(norm_target)
         if translator is None:
             translator = self._load_translator(norm_target)
             if translator is None:
                 self._record_error()
                 return None
+
         effective_translator = translator
         if norm_source != "auto" and norm_source != "en":
             specific = self._load_specific_translator(norm_source, norm_target)
             if specific:
                 effective_translator = specific
+
         try:
             translated = effective_translator.translate(text)
             return translated.strip() if translated else None
@@ -3671,6 +4309,7 @@ class ArgosTranslateEngine(BaseCachedTranslationEngine):
             raise
 
     def dispose(self) -> None:
+        """Räumt Ressourcen auf."""
         super().dispose()
         with self._lock:
             self._translators.clear()
@@ -3682,6 +4321,12 @@ ErrorCallback = Callable[[str], None]
 FinishedCallback = Callable[[], None]
 
 class DummyTranslationEngine(BaseTranslationEngine):
+    """
+    Platzhalter‑Engine, wenn keine echte Übersetzungs‑Engine verfügbar ist.
+
+    Gibt immer einen Platzhaltertext zurück.
+    """
+
     def __init__(
         self,
         target_lang: str = "de",
@@ -3696,11 +4341,13 @@ class DummyTranslationEngine(BaseTranslationEngine):
         self.last_detected_language = "auto"
 
     def set_target_language(self, target_lang: str) -> None:
+        """Setzt die Zielsprache (nur gespeichert)."""
         self.target_lang = target_lang
 
     def translate_text(
         self, text: str, source_lang: str = "auto"
     ) -> Optional[TranslationResult]:
+        """Gibt einen Platzhalter zurück."""
         return TranslationResult(
             original=text,
             translated="[Übersetzung nicht verfügbar]",
@@ -3709,6 +4356,7 @@ class DummyTranslationEngine(BaseTranslationEngine):
         )
 
     def dispose(self) -> None:
+        """Nichts zu tun."""
         pass
 
 # =============================================================================
@@ -3950,17 +4598,18 @@ class AudioEnhancer:
 # =============================================================================
 # 14. TRANSKRIPTIONS-ENGINE & DUMMY
 # =============================================================================
+
 class TranscriptionEngine:
     """
-    Zentrale Klasse für die Transkription mit Whisper (faster‑whisper oder openai‑whisper).
+    Zentrale Klasse für die Transkription mit Whisper.
 
-    Verwaltet das Laden, Caching und Entladen von Modellen, kümmert sich um Audio‑Enhancement,
-    VAD‑Filter, Duplikaterkennung und die eigentliche Transkription. Thread‑sicher.
-
-    Lock‑Reihenfolge (wichtig für Deadlock‑Vermeidung):
-    1. modellspezifischer Lock (self._get_model_lock(model_size))
-    2. globaler Lock (self._lock)
-    Diese Reihenfolge muss in allen Methoden eingehalten werden.
+    Optimierte Version mit:
+        - Verbesserter Fehlerbehandlung bei CUDA OOM
+        - Dynamischem Fallback auf kleinere Modelle
+        - Expliziter GPU‑Cache‑Leerung nach Fehlern
+        - Thread‑sicherer Verwaltung von Zustandsvariablen
+        - Detaillierten Debug‑Ausgaben (--debug=3)
+        - Konsistenter Lock‑Reihenfolge (nur self._lock für Zustand, self._state_lock für flüchtige Werte)
     """
 
     MODEL_SIZE_ORDER = [
@@ -3997,8 +4646,7 @@ class TranscriptionEngine:
         "forced_language", "_last_detected_language", "_torch", "_np",
         "_scipy_signal", "_last_confidence_threshold", "_audio_enhancer",
         "_cache_manager", "_model_locks", "_model_locks_lock", "_reloading",
-        "_vad_fallback_enabled", "_debug", "_last_gpu_stats_time",
-        "_vad_fallback_attempts"
+        "_vad_fallback_enabled", "_debug", "_state_lock"
     )
 
     def __init__(
@@ -4011,8 +4659,9 @@ class TranscriptionEngine:
         self.model: Any = None
         self.model_size: Optional[str] = None
         self.whisper_backend: Optional[str] = None
-        self._lock = threading.RLock()
-        self._model_usage_lock = threading.RLock()
+        self._lock = threading.RLock()                     # Haupt‑Lock für Zustand (reloading, cache)
+        self._state_lock = threading.RLock()               # Lock für flüchtige Zustandsvariablen
+        self._model_usage_lock = threading.RLock()         # Lock für aktive Modell‑Referenz
         self._max_cached_models = 1
         self._cache_manager = cache_manager or AppContext().cache_manager
         self._cache = self._cache_manager.transcription_cache
@@ -4032,8 +4681,6 @@ class TranscriptionEngine:
         self._vad_fallback_enabled = True
         self.device, self.compute_type = self._detect_optimal_device()
         self._debug = logger.isEnabledFor(logging.DEBUG)
-        self._last_gpu_stats_time = 0.0
-        self._vad_fallback_attempts = 0
 
         self._model_locks: Dict[str, threading.Lock] = {}
         self._model_locks_lock = threading.Lock()
@@ -4053,7 +4700,11 @@ class TranscriptionEngine:
         Wenn set_active=True, wird das Modell als aktives Modell gesetzt.
         Gibt (Modell, Backend) zurück oder None bei Fehler.
         """
-        # Schneller Cache-Zugriff ohne langen Lock
+        if self._disposing:
+            logger.warning("TranscriptionEngine wird entsorgt – Laden eines Modells nicht möglich")
+            return None
+
+        # Schnelle Prüfung auf aktives Modell (flüchtig, kein Lock)
         if set_active:
             with self._model_usage_lock:
                 if self.model is not None and self.model_size == model_size:
@@ -4072,24 +4723,152 @@ class TranscriptionEngine:
 
         cache_key = (model_size, backend)
 
+        # Cache‑Zugriff mit globalem Lock
         with self._lock:
             if cache_key in self._model_cache:
                 model = self._model_cache[cache_key]
                 self._model_cache.move_to_end(cache_key)
                 if set_active:
                     self._set_active_model(model, model_size, backend, cache_key)
-                if self._debug:
-                    logger.debug(f"Modell {model_size} aus Cache geladen")
                 return model, backend
 
-        # Laden mit korrekter Lock-Reihenfolge
+        # Laden mit modellspezifischem Lock
         return self._load_model_with_checks(model_size, backend, cache_key, set_active)
 
+    def _load_model_with_checks(
+        self,
+        model_size: str,
+        backend: str,
+        cache_key: Tuple[str, str],
+        set_active: bool
+    ) -> Optional[Tuple[Any, str]]:
+        """
+        Lädt ein Modell mit VRAM‑Prüfung und iterativem Fallback.
+        Diese Methode wird **innerhalb** des modellspezifischen Locks aufgerufen.
+        """
+        with self._get_model_lock(model_size):
+            # Double‑checked Locking: prüfe nochmal den Cache (globaler Lock)
+            with self._lock:
+                if cache_key in self._model_cache:
+                    model = self._model_cache[cache_key]
+                    self._model_cache.move_to_end(cache_key)
+                    if set_active:
+                        self._set_active_model(model, model_size, backend, cache_key)
+                    return model, backend
+
+            # --- Iterative Fallback‑Schleife ---
+            all_models = Config.WHISPER_MODELS
+            try:
+                start_index = all_models.index(model_size)
+            except ValueError:
+                start_index = -1
+
+            models_to_try = [model_size]
+            if start_index >= 0:
+                models_to_try.extend(all_models[start_index - 1::-1])
+
+            backends_to_try = ["faster_whisper", "openai_whisper"]
+            last_exception = None
+
+            for current_model in models_to_try:
+                for current_backend in backends_to_try:
+                    if not self._is_backend_available(current_backend):
+                        continue
+                    if not self._has_enough_vram(current_model):
+                        continue
+
+                    current_cache_key = (current_model, current_backend)
+
+                    # Cache nochmal prüfen (globaler Lock)
+                    with self._lock:
+                        if current_cache_key in self._model_cache:
+                            model = self._model_cache[current_cache_key]
+                            self._model_cache.move_to_end(current_cache_key)
+                            if set_active and current_model == model_size and current_backend == backend:
+                                self._set_active_model(model, current_model, current_backend, current_cache_key)
+                            return model, current_backend
+
+                    logger.info(f"📁 Lade Modell {current_model} mit {current_backend}...")
+                    model = self._perform_load(current_backend, current_model)
+                    if model is not None:
+                        # Erfolg: in Cache einfügen (globaler Lock)
+                        with self._lock:
+                            self._model_cache[current_cache_key] = model
+                            if len(self._model_cache) > self._max_cached_models:
+                                oldest_key, old_model = next(iter(self._model_cache.items()))
+                                del self._model_cache[oldest_key]
+                                self._unload_model(old_model)   # Entladen ohne Lock auf globalem Cache
+
+                        # Aktives Modell setzen (nach Freigabe des globalen Locks)
+                        if set_active:
+                            self._set_active_model(model, current_model, current_backend, current_cache_key)
+                        return model, current_backend
+                    else:
+                        last_exception = RuntimeError(f"Laden von {current_model} mit {current_backend} fehlgeschlagen")
+                        logger.warning(f"❌ {last_exception}")
+
+            if last_exception:
+                raise last_exception
+            raise RuntimeError("Kein Modell konnte geladen werden")
+
+    def _set_active_model(
+        self,
+        model: Any,
+        model_size: str,
+        backend: str,
+        cache_key: Tuple[str, str]
+    ) -> None:
+        """
+        Setzt das aktive Modell und entlädt das vorherige.
+        Diese Methode wird **außerhalb** von modellspezifischen Locks aufgerufen,
+        aber innerhalb von self._lock (da sie nur von load_model aufgerufen wird).
+        """
+        old_model = None
+        old_key = None
+
+        with self._model_usage_lock:
+            if self.model is not None and (self.model_size, self.whisper_backend) != cache_key:
+                old_key = (self.model_size, self.whisper_backend)
+                old_model = self.model
+            self.model = model
+            self.model_size = model_size
+            self.whisper_backend = backend
+            self._model_loaded_flag = True
+
+        # Altes Modell entladen (keine Locks, die mit Cache kollidieren könnten)
+        if old_model is not None:
+            self._unload_model(old_model)
+            if old_key is not None:
+                with self._lock:
+                    if old_key in self._model_cache:
+                        del self._model_cache[old_key]
+                        if self._debug:
+                            logger.debug(f"🧹 Altes Modell {old_key[0]} aus Cache entfernt")
+
+    def _is_backend_available(self, backend: str) -> bool:
+        """Prüft, ob das angegebene Backend verfügbar ist."""
+        if backend == "faster_whisper":
+            return FASTER_WHISPER_AVAILABLE
+        if backend == "openai_whisper":
+            return OPENAI_WHISPER_AVAILABLE
+        return False
+
+    def _has_enough_vram(self, model_size: str) -> bool:
+        """Prüft, ob genügend VRAM für das Modell vorhanden ist (nur CUDA)."""
+        if self.device != "cuda":
+            return True
+        free_gb = self._get_free_gpu_memory()
+        if free_gb is None:
+            return True
+        estimated = self._estimate_model_memory(model_size)
+        buffer_gb = 1.0   # fester Puffer von 1 GB (anstatt 20% des freien Speichers)
+        return free_gb >= estimated + buffer_gb
+
+    # -------------------------------------------------------------------------
+    #  Modell‑Laden und -Entladen (optimiert)
+    # -------------------------------------------------------------------------
     def reload_model(self, model_size: str) -> bool:
-        """
-        Lädt ein neues Modell im Hintergrund und wechselt asynchron.
-        Gibt True zurück, wenn der Ladevorgang gestartet wurde.
-        """
+        """Lädt das Modell im Hintergrund neu."""
         with self._lock:
             if self._reloading:
                 if self._debug:
@@ -4141,17 +4920,18 @@ class TranscriptionEngine:
         return True
 
     def is_model_loading(self) -> bool:
-        """Gibt zurück, ob gerade ein Modell im Hintergrund geladen wird."""
-        return self._reloading
+        with self._lock:
+            return self._reloading
 
     def safe_transcribe(
         self, audio_data: bytes, max_retries: int = 2
     ) -> Optional[TranscriptionResult]:
-        """
-        Führt eine Transkription mit Wiederholungsversuchen bei Fehlern durch.
-        Gibt ein TranscriptionResult oder None zurück.
-        """
-        with self._model_usage_lock:
+        """Sichere Transkription mit Wiederholungsversuchen bei Fehlern."""
+        if self._disposing:
+            logger.warning("TranscriptionEngine is being disposed – cannot transcribe")
+            return None
+
+        with self._lock:
             if self._reloading:
                 if self._debug:
                     logger.debug("Reloading in progress – skip transcription")
@@ -4163,51 +4943,61 @@ class TranscriptionEngine:
                 log_debug("transcribe", f"Audio validation failed: {msg}")
             return None
 
+        last_error = None
         for attempt in range(max_retries + 1):
             try:
-                if attempt == 0 or self._last_confidence_threshold < 0.5:
+                # Adaptive Enhancement: bei niedriger Konfidenz verstärken
+                with self._state_lock:
+                    last_conf = self._last_confidence_threshold
+                if attempt == 0 or last_conf < 0.5:
                     processed = self._audio_enhancer.enhance_audio(
-                        audio_data, self._last_confidence_threshold, 0
+                        audio_data, last_conf, 0
                     )
                 else:
                     processed = audio_data
+
                 result = self.transcribe_audio(processed)
                 if result and result.text and result.text.strip():
-                    self._last_confidence_threshold = getattr(result, "confidence", 0.5)
+                    with self._state_lock:
+                        self._last_confidence_threshold = getattr(result, "confidence", 0.5)
                     return result
+
                 if self._debug:
                     logger.debug(f"Transcription returned empty text (attempt {attempt+1})")
+
             except RuntimeError as e:
+                last_error = e
                 if "out of memory" in str(e).lower() and self.device == "cuda":
                     logger.error(f"🚨 CUDA out of memory (attempt {attempt+1}) – versuche Gegenmaßnahmen")
                     self._handle_cuda_oom()
+                    # nach OOM-Bereinigung erneut versuchen
                     continue
                 else:
-                    if self._debug:
-                        logger.warning(f"RuntimeError in Transkription (Versuch {attempt+1}): {e}")
+                    logger.warning(f"RuntimeError in Transkription (Versuch {attempt+1}): {e}")
+                    if self._debug and attempt == max_retries:
                         logger.exception("Stacktrace:")
             except Exception as e:
+                last_error = e
                 if attempt == max_retries:
                     logger.exception(f"Transkriptionsfehler (letzter Versuch): {e}")
                 else:
-                    if self._debug:
-                        logger.warning(f"Transkriptionsfehler (Versuch {attempt+1}): {e}")
+                    logger.warning(f"Transkriptionsfehler (Versuch {attempt+1}): {e}")
+
             if attempt < max_retries:
                 wait_time = 0.5 * (attempt + 1)
-                if self._debug:
-                    logger.debug(f"Warte {wait_time:.1f}s vor nächstem Versuch")
                 time.sleep(wait_time)
 
         logger.error(f"❌ safe_transcribe fehlgeschlagen nach {max_retries+1} Versuchen")
+        if last_error:
+            raise last_error
         return None
 
     def transcribe_audio(
         self, audio_data: bytes, include_timestamps: bool = False
     ) -> Any:
-        """
-        Kern‑Transkription. Gibt entweder ein einzelnes TranscriptionResult (ohne Timestamps)
-        oder eine Liste von TranscriptionResult (mit Timestamps) zurück.
-        """
+        if self._disposing:
+            return [] if include_timestamps else None
+
         with self._model_usage_lock:
             model = self.model
             if not model:
@@ -4222,7 +5012,12 @@ class TranscriptionEngine:
                 return [] if include_timestamps else None
 
         return self._transcribe_worker(
-            model, processed, language, beam_size, vad_params, include_timestamps,
+            model,
+            processed,
+            language,
+            beam_size,
+            vad_params,
+            include_timestamps,
             hotwords=self.settings.hotwords,
             best_of=self.settings.best_of,
             patience=self.settings.patience,
@@ -4236,9 +5031,9 @@ class TranscriptionEngine:
     def emergency_fallback_transcription(
         self, audio_data: Union[bytes, Any]
     ) -> Optional[TranscriptionResult]:
-        """
-        Minimalistische Fallback‑Transkription, wenn die normale fehlschlägt.
-        """
+        if self._disposing:
+            return None
+        self._load_modules()   # Sicherstellen, dass numpy geladen ist
         with self._model_usage_lock:
             model = self.model
             if not model:
@@ -4249,7 +5044,6 @@ class TranscriptionEngine:
                     if audio_np.dtype == self._np.int16:
                         audio_np = audio_np / 32768.0
                 else:
-                    self._load_modules()
                     audio_np = (
                         self._np.frombuffer(audio_data, dtype=self._np.int16).astype(self._np.float32) / 32768.0
                     )
@@ -4259,12 +5053,14 @@ class TranscriptionEngine:
                 return None
 
     def get_current_model(self) -> str:
-        """Gibt den Namen des aktuell aktiven Modells zurück."""
+        if self._disposing:
+            return "disposing"
         with self._model_usage_lock:
             return self.model_size if self.model_size else "None"
 
     def test_model_functionality(self) -> bool:
-        """Testet das geladene Modell mit einem kurzen Dummy‑Audio."""
+        if self._disposing:
+            return False
         with self._model_usage_lock:
             if not self.model:
                 return False
@@ -4288,14 +5084,13 @@ class TranscriptionEngine:
                 return False
 
     def validate_audio_data(self, audio_data: bytes) -> Tuple[bool, str]:
-        """Prüft, ob die Audiodaten gültig sind (nicht leer, nicht stumm)."""
+        self._load_modules()   # Sicherstellen, dass numpy geladen ist
         if not isinstance(audio_data, bytes):
             return False, "Audio data must be bytes"
         if len(audio_data) == 0:
             return False, "Audio data is empty"
         if len(audio_data) < 1600:
             return False, f"Audio data too short: {len(audio_data)} bytes"
-        self._load_modules()
         if self._np is not None:
             try:
                 audio_np = self._np.frombuffer(audio_data, dtype=self._np.int16)
@@ -4308,7 +5103,6 @@ class TranscriptionEngine:
         return True, "Valid"
 
     def is_valid_segment(self, text: str, confidence: float) -> bool:
-        """Prüft, ob ein Transkriptionssegment gültig ist (Mindestlänge, keine Leerzeichen, Confidence)."""
         if not text or len(text.strip()) < 2:
             return False
         clean = text.strip()
@@ -4323,7 +5117,6 @@ class TranscriptionEngine:
         return True
 
     def clear_cache(self) -> None:
-        """Leert den Transkriptions‑Cache und den GPU‑Cache (falls vorhanden)."""
         with self._lock:
             self._cache.clear()
             self._last_transcription_text = ""
@@ -4335,7 +5128,6 @@ class TranscriptionEngine:
                 pass
 
     def dispose(self) -> None:
-        """Gibt alle Ressourcen frei (Modelle, Cache, GPU‑Speicher)."""
         logger.info("🧹 Transcription Engine Dispose...")
         self._disposing = True
         with self._lock:
@@ -4350,7 +5142,6 @@ class TranscriptionEngine:
 
     # ---------- Private Hilfsmethoden ----------
     def _load_modules(self) -> None:
-        """Lädt benötigte Module (numpy, scipy, torch) nach Bedarf."""
         if self._np is None and NUMPY_AVAILABLE:
             self._np = FastLazyLoader.load("numpy")
         if self._scipy_signal is None and SCIPY_AVAILABLE:
@@ -4359,9 +5150,6 @@ class TranscriptionEngine:
             self._torch = FastLazyLoader.load("torch")
 
     def _detect_optimal_device(self) -> Tuple[str, str]:
-        """
-        Ermittelt das beste verfügbare Device (CUDA, MPS, CPU) und den Compute‑Typ.
-        """
         self._load_modules()
         device = "cpu"
         compute_type = "int8"
@@ -4398,9 +5186,6 @@ class TranscriptionEngine:
         return device, compute_type
 
     def _estimate_model_memory(self, model_size: str) -> float:
-        """
-        Schätzt den benötigten VRAM für ein Modell (in GB).
-        """
         estimates = {
             "tiny": 1.0,
             "tiny.en": 1.0,
@@ -4415,18 +5200,14 @@ class TranscriptionEngine:
             "large-v2": 6.0,
             "large-v3": 6.0,
         }
-        # Fallback: Wenn der genaue Name nicht im Dict ist, versuche, "large" zu erkennen
         size_lower = model_size.lower()
         if size_lower in estimates:
             return estimates[size_lower]
         if size_lower.startswith("large"):
             return 6.0
-        return 3.0  # Standard
+        return 3.0
 
     def _get_free_gpu_memory(self) -> Optional[float]:
-        """
-        Liefert den freien GPU‑Speicher in GB oder None, falls nicht verfügbar.
-        """
         self._load_modules()
         if self.device != "cuda" or self._torch is None:
             return None
@@ -4435,17 +5216,15 @@ class TranscriptionEngine:
             if not torch.cuda.is_available():
                 return None
             device_idx = torch.cuda.current_device()
-            allocated = torch.cuda.memory_allocated(device_idx)
+            # Verwende memory_reserved für bessere Schätzung des tatsächlichen VRAM‑Verbrauchs
+            reserved = torch.cuda.memory_reserved(device_idx)
             total = torch.cuda.get_device_properties(device_idx).total_memory
-            free = (total - allocated) / (1024**3)
+            free = (total - reserved) / (1024**3)
             return free
         except Exception:
             return None
 
     def _load_faster_whisper(self, model_size: str) -> Any:
-        """
-        Lädt ein Modell mit faster‑whisper.
-        """
         try:
             WhisperModel = FastLazyLoader.load("faster_whisper")
             model = WhisperModel(
@@ -4462,9 +5241,6 @@ class TranscriptionEngine:
             return None
 
     def _load_openai_whisper(self, model_size: str) -> Any:
-        """
-        Lädt ein Modell mit openai‑whisper.
-        """
         try:
             import whisper
             device = "cuda" if self.device == "cuda" else "cpu"
@@ -4476,7 +5252,6 @@ class TranscriptionEngine:
             return None
 
     def _unload_model(self, model: Any) -> None:
-        """Entlädt ein Modell und gibt GPU‑Speicher frei."""
         if model is None:
             return
 
@@ -4496,81 +5271,13 @@ class TranscriptionEngine:
             except Exception as e:
                 logger.warning(f"⚠️ Fehler beim Leeren des GPU-Caches: {e}")
 
-    # ---------- Thread‑sicheres Laden ----------
     def _get_model_lock(self, model_size: str) -> threading.Lock:
-        """Liefert einen modellspezifischen Lock zurück (erstellt ihn bei Bedarf)."""
         with self._model_locks_lock:
             if model_size not in self._model_locks:
                 self._model_locks[model_size] = threading.Lock()
             return self._model_locks[model_size]
 
-    def _set_active_model(self, model: Any, model_size: str, backend: str, cache_key: Tuple[str, str]) -> None:
-        """
-        Setzt das aktive Modell und entlädt das vorherige.
-        Das Entladen erfolgt außerhalb des Locks, um Deadlocks zu vermeiden.
-        """
-        old_model = None
-        with self._model_usage_lock:
-            if self.model is not None and (self.model_size, self.whisper_backend) != cache_key:
-                # Altes Modell für spätere Bereinigung merken
-                old_model = self.model
-            self.model = model
-            self.model_size = model_size
-            self.whisper_backend = backend
-            self._model_loaded_flag = True
-
-        # Altes Modell jetzt außerhalb des Locks entladen
-        if old_model is not None:
-            self._unload_model(old_model)
-
-    def _add_to_cache_and_set_active(
-        self, model: Any, model_size: str, backend: str, cache_key: Tuple[str, str], set_active: bool
-    ) -> None:
-        """
-        Fügt ein Modell zum Cache hinzu (LRU) und setzt es ggf. als aktiv.
-        """
-        with self._lock:
-            if cache_key not in self._model_cache:
-                self._model_cache[cache_key] = model
-                if len(self._model_cache) > self._max_cached_models:
-                    oldest_key, old_model = next(iter(self._model_cache.items()))
-                    del self._model_cache[oldest_key]
-                    self._unload_model(old_model)
-            if set_active:
-                self._set_active_model(model, model_size, backend, cache_key)
-
-    def _load_model_with_checks(
-        self, model_size: str, backend: str, cache_key: Tuple[str, str], set_active: bool
-    ) -> Optional[Tuple[Any, str]]:
-        """
-        Lädt ein Modell mit Prüfung auf ausreichend VRAM und ggf. Fallback auf kleinere Modelle.
-        """
-        with self._get_model_lock(model_size):
-            # Double‑checked locking
-            with self._lock:
-                if cache_key in self._model_cache:
-                    model = self._model_cache[cache_key]
-                    self._model_cache.move_to_end(cache_key)
-                    if set_active:
-                        self._set_active_model(model, model_size, backend, cache_key)
-                    return model, backend
-
-            # VRAM prüfen und ggf. iterativ kleineres Modell laden
-            fallback_result = self._try_smaller_model_if_needed(model_size)
-            if fallback_result is not None:
-                return fallback_result
-
-            model = self._perform_load(backend, model_size)
-            if model is None:
-                return None
-
-            self._add_to_cache_and_set_active(model, model_size, backend, cache_key, set_active)
-            return model, backend
-
     def _perform_load(self, backend: str, model_size: str) -> Any:
-        """
-        Führt den eigentlichen Modell‑Ladevorgang durch.
-        """
         logger.info("📁 Modell wird im Standard-Cache von Hugging Face gespeichert.")
         model = None
         if backend == "faster_whisper":
@@ -4581,71 +5288,8 @@ class TranscriptionEngine:
             model = self._load_openai_whisper(model_size)
         return model
 
-    # ---------- OOM‑ und Fallback‑Logik ----------
-    def _try_smaller_model_if_needed(self, model_size: str) -> Optional[Tuple[Any, str]]:
-        """
-        Prüft, ob genügend VRAM für das angeforderte Modell vorhanden ist.
-        Falls nicht, wird versucht, ein kleineres Modell zu laden.
-        """
-        free_gb = self._get_free_gpu_memory()
-        if free_gb is None:
-            return None
-
-        estimated = self._estimate_model_memory(model_size)
-        buffer_gb = max(1.0, free_gb * 0.2)
-        required_gb = estimated + buffer_gb
-        if free_gb >= required_gb:
-            return None
-
-        if self._torch and self.device == "cuda":
-            self._torch.cuda.empty_cache()
-            time.sleep(0.2)
-            free_gb = self._get_free_gpu_memory()
-            if free_gb is not None and free_gb >= required_gb:
-                logger.info(f"✅ Nach Cache-Leerung: {free_gb:.1f} GB frei – genug für {model_size}")
-                return None
-
-        current_idx = self.MODEL_SIZE_ORDER.index(model_size) if model_size in self.MODEL_SIZE_ORDER else -1
-        for idx in range(current_idx - 1, -1, -1):
-            smaller = self.MODEL_SIZE_ORDER[idx]
-            smaller_est = self._estimate_model_memory(smaller)
-            smaller_required = smaller_est + buffer_gb
-            if free_gb is not None and free_gb >= smaller_required:
-                logger.info(f"🔄 Fallback auf {smaller}")
-                result = self.load_model(smaller, set_active=True)
-                if result is not None:
-                    return result
-        logger.error("❌ Nicht genug VRAM für irgendein Modell – breche ab.")
-        return None
-
-    def _clear_gpu_cache_and_check(self) -> Optional[float]:
-        """Leert den GPU‑Cache und gibt den freien Speicher zurück."""
-        logger.info("🧹 CUDA OOM: Bereinige GPU-Speicher...")
-        if self._torch and self.device == "cuda":
-            self._torch.cuda.empty_cache()
-            time.sleep(0.2)
-            free_gb = self._get_free_gpu_memory()
-            if free_gb is not None and free_gb > 1.0:
-                logger.info(f"✅ Nach Cache-Leerung: {free_gb:.1f} GB frei – versuche weiter mit gleichem Modell")
-                return free_gb
-        return None
-
-    def _unload_current_model(self) -> None:
-        """Entlädt das aktuell aktive Modell."""
-        with self._model_usage_lock:
-            if self.model is not None:
-                self._unload_model(self.model)
-                self.model = None
-                self.model_size = None
-        if self._torch and self.device == "cuda":
-            self._torch.cuda.empty_cache()
-            time.sleep(0.1)
-
     def _try_smaller_model_iterative(self) -> bool:
-        """
-        Versucht iterativ kleinere Modelle zu laden, bis eines funktioniert.
-        Gibt True zurück, wenn ein Modell erfolgreich geladen wurde.
-        """
+        """Versucht schrittweise kleinere Modelle, bis ein funktionsfähiges gefunden wird."""
         current = self.model_size or "medium"
         if current not in self.MODEL_SIZE_ORDER:
             for size in self.MODEL_SIZE_ORDER:
@@ -4660,11 +5304,19 @@ class TranscriptionEngine:
             logger.info(f"🔄 Versuche kleineres Modell: {smaller}")
             result = self.load_model(smaller, set_active=True)
             if result is not None:
-                return True
+                # Test, ob das Modell wirklich funktioniert
+                if self.test_model_functionality():
+                    return True
+                else:
+                    logger.warning(f"⚠️ Modell {smaller} funktioniert nicht, lösche aus Cache")
+                    with self._lock:
+                        cache_key = (smaller, self.whisper_backend)
+                        if cache_key in self._model_cache:
+                            del self._model_cache[cache_key]
+                    self._unload_model(result[0])
         return False
 
     def _fallback_to_cpu(self) -> None:
-        """Wechselt auf CPU (falls OOM)."""
         logger.warning("⚠️ Schalte wegen OOM auf CPU um")
         with self._model_usage_lock:
             self.device = "cpu"
@@ -4673,28 +5325,38 @@ class TranscriptionEngine:
         self.load_model(current, set_active=True)
 
     def _handle_cuda_oom(self) -> None:
-        """Behandelt einen CUDA OOM‑Fehler (Cache leeren, kleineres Modell, CPU‑Fallback)."""
+        """Behandelt CUDA Out-of-Memory durch Leeren des Caches und ggf. Fallback auf CPU."""
         if self.device == "cpu":
-            if self._debug:
-                logger.warning("⚠️ Bereits auf CPU, kann OOM nicht beheben.")
+            logger.warning("⚠️ Bereits auf CPU, kann OOM nicht beheben.")
             return
 
-        with self._model_usage_lock:
+        with self._lock:
             self._reloading = True
 
         try:
-            self._clear_gpu_cache_and_check()
+            # 1. GPU-Cache leeren
+            if self._torch:
+                self._torch.cuda.empty_cache()
+                time.sleep(0.2)
+                free_gb = self._get_free_gpu_memory()
+                if free_gb is not None and free_gb > 1.0:
+                    logger.info(f"✅ Nach Cache-Leerung: {free_gb:.1f} GB frei – versuche weiter mit gleichem Modell")
+                    return
+
+            # 2. Versuche kleineres Modell
             if self._try_smaller_model_iterative():
                 return
+
+            # 3. Fallback auf CPU
             self._fallback_to_cpu()
+
         except Exception as e:
             logger.exception(f"❌ Fehler in _handle_cuda_oom: {e}")
         finally:
-            with self._model_usage_lock:
+            with self._lock:
                 self._reloading = False
 
     def _force_model_cleanup(self) -> None:
-        """Entfernt das aktive Modell und leert den Cache."""
         with self._model_usage_lock:
             old_model = self.model
             old_size = self.model_size
@@ -4723,43 +5385,29 @@ class TranscriptionEngine:
                 if self._debug:
                     logger.warning(f"⚠️ Failed to clear GPU cache: {e}")
 
-    # ---------- Transkriptions‑Logik ----------
     def _prepare_transcription(self, audio_data: bytes) -> Tuple[Any, Optional[str], int, Dict[str, Any]]:
-        """
-        Bereitet die Audiodaten für die Transkription vor:
-        - Lädt benötigte Module (numpy etc.)
-        - Wendet Audio‑Enhancement an
-        - Konvertiert in Float32‑Array
-        - Bestimmt Beam Size, Sprache und VAD‑Parameter
-        """
         self._load_modules()
 
-        # Prüfe, ob numpy verfügbar ist
         if self._np is None:
             raise RuntimeError("numpy is required but not available. Please install numpy.")
 
-        # Audio verbessern (Rauschunterdrückung, Verstärkung etc.)
-        processed = self._audio_enhancer.enhance_audio(
-            audio_data, self._last_confidence_threshold, 0
-        )
+        with self._state_lock:
+            last_conf = self._last_confidence_threshold
+        processed = self._audio_enhancer.enhance_audio(audio_data, last_conf, 0)
 
-        # In Float32-Array konvertieren
         audio_np = (
             self._np.frombuffer(processed, dtype=self._np.int16).astype(self._np.float32) / 32768.0
         )
 
-        # Parameter aus den Einstellungen übernehmen
         beam_size = self.settings.beam_size
         language = self.forced_language if self.forced_language else None
-        vad_language = self.forced_language or self._last_detected_language
+        with self._state_lock:
+            vad_language = self.forced_language or self._last_detected_language
         vad_params = self._get_vad_parameters(vad_language)
 
         return audio_np, language, beam_size, vad_params
 
     def _get_vad_parameters(self, language: Optional[str]) -> Dict[str, Any]:
-        """
-        Liefert VAD‑Parameter, ggf. sprachspezifisch überschrieben.
-        """
         if language and language in self.config.LANGUAGE_VAD:
             lang_vad = self.config.LANGUAGE_VAD[language]
             return {
@@ -4777,11 +5425,6 @@ class TranscriptionEngine:
     def _universal_transcribe(
         self, model: Any, audio_np: Any, **kwargs: Any
     ) -> Tuple[List[Any], Any]:
-        """
-        Universelle Transkription, die sowohl faster-whisper als auch openai-whisper unterstützt.
-        Gibt ein Tupel (segments, info) zurück. Im Fehlerfall wird ein leeres Segment und
-        ein _EmptyInfo-Objekt zurückgegeben.
-        """
         if model is None:
             raise ValueError("Kein Modell geladen")
 
@@ -4789,7 +5432,6 @@ class TranscriptionEngine:
         if self._debug:
             log_debug("transcribe", f"Backend: {backend}, Parameter: {kwargs}")
 
-        # Filtere die Parameter je nach Backend
         allowed = self._ALLOWED_FASTER if backend == "faster_whisper" else self._ALLOWED_OPENAI
         filtered = {k: v for k, v in kwargs.items() if k in allowed}
         if DEBUG_LEVEL >= 3:
@@ -4817,18 +5459,14 @@ class TranscriptionEngine:
                 else:
                     raise
             except Exception as e:
-                # Bei anderen Fehlern: einmaligen Versuch abbrechen und Fallback liefern
                 logger.warning(f"⚠️ Transkriptionsfehler: {e}")
                 if attempt == 1:
-                    # Zweiter Versuch fehlgeschlagen -> Fallback
                     break
                 continue
 
-        # Fallback: Leere Segmente und ein _EmptyInfo-Objekt
         return [], _EmptyInfo()
 
     def _handle_universal_cuda_oom(self) -> None:
-        """Leert den GPU‑Cache bei einem OOM‑Fehler in der universellen Transkription."""
         if self._torch is not None and self.device == "cuda":
             self._torch.cuda.empty_cache()
             time.sleep(0.5)
@@ -4836,9 +5474,9 @@ class TranscriptionEngine:
     def _faster_whisper_transcribe(
         self, model: Any, audio_np: Any, **kwargs: Any
     ) -> Tuple[List[Any], Any]:
-        """
-        Transkription mit faster‑whisper.
-        """
+        if DEBUG_LEVEL >= 3:
+            log_debug("whisper", f"Start transcribe with {len(audio_np)} samples, backend=faster_whisper")
+
         try:
             vad_params = kwargs.pop("vad_parameters", None)
             if kwargs.get("vad_filter", False) and vad_params is None:
@@ -4886,9 +5524,9 @@ class TranscriptionEngine:
     def _openai_whisper_transcribe(
         self, model: Any, audio_np: Any, **kwargs: Any
     ) -> Tuple[List[Any], Any]:
-        """
-        Transkription mit openai‑whisper.
-        """
+        if DEBUG_LEVEL >= 3:
+            log_debug("whisper", f"Start transcribe with {len(audio_np)} samples, backend=openai_whisper")
+
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in self._ALLOWED_OPENAI}
         filtered_kwargs.setdefault("language", None)
         filtered_kwargs.setdefault("task", "transcribe")
@@ -4936,9 +5574,6 @@ class TranscriptionEngine:
         condition_on_previous_text: bool = True,
         suppress_tokens: str = "-1",
     ) -> Dict[str, Any]:
-        """
-        Baut die Parameter für den Aufruf von _universal_transcribe zusammen.
-        """
         kwargs = {
             "language": language,
             "task": "transcribe",
@@ -4973,9 +5608,8 @@ class TranscriptionEngine:
         include_timestamps: bool,
         **kwargs
     ) -> Any:
-        """
-        Arbeitsfunktion, die die eigentliche Transkription mit Fallback‑Logik durchführt.
-        """
+        vad_fallback_attempts = 0   # lokaler Zähler, nicht als Instanzvariable
+
         try:
             if self._debug:
                 log_debug("vad", f"Parameter: {vad_params}, aktiv: {self.settings.vad_filter}")
@@ -4986,11 +5620,10 @@ class TranscriptionEngine:
 
             segments, info = self._universal_transcribe(model, audio_np, **transcribe_kwargs)
 
-            # VAD-Fallback mit Begrenzung
-            if not segments and self._vad_fallback_enabled and self._vad_fallback_attempts < 2:
-                self._vad_fallback_attempts += 1
+            if not segments and self._vad_fallback_enabled and vad_fallback_attempts < 2:
+                vad_fallback_attempts += 1
                 if self._debug:
-                    log_debug("vad", f"Keine Segmente mit VAD – Versuch {self._vad_fallback_attempts}/2 ohne VAD...")
+                    log_debug("vad", f"Keine Segmente mit VAD – Versuch {vad_fallback_attempts}/2 ohne VAD...")
                 kwargs_no_vad = transcribe_kwargs.copy()
                 kwargs_no_vad["vad_filter"] = False
                 kwargs_no_vad.pop("vad_parameters", None)
@@ -5025,7 +5658,6 @@ class TranscriptionEngine:
                 return self._create_continuous_result(valid_segments, info, total_confidence)
 
         except TranscriptionError as e:
-            # Spezifische Behandlung von Transkriptionsfehlern (z.B. CUDA-OOM)
             logger.error(f"TranscriptionError in _transcribe_worker: {e}")
             return [] if include_timestamps else None
 
@@ -5033,25 +5665,18 @@ class TranscriptionEngine:
             logger.exception(f"❌ _transcribe_worker Fehler: {e}")
             return [] if include_timestamps else None
 
-        finally:
-            # Zähler zurücksetzen, damit der nächste Chunk wieder mit VAD startet
-            self._vad_fallback_attempts = 0
-
     def _update_detected_language(self, info: Any) -> None:
-        """Aktualisiert die zuletzt erkannte Sprache."""
         if hasattr(info, "language") and info.language != "unknown":
             if getattr(info, "language_probability", 1.0) < 0.4:
                 if self._debug:
                     logger.debug("Low language confidence, using fallback")
             else:
-                self._last_detected_language = info.language
+                with self._state_lock:
+                    self._last_detected_language = info.language
 
     def _process_segments(
         self, segments: List[Any], info: Any
     ) -> Tuple[List[Any], float]:
-        """
-        Filtert gültige Segmente und berechnet die Gesamt‑Confidence.
-        """
         valid_segments = []
         total_confidence = 0.0
         for seg in segments:
@@ -5065,9 +5690,6 @@ class TranscriptionEngine:
     def _create_timestamped_results(
         self, segments: List[Any], info: Any
     ) -> List[TranscriptionResult]:
-        """
-        Erzeugt eine Liste von TranscriptionResult mit Zeitstempeln.
-        """
         return [
             TranscriptionResult(
                 text=seg.text.strip(),
@@ -5082,9 +5704,6 @@ class TranscriptionEngine:
     def _create_continuous_result(
         self, segments: List[Any], info: Any, total_confidence: float
     ) -> TranscriptionResult:
-        """
-        Erzeugt ein einzelnes TranscriptionResult aus mehreren Segmenten (ohne Timestamps).
-        """
         full_text = " ".join(seg.text.strip() for seg in segments)
         avg_conf = total_confidence / len(segments)
         return TranscriptionResult(
@@ -5096,9 +5715,6 @@ class TranscriptionEngine:
     def _transcribe_minimal(
         self, model: Any, audio_np: Any, language: Optional[str]
     ) -> Optional[TranscriptionResult]:
-        """
-        Minimalistische Transkription mit sehr niedrigen Anforderungen.
-        """
         try:
             segments, info = self._universal_transcribe(
                 model, audio_np,
@@ -5130,9 +5746,6 @@ class TranscriptionEngine:
         return None
 
     def _calculate_enhanced_confidence(self, segment: Any, text: str) -> float:
-        """
-        Berechnet eine verbesserte Confidence, die Textlänge und Wortzahl berücksichtigt.
-        """
         base = max(getattr(segment, "confidence", 0.0), 0.1)
         words = text.split()
         word_count = len(words)
@@ -5149,9 +5762,6 @@ class TranscriptionEngine:
         return min(0.95, base + boosts)
 
     def _parse_suppress_tokens(self, token_str: str) -> List[int]:
-        """
-        Wandelt einen kommagetrennten String in eine Liste von Token‑IDs um.
-        """
         if not token_str:
             return [-1]
         try:
@@ -5161,83 +5771,81 @@ class TranscriptionEngine:
                 logger.warning(f"Ungültiges suppress_tokens Format: {token_str}, verwende [-1]")
             return [-1]
 
-    # ---------- GPU‑Statistik (optional) ----------
-    def _log_gpu_stats(self, chunk_counter: int, last_gpu_stats_time_ref: float) -> float:
-        """
-        Loggt GPU‑Statistiken, wenn pynvml verfügbar ist.
-        Gibt die aktuelle Zeit zurück (für den Aufrufer).
-        """
-        if not logger.isEnabledFor(logging.DEBUG):
-            return last_gpu_stats_time_ref
-
-        if chunk_counter % 5 != 0:
-            return last_gpu_stats_time_ref
-
-        if TORCH_AVAILABLE and self.device == "cuda":
-            torch = FastLazyLoader.load("torch")
-            try:
-                allocated = torch.cuda.memory_allocated() / 1024**3
-                reserved = torch.cuda.memory_reserved() / 1024**3
-                log_debug("gpu", f"Chunk {chunk_counter}: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB")
-            except (RuntimeError, AttributeError) as e:
-                log_debug("gpu", f"GPU-Statistik-Fehler: {e}")
-            except Exception as e:
-                logger.error(f"Unerwarteter Fehler bei GPU-Statistik: {e}", exc_info=True)
-
-        # pynvml‑Statistiken nur alle 10 Sekunden ausgeben
-        now = time.time()
-        if now - last_gpu_stats_time_ref > 10:
-            if GPUStats.is_available():
-                temp = GPUStats.get_temperature()
-                util = GPUStats.get_utilization()
-                if temp is not None and util is not None:
-                    log_debug("gpu", f"Temp={temp}°C, Util={util}%")
-                elif temp is not None:
-                    log_debug("gpu", f"Temp={temp}°C (Util nicht verfügbar)")
-                elif util is not None:
-                    log_debug("gpu", f"Util={util}% (Temp nicht verfügbar)")
-            return now
-        return last_gpu_stats_time_ref
-
 class DummyTranscriptionEngine:
+    """
+    Platzhalter‑Engine, wenn kein Whisper‑Backend verfügbar ist.
+    Thread‑sicher und gibt konsistente Dummy‑Ergebnisse zurück.
+    """
+
     def __init__(
         self,
         settings: Optional["AdvancedSettings"] = None,
         cache_manager: Optional[CacheManager] = None,
     ):
         self.settings = settings or AdvancedSettings()
+        self.cache_manager = cache_manager or AppContext().cache_manager
         self.model = None
         self.model_size = "dummy"
         self.whisper_backend = None
         self.demo_mode = True
+        self._lock = threading.RLock()
+        self._last_result: Optional[TranscriptionResult] = None
+        self._last_audio_hash: Optional[str] = None
 
     def load_model(
         self, model_size: str, set_active: bool = False
     ) -> Optional[Tuple[Any, str]]:
-        logger.info("Dummy-Modus: Laden eines Modells nicht erforderlich.")
-        return (None, "dummy")
+        with self._lock:
+            logger.info("Dummy-Modus: Laden eines Modells nicht erforderlich.")
+            return (None, "dummy")
 
     def transcribe_audio(
         self, audio_data: bytes, include_timestamps: bool = False
     ) -> Any:
-        if include_timestamps:
-            dummy = TranscriptionResult(
-                text="[Whisper nicht verfügbar]",
-                confidence=0.5,
-                language="de",
-                start=0.0,
-                end=5.0,
-            )
-            return [dummy]
-        else:
-            return TranscriptionResult(
-                text="[Whisper nicht verfügbar]", confidence=0.5, language="de"
-            )
+        """
+        Gibt ein Dummy‑Transkriptionsergebnis zurück.
+        Bei wiederholten Aufrufen mit identischen Audiodaten wird das gleiche
+        Ergebnis geliefert (optionales Caching).
+        """
+        with self._lock:
+            # Optional: Cache basierend auf Audio‑Hash, falls gewünscht
+            audio_hash = hashlib.sha256(audio_data).hexdigest() if audio_data else None
+            if self._last_audio_hash == audio_hash and self._last_result is not None:
+                result = self._last_result
+            else:
+                if include_timestamps:
+                    result = [
+                        TranscriptionResult(
+                            text="[Whisper nicht verfügbar]",
+                            confidence=0.5,
+                            language="de",
+                            start=0.0,
+                            end=5.0,
+                        )
+                    ]
+                else:
+                    result = TranscriptionResult(
+                        text="[Whisper nicht verfügbar]",
+                        confidence=0.5,
+                        language="de",
+                    )
+                # Cache speichern (für identische Audiodaten)
+                self._last_audio_hash = audio_hash
+                self._last_result = result
+
+            return result
 
     def safe_transcribe(
         self, audio_data: bytes, max_retries: int = 2
     ) -> Optional[TranscriptionResult]:
-        return self.transcribe_audio(audio_data)
+        """
+        Sicherer Aufruf, der die gleiche Dummy‑Transkription wie transcribe_audio
+        liefert, aber im nicht‑Timestamp‑Modus.
+        """
+        result = self.transcribe_audio(audio_data, include_timestamps=False)
+        if isinstance(result, list) and result:
+            return result[0]  # Falls doch Liste, nimm ersten
+        return result
 
     def get_current_model(self) -> str:
         return "dummy"
@@ -5251,8 +5859,15 @@ class DummyTranscriptionEngine:
     def test_model_functionality(self) -> bool:
         return True
 
-    def dispose(self) -> None:
+    def set_vad_fallback_enabled(self, enabled: bool) -> None:
+        """Dummy‑Implementierung – hat keine Wirkung."""
         pass
+
+    def dispose(self) -> None:
+        """Räumt auf (hier nichts zu tun)."""
+        with self._lock:
+            self._last_result = None
+            self._last_audio_hash = None
 
 # =============================================================================
 # 15. PLUGIN-KLASSEN (Plugin, PluginManager)
@@ -5695,12 +6310,18 @@ class StreamManager:
                 with self._stats_lock:
                     self._stats["cache_hits"] += 1
                 if self._debug:
-                    logger.debug(f"📦 Audio-URL Cache-Treffer für {url[:50]}...")
+                    if DEBUG_LEVEL >= 3:
+                        logger.debug(f"📦 Audio-URL Cache-Treffer für {url}")
+                    else:
+                        logger.debug(f"📦 Audio-URL Cache-Treffer für {url[:50]}...")
                 return cached
 
             if self._audio_url_fail_cache.get(url):
                 if self._debug:
-                    logger.debug(f"📦 Audio-URL Fail-Cache-Treffer für {url[:50]}...")
+                    if DEBUG_LEVEL >= 3:
+                        logger.debug(f"📦 Audio-URL Fail-Cache-Treffer für {url}")
+                    else:
+                        logger.debug(f"📦 Audio-URL Fail-Cache-Treffer für {url[:50]}...")
                 return None
 
         platform_id, platform_name = self.detect_platform(url)
@@ -5758,7 +6379,10 @@ class StreamManager:
 
         self._last_method = extraction_method
         if self._debug and result:
-            logger.debug(f"🎵 EXTRACT_AUDIO_URL ENDE - Ergebnis: {result[:80]}...")
+            if DEBUG_LEVEL >= 3:
+                logger.debug(f"🎵 EXTRACT_AUDIO_URL ENDE - Ergebnis: {result}")
+            else:
+                logger.debug(f"🎵 EXTRACT_AUDIO_URL ENDE - Ergebnis: {result[:80]}...")
         return result
 
     def reset_stats(self) -> None:
@@ -5889,6 +6513,9 @@ class StreamManager:
         format_list = self._FORMAT_PRIORITIES.get(platform_id, self._FORMAT_PRIORITIES["generic"])
         proxy_arg = self._proxy if self._proxy_enabled else ""
 
+        audio_url = None  # <-- Initialisierung, um UnboundLocalError zu vermeiden
+        method_used = ""
+
         for i, format_str in enumerate(format_list[:2]):
             if self._debug:
                 logger.debug(f"  🔄 Versuche Format {i+1}: {format_str}")
@@ -5899,8 +6526,13 @@ class StreamManager:
             if audio_url:
                 if self._debug:
                     logger.debug(f"  ✅ Erfolg mit Format {format_str}")
-                return audio_url, f"generic_{format_str}"
-        return None, ""
+                method_used = f"generic_{format_str}"
+                break
+
+        if audio_url:
+            return audio_url, method_used
+        else:
+            return None, ""
 
     def _extract_youtube_audio_optimized(self, url: str, platform_id: str) -> Optional[str]:
         if self._debug:
@@ -5912,12 +6544,15 @@ class StreamManager:
                 logger.debug("  ❌ Ungültige Video-ID")
             return None
 
+        is_live = self._check_youtube_live_status(url)
+        format_str = "bestaudio" if is_live else "bestaudio[ext=m4a]/bestaudio/best"
+        
         if self.use_browser_cookies:
-            result = self._try_browser_cookies(url)
+            result = self._try_browser_cookies(url, format_str)
             if result:
                 return result
 
-        result = self._try_standard_methods(url)
+        result = self._try_standard_methods(url, format_str)
         if result:
             return result
 
@@ -5935,14 +6570,14 @@ class StreamManager:
         match = self._YOUTUBE_ID_REGEX.search(url)
         return match.group(1) if match else None
 
-    def _try_browser_cookies(self, url: str) -> Optional[str]:
+    def _try_browser_cookies(self, url: str, format_str: str = "bestaudio[ext=m4a]/bestaudio/best") -> Optional[str]:
         proxy_arg = self._proxy if self._proxy_enabled else ""
         for browser_cmd, browser_name in self._BROWSERS:
             if self._debug:
                 logger.debug(f"    🧪 Teste mit {browser_name}-Cookies...")
             audio_url = YtDlpHelper.get_audio_url(
                 url,
-                format_str="bestaudio[ext=m4a]/bestaudio/best",
+                format_str=format_str,
                 timeout=20,
                 use_cookies=True,
                 browser=browser_cmd,
@@ -5954,10 +6589,10 @@ class StreamManager:
                 return audio_url
         return None
 
-    def _try_standard_methods(self, url: str) -> Optional[str]:
+    def _try_standard_methods(self, url: str, format_str: str = "bestaudio[ext=m4a]/bestaudio/best") -> Optional[str]:
         proxy_arg = self._proxy if self._proxy_enabled else ""
         methods = [
-            {"name": "Standard yt-dlp", "format": "bestaudio[ext=m4a]/bestaudio/best", "timeout": 20},
+            {"name": "Standard yt-dlp", "format": format_str, "timeout": 20},
             {"name": "Lowest Quality", "format": "worstaudio", "timeout": 20},
         ]
         for method in methods:
@@ -6029,6 +6664,15 @@ class StreamManager:
         self._dvb_monitor_thread.start()
 
     def _start_dvb_stream(self, dvb_url: str) -> Optional[str]:
+        """
+        Startet einen VLC‑Prozess für DVB‑S‑Streaming.
+
+        Args:
+            dvb_url: DVB‑URL im Format dvb-s://frequency=...&symbolrate=...&polarization=...
+
+        Returns:
+            Die HTTP‑URL des VLC‑Streams oder None bei Fehler.
+        """
         if not shutil.which("vlc"):
             logger.error("❌ VLC nicht gefunden – für DVB wird VLC benötigt.", extra={"component": "stream"})
             return None
@@ -6070,6 +6714,7 @@ class StreamManager:
             logger.error("❌ 'frequency' ist ein Pflichtparameter für DVB-S.", extra={"component": "stream"})
             return None
 
+        # Lokalen Port finden
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.bind(('localhost', 0))
         port = sock.getsockname()[1]
@@ -6108,14 +6753,17 @@ class StreamManager:
                 logger.error("❌ VLC-Prozess für DVB ist sofort beendet.", extra={"component": "stream"})
                 return None
 
-            try:
-                import requests
-                r = requests.get(http_url, timeout=3)
-                if r.status_code != 200:
-                    logger.warning(f"⚠️ DVB-Stream antwortet mit Status {r.status_code}, aber VLC läuft.", extra={"component": "stream"})
-            except Exception as e:
-                logger.warning(f"⚠️ DVB-Stream-Test fehlgeschlagen: {e}", extra={"component": "stream"})
-
+            # Optionaler Stream‑Test, nur wenn requests verfügbar
+            if requests is not None:
+                try:
+                    r = requests.get(http_url, timeout=3)
+                    if r.status_code != 200:
+                        logger.warning(f"⚠️ DVB-Stream antwortet mit Status {r.status_code}, aber VLC läuft.", extra={"component": "stream"})
+                except Exception as e:
+                    logger.warning(f"⚠️ DVB-Stream-Test fehlgeschlagen: {e}", extra={"component": "stream"})
+            else:
+                logger.warning("⚠️ requests nicht installiert – DVB‑Stream‑Test übersprungen.")
+    
             with self._dvb_lock:
                 self._dvb_processes.append(process)
 
@@ -6240,7 +6888,10 @@ class YtDlpHelper:
                 return stdout.strip()
             else:
                 if logger.isEnabledFor(logging.DEBUG):
-                    stderr_preview = stderr[:200].replace("\n", " ")
+                    if DEBUG_LEVEL >= 3:
+                        stderr_preview = stderr.replace("\n", " ")
+                    else:
+                        stderr_preview = stderr[:200].replace("\n", " ")
                     logger.debug(f"  ⚠️ {method_name} fehlgeschlagen (Code {proc.returncode}): {stderr_preview}", extra={"component": "ytdlp"})
                 return None
         except subprocess.TimeoutExpired:
@@ -6368,84 +7019,176 @@ class YtDlpHelper:
         return None
 
 
-class FFmpegManager(PeriodicTaskMixin):
+# -----------------------------------------------------------------------------
+# Konstanten (sollten idealerweise aus ConfigDefaults importiert werden)
+# -----------------------------------------------------------------------------
+class FFmpegManagerDefaults:
+    """Standardwerte für den FFmpegManager (falls nicht in ConfigDefaults vorhanden)."""  
+    
+    # Prozess‑Management
+    DEFAULT_WAIT_AFTER_TERMINATE: float = 1.0
+    DEFAULT_WAIT_AFTER_KILL: float = 0.5
+    DEFAULT_MAX_IDLE_SECONDS: float = 30.0
+    DEFAULT_PROCESS_TIMEOUT: float = 5.0
+    DEFAULT_MAX_PROCESSES: int = 4
+
+    # Zeit‑Einstellungen
+    FIRST_DATA_TIMEOUT: float = 20.0
+    HLS_INITIAL_WAIT: float = 1.5
+    CLEANUP_INTERVAL: int = 60
+    INITIAL_PROCESS_CHECK_DELAY: float = 1.0
+
+    # Anzahl Wiederholungen bei URL‑Refresh
+    MAX_REFRESH_ATTEMPTS: int = 3
+    REFRESH_RETRY_DELAY_BASE: float = 2.0
+    REFRESH_RETRY_DELAY_MAX: float = 10.0
+
+    # Stderr‑Aggregation
+    STALLED_RECONNECT_LOG_INTERVAL: float = 10.0
+
+    # Prozess‑Terminierung (psutil & Fallback)
+    PSUTIL_CHILD_TERMINATE_TIMEOUT: float = 2.5
+    PSUTIL_CHILD_KILL_WAIT: float = 1.0
+    PSUTIL_PARENT_TERMINATE_TIMEOUT: float = 6.0
+    PSUTIL_PARENT_KILL_WAIT: float = 2.5
+    SUBPROC_TERMINATE_TIMEOUT: float = 5.0
+    SUBPROC_KILL_WAIT: float = 2.0
+
+
+class FFmpegManager:
     """
-    Verwaltung von FFmpeg‑Prozessen für Audio‑Streaming mit Semaphore‑beschränkter Parallelität.
-    Thread‑sicher, plattformunabhängig.
+    Verwaltung von FFmpeg‑Prozessen für Audio‑Streaming.
+
+    Für problematische Livestreams (YouTube, Twitch, Kick, etc.) wird zwingend
+    der Pipe‑Zweig (yt‑dlp + FFmpeg) verwendet, da nur yt‑dlp die korrekten
+    Cookies und Header setzen kann.
+    Thread‑sicher durch Locks und Semaphore.
     """
 
-    DEFAULT_WAIT_AFTER_TERMINATE = 1.0
-    DEFAULT_WAIT_AFTER_KILL = 0.5
-    DEFAULT_MAX_IDLE_SECONDS = 30.0
-    DEFAULT_PROCESS_TIMEOUT = 5.0
-    DEFAULT_MAX_PROCESSES = 4
+    # --- Timeout-Konstanten aus FFmpegManagerDefaults ---
+    PSUTIL_CHILD_TERMINATE_TIMEOUT = FFmpegManagerDefaults.PSUTIL_CHILD_TERMINATE_TIMEOUT
+    PSUTIL_CHILD_KILL_WAIT = FFmpegManagerDefaults.PSUTIL_CHILD_KILL_WAIT
+    PSUTIL_PARENT_TERMINATE_TIMEOUT = FFmpegManagerDefaults.PSUTIL_PARENT_TERMINATE_TIMEOUT
+    PSUTIL_PARENT_KILL_WAIT = FFmpegManagerDefaults.PSUTIL_PARENT_KILL_WAIT
+    SUBPROC_TERMINATE_TIMEOUT = FFmpegManagerDefaults.SUBPROC_TERMINATE_TIMEOUT
+    SUBPROC_KILL_WAIT = FFmpegManagerDefaults.SUBPROC_KILL_WAIT
 
-    FIRST_DATA_TIMEOUT = 20.0
-    HLS_INITIAL_WAIT = 1.5
-    CLEANUP_INTERVAL = 60
-    INITIAL_PROCESS_CHECK_DELAY = 1.0
+    # -------------------------------------------------------------------------
+    #  Klassenvariablen (Konstanten)
+    # -------------------------------------------------------------------------
+    WAIT_AFTER_TERMINATE: float = 1.0
+    WAIT_AFTER_KILL: float = 0.5
+    MAX_IDLE_SECONDS: float = 30.0
+    PROCESS_TIMEOUT: float = 5.0
+    MAX_PROCESSES: int = 4
 
+    FIRST_DATA_TIMEOUT: float = 20.0
+    HLS_INITIAL_WAIT: float = 1.5
+    CLEANUP_INTERVAL: int = 60
+    INITIAL_PROCESS_CHECK_DELAY: float = 1.0
+
+    MAX_REFRESH_ATTEMPTS: int = 3
+    REFRESH_RETRY_DELAY_BASE: float = 2.0
+    REFRESH_RETRY_DELAY_MAX: float = 10.0
+
+    STALLED_RECONNECT_LOG_INTERVAL: float = 10.0
+
+    # Plattformen, bei denen der Pipe‑Zweig bevorzugt wird
+    PIPE_PREFERRED_PLATFORMS = {"youtube", "twitch", "kick", "rumble", "tiktok", "facebook"}
+
+    # -------------------------------------------------------------------------
+    #  Interne Datenstruktur für Prozessinformationen
+    # -------------------------------------------------------------------------
     class _ProcessInfo:
         __slots__ = (
-            "process", "output_queue", "start_time", "url", "stopping",
-            "bytes_read", "platform", "is_live", "chunks_processed",
-            "last_activity", "headers_used", "process_id", "stats",
-            "stderr_thread", "stop_stderr"
+            "process_id", "process", "yt_process", "output_queue", "start_time", "url",
+            "stopping", "bytes_read", "platform", "is_live", "chunks_processed",
+            "last_activity", "headers_used", "stats", "stderr_thread", "stop_stderr",
+            "refresh_attempts", "current_read_future", "pipe_mode", "creation_time",
+            "last_error", "error_count", "last_stderr_line"
         )
-        def __init__(self, process_id: str, process: subprocess.Popen,
-                     output_queue: Optional[queue.Queue], url: str,
-                     platform: str, is_live: bool, headers_used: bool) -> None:
-            self.process_id = process_id
-            self.process = process
-            self.output_queue = output_queue
-            self.start_time = time.time()
-            self.url = url
-            self.stopping = False
-            self.bytes_read = 0
-            self.platform = platform
-            self.is_live = is_live
-            self.chunks_processed = 0
-            self.last_activity = time.time()
-            self.headers_used = headers_used
-            self.stats = {
+        def __init__(self,
+                     process_id: str,
+                     process: subprocess.Popen,
+                     output_queue: Optional[queue.Queue],
+                     url: str,
+                     platform: str,
+                     is_live: bool,
+                     headers_used: bool,
+                     yt_process: Optional[subprocess.Popen] = None,
+                     pipe_mode: bool = False) -> None:
+            self.process_id: str = process_id
+            self.process: subprocess.Popen = process
+            self.yt_process: Optional[subprocess.Popen] = yt_process
+            self.output_queue: Optional[queue.Queue] = output_queue
+            self.start_time: float = time.time()
+            self.creation_time: float = time.time()   # für Laufzeitmessung
+            self.url: str = url
+            self.stopping: bool = False
+            self.bytes_read: int = 0
+            self.platform: str = platform
+            self.is_live: bool = is_live
+            self.chunks_processed: int = 0
+            self.last_activity: float = time.time()
+            self.headers_used: bool = headers_used
+            self.pipe_mode: bool = pipe_mode           # ob yt-dlp verwendet wird
+            self.stats: Dict[str, Any] = {
                 "total_reads": 0,
                 "total_read_bytes": 0,
                 "read_errors": 0,
                 "last_read_duration_ms": 0.0,
                 "last_read_time": 0.0,
+                "pipe_errors": 0,
+                "timeouts": 0,
             }
             self.stderr_thread: Optional[threading.Thread] = None
-            self.stop_stderr = threading.Event()
+            self.stop_stderr: threading.Event = threading.Event()
+            self.refresh_attempts: int = 0
+            self.current_read_future: Optional[Future] = None
+            self.last_error: Optional[str] = None
+            self.error_count: int = 0
+            self.last_stderr_line: str = ""
 
-    def __init__(self, config: Optional[Config] = None,
-                 stream_manager: Optional[StreamManager] = None,
-                 settings: Optional["AdvancedSettings"] = None,
-                 resource_manager: Optional["ResourceManager"] = None,
-                 max_processes: int = DEFAULT_MAX_PROCESSES,
-                 process_timeout: float = DEFAULT_PROCESS_TIMEOUT,
-                 max_idle_seconds: float = DEFAULT_MAX_IDLE_SECONDS,
+    # -------------------------------------------------------------------------
+    #  Konstruktor
+    # -------------------------------------------------------------------------
+    def __init__(self,
+                 config: Optional[Any] = None,
+                 stream_manager: Optional[Any] = None,
+                 settings: Optional[Any] = None,
+                 resource_manager: Optional[Any] = None,
+                 max_processes: int = MAX_PROCESSES,
+                 process_timeout: float = PROCESS_TIMEOUT,
+                 max_idle_seconds: float = MAX_IDLE_SECONDS,
                  on_process_crash: Optional[Callable[[str, str], None]] = None) -> None:
-        PeriodicTaskMixin.__init__(self, interval=self.CLEANUP_INTERVAL,
-                                   task=self.cleanup_stale_processes)
+        """
+        Initialisiert den FFmpegManager.
 
+        Args:
+            config: Konfigurationsobjekt (z. B. Config). Falls None, wird eine Default‑Config erstellt.
+            stream_manager: StreamManager für URL‑Extraktion.
+            settings: AdvancedSettings (optional).
+            resource_manager: ResourceManager für Prozess‑Registrierung.
+            max_processes: Maximale Anzahl gleichzeitiger FFmpeg‑Prozesse.
+            process_timeout: Timeout in Sekunden für Lesevorgänge.
+            max_idle_seconds: Max. Inaktivität in Sekunden, bevor ein Prozess als stale gilt.
+            on_process_crash: Callback, der bei unerwartetem Prozessende aufgerufen wird.
+        """
         self._processes: Dict[str, FFmpegManager._ProcessInfo] = {}
         self._lock = threading.RLock()
         self._shutting_down = False
-        self.config = config or Config()
-        self.stream_manager = stream_manager or StreamManager()
-        self.settings = settings
+
+        self.config = config if config is not None else Config()
+        self.settings = settings if settings is not None else AdvancedSettings()
+
+        self.stream_manager = stream_manager
         self.resource_manager = resource_manager
-        self._pid_tracking: Dict[int, Dict[str, Any]] = {}
-        self._live_detection_cache: Dict[str, Dict[str, Any]] = {}
         self._on_process_crash = on_process_crash
 
         self._process_semaphore = threading.Semaphore(max_processes)
+        self._process_semaphore_max = max_processes
 
-        self._wait_after_terminate = self.DEFAULT_WAIT_AFTER_TERMINATE
-        self._wait_after_kill = self.DEFAULT_WAIT_AFTER_KILL
-        self._max_idle_seconds = max_idle_seconds
-        self._process_timeout = process_timeout
-
+        # Statistik (erweitert)
         self._stats = {
             "extraction_attempts": 0,
             "successful_extractions": 0,
@@ -6453,34 +7196,81 @@ class FFmpegManager(PeriodicTaskMixin):
             "cache_hits": 0,
             "start_time": time.time(),
             "total_processes_started": 0,
+            "total_pipe_processes": 0,
             "process_terminations_graceful": 0,
             "process_terminations_kill": 0,
             "process_terminations_psutil": 0,
             "process_terminations_failed": 0,
+            "reconnect_attempts": 0,
+            "reconnect_success": 0,
+            "reconnect_failures": 0,
         }
         self._stats_lock = threading.RLock()
 
-        self._psutil_available = PSUTIL_AVAILABLE
+        # Hilfs‑Executor für nicht‑blockierendes Lesen
+        from concurrent.futures import ThreadPoolExecutor
+        self._read_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="FFmpegRead")
 
-        # Für Windows: Executor für nicht‑blockierendes Lesen
-        self._read_executor = None
-        if IS_WINDOWS:
-            from concurrent.futures import ThreadPoolExecutor
-            self._read_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="FFmpegRead")
+        # Cache für Live‑Erkennung
+        self._live_detection_cache: Dict[str, Dict[str, Any]] = {}
+        self._pid_tracking: Dict[int, Dict[str, Any]] = {}
 
-        logger.info(f"✅ FFmpeg Manager initialized (Platform: {SYSTEM}, "
-                    f"max_processes={max_processes}, process_timeout={process_timeout}s)")
+        # Periodische Bereinigung
+        self._cleanup_stop_event = threading.Event()
+        self._cleanup_thread = threading.Thread(
+            target=self._cleanup_worker,
+            daemon=True,
+            name="FFmpegManagerCleanup"
+        )
+        self._cleanup_thread.start()
 
-    # ---------- Öffentliche Methoden ----------
-    def start_stream(self, video_url: str, output_queue: Optional[queue.Queue],
-                     process_id: str, force_refresh_audio_url: bool = False,
-                     audio_url: Optional[str] = None, seek_seconds: Optional[float] = None,
+        # psutil initialisieren
+        self._psutil_available = False
+        self._psutil = None
+        try:
+            import psutil
+            self._psutil = psutil
+            self._psutil_available = True
+        except ImportError:
+            log_debug("ffmpeg", "psutil not available, using fallback termination")
+
+        # Gleitender Durchschnitt der Lesezeiten (für dynamischen Timeout)
+        self._read_times: Deque[float] = deque(maxlen=10)
+
+        # atexit‑Handler für Notfall‑Cleanup
+        self._disposed = False
+        atexit.register(self._atexit_cleanup)
+
+        logger.info(
+            f"✅ FFmpegManager initialized (Platform: {SYSTEM}, "
+            f"max_processes={max_processes}, process_timeout={process_timeout}s)"
+        )
+
+    def _atexit_cleanup(self) -> None:
+        """Notfall‑Cleanup, falls dispose nicht aufgerufen wurde."""
+        if not self._disposed:
+            logger.info("⚠️ FFmpegManager: atexit‑Cleanup wird ausgeführt")
+            self.dispose()
+            self._disposed = True
+
+    # -------------------------------------------------------------------------
+    #  Öffentliche Methoden
+    # -------------------------------------------------------------------------
+    def start_stream(self,
+                     video_url: str,
+                     output_queue: Optional[queue.Queue],
+                     process_id: str,
+                     force_refresh_audio_url: bool = False,
+                     audio_url: Optional[str] = None,
+                     seek_seconds: Optional[float] = None,
                      detected_language: Optional[str] = None) -> Optional[subprocess.Popen]:
-        """
-        Startet einen FFmpeg-Prozess für einen Audio-Stream und registriert ihn.
-        Gibt das Process-Objekt zurück oder None bei Fehler.
-        """
-        logger.info(f"\n🎬 FFmpegManager: Starting stream for: {video_url[:80]}...")
+        """Startet einen Audio‑Stream."""
+        if DEBUG_LEVEL >= 3:
+            log_debug("ffmpeg", f"start_stream called: video_url={video_url} process_id={process_id}")
+            logger.info(f"\n🎬 FFmpegManager: Starting stream for: {video_url}")
+        else:
+            log_debug("ffmpeg", f"start_stream called: video_url={video_url[:80]}... process_id={process_id}")
+            logger.info(f"\n🎬 FFmpegManager: Starting stream for: {video_url[:80]}...")
 
         with self._lock:
             if self._shutting_down:
@@ -6491,42 +7281,186 @@ class FFmpegManager(PeriodicTaskMixin):
                 return None
 
         if not self._process_semaphore.acquire(blocking=False):
-            logger.warning(f"⚠️ Max processes reached ({self._process_semaphore._value}), "
-                           f"cannot start {process_id}")
+            logger.warning(
+                f"⚠️ Max processes reached ({self._get_semaphore_value()}), "
+                f"cannot start {process_id}"
+            )
             return None
 
         registered = False
         process = None
+        yt_process = None
+        pipe_mode = False
+
         try:
-            # 1. URL validieren
-            valid, msg = PlatformUtils.validate_url(video_url)
+            valid, msg = self._validate_url(video_url)
             if not valid:
                 logger.error(f"❌ Ungültige Video-URL: {msg}")
                 return None
 
-            # 2. Audio-URL auflösen (falls nicht direkt übergeben)
-            if audio_url is None:
+            is_live, platform = self._detect_stream_type(video_url)
+            is_youtube = "youtube.com" in video_url.lower() or "youtu.be" in video_url.lower()
+            if is_youtube and not is_live:
+                is_live = self._check_youtube_live_by_metadata(video_url)
+                if is_live:
+                    logger.info("  🎥 YouTube‑Livestream erkannt (via Metadata)")
+
+            use_pipe = is_youtube or (is_live and platform.lower() in self.PIPE_PREFERRED_PLATFORMS)
+            log_debug("ffmpeg", f"use_pipe={use_pipe}, is_live={is_live}, platform={platform}")
+
+            if use_pipe:
+                logger.info(f"  🎥 {platform}‑Livestream: Verwende yt‑dlp als Datenquelle (Pipe‑Zweig)")
+                pipe_mode = True
+                formats_to_try = [None, "webm", "matroska"]
+                yt_process = None
+                process = None
+
+                for fmt in formats_to_try:
+                    if yt_process is not None:
+                        self._terminate_process(yt_process)
+                    if process is not None:
+                        self._terminate_process(process)
+
+                    yt_cmd = [
+                        "yt-dlp",
+                        "-f", "bestaudio[ext=m4a]/bestaudio/best",
+                        "--no-playlist",
+                        "--quiet",
+                        "--no-warnings",
+                    ]
+                    use_cookies = getattr(self.settings, 'use_browser_cookies', True)
+                    if use_cookies:
+                        browser = getattr(self.settings, 'browser_name', 'firefox')
+                        yt_cmd.extend(["--cookies-from-browser", browser])
+                    if hasattr(self.settings, 'proxy_enabled') and self.settings.proxy_enabled:
+                        proxy_url = getattr(self.settings, 'proxy_url', '')
+                        if proxy_url:
+                            yt_cmd.extend(["--proxy", proxy_url])
+                    yt_cmd.extend(["-o", "-", video_url])
+
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(f"yt‑dlp command: {' '.join(yt_cmd)}")
+
+                    yt_process = subprocess.Popen(
+                        yt_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        stdin=subprocess.DEVNULL,
+                        bufsize=10 * 1024 * 1024,
+                        start_new_session=True,
+                    )
+                    logger.info(f"  ✅ yt‑dlp started (PID: {yt_process.pid}) (Format: {fmt if fmt else 'auto'})")
+
+                    # Thread zum Lesen von yt‑dlp stderr (daemon, wird nicht extra gespeichert)
+                    def read_yt_stderr(proc):
+                        try:
+                            for line in iter(proc.stderr.readline, b''):
+                                line_str = line.decode('utf-8', errors='ignore').strip()
+                                if line_str:
+                                    log_debug("ytdlp", line_str)
+                        except Exception as e:
+                            if DEBUG_LEVEL >= 3:
+                                log_exception("ytdlp", "Error reading yt-dlp stderr", e, level="debug")
+                    stderr_thread = threading.Thread(target=read_yt_stderr, args=(yt_process,), daemon=True)
+                    stderr_thread.start()
+
+                    profile = "realtime" if is_live else "transcription"
+                    if self.settings and hasattr(self.settings, "audio_profile"):
+                        profile = self.settings.audio_profile
+                    audio_filter = self.config.get_audio_filter(
+                        language=detected_language, profile=profile
+                    )
+
+                    ff_cmd = [
+                        "ffmpeg", "-hide_banner", "-loglevel", "warning",
+                    ]
+                    if fmt is not None:
+                        ff_cmd.extend(["-f", fmt])
+                    ff_cmd.extend([
+                        "-i", "pipe:0",
+                        "-vn",
+                        "-f", "s16le",
+                        "-acodec", "pcm_s16le",
+                        "-ar", str(self.config.SAMPLE_RATE),
+                        "-ac", str(self.config.CHANNELS),
+                        "-af", audio_filter,
+                        "-fflags", "+genpts+discardcorrupt",
+                        "-avoid_negative_ts", "make_zero",
+                        "-max_interleave_delta", "0",
+                        "-threads", "2",
+                        "-bufsize", self.config.FFMPEG_BUFSIZE,
+                        "pipe:1"
+                    ])
+
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(f"FFmpeg command: {' '.join(ff_cmd)}")
+
+                    process = subprocess.Popen(
+                        ff_cmd,
+                        stdin=yt_process.stdout,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        bufsize=10 * 1024 * 1024,
+                        start_new_session=True,
+                    )
+                    logger.info(f"  ✅ FFmpeg started (PID: {process.pid})")
+
+                    if self.resource_manager is not None:
+                        self.resource_manager.register_process(process)
+                        self.resource_manager.register_process(yt_process)
+
+                    time.sleep(self.INITIAL_PROCESS_CHECK_DELAY * 5)
+
+                    if process.poll() is None:
+                        logger.info(f"  ✅ Pipe mode successful with format {fmt if fmt else 'auto'}")
+                        break
+                    else:
+                        stderr_hint = self._read_stderr(process)
+                        if DEBUG_LEVEL >= 3:
+                            stderr_display = stderr_hint
+                        else:
+                            stderr_display = stderr_hint[:200]
+                        logger.warning(f"❌ FFmpeg died with format {fmt}, trying next... stderr: {stderr_display}")
+                        continue
+                else:
+                    logger.error("❌ All pipe formats failed")
+                    return None
+
+                self._register_process(process_id, process, output_queue, video_url, is_live, yt_process, pipe_mode=pipe_mode)
+                registered = True
+                with self._stats_lock:
+                    self._stats["total_processes_started"] += 1
+                    self._stats["total_pipe_processes"] += 1
+
+                if DEBUG_LEVEL >= 3:
+                    log_debug("ffmpeg", f"Semaphore value after start: {self._get_semaphore_value()}")
+                return process
+
+            # Normale Verarbeitung (FFmpeg direkt)
+            if audio_url is None or force_refresh_audio_url:
                 logger.info("🎵 Resolving audio URL...")
-                audio_url = self.stream_manager.extract_audio_url(
-                    video_url, force_refresh=force_refresh_audio_url
-                )
+                audio_url = self._extract_audio_url(video_url, force_refresh=is_live or force_refresh_audio_url)
                 if not audio_url:
                     logger.error("❌ Audio URL resolution failed")
                     return None
-                logger.info(f"✅ Resolved URL: {audio_url[:100]}...")
+                if DEBUG_LEVEL >= 3:
+                    logger.info(f"✅ Resolved URL: {audio_url}")
+                else:
+                    logger.info(f"✅ Resolved URL: {audio_url[:100]}...")
             else:
-                valid, msg = PlatformUtils.validate_url(audio_url)
+                valid, msg = self._validate_url(audio_url)
                 if not valid:
                     logger.error(f"❌ Ungültige Audio-URL: {msg}")
                     return None
-                logger.info(f"✅ Using pre-resolved audio URL: {audio_url[:100]}...")
+                if DEBUG_LEVEL >= 3:
+                    logger.info(f"✅ Using pre-resolved audio URL: {audio_url}")
+                else:
+                    logger.info(f"✅ Using pre-resolved audio URL: {audio_url[:100]}...")
 
-            # 3. FFmpeg-Kommando bauen
             cmd = self._build_ffmpeg_command_optimized(
                 audio_url, seek_seconds=seek_seconds, detected_language=detected_language
             )
 
-            # 4. Prozess starten
             process_kwargs = {
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
@@ -6547,125 +7481,183 @@ class FFmpegManager(PeriodicTaskMixin):
             if self.resource_manager is not None:
                 self.resource_manager.register_process(process)
 
-            # 5. Warte kurz und prüfe, ob Prozess sofort stirbt
             time.sleep(self.INITIAL_PROCESS_CHECK_DELAY)
             logger.debug("Initial startup delay completed, checking process status...")
 
             if process.poll() is not None:
-                # Prozess ist sofort beendet – Fehler analysieren
-                try:
-                    stderr_output = process.stderr.read(1000).decode("utf-8", errors="ignore")
-                    if logger.isEnabledFor(logging.DEBUG):
-                        log_debug("ffmpeg", f"FFmpeg died immediately, stderr: {stderr_output}")
-                    logger.error(f"❌ FFmpeg died immediately. Exit code: {process.poll()}")
-                    if stderr_output:
-                        logger.error("📋 FFMPEG STDERR (first 200 chars):")
-                        logger.error(stderr_output[:200])
-                except Exception as e:
-                    logger.warning(f"⚠️ Could not read stderr: {e}")
-                # Keine Registrierung, Fehler zurück
+                stderr_hint = self._read_stderr(process)
+                if DEBUG_LEVEL >= 3:
+                    stderr_display = stderr_hint
+                else:
+                    stderr_display = stderr_hint[:200]
+                logger.error(f"❌ FFmpeg died immediately. Exit code: {process.poll()}, stderr: {stderr_display}")
+    
+                if is_live:
+                    logger.info("🔄 Fallback: Versuche Pipe‑Modus...")
+                    fallback_process = self._start_pipe(
+                        video_url, output_queue, process_id, seek_seconds, detected_language
+                    )
+                    if fallback_process is not None:
+                        self._remove_process(process_id)
+                        self._register_process(
+                            process_id, fallback_process, output_queue, video_url, True, pipe_mode=True
+                        )
+                        registered = True
+                        with self._stats_lock:
+                            self._stats["total_processes_started"] += 1
+                        return fallback_process
                 return None
             else:
                 logger.info(f"✅ FFmpeg is running (PID: {process.pid})")
 
-            # 6. Zusätzliche Wartezeit für HLS/Live
             if any(keyword in audio_url.lower() for keyword in ["hls", ".m3u8", "manifest.googlevideo.com"]):
                 time.sleep(self.HLS_INITIAL_WAIT)
                 logger.debug("Additional wait for HLS stream")
 
-            # 7. Registrieren (jetzt erst, wenn Prozess läuft)
-            self._register_process(process_id, process, output_queue, audio_url)
+            self._register_process(process_id, process, output_queue, audio_url, is_live, pipe_mode=False)
             registered = True
             with self._stats_lock:
                 self._stats["total_processes_started"] += 1
+
+            if DEBUG_LEVEL >= 3:
+                log_debug("ffmpeg", f"Semaphore value after start: {self._get_semaphore_value()}")
+
             return process
 
         except Exception as e:
-            logger.error(f"❌ Failed to start FFmpeg: {e}")
+            logger.error(f"❌ Failed to start FFmpeg: {e}", exc_info=True)
             return None
 
         finally:
-            # Wichtig: Semaphore freigeben, wenn keine erfolgreiche Registrierung erfolgt ist
             if not registered:
                 self._process_semaphore.release()
                 if process is not None and process.poll() is None:
-                    # Falls ein Prozess gestartet wurde, aber nicht registriert werden konnte,
-                    # beende ihn sauber
                     try:
                         process.terminate()
                         process.wait(timeout=2.0)
-                    except Exception:
+                    except Exception as e:
+                        if DEBUG_LEVEL >= 3:
+                            log_exception("ffmpeg", "Error terminating process in finally", e, level="debug")
                         try:
                             process.kill()
-                        except Exception:
-                            pass
+                        except Exception as e2:
+                            if DEBUG_LEVEL >= 3:
+                                log_exception("ffmpeg", "Error killing process in finally", e2, level="debug")
+                if yt_process is not None and yt_process.poll() is None:
+                    try:
+                        yt_process.terminate()
+                        yt_process.wait(timeout=2.0)
+                    except Exception as e:
+                        if DEBUG_LEVEL >= 3:
+                            log_exception("ffmpeg", "Error terminating yt_process in finally", e, level="debug")
+                        try:
+                            yt_process.kill()
+                        except Exception as e2:
+                            if DEBUG_LEVEL >= 3:
+                                log_exception("ffmpeg", "Error killing yt_process in finally", e2, level="debug")
 
     def read_audio_data(self, process_id: str, size: int) -> Optional[bytes]:
+        """Liest Audiodaten aus dem stdout‑Stream eines laufenden FFmpeg‑Prozesses."""
         with self._lock:
             if process_id not in self._processes:
+                log_debug("ffmpeg", f"read_audio_data: process_id {process_id} not found")
                 return None
             pinfo = self._processes[process_id]
             if pinfo.stopping:
+                log_debug("ffmpeg", f"read_audio_data: process {process_id} is stopping, skipping")
                 return None
             process = pinfo.process
 
+        timeout = self.PROCESS_TIMEOUT
+        if pinfo.is_live or ".m3u8" in pinfo.url.lower():
+            if self._read_times:
+                avg_read = sum(self._read_times) / len(self._read_times)
+                timeout = max(30.0, avg_read * 2.0)
+            else:
+                timeout = 30.0
+            if DEBUG_LEVEL >= 3:
+                log_debug("ffmpeg", f"Dynamic timeout for {process_id}: {timeout:.1f}s (avg_read={self._read_times[-1] if self._read_times else 'none'})")
+
         start_read = time.perf_counter()
         try:
-            if IS_WINDOWS:
-                if self._read_executor is None:
-                    audio_data = process.stdout.read(size)
-                else:
-                    future = self._read_executor.submit(process.stdout.read, size)
-                    try:
-                        audio_data = future.result(timeout=self._process_timeout)
-                    except Exception:
-                        return b""
-            else:
-                import select
-                readable, _, _ = select.select([process.stdout], [], [], self._process_timeout)
-                if not readable:
-                    return b""
-                audio_data = process.stdout.read(size)
-
-            if audio_data:
-                read_duration = (time.perf_counter() - start_read) * 1000
-                with self._lock:
-                    pinfo.bytes_read += len(audio_data)
-                    pinfo.chunks_processed += 1
-                    pinfo.last_activity = time.time()
-                    pinfo.stats["total_reads"] += 1
-                    pinfo.stats["total_read_bytes"] += len(audio_data)
-                    pinfo.stats["last_read_duration_ms"] = read_duration
-                    pinfo.stats["last_read_time"] = time.time()
-                if logger.isEnabledFor(logging.DEBUG):
-                    log_debug("ffmpeg", f"{len(audio_data)} Bytes gelesen von PID {process.pid} in {read_duration:.2f}ms")
-                return audio_data
-            else:
-                if process.poll() is not None:
-                    exit_code = process.poll()
-                    logger.warning(f"⚠️ Process {process_id} terminated (exit: {exit_code})")
-                    try:
-                        stderr = process.stderr.read(300).decode("utf-8", errors="ignore")
-                        if stderr:
-                            logger.info(f"📝 Last error: {stderr[:150]}")
-                    except Exception:
-                        pass
-                    self._remove_process(process_id)
-                return None
-
-        except (IOError, OSError, ValueError) as e:
-            logger.warning(f"⚠️ Read error for {process_id}: {e}")
+            future = self._read_executor.submit(process.stdout.read, size)
             with self._lock:
-                if process_id in self._processes:
-                    self._processes[process_id].stats["read_errors"] += 1
+                pinfo.current_read_future = future
+            try:
+                audio_data = future.result(timeout=timeout)
+            except (FutureTimeout, TimeoutError):
+                future.cancel()
+                with self._lock:
+                    pinfo.stats["timeouts"] += 1
+                logger.warning(
+                    f"⏰ Lese-Timeout für {process_id} nach {timeout:.1f}s "
+                    f"(Chunks: {pinfo.chunks_processed}, "
+                    f"letzte Aktivität: {time.time() - pinfo.last_activity:.1f}s her, "
+                    f"Bytes: {pinfo.bytes_read})"
+                )
+                return None
+            finally:
+                with self._lock:
+                    if pinfo.current_read_future is future:
+                        pinfo.current_read_future = None
+        except (BrokenPipeError, BlockingIOError) as e:
+            logger.debug(f"Pipe error for {process_id}: {e}")
             self._remove_process(process_id)
-            return None
+            return b""
         except Exception as e:
-            logger.warning(f"⚠️ Unexpected read error for {process_id}: {e}")
+            logger.warning(f"⚠️ Read error for {process_id}: {e}")
             self._remove_process(process_id)
             return None
+
+        if audio_data:
+            read_duration = time.perf_counter() - start_read
+            if read_duration > 0.1:
+                self._read_times.append(read_duration)
+
+            with self._lock:
+                pinfo.bytes_read += len(audio_data)
+                pinfo.chunks_processed += 1
+                pinfo.last_activity = time.time()
+                pinfo.stats["total_reads"] += 1
+                pinfo.stats["total_read_bytes"] += len(audio_data)
+                pinfo.stats["last_read_duration_ms"] = read_duration * 1000
+                pinfo.stats["last_read_time"] = time.time()
+
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "ffmpeg",
+                    f"Read {len(audio_data)} bytes from PID {process.pid} in {read_duration*1000:.2f}ms"
+                )
+            return audio_data
+        else:
+            if process.poll() is not None:
+                exit_code = process.poll()
+                logger.warning(f"⚠️ Process {process_id} terminated (exit: {exit_code})")
+                stderr_hint = self._read_stderr(process)
+                if stderr_hint:
+                    logger.info(f"📝 Last error: {stderr_hint[:150]}")
+                self._remove_process(process_id)
+            return b""
 
     def stop_stream(self, process_id: str) -> bool:
+        with self._lock:
+            if process_id not in self._processes:
+                return False
+            pinfo = self._processes[process_id]
+            pinfo.stopping = True
+
+            future = pinfo.current_read_future
+            if future and not future.done():
+                future.cancel()
+                if DEBUG_LEVEL >= 3:
+                    log_debug("ffmpeg", f"Canceled pending read future for {process_id}")
+
+            try:
+                if pinfo.process.stdout and not pinfo.process.stdout.closed:
+                    pinfo.process.stdout.close()
+            except Exception:
+                pass
+
         return self._remove_process(process_id)
 
     def stop_all_streams(self) -> None:
@@ -6690,10 +7682,9 @@ class FFmpegManager(PeriodicTaskMixin):
                 return False
             pinfo = self._processes[process_id]
             try:
-                process = pinfo.process
-                if process.poll() is not None:
+                if pinfo.process.poll() is not None:
                     return False
-                if time.time() - pinfo.last_activity > self._max_idle_seconds:
+                if time.time() - pinfo.last_activity > self.MAX_IDLE_SECONDS:
                     return False
                 return True
             except AttributeError:
@@ -6725,163 +7716,371 @@ class FFmpegManager(PeriodicTaskMixin):
                                              if p.process.poll() is None])
             stats["total_processes"] = len(self._processes)
             stats["live_detection_cache_size"] = len(self._live_detection_cache)
+            stats["semaphore_value"] = self._get_semaphore_value()
 
             process_reads = 0
             process_bytes = 0
             process_errors = 0
+            process_timeouts = 0
             for pinfo in self._processes.values():
                 s = pinfo.stats
                 process_reads += s["total_reads"]
                 process_bytes += s["total_read_bytes"]
                 process_errors += s["read_errors"]
+                process_timeouts += s.get("timeouts", 0)
             stats["process_total_reads"] = process_reads
             stats["process_total_bytes"] = process_bytes
             stats["process_read_errors"] = process_errors
+            stats["process_timeouts"] = process_timeouts
             return stats
+
+    def get_process_info(self, process_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            if process_id not in self._processes:
+                return None
+            pinfo = self._processes[process_id]
+            return {
+                "process_id": pinfo.process_id,
+                "pid": pinfo.process.pid if pinfo.process else None,
+                "yt_pid": pinfo.yt_process.pid if pinfo.yt_process else None,
+                "url": pinfo.url,
+                "platform": pinfo.platform,
+                "is_live": pinfo.is_live,
+                "pipe_mode": pinfo.pipe_mode,
+                "start_time": pinfo.start_time,
+                "last_activity": pinfo.last_activity,
+                "bytes_read": pinfo.bytes_read,
+                "chunks_processed": pinfo.chunks_processed,
+                "stats": pinfo.stats.copy(),
+                "is_alive": pinfo.process.poll() is None,
+                "stopping": pinfo.stopping,
+                "has_pending_read": pinfo.current_read_future is not None,
+                "last_error": pinfo.last_error,
+                "error_count": pinfo.error_count,
+                "last_stderr_line": pinfo.last_stderr_line,
+            }
+
+    def get_semaphore_value(self) -> int:
+        return self._get_semaphore_value()
 
     def dispose(self) -> None:
         logger.info("🧹 Shutting down FFmpeg Manager...")
-        self.stop_periodic_task()
+        self._cleanup_stop_event.set()
         self.stop_all_streams()
+        if self._cleanup_thread.is_alive():
+            self._cleanup_thread.join(timeout=2.0)
         if self._read_executor:
             self._read_executor.shutdown(wait=False, cancel_futures=False)
         self._live_detection_cache.clear()
         self._pid_tracking.clear()
         self._processes.clear()
+        self._disposed = True
         gc.collect()
         logger.info("✅ FFmpeg Manager disposed")
 
-    # ---------- Private Hilfsmethoden ----------
-    def _remove_process(self, process_id: str) -> bool:
+    # -------------------------------------------------------------------------
+    #  Private Hilfsmethoden
+    # -------------------------------------------------------------------------
+    def _get_semaphore_value(self) -> int:
         with self._lock:
-            if process_id not in self._processes:
-                return False
-            pinfo = self._processes[process_id]
+            return self._process_semaphore._value
 
-        self._stop_stderr_thread(pinfo)
+    def _validate_url(self, url: str) -> Tuple[bool, str]:
+        if self.stream_manager is not None and hasattr(self.stream_manager, "validate_url"):
+            return self.stream_manager.validate_url(url)
+        if not url or not url.strip():
+            return False, "Empty URL"
+        if url.startswith(("http://", "https://", "file://", "dvb://", "dvb-s://")):
+            return True, "ok"
+        return False, "Invalid URL scheme"
 
-        stderr_hint = ""
-        try:
-            if pinfo.process.stderr:
-                stderr_hint = pinfo.process.stderr.read(200).decode("utf-8", errors="ignore")
-        except Exception:
-            pass
+    def _extract_audio_url(self, video_url: str, force_refresh: bool, timeout: float = 30.0) -> Optional[str]:
+        """
+        Extrahiert die Audio-URL aus einer Video-URL über den StreamManager.
+        Verwendet einen Timeout-geschützten Thread, um Blockierungen zu vermeiden.
 
-        with self._lock:
-            if process_id not in self._processes:
-                return False
-            del self._processes[process_id]
-            if pinfo.process.pid in self._pid_tracking:
-                del self._pid_tracking[pinfo.process.pid]
-            process = pinfo.process
+        Args:
+            video_url: Die Video-URL (z.B. YouTube, Twitch).
+            force_refresh: Ob der Cache ignoriert werden soll.
+            timeout: Maximalzeit in Sekunden für die Extraktion.
 
-        try:
-            success = self._terminate_process(process, process.pid)
+        Returns:
+            Die extrahierte Audio-URL oder None bei Fehler/Timeout.
+        """
+        if self.stream_manager is None:
+            logger.error("StreamManager nicht verfügbar – kann Audio‑URL nicht extrahieren")
+            return None
 
-            for pipe_name in ("stdout", "stderr", "stdin"):
-                pipe = getattr(process, pipe_name, None)
-                if pipe and not pipe.closed:
-                    try:
-                        pipe.close()
-                    except Exception:
-                        pass
+        log_debug("ffmpeg", f"  ⏳ Extrahiere neue Audio‑URL (Timeout {timeout}s, force_refresh={force_refresh})...")
+        result = [None]
+        error = [None]
 
-            with self._stats_lock:
-                if success:
-                    self._stats["process_terminations_graceful"] += 1
+        def extract():
+            try:
+                with self._stats_lock:
+                    self._stats["extraction_attempts"] += 1
+                url = self.stream_manager.extract_audio_url(video_url, force_refresh=force_refresh)
+                if url:
+                    with self._stats_lock:
+                        self._stats["successful_extractions"] += 1
+                    result[0] = url
                 else:
-                    self._stats["process_terminations_failed"] += 1
+                    with self._stats_lock:
+                        self._stats["failed_extractions"] += 1
+            except Exception as e:
+                error[0] = e
+                logger.error(f"Fehler bei der Audio‑URL‑Extraktion: {e}", exc_info=True)
 
-            if self._on_process_crash and not success:
-                try:
-                    self._on_process_crash(process_id, stderr_hint)
-                except Exception as e:
-                    logger.error(f"Crash callback error: {e}")
-
-        finally:
-            self._process_semaphore.release()
-
-        return True
-
-    def _register_process(self, process_id: str, process: subprocess.Popen,
-                          output_queue: Optional[queue.Queue], url: str) -> None:
-        with self._lock:
-            is_live, platform = self._detect_stream_type(url)
-            headers_used = "youtube.com" in url.lower() or "googlevideo.com" in url.lower()
-            pinfo = self._ProcessInfo(
-                process_id=process_id,
-                process=process,
-                output_queue=output_queue,
-                url=url,
-                platform=platform,
-                is_live=is_live,
-                headers_used=headers_used,
-            )
-            self._processes[process_id] = pinfo
-            self._pid_tracking[process.pid] = {
-                "process_id": process_id,
-                "start_time": pinfo.start_time,
-                "url": url[:100],
-                "platform": platform,
-                "is_live": is_live,
-            }
-            if not IS_WINDOWS:
-                self._start_stderr_thread(pinfo)
-            logger.info(f"📊 Process registered: {process_id} (PID: {process.pid})")
-
-    def _start_stderr_thread(self, pinfo: "_ProcessInfo") -> None:
-        def stderr_worker():
-            process = pinfo.process
-            stop = pinfo.stop_stderr
-            ignore_patterns = [
-                "Connection reset by peer",
-                "partial file",
-                "Error in the pull function",
-                "packet corrupt",
-                "demuxing error",
-                "Input/output error",
-                "End of file",
-            ]
-            while not stop.is_set():
-                if process.poll() is not None:
-                    break
-                try:
-                    line = process.stderr.readline()
-                    if not line:
-                        time.sleep(0.1)
-                        continue
-                    line = line.decode("utf-8", errors="ignore").strip()
-                    if line:
-                        is_ignored = any(pat in line for pat in ignore_patterns)
-                        if is_ignored:
-                            if DEBUG_LEVEL >= 3:
-                                logger.debug(f"FFmpeg stderr ({pinfo.process_id}): {line}")
-                        else:
-                            logger.debug(f"FFmpeg stderr ({pinfo.process_id}): {line}")
-                except (OSError, ValueError):
-                    break
-                except Exception as e:
-                    logger.debug(f"stderr worker error: {e}")
-                    break
-            logger.debug(f"stderr thread stopped for {pinfo.process_id}")
-
-        thread = threading.Thread(target=stderr_worker, daemon=True,
-                                  name=f"FFmpegStderr-{pinfo.process_id}")
+        thread = threading.Thread(target=extract, daemon=True)
         thread.start()
-        pinfo.stderr_thread = thread
+        thread.join(timeout)
 
-    def _stop_stderr_thread(self, pinfo: "_ProcessInfo") -> None:
-        if pinfo.stderr_thread and pinfo.stderr_thread.is_alive():
-            pinfo.stop_stderr.set()
-            if pinfo.process and pinfo.process.stderr and not pinfo.process.stderr.closed:
-                try:
-                    pinfo.process.stderr.close()
-                except Exception:
-                    pass
-            pinfo.stderr_thread.join(timeout=2.0)
-            if pinfo.stderr_thread.is_alive():
-                logger.warning(f"⚠️ stderr thread for {pinfo.process_id} did not stop")
-            pinfo.stderr_thread = None
+        if thread.is_alive():
+            logger.error(f"⏰ Extraktion der Audio‑URL nach {timeout}s abgebrochen (Thread hängt)")
+            return None
+
+        if error[0]:
+            return None
+        return result[0]
+
+    def _start_pipe(self, video_url: str, output_queue: Optional[queue.Queue],
+                    process_id: str, seek_seconds: Optional[float],
+                    detected_language: Optional[str]) -> Optional[subprocess.Popen]:
+        """Startet den Pipe‑Zweig (yt‑dlp + FFmpeg) als Fallback."""
+        logger.info("  🎥 Pipe‑Fallback: Verwende yt‑dlp als Datenquelle")
+        yt_cmd = [
+            "yt-dlp",
+            "-f", "bestaudio[ext=m4a]/bestaudio/best",
+            "--no-playlist",
+            "--quiet",
+            "--no-warnings",
+        ]
+        use_cookies = getattr(self.settings, 'use_browser_cookies', True)
+        if use_cookies:
+            browser = getattr(self.settings, 'browser_name', 'firefox')
+            yt_cmd.extend(["--cookies-from-browser", browser])
+        if hasattr(self.settings, 'proxy_enabled') and self.settings.proxy_enabled:
+            proxy_url = getattr(self.settings, 'proxy_url', '')
+            if proxy_url:
+                yt_cmd.extend(["--proxy", proxy_url])
+        yt_cmd.extend(["-o", "-", video_url])
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"yt‑dlp command: {' '.join(yt_cmd)}")
+
+        yt_process = subprocess.Popen(
+            yt_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            bufsize=10 * 1024 * 1024,
+            start_new_session=True,
+        )
+        logger.info(f"  ✅ yt‑dlp started (PID: {yt_process.pid})")
+
+        profile = "realtime"
+        if self.settings and hasattr(self.settings, "audio_profile"):
+            profile = self.settings.audio_profile
+        audio_filter = self.config.get_audio_filter(
+            language=detected_language, profile=profile
+        )
+
+        ff_cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "warning",
+            "-i", "pipe:0",
+            "-vn",
+            "-f", "s16le",
+            "-acodec", "pcm_s16le",
+            "-ar", str(self.config.SAMPLE_RATE),
+            "-ac", str(self.config.CHANNELS),
+            "-af", audio_filter,
+            "-fflags", "+genpts+discardcorrupt",
+            "-avoid_negative_ts", "make_zero",
+            "-max_interleave_delta", "0",
+            "-threads", "2",
+            "-bufsize", self.config.FFMPEG_BUFSIZE,
+            "pipe:1"
+        ]
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"FFmpeg command: {' '.join(ff_cmd)}")
+
+        process = subprocess.Popen(
+            ff_cmd,
+            stdin=yt_process.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=10 * 1024 * 1024,
+            start_new_session=True,
+        )
+        logger.info(f"  ✅ FFmpeg started (PID: {process.pid})")
+
+        if self.resource_manager is not None:
+            self.resource_manager.register_process(process)
+            self.resource_manager.register_process(yt_process)
+
+        time.sleep(self.INITIAL_PROCESS_CHECK_DELAY * 2)
+        if process.poll() is not None:
+            stderr_hint = self._read_stderr(process)
+            yt_stderr = ""
+            if yt_process.poll() is not None:
+                yt_stderr = self._read_stderr(yt_process)
+
+            if DEBUG_LEVEL >= 3:
+                ff_display = stderr_hint
+                yt_display = yt_stderr
+            else:
+                ff_display = stderr_hint[:200]
+                yt_display = yt_stderr[:200]
+
+            logger.error(
+                f"❌ FFmpeg in pipe died immediately. Exit code: {process.poll()}, "
+                f"FFmpeg stderr: {ff_display}, yt‑dlp stderr: {yt_display}"
+            )
+            return None
+
+        return process
+
+    def _check_youtube_live_by_metadata(self, url: str) -> bool:
+        cache_key = f"live_meta_{hashlib.md5(url.encode()).hexdigest()[:16]}"
+        with self._lock:
+            if cache_key in self._live_detection_cache:
+                cached = self._live_detection_cache[cache_key]
+                if time.time() - cached["timestamp"] < 300:
+                    log_debug("ffmpeg", f"Metadata check (cached): {url[:50]} is_live={cached['is_live']}")
+                    return cached["is_live"]
+
+        try:
+            import json
+            cmd = [
+                "yt-dlp",
+                "--dump-json",
+                "--no-warnings",
+                "--no-check-certificate",
+                "--socket-timeout", "5",
+                url
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if proc.returncode == 0 and proc.stdout:
+                data = json.loads(proc.stdout)
+                is_live = data.get("is_live", False)
+                with self._lock:
+                    self._live_detection_cache[cache_key] = {
+                        "is_live": is_live,
+                        "timestamp": time.time(),
+                        "url": url[:50]
+                    }
+                log_debug("ffmpeg", f"Metadata check: {url[:50]} is_live={is_live}")
+                return is_live
+        except Exception as e:
+            log_debug("ffmpeg", f"Metadata check failed: {e}")
+        return False
+
+    def _build_ffmpeg_command_optimized(self,
+                                        url: str,
+                                        seek_seconds: Optional[float] = None,
+                                        detected_language: Optional[str] = None) -> List[str]:
+        """
+        Erstellt eine optimierte FFmpeg-Befehlszeile für den angegebenen Stream.
+
+        Args:
+            url: Die Audio-URL (z.B. von yt-dlp oder direkt).
+            seek_seconds: Startposition in Sekunden (nur für Nicht-Live-Streams).
+            detected_language: Erkannte Sprache für die Audio-Filterung.
+
+        Returns:
+            Liste der Befehlsargumente für subprocess.Popen.
+        """
+        is_live, platform = self._detect_stream_type(url)
+        stream_type = "LIVE" if is_live else "VIDEO"
+        logger.info(f"\n🎬 Building FFmpeg command for {platform} ({stream_type})")
+        logger.info(f"  📍 URL: {url[:80]}...")
+
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning"]
+
+        # YouTube-spezifische Header und User-Agent
+        if "youtube.com" in url.lower() or "youtu.be" in url.lower():
+            logger.info("  🎯 Adding YouTube-specific headers")
+            cmd.extend([
+                "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "-referer", "https://www.youtube.com/",
+            ])
+            headers_dict = self.config.get_youtube_headers(
+                is_manifest="manifest.googlevideo.com" in url
+            )
+            headers_list = [f"{k}: {v}" for k, v in headers_dict.items()]
+            headers_string = "\r\n".join(headers_list)
+            cmd.extend(["-headers", headers_string])
+
+        # Live-Stream vs. On-Demand
+        if is_live:
+            logger.info("  📡 LIVE: Using optimized HLS/Live parameters")
+            cmd.extend([
+                "-reconnect", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "10",
+                "-reconnect_on_network_error", "1",
+                "-timeout", "10000000",
+                "-rw_timeout", "30000000",
+                "-multiple_requests", "1",
+                "-seekable", "0",
+                "-fflags", "+discardcorrupt+fastseek+genpts",
+                "-analyzeduration", "10M",
+                "-probesize", "10M",
+            ])
+            # HLS-spezifische Flags für Nicht-YouTube-Streams
+            if "youtube.com" not in url.lower() and "youtu.be" not in url.lower():
+                cmd.extend([
+                    "-live_start_index", "0",
+                    "-hls_time", "0",
+                    "-hls_playlist_type", "event",
+                    "-hls_flags", "discard_segments",
+                    "-max_reload", "0",
+                ])
+            if seek_seconds is not None:
+                logger.warning(f"⚠️ seek_seconds={seek_seconds} wird bei Live-Stream ignoriert")
+        else:
+            logger.info("  🎬 VIDEO: Fast access for non-live content")
+            cmd.extend([
+                "-rw_timeout", "10000000",
+                "-accurate_seek",
+                "-fflags", "+genpts+discardcorrupt+fastseek",
+            ])
+            if seek_seconds is not None and seek_seconds > 0:
+                logger.info(f"  ⏩ Seeking to {seek_seconds}s")
+                cmd.extend(["-ss", str(seek_seconds)])
+
+        # Eingabe-URL
+        cmd.extend(["-i", url])
+
+        # Audio-Filter basierend auf Profil und Sprache
+        profile = "realtime" if is_live else "transcription"
+        if self.settings and hasattr(self.settings, "audio_profile"):
+            profile = self.settings.audio_profile
+        audio_filter = self.config.get_audio_filter(
+            language=detected_language, profile=profile
+        )
+        logger.info(f"  🎚️ Using audio filter (profile={profile}): {audio_filter}")
+
+        # Ausgabeformat und Encoder
+        cmd.extend([
+            "-vn",
+            "-f", "s16le",
+            "-acodec", "pcm_s16le",
+            "-ar", str(self.config.SAMPLE_RATE),
+            "-ac", str(self.config.CHANNELS),
+            "-af", audio_filter,
+            "-fflags", "+genpts+discardcorrupt",
+            "-avoid_negative_ts", "make_zero",
+            "-max_interleave_delta", "0",
+            "-threads", "2",
+            "-bufsize", self.config.FFMPEG_BUFSIZE,
+            "pipe:1",
+        ])
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"FFmpeg command: {' '.join(cmd)}")
+        return cmd
 
     def _detect_stream_type(self, url: str) -> Tuple[bool, str]:
         cache_key = hashlib.md5(url.encode()).hexdigest()[:16]
@@ -6902,7 +8101,7 @@ class FFmpegManager(PeriodicTaskMixin):
                     "&live", "?live", "/watch_live"
                 ])
                 if logger.isEnabledFor(logging.DEBUG):
-                    log_debug("network", f"YouTube detection: {url_lower[:100]}, is_live={is_live}")
+                    logger.debug(f"YouTube detection: {url_lower[:100]}, is_live={is_live}")
             elif "twitch.tv" in url_lower:
                 platform = "Twitch"
                 is_live = True
@@ -6950,128 +8149,331 @@ class FFmpegManager(PeriodicTaskMixin):
                     oldest = min(self._live_detection_cache.items(),
                                  key=lambda x: x[1]["timestamp"])[0]
                     del self._live_detection_cache[oldest]
+            log_debug("ffmpeg", f"detect_stream_type: url={url[:50]}, is_live={is_live}, platform={platform}")
             return is_live, platform
 
         except Exception as e:
             logger.warning(f"⚠️ Stream type detection error: {e}")
             return False, "unknown"
 
-    def _build_ffmpeg_command_optimized(self, url: str,
-                                        seek_seconds: Optional[float] = None,
-                                        detected_language: Optional[str] = None) -> List[str]:
-        is_live, platform = self._detect_stream_type(url)
-        stream_type = "LIVE" if is_live else "VIDEO"
-        logger.info(f"\n🎬 Building FFmpeg command for {platform} ({stream_type})")
-        logger.info(f"  📍 URL: {url[:80]}...")
-
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning"]
-
-        if "youtube.com" in url.lower() or "youtu.be" in url.lower():
-            logger.info("  🎯 Adding YouTube-specific headers")
-            headers_dict = self.config.get_youtube_headers(
-                is_manifest="manifest.googlevideo.com" in url
+    def _register_process(self,
+                          process_id: str,
+                          process: subprocess.Popen,
+                          output_queue: Optional[queue.Queue],
+                          url: str,
+                          is_live: bool,
+                          yt_process: Optional[subprocess.Popen] = None,
+                          pipe_mode: bool = False) -> None:
+        with self._lock:
+            platform = "YouTube" if ("youtube.com" in url.lower() or "youtu.be" in url.lower()) else "Unknown"
+            headers_used = "youtube.com" in url.lower() or "googlevideo.com" in url.lower()
+            pinfo = self._ProcessInfo(
+                process_id=process_id,
+                process=process,
+                output_queue=output_queue,
+                url=url,
+                platform=platform,
+                is_live=is_live,
+                headers_used=headers_used,
+                yt_process=yt_process,
+                pipe_mode=pipe_mode,
             )
-            headers_list = [f"{k}: {v}" for k, v in headers_dict.items()]
-            headers_string = "\r\n".join(headers_list)
-            cmd.extend(["-headers", headers_string])
+            self._processes[process_id] = pinfo
+            self._pid_tracking[process.pid] = {
+                "process_id": process_id,
+                "start_time": pinfo.start_time,
+                "url": url[:100],
+                "platform": platform,
+                "is_live": is_live,
+                "pipe_mode": pipe_mode,
+            }
+            if yt_process:
+                self._pid_tracking[yt_process.pid] = {
+                    "process_id": f"{process_id}_yt",
+                    "start_time": pinfo.start_time,
+                    "url": url[:100],
+                    "platform": platform,
+                    "is_live": is_live,
+                    "pipe_mode": pipe_mode,
+                }
+            self._start_stderr_thread(pinfo)
+            logger.info(f"📊 Process registered: {process_id} (PID: {process.pid}) [pipe_mode={pipe_mode}]")
 
-        if is_live:
-            logger.info("  📡 LIVE: Using optimized HLS/Live parameters")
-            cmd.extend([
-                "-reconnect", "1",
-                "-reconnect_streamed", "1",
-                "-reconnect_delay_max", "10",
-                "-reconnect_on_network_error", "1",
-                "-timeout", "10000000",
-                "-rw_timeout", "30000000",
-                "-multiple_requests", "1",
-                "-seekable", "0",
-                "-fflags", "+discardcorrupt+fastseek+genpts",
-                "-analyzeduration", "10M",
-                "-probesize", "10M",
-            ])
-            if seek_seconds is not None:
-                logger.warning(f"⚠️ seek_seconds={seek_seconds} wird bei Live-Stream ignoriert")
-        else:
-            logger.info("  🎬 VIDEO: Fast access for non-live content")
-            cmd.extend([
-                "-rw_timeout", "10000000",
-                "-accurate_seek",
-                "-fflags", "+genpts+discardcorrupt+fastseek",
-            ])
-            if seek_seconds is not None and seek_seconds > 0:
-                logger.info(f"  ⏩ Seeking to {seek_seconds}s")
-                cmd.extend(["-ss", str(seek_seconds)])
+    def _start_stderr_thread(self, pinfo: "_ProcessInfo") -> None:
+        def stderr_worker() -> None:
+            process = pinfo.process
+            stop = pinfo.stop_stderr
 
-        cmd.extend(["-i", url])
+            if DEBUG_LEVEL < 3:
+                ignore_patterns = [
+                    "Connection reset by peer",
+                    "partial file",
+                    "Error in the pull function",
+                    "packet corrupt",
+                    "demuxing error",
+                    "Input/output error",
+                    "End of file",
+                ]
+                # Im normalen Modus: Wiederholungsunterdrückung aktiv
+                reconnect_counter = 0
+                last_reconnect_time = 0.0
+                last_line = ""
+            else:
+                # Im tiefen Debug‑Modus: alle Zeilen loggen, keine Unterdrückung
+                ignore_patterns = []
+                # Keine Variablen für Wiederholungsunterdrückung nötig
+                # (wir verzichten auf die ganze reconnect‑Logik)
 
-        profile = "realtime" if is_live else "transcription"
-        if self.settings and hasattr(self.settings, "audio_profile"):
-            profile = self.settings.audio_profile
-        audio_filter = self.config.get_audio_filter(
-            language=detected_language, profile=profile
-        )
-        logger.info(f"  🎚️ Using audio filter (profile={profile}): {audio_filter}")
+            while not stop.is_set():
+                if process.poll() is not None:
+                    break
+                try:
+                    line = process.stderr.readline()
+                    if not line:
+                        time.sleep(0.1)
+                        continue
+                    line = line.decode("utf-8", errors="ignore").strip()
+                    if not line:
+                        continue
 
-        cmd.extend([
-            "-vn",
-            "-f", "s16le",
-            "-acodec", "pcm_s16le",
-            "-ar", str(Config.SAMPLE_RATE),
-            "-ac", str(Config.CHANNELS),
-            "-af", audio_filter,
-            "-fflags", "+genpts+discardcorrupt",
-            "-avoid_negative_ts", "make_zero",
-            "-max_interleave_delta", "0",
-            "-threads", "2",
-            "-bufsize", self.config.FFMPEG_BUFSIZE,
-            "pipe:1",
-        ])
+                    pinfo.last_stderr_line = line
 
-        if logger.isEnabledFor(logging.DEBUG):
-            log_debug("ffmpeg", f"Kommando: {' '.join(cmd)}")
-        return cmd
+                    # ----- DEBUG‑Modus: Jede Zeile sofort ausgeben -----
+                    if DEBUG_LEVEL >= 3:
+                        logger.debug(f"FFmpeg stderr ({pinfo.process_id}): {line}")
+                        if "Error" in line or "error" in line:
+                            pinfo.error_count += 1
+                            pinfo.last_error = line
+                        continue   # keine weitere Verarbeitung im Debug‑Modus
 
-    def _terminate_process(self, process: subprocess.Popen, pid: int) -> bool:
+                    # ----- Normaler Modus (DEBUG_LEVEL < 3) mit Wiederholungsunterdrückung -----
+                    is_ignored = any(pat in line for pat in ignore_patterns)
+
+                    if "Will reconnect" in line and "error=End of file" in line:
+                        now = time.time()
+                        if now - last_reconnect_time < self.STALLED_RECONNECT_LOG_INTERVAL:
+                            reconnect_counter += 1
+                            last_line = line
+                            continue
+                        else:
+                            if reconnect_counter > 0:
+                                logger.debug(
+                                    f"FFmpeg stderr ({pinfo.process_id}): "
+                                    f"{reconnect_counter+1} reconnect messages suppressed, last: {last_line}"
+                                )
+                            reconnect_counter = 0
+                            last_reconnect_time = now
+                            logger.debug(f"FFmpeg stderr ({pinfo.process_id}): {line}")
+                            last_line = line
+                        continue
+                    else:
+                        if reconnect_counter > 0:
+                            logger.debug(
+                                f"FFmpeg stderr ({pinfo.process_id}): "
+                                f"{reconnect_counter+1} reconnect messages suppressed, last: {last_line}"
+                            )
+                            reconnect_counter = 0
+                            last_reconnect_time = 0.0
+                        if not is_ignored:
+                            logger.debug(f"FFmpeg stderr ({pinfo.process_id}): {line}")
+
+                    if "Error" in line or "error" in line:
+                        pinfo.error_count += 1
+                        pinfo.last_error = line
+
+                except (OSError, ValueError):
+                    break
+                except Exception as e:
+                    logger.debug(f"stderr worker error: {e}")
+                    break
+
+            if DEBUG_LEVEL < 3 and reconnect_counter > 0:
+                logger.debug(
+                    f"FFmpeg stderr ({pinfo.process_id}): "
+                    f"{reconnect_counter+1} reconnect messages suppressed, last: {last_line}"
+                )
+            logger.debug(f"stderr thread stopped for {pinfo.process_id}")
+
+    def _stop_stderr_thread(self, pinfo: "_ProcessInfo") -> None:
+        thread = pinfo.stderr_thread
+        if thread is None:
+            return
         try:
-            if process.poll() is None:
-                process.terminate()
+            if thread.is_alive():
+                pinfo.stop_stderr.set()
+                if pinfo.process and pinfo.process.stderr and not pinfo.process.stderr.closed:
+                    try:
+                        pinfo.process.stderr.close()
+                    except Exception:
+                        pass
+                thread.join(timeout=2.0)
+                if thread.is_alive():
+                    logger.warning(f"⚠️ stderr thread for {pinfo.process_id} did not stop")
+        finally:
+            pinfo.stderr_thread = None
+
+    def _read_stderr(self, process: subprocess.Popen) -> str:
+        try:
+            if process.stderr:
+                if DEBUG_LEVEL >= 3:
+                    # Vollständigen Inhalt lesen
+                    return process.stderr.read().decode("utf-8", errors="ignore")
+                else:
+                    return process.stderr.read(300).decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+        return ""
+
+    def _terminate_process(self, proc: subprocess.Popen) -> bool:
+        """Beendet einen Prozess und alle seine Kindprozesse (robust)."""
+        if proc.poll() is not None:
+            return True
+
+        pid = proc.pid
+        logger.debug(f"🛑 Beende Prozess {pid}...")
+
+        for pipe_name in ("stdout", "stderr", "stdin"):
+            pipe = getattr(proc, pipe_name, None)
+            if pipe and not pipe.closed:
                 try:
-                    process.wait(timeout=self._wait_after_terminate)
-                except subprocess.TimeoutExpired:
+                    pipe.close()
+                except Exception:
                     pass
 
-            if process.poll() is None:
-                process.kill()
-                try:
-                    process.wait(timeout=self._wait_after_kill)
-                except subprocess.TimeoutExpired:
-                    pass
+        if self._psutil_available and self._psutil is not None:
+            try:
+                parent = self._psutil.Process(pid)
+                children = parent.children(recursive=True)
 
-            if process.poll() is None and self._psutil_available:
+                for child in children:
+                    try:
+                        child.terminate()
+                    except self._psutil.NoSuchProcess:
+                        pass
+
+                gone, alive = self._psutil.wait_procs(children, timeout=self.PSUTIL_CHILD_TERMINATE_TIMEOUT)
+                for p in alive:
+                    try:
+                        p.kill()
+                    except self._psutil.NoSuchProcess:
+                        pass
+
+                parent.terminate()
                 try:
-                    import psutil
-                    p = psutil.Process(pid)
-                    children = p.children(recursive=True)
-                    for child in children:
-                        try:
-                            child.terminate()
-                        except psutil.NoSuchProcess:
-                            pass
-                    # Warte auf Kinder, aber nicht ewig
-                    psutil.wait_procs(children, timeout=self._wait_after_terminate)
-                    p.terminate()
-                    p.wait(timeout=self._wait_after_terminate)
+                    parent.wait(timeout=self.PSUTIL_PARENT_TERMINATE_TIMEOUT)
+                    logger.debug(f"✅ Prozess {pid} mit psutil beendet")
                     with self._stats_lock:
                         self._stats["process_terminations_psutil"] += 1
-                except Exception as e:
-                    logger.debug(f"psutil fallback error: {e}")
+                    return True
+                except self._psutil.TimeoutExpired:
+                    parent.kill()
+                    try:
+                        parent.wait(timeout=self.PSUTIL_PARENT_KILL_WAIT)
+                        logger.debug(f"✅ Prozess {pid} nach kill beendet")
+                        with self._stats_lock:
+                            self._stats["process_terminations_psutil"] += 1
+                        return True
+                    except self._psutil.TimeoutExpired:
+                        logger.warning(f"⚠️ Prozess {pid} auch nach kill nicht beendet")
+                        with self._stats_lock:
+                            self._stats["process_terminations_failed"] += 1
+                        return False
 
-            return process.poll() is not None
+            except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, AttributeError) as e:
+                logger.debug(f"psutil-Cleanup für {pid} fehlgeschlagen: {e}")
 
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=self.SUBPROC_TERMINATE_TIMEOUT)
+                logger.debug(f"✅ Prozess {pid} mit terminate beendet")
+                with self._stats_lock:
+                    self._stats["process_terminations_graceful"] += 1
+                return True
+            except subprocess.TimeoutExpired:
+                logger.debug(f"⏰ Prozess {pid} reagiert nicht auf terminate, versuche kill")
+                proc.kill()
+                try:
+                    proc.wait(timeout=self.SUBPROC_KILL_WAIT)
+                    logger.debug(f"✅ Prozess {pid} mit kill beendet")
+                    with self._stats_lock:
+                        self._stats["process_terminations_kill"] += 1
+                    return True
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"⚠️ Prozess {pid} auch nach kill nicht beendet")
+                    with self._stats_lock:
+                        self._stats["process_terminations_failed"] += 1
+                    return False
         except Exception as e:
-            logger.warning(f"Fehler beim Beenden von Prozess {pid}: {e}")
+            logger.warning(f"⚠️ Fehler beim Beenden von Prozess {pid}: {e}")
+            with self._stats_lock:
+                self._stats["process_terminations_failed"] += 1
             return False
+
+    def _remove_process(self, process_id: str) -> bool:
+        logger.debug(f"  _remove_process called for {process_id}")
+        with self._lock:
+            if process_id not in self._processes:
+                return False
+            pinfo = self._processes[process_id]
+
+        logger.debug("  Stopping stderr thread...")
+        self._stop_stderr_thread(pinfo)
+        logger.debug("  stderr thread stopped")
+
+        stderr_hint = ""
+        try:
+            if pinfo.process.stderr:
+                if DEBUG_LEVEL >= 3:
+                    stderr_hint = pinfo.process.stderr.read().decode("utf-8", errors="ignore")
+                else:
+                    stderr_hint = pinfo.process.stderr.read(200).decode("utf-8", errors="ignore")
+        except Exception as e:
+            if DEBUG_LEVEL >= 3:
+                log_exception("ffmpeg", "Error reading stderr in _remove_process", e, level="debug")
+            # Im Normalbetrieb ignorieren wir den Fehler still.
+
+        with self._lock:
+            if process_id not in self._processes:
+                return False
+            del self._processes[process_id]
+            if pinfo.process.pid in self._pid_tracking:
+                del self._pid_tracking[pinfo.process.pid]
+            if pinfo.yt_process and pinfo.yt_process.pid in self._pid_tracking:
+                del self._pid_tracking[pinfo.yt_process.pid]
+            process = pinfo.process
+            yt_process = pinfo.yt_process
+
+        success = True
+        try:
+            if yt_process and yt_process.poll() is None:
+                self._terminate_process(yt_process)
+
+            success = self._terminate_process(process)
+
+            for pipe_name in ("stdout", "stderr", "stdin"):
+                pipe = getattr(process, pipe_name, None)
+                if pipe and not pipe.closed:
+                    try:
+                        pipe.close()
+                    except Exception as e:
+                        if DEBUG_LEVEL >= 3:
+                            log_exception("ffmpeg", f"Error closing {pipe_name} pipe", e, level="debug")
+                        # Im Normalbetrieb ignorieren
+
+            if self._on_process_crash and not success:
+                try:
+                    self._on_process_crash(process_id, stderr_hint)
+                except Exception as e:
+                    log_exception("ffmpeg", "Crash callback error", e, level="error")
+
+        finally:
+            self._process_semaphore.release()
+            if DEBUG_LEVEL >= 3:
+                log_debug("ffmpeg", f"Semaphore released, now value={self._get_semaphore_value()}")
+
+        logger.debug("  _remove_process completed")
+        return success
 
     def cleanup_stale_processes(self) -> None:
         stale_pids = []
@@ -7084,6 +8486,114 @@ class FFmpegManager(PeriodicTaskMixin):
             removed = self._remove_process(pid)
             if removed:
                 logger.info(f"🧹 Cleaned stale process: {pid}")
+
+    def _cleanup_worker(self) -> None:
+        while not self._cleanup_stop_event.is_set():
+            self._cleanup_stop_event.wait(self.CLEANUP_INTERVAL)
+            if self._cleanup_stop_event.is_set():
+                break
+            try:
+                self.cleanup_stale_processes()
+            except Exception as e:
+                logger.warning(f"Fehler in cleanup worker: {e}")
+
+    def refresh_and_restart(self,
+                            process_id: str,
+                            video_url: str,
+                            detected_language: Optional[str] = None,
+                            max_attempts: int = MAX_REFRESH_ATTEMPTS) -> Optional[subprocess.Popen]:
+        logger.info(f"🔄 Attempting to refresh and restart FFmpeg for {process_id} (max_attempts={max_attempts})")
+        with self._stats_lock:
+            self._stats["reconnect_attempts"] += 1
+
+        for attempt in range(1, max_attempts + 1):
+            logger.info(f"  🔁 Refresh attempt {attempt}/{max_attempts}")
+
+            pinfo = None
+            with self._lock:
+                pinfo = self._processes.get(process_id)
+            if pinfo:
+                logger.info(f"  🛑 Stopping existing process (PID: {pinfo.process.pid})")
+                self.stop_stream(process_id)
+                pinfo = None
+                logger.debug("  stop_stream completed")
+
+                for _ in range(50):
+                    if self._get_semaphore_value() > 0:
+                        break
+                    time.sleep(0.1)
+                logger.debug(f"  Semaphore after stop: {self._get_semaphore_value()}")
+
+            is_live, platform = self._detect_stream_type(video_url)
+            is_youtube = "youtube.com" in video_url.lower() or "youtu.be" in video_url.lower()
+            if is_youtube and not is_live:
+                is_live = self._check_youtube_live_by_metadata(video_url)
+            use_pipe = (is_youtube and is_live) or (is_live and platform in self.PIPE_PREFERRED_PLATFORMS)
+
+            if not use_pipe:
+                logger.info("  🎵 Attempting to extract new audio URL...")
+                new_url = self._extract_audio_url(video_url, force_refresh=is_live, timeout=30.0)
+                if not new_url:
+                    wait = min(self.REFRESH_RETRY_DELAY_MAX,
+                               self.REFRESH_RETRY_DELAY_BASE * (2 ** (attempt - 1)))
+                    logger.warning(f"  ❌ Refresh attempt {attempt} failed (no new URL). Retry in {wait:.1f}s")
+                    time.sleep(wait)
+                    continue
+                logger.info(f"  ✅ New audio URL obtained: {new_url[:100]}...")
+                audio_url = new_url
+                force_refresh = is_live
+            else:
+                audio_url = None
+                force_refresh = True
+                logger.info("  🎥 Livestream: skip audio URL extraction, will use yt-dlp")
+
+            seek_seconds = None
+            if pinfo and not pinfo.is_live:
+                seek_seconds = pinfo.bytes_read / self.config.BYTES_PER_SECOND
+                seek_seconds = max(0, seek_seconds - 5)
+                logger.info(f"  ⏩ Setting seek_seconds={seek_seconds:.1f}s")
+
+            logger.info("  🚀 Starting new FFmpeg process...")
+            try:
+                new_process = self.start_stream(
+                    video_url=video_url,
+                    output_queue=None,
+                    process_id=process_id,
+                    force_refresh_audio_url=force_refresh,
+                    audio_url=audio_url,
+                    seek_seconds=seek_seconds,
+                    detected_language=detected_language,
+                )
+            except Exception as e:
+                logger.error(f"  ❌ Exception in start_stream: {e}", exc_info=True)
+                new_process = None
+
+            if new_process is not None:
+                logger.info(f"  ✅ New FFmpeg process started (PID: {new_process.pid})")
+                logger.info("  🔍 Testing new process for audio data...")
+                for test_attempt in range(3):
+                    time.sleep(1.5)
+                    test_data = self.read_audio_data(process_id, 1024)
+                    if test_data is not None and len(test_data) > 0:
+                        logger.info(f"  ✅ Data received after {test_attempt+1} attempt(s). Refresh successful.")
+                        with self._stats_lock:
+                            self._stats["reconnect_success"] += 1
+                        return new_process
+                    else:
+                        logger.debug(f"  ⏳ Test attempt {test_attempt+1}: no data yet")
+                logger.warning("  ⚠️ New process started but no data after 3 attempts, retrying...")
+                self.stop_stream(process_id)
+                continue
+            else:
+                wait = min(self.REFRESH_RETRY_DELAY_MAX,
+                           self.REFRESH_RETRY_DELAY_BASE * (2 ** (attempt - 1)))
+                logger.warning(f"  ❌ Refresh attempt {attempt} failed (start_stream returned None). Retry in {wait:.1f}s")
+                time.sleep(wait)
+
+        with self._stats_lock:
+            self._stats["reconnect_failures"] += 1
+        logger.error(f"❌ Failed to refresh and restart after {max_attempts} attempts")
+        return None
 
 
 class StreamInfoExtractor:
@@ -7372,6 +8882,10 @@ class StreamInfoExtractor:
             ]
 
     def _ensure_chrome_symlinks(self) -> None:
+        """
+        Erstellt Symlinks für Chrome‑Kompatibilität unter Linux.
+        Fehler beim Symlink‑Erstellen werden abgefangen und geloggt.
+        """
         try:
             chrome_config_dir = Path.home() / ".config" / "google-chrome"
             chromium_config_dir = Path.home() / ".config" / "chromium"
@@ -7383,7 +8897,10 @@ class StreamInfoExtractor:
                     chrome_file = chrome_config_dir / file_path
                     if chromium_file.exists() and not chrome_file.exists():
                         chrome_file.parent.mkdir(parents=True, exist_ok=True)
-                        os.symlink(str(chromium_file), str(chrome_file))
+                        try:
+                            os.symlink(str(chromium_file), str(chrome_file))
+                        except OSError as e:
+                            logger.debug(f"Symlink-Erstellung fehlgeschlagen (keine Admin‑Rechte?): {e}")
                 logger.info("    🔗 Created Chrome compatibility symlinks for yt-dlp")
         except Exception as e:
             logger.warning(f"    ⚠️ Chrome symlink setup failed: {e}")
@@ -7612,24 +9129,48 @@ class ExportManager:
         transcript_data: List[TranscriptionResult],
         filename: str,
     ) -> bool:
+        """
+        Exportiert die Transkription als DOCX‑Datei (oder als TXT‑Fallback).
+    
+        Args:
+            transcript_data: Liste der Transkriptionssegmente.
+            filename: Zieldateiname (inkl. Pfad).
+
+        Returns:
+            True bei Erfolg.
+
+        Raises:
+            ProcessingError: Bei Fehlern während des Exports.
+        """
+        if not transcript_data:
+            raise ProcessingError("Keine Transkriptionsdaten zum Exportieren")
+
+        # Versuche DOCX‑Export mit python-docx
         if self._docx_available:
             try:
                 doc = self._docx.Document()
                 doc.add_heading("Transkription", level=1)
+
                 for i, seg in enumerate(transcript_data, 1):
                     p = doc.add_paragraph()
+                    # Zeitstempel hinzufügen, falls vorhanden
                     if hasattr(seg, "start") and seg.start is not None:
                         start_str = self._format_timestamp_srt(seg.start)
                         p.add_run(f"[{start_str}] ").bold = True
                     p.add_run(seg.text)
+                    # Leerzeile zwischen den Segmenten (außer nach dem letzten)
                     if i < len(transcript_data):
                         doc.add_paragraph()
+
                 out_path = Path(filename)
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 doc.save(str(out_path))
                 return True
+
             except Exception as e:
                 logger.warning(f"python-docx Export fehlgeschlagen, verwende Fallback: {e}")
+
+        # Fallback: Export als einfache Textdatei
         try:
             content = self._generate_txt_content(transcript_data, None)
             out_path = Path(filename)
@@ -7746,7 +9287,32 @@ class ExportManager:
 
 
 class ResourceManager:
+    """
+    Zentrale Verwaltung von Systemressourcen (Prozesse, Threads, temporäre Dateien).
+
+    Diese Klasse sammelt alle vom Programm erstellten Ressourcen und stellt sicher,
+    dass sie beim Programmende oder bei einem Fehler sauber freigegeben werden.
+    Sie ist thread-sicher und kann über den Kontextmanager `with` verwendet werden.
+
+    Features:
+        - Registrierung von subprocess.Popen-Prozessen
+        - Registrierung von threading.Thread-Objekten
+        - Registrierung temporärer Dateipfade
+        - Automatische Terminierung von Prozessen mit Kindprozessen (via psutil)
+        - Automatisches Joinen von Threads
+        - Löschen temporärer Dateien
+        - GPU-Cache-Bereinigung (via torch)
+        - atexit-Handler für Notfall-Cleanup
+        - Zeitbegrenzung für Cleanup, um Programmende nicht zu blockieren
+    """
+
+    __slots__ = (
+        "processes", "threads", "temp_files", "cleanup_done",
+        "_lock", "_shutdown_event", "_atexit_registered", "_psutil"
+    )
+
     def __init__(self) -> None:
+        """Initialisiert den ResourceManager."""
         self.processes: List[subprocess.Popen] = []
         self.threads: List[threading.Thread] = []
         self.temp_files: List[str] = []
@@ -7761,142 +9327,315 @@ class ResourceManager:
         except ImportError:
             pass
 
+        # atexit-Handler nur einmal registrieren (für Notfall-Cleanup)
+        if not self._atexit_registered:
+            self._atexit_registered = True
+            atexit.register(self._atexit_cleanup)
+
+    def _atexit_cleanup(self) -> None:
+        """Notfall-Cleanup bei Programmende, falls normale Cleanup nicht erfolgte."""
+        if not self.cleanup_done:
+            logger.info("⚠️ ResourceManager: atexit-Cleanup wird ausgeführt")
+            self.cleanup(timeout=3.0)
+
+    # -------------------------------------------------------------------------
+    # Registrierung & Deregistrierung
+    # -------------------------------------------------------------------------
     def register_process(self, process: subprocess.Popen) -> None:
+        """
+        Registriert einen Subprozess für die spätere Bereinigung.
+
+        Args:
+            process: Der zu registrierende subprocess.Popen.
+        """
         with self._lock:
             if process and process not in self.processes:
                 self.processes.append(process)
 
+    def unregister_process(self, process: subprocess.Popen) -> bool:
+        """
+        Entfernt einen Prozess aus der Verwaltung (z.B. nach erfolgreicher Terminierung).
+
+        Args:
+            process: Der zu entfernende Prozess.
+
+        Returns:
+            True, wenn der Prozess registriert war und entfernt wurde, sonst False.
+        """
+        with self._lock:
+            if process in self.processes:
+                self.processes.remove(process)
+                return True
+        return False
+
     def register_thread(self, thread: threading.Thread) -> None:
+        """
+        Registriert einen Thread für die spätere Bereinigung.
+
+        Nur lebende Threads werden registriert.
+
+        Args:
+            thread: Der zu registrierende Thread.
+        """
         with self._lock:
             if thread and thread not in self.threads and thread.is_alive():
                 self.threads.append(thread)
 
+    def unregister_thread(self, thread: threading.Thread) -> bool:
+        """
+        Entfernt einen Thread aus der Verwaltung.
+
+        Args:
+            thread: Der zu entfernende Thread.
+
+        Returns:
+            True, wenn der Thread registriert war und entfernt wurde, sonst False.
+        """
+        with self._lock:
+            if thread in self.threads:
+                self.threads.remove(thread)
+                return True
+        return False
+
     def register_temp_file(self, file_path: str) -> None:
+        """
+        Registriert eine temporäre Datei zum Löschen bei der Bereinigung.
+
+        Args:
+            file_path: Pfad zur temporären Datei.
+        """
         with self._lock:
             if file_path and file_path not in self.temp_files:
                 self.temp_files.append(file_path)
 
+    def unregister_temp_file(self, file_path: str) -> bool:
+        """
+        Entfernt eine temporäre Datei aus der Verwaltung.
+
+        Args:
+            file_path: Pfad zur temporären Datei.
+
+        Returns:
+            True, wenn die Datei registriert war und entfernt wurde, sonst False.
+        """
+        with self._lock:
+            if file_path in self.temp_files:
+                self.temp_files.remove(file_path)
+                return True
+        return False
+
     def is_shutting_down(self) -> bool:
+        """Gibt zurück, ob der Shutdown eingeleitet wurde."""
         return self._shutdown_event.is_set()
 
-    def cleanup(self, timeout: float = 5.0) -> None:
+    # -------------------------------------------------------------------------
+    # Hauptbereinigung
+    # -------------------------------------------------------------------------
+    def cleanup(self, timeout: float = 5.0) -> bool:
+        """
+        Führt die Bereinigung aller registrierten Ressourcen durch.
+
+        Diese Methode ist nur einmal pro Instanz wirksam. Sie setzt ein internes
+        Shutdown-Event, beendet Prozesse, joined Threads und löscht temporäre Dateien.
+        Die Operation ist zeitbegrenzt, um das Programmende nicht unnötig zu verzögern.
+
+        Args:
+            timeout: Maximale Zeit in Sekunden für die gesamte Bereinigung.
+
+        Returns:
+            True, wenn die Bereinigung abgeschlossen wurde (ggf. mit Timeout),
+            False, wenn sie bereits zuvor ausgeführt wurde.
+        """
         if self.cleanup_done:
-            return
+            return False
+
+        logger.debug("🧹 ResourceManager: Starte Bereinigung...")
         self._shutdown_event.set()
         start_time = time.time()
+        remaining_timeout = timeout
+
+        # 1. Prozesse beenden
         with self._lock:
-            for proc in self.processes[:]:
-                if time.time() - start_time > timeout:
-                    logger.warning("⚠️ Cleanup timeout – breche weitere Prozessbereinigung ab")
-                    break
-                try:
-                    self._terminate_process(proc)
-                except Exception as e:
-                    logger.warning(f"⚠️ Fehler beim Beenden von Prozess {proc.pid}: {e}")
-                finally:
+            processes_to_terminate = self.processes[:]
+        for proc in processes_to_terminate:
+            if time.time() - start_time > timeout:
+                logger.warning("⚠️ Cleanup timeout – breche Prozessbereinigung ab")
+                break
+            try:
+                self._terminate_process(proc)
+            except Exception as e:
+                logger.warning(f"⚠️ Fehler beim Beenden von Prozess {proc.pid}: {e}")
+            finally:
+                with self._lock:
                     if proc in self.processes:
                         self.processes.remove(proc)
-            for thread in self.threads[:]:
-                if time.time() - start_time > timeout:
-                    logger.warning("⚠️ Cleanup timeout – breche Thread-Join ab")
-                    break
-                try:
-                    if thread.is_alive():
-                        thread.join(timeout=max(0.1, timeout - (time.time() - start_time)))
-                except Exception as e:
-                    logger.warning(f"⚠️ Fehler beim Join von Thread {thread.name}: {e}")
-                finally:
+
+        # 2. Threads beenden
+        remaining_timeout = timeout - (time.time() - start_time)
+        with self._lock:
+            threads_to_join = self.threads[:]
+        for thread in threads_to_join:
+            if time.time() - start_time > timeout:
+                logger.warning("⚠️ Cleanup timeout – breche Thread-Join ab")
+                break
+            if not thread.is_alive():
+                with self._lock:
                     if thread in self.threads:
                         self.threads.remove(thread)
-            for temp_file in self.temp_files[:]:
-                if time.time() - start_time > timeout:
-                    logger.warning("⚠️ Cleanup timeout – breche Löschen temp. Dateien ab")
-                    break
-                try:
-                    if os.path.exists(temp_file):
-                        os.unlink(temp_file)
-                except (OSError, PermissionError) as e:
-                    logger.warning(f"⚠️ Konnte temp. Datei {temp_file} nicht löschen: {e}")
-                finally:
+                continue
+            thread_timeout = max(0.1, remaining_timeout)
+            try:
+                thread.join(timeout=thread_timeout)
+            except Exception as e:
+                logger.warning(f"⚠️ Fehler beim Join von Thread {thread.name}: {e}")
+            finally:
+                with self._lock:
+                    if thread in self.threads:
+                        self.threads.remove(thread)
+            remaining_timeout = max(0.1, timeout - (time.time() - start_time))
+
+        # 3. Temporäre Dateien löschen
+        remaining_timeout = timeout - (time.time() - start_time)
+        with self._lock:
+            temp_files_to_delete = self.temp_files[:]
+        for temp_file in temp_files_to_delete:
+            if time.time() - start_time > timeout:
+                logger.warning("⚠️ Cleanup timeout – breche Löschen temporärer Dateien ab")
+                break
+            try:
+                if os.path.exists(temp_file):
+                    os.unlink(temp_file)
+                    logger.debug(f"🗑️ Temporäre Datei gelöscht: {temp_file}")
+            except (OSError, PermissionError) as e:
+                logger.warning(f"⚠️ Konnte temporäre Datei {temp_file} nicht löschen: {e}")
+            finally:
+                with self._lock:
                     if temp_file in self.temp_files:
                         self.temp_files.remove(temp_file)
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    logger.debug("🧹 GPU-Cache geleert")
-            except ImportError:
-                pass
-            gc.collect()
-            self.cleanup_done = True
-            logger.info("✅ ResourceManager: Alle Ressourcen bereinigt")
 
+        # 4. GPU-Cache leeren (optional)
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                logger.debug("🧹 GPU-Cache geleert")
+        except ImportError:
+            pass
+
+        # 5. Garbage Collection
+        gc.collect()
+        self.cleanup_done = True
+        logger.info("✅ ResourceManager: Alle Ressourcen bereinigt")
+        return True
+
+    def dispose(self) -> None:
+        """Öffentliche Methode zum Entsorgen der Ressourcen (Alias für cleanup)."""
+        self.cleanup()
+
+    # -------------------------------------------------------------------------
+    # Interne Terminierungslogik
+    # -------------------------------------------------------------------------
     def _terminate_process(self, proc: subprocess.Popen) -> None:
+        """
+        Beendet einen Prozess und alle seine Kindprozesse (wenn möglich).
+        Verwendet psutil, falls verfügbar, ansonsten einfaches terminate/kill.
+        """
+        # Wenn der Prozess bereits beendet ist, muss nichts getan werden.
         if proc.poll() is not None:
+            logger.debug(f"Prozess {proc.pid} bereits beendet – überspringe")
             return
+
         pid = proc.pid
         logger.debug(f"🛑 Beende Prozess {pid}...")
+
         if self._psutil:
             try:
                 parent = self._psutil.Process(pid)
                 children = parent.children(recursive=True)
+
+                # Kindprozesse terminieren
                 for child in children:
                     try:
                         child.terminate()
                     except self._psutil.NoSuchProcess:
                         pass
-                gone, alive = self._psutil.wait_procs(children, timeout=1.0)
+
+                # Auf Kindprozesse warten (max. 2 Sekunden)
+                gone, alive = self._psutil.wait_procs(children, timeout=2.0)
                 for p in alive:
                     try:
                         p.kill()
                     except self._psutil.NoSuchProcess:
                         pass
+
+                # Elternprozess terminieren
                 parent.terminate()
-                parent.wait(timeout=1.0)
-                logger.debug(f"✅ Prozess {pid} mit psutil beendet")
+                try:
+                    parent.wait(timeout=2.0)
+                    logger.debug(f"✅ Prozess {pid} mit psutil beendet")
+                    return
+                except self._psutil.TimeoutExpired:
+                    # Falls nicht terminiert, killen
+                    parent.kill()
+                    try:
+                        parent.wait(timeout=1.0)
+                        logger.debug(f"✅ Prozess {pid} mit kill beendet")
+                    except self._psutil.TimeoutExpired:
+                        logger.warning(f"⚠️ Prozess {pid} auch nach kill nicht beendet")
                 return
-            except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, AttributeError):
-                pass
+
+            except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, AttributeError) as e:
+                logger.debug(f"psutil-Fehler bei Prozess {pid}: {e} – verwende Fallback")
+
+        # Fallback ohne psutil
         try:
             proc.terminate()
-            proc.wait(timeout=1.0)
-        except subprocess.TimeoutExpired:
             try:
+                proc.wait(timeout=2.0)
+                logger.debug(f"✅ Prozess {pid} mit terminate beendet")
+                return
+            except subprocess.TimeoutExpired:
+                logger.debug(f"⏰ Prozess {pid} reagiert nicht auf terminate, versuche kill")
                 proc.kill()
-                proc.wait(timeout=0.5)
-            except Exception:
-                pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.cleanup()
+                try:
+                    proc.wait(timeout=1.0)
+                    logger.debug(f"✅ Prozess {pid} mit kill beendet")
+                except subprocess.TimeoutExpired:
+                    # Letzter Versuch: kurz warten und dann poll
+                    time.sleep(0.5)
+                    if proc.poll() is None:
+                        logger.warning(f"⚠️ Prozess {pid} konnte nicht beendet werden")
+                    else:
+                        logger.debug(f"✅ Prozess {pid} nach kill erfolgreich beendet")
+        except Exception as e:
+            logger.warning(f"⚠️ Fehler beim Beenden von Prozess {pid}: {e}")
 
 
 class LanguageDetector:
     """
     Sprachdetektion für Audio-/Videodateien mittels Whisper.
 
-    Die Klasse extrahiert eine kurze Audioprobe aus der Mediendatei und
-    führt eine Transkription mit Whisper durch, um die Sprache zu erkennen.
-    Sie ist robust gegenüber verschiedenen Audioformaten, kann die Probe
-    intelligent wählen und liefert detaillierte Ergebnisse.
+    Diese Klasse extrahiert eine kurze Audioprobe aus der Mediendatei und führt
+    eine Transkription mit Whisper durch, um die Sprache zu erkennen. Sie ist
+    robust gegenüber verschiedenen Audioformaten, kann die Probe intelligent
+    wählen und liefert detaillierte Ergebnisse.
 
     Features:
-    - Automatische Extraktion der Audioprobe mit ffmpeg
-    - Intelligente Wahl der Probendauer basierend auf der Dateilänge
-    - Detaillierte Fehlerbehandlung mit aussagekräftigen Meldungen
-    - Unterstützung für lokale Dateien und URLs (über die Transkriptionsengine)
-    - Cache für häufige Dateien (optional)
-    - Thread-sicher und mit Timeout-Schutz
-    - Deaktiviert VAD während der Sprachdetektion für bessere Ergebnisse
+        - Automatische Extraktion der Audioprobe mit ffmpeg
+        - Intelligente Wahl der Probendauer basierend auf Dateilänge
+        - Robuste Verarbeitung von WAV‑Dateien mit korrektem Header-Parsing
+        - Deaktiviert VAD während der Sprachdetektion für bessere Ergebnisse
+        - Fallback bei leeren Ergebnissen: Zweiter Versuch mit verstärktem Audio
+        - Detaillierte Fehlerbehandlung mit aussagekräftigen Meldungen
+        - Cache für häufige Dateien (optional)
+        - Thread-sicher und mit Timeout-Schutz
 
     Attributes:
         transcription_engine (TranscriptionEngine): Die zu verwendende Transkriptionsengine.
         _debug (bool): Debug-Modus aktiviert.
-        _cache (TTLCache): Optionaler Cache für Spracherkennungsergebnisse.
+        _cache (Optional[TTLCache]): Cache für Spracherkennungsergebnisse.
         _lock (threading.RLock): Lock für Thread-Sicherheit.
+        _ffmpeg_timeout (int): Timeout für ffmpeg/ffprobe-Aufrufe in Sekunden.
     """
 
     def __init__(self, transcription_engine: TranscriptionEngine, enable_cache: bool = True, cache_ttl: float = 3600) -> None:
@@ -7912,11 +9651,18 @@ class LanguageDetector:
         self._debug = logger.isEnabledFor(logging.DEBUG)
         self._lock = threading.RLock()
         self._cache: Optional[TTLCache] = TTLCache(maxsize=50, ttl=cache_ttl) if enable_cache else None
-        self._ffmpeg_timeout = 30  # Sekunden für ffmpeg-Aufrufe
+        self._ffmpeg_timeout = 30  # Sekunden für ffmpeg/ffprobe-Aufrufe
 
+    # -------------------------------------------------------------------------
+    # Öffentliche Methoden
+    # -------------------------------------------------------------------------
     def detect_video_language(self, file_path: str, force: bool = False, sample_duration: Optional[int] = None) -> Dict[str, Any]:
         """
         Ermittelt die Sprache einer lokalen Audio-/Videodatei.
+
+        Bei leerem Ergebnis wird ein zweiter Versuch mit verstärktem Audio
+        (Gain-Faktor 2.0) durchgeführt, um leise oder wenig kontrastreiche
+        Passagen besser zu erkennen.
 
         Args:
             file_path: Pfad zur Datei (kann auch mit file:// beginnen).
@@ -7931,6 +9677,7 @@ class LanguageDetector:
                 - sample_text (str): Beispieltext (gekürzt)
                 - duration_analyzed (float): Analysierte Dauer in Sekunden
                 - file_duration (float): Gesamtdauer der Datei (falls bekannt)
+                - enhanced_used (bool): Ob der verstärkte Fallback verwendet wurde
                 Im Fehlerfall enthält das Dictionary ein Feld 'error' mit der Fehlermeldung.
 
         Raises:
@@ -8000,8 +9747,33 @@ class LanguageDetector:
             self.transcription_engine.settings.vad_filter = old_vad
             self.transcription_engine.forced_language = old_language
 
+        # Prüfen, ob ein Ergebnis vorliegt
         if not result or not result.text or not result.text.strip():
-            return {"error": "Kein gesprochener Text in der Audioprobe erkannt"}
+            # Fallback: Verstärkung des Audios (Gain-Faktor 2.0) und zweiter Versuch
+            if self._debug:
+                logger.debug("Sprachdetektion: Kein Text erkannt, versuche verstärktes Audio...")
+            amplified = self._amplify_audio(audio_sample, gain=2.0)
+            if amplified:
+                try:
+                    self.transcription_engine.settings.vad_filter = False
+                    self.transcription_engine.forced_language = None
+                    result2 = self.transcription_engine.transcribe_audio(amplified, include_timestamps=False)
+                except Exception as e:
+                    logger.exception(f"Fehler bei verstärkter Sprachdetektion: {e}")
+                    return {"error": "Kein gesprochener Text in der Audioprobe erkannt (auch nach Verstärkung)"}
+                finally:
+                    self.transcription_engine.settings.vad_filter = old_vad
+                    self.transcription_engine.forced_language = old_language
+
+                if result2 and result2.text and result2.text.strip():
+                    result = result2
+                    enhanced_used = True
+                else:
+                    return {"error": "Kein gesprochener Text in der Audioprobe erkannt"}
+            else:
+                return {"error": "Kein gesprochener Text in der Audioprobe erkannt"}
+        else:
+            enhanced_used = False
 
         # Ergebnisse aufbereiten
         language_code = getattr(result, "language", "unknown")
@@ -8020,6 +9792,7 @@ class LanguageDetector:
             "sample_text": sample_text,
             "duration_analyzed": sample_duration,
             "file_duration": file_duration,
+            "enhanced_used": enhanced_used,
         }
 
         # Cache speichern
@@ -8028,6 +9801,22 @@ class LanguageDetector:
 
         return detection_result
 
+    def clear_cache(self) -> None:
+        """Leert den internen Cache."""
+        if self._cache:
+            self._cache.clear()
+            if self._debug:
+                logger.debug("Sprachdetektions-Cache geleert")
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Gibt Statistiken zum Cache zurück."""
+        if self._cache:
+            return self._cache.get_stats()
+        return {"enabled": False}
+
+    # -------------------------------------------------------------------------
+    # Private Hilfsmethoden
+    # -------------------------------------------------------------------------
     def _get_media_duration(self, file_path: str) -> Optional[float]:
         """
         Ermittelt die Dauer einer Mediendatei mit ffprobe.
@@ -8072,6 +9861,10 @@ class LanguageDetector:
         """
         Extrahiert eine kurze Audioprobe im Rohformat (16-bit PCM, 16 kHz, mono).
 
+        Für WAV‑Dateien wird das Standardmodul `wave` verwendet, um den Header
+        korrekt zu parsen und die Daten auszulesen. Für alle anderen Formate wird
+        ffmpeg genutzt.
+
         Args:
             file_path: Pfad zur Mediendatei.
             duration: Dauer der Probe in Sekunden.
@@ -8081,22 +9874,16 @@ class LanguageDetector:
         """
         config = self.transcription_engine.settings.config
 
-        # Optimierung: Wenn die Datei bereits WAV mit passenden Parametern ist,
-        # können wir sie direkt einlesen (spart ffmpeg).
-        if file_path.lower().endswith(".wav") and self._is_wav_compatible(file_path, config):
+        # --- Optimierung: Wenn Datei WAV mit korrekten Parametern ist, direkt über wave lesen ---
+        if file_path.lower().endswith(".wav"):
             try:
-                with open(file_path, "rb") as f:
-                    # WAV-Header überspringen (44 Bytes)
-                    f.seek(44)
-                    audio_data = f.read(duration * config.BYTES_PER_SECOND)
-                if audio_data:
-                    return audio_data
+                return self._extract_wav_sample(file_path, duration, config)
             except Exception as e:
                 if self._debug:
-                    logger.debug(f"Direktes Einlesen der WAV-Datei fehlgeschlagen: {e}")
+                    logger.debug(f"Direktes Einlesen der WAV-Datei fehlgeschlagen: {e}, verwende ffmpeg")
                 # Fallback auf ffmpeg
 
-        # Standard: ffmpeg verwenden
+        # --- Standard: ffmpeg verwenden ---
         cmd = [
             "ffmpeg",
             "-i", file_path,
@@ -8142,53 +9929,118 @@ class LanguageDetector:
             logger.warning(f"Fehler beim Extrahieren der Audioprobe: {e}")
             return None
 
-    def _is_wav_compatible(self, file_path: str, config: Config) -> bool:
+    def _extract_wav_sample(self, file_path: str, duration: int, config: Config) -> Optional[bytes]:
         """
-        Prüft, ob eine WAV-Datei bereits mit den gewünschten Parametern vorliegt.
+        Extrahiert eine Audioprobe aus einer WAV‑Datei mit dem `wave`-Modul.
 
         Args:
             file_path: Pfad zur WAV-Datei.
-            config: Config-Objekt mit SAMPLE_RATE, CHANNELS, BYTES_PER_SAMPLE.
+            duration: Dauer der Probe in Sekunden.
+            config: Konfigurationsobjekt mit erwarteten Audio-Parametern.
 
         Returns:
-            True, wenn die Datei kompatibel ist, sonst False.
+            Byte-Daten der Audioprobe im 16-bit PCM, mono, SAMPLE_RATE oder None bei Fehler.
         """
+        import wave
+
+        with wave.open(file_path, 'rb') as wav:
+            # Header-Informationen
+            nchannels = wav.getnchannels()
+            sampwidth = wav.getsampwidth()
+            framerate = wav.getframerate()
+            nframes = wav.getnframes()
+
+            # Prüfen, ob das Format konvertiert werden muss
+            # Erwartetes Format: 16-bit, Mono, SAMPLE_RATE
+            needs_conversion = (sampwidth != 2 or nchannels != 1 or framerate != config.SAMPLE_RATE)
+
+            if needs_conversion:
+                # Fallback auf ffmpeg, wenn das Format nicht passt
+                if self._debug:
+                    logger.debug(f"WAV-Format ({nchannels}ch, {sampwidth*8}bit, {framerate}Hz) nicht kompatibel – verwende ffmpeg")
+                return None
+
+            # Anzahl zu lesender Frames berechnen
+            frames_to_read = min(nframes, int(framerate * duration))
+
+            # Frames auslesen
+            data = wav.readframes(frames_to_read)
+
+            # Daten liegen als Bytes im nativen Format vor (hier 16-bit PCM)
+            return data
+
+    def _amplify_audio(self, audio_bytes: bytes, gain: float = 2.0) -> Optional[bytes]:
+        """
+        Verstärkt die Amplitude des Audiosignals (Gain-Faktor) und gibt die verstärkten
+        Bytes zurück. Verwendet numpy, falls verfügbar, ansonsten struct mit expliziter
+        little-endian Konvertierung.
+
+        Args:
+            audio_bytes: PCM-16 Audiodaten (16-bit signed little-endian).
+            gain: Verstärkungsfaktor (1.0 = keine Änderung).
+
+        Returns:
+            Verstärkte Audiodaten oder None bei Fehler.
+        """
+        if not audio_bytes:
+            return None
+
         try:
-            with open(file_path, "rb") as f:
-                # Lese WAV-Header (44 Bytes)
-                header = f.read(44)
-                if len(header) < 44:
-                    return False
-
-                # Sample-Rate aus Bytes 24-27 (little-endian)
-                sample_rate = int.from_bytes(header[24:28], "little")
-                # Anzahl Kanäle aus Bytes 22-23
-                channels = int.from_bytes(header[22:24], "little")
-                # Bits pro Sample aus Bytes 34-35
-                bits_per_sample = int.from_bytes(header[34:36], "little")
-                bytes_per_sample = bits_per_sample // 8
-
-                return (sample_rate == config.SAMPLE_RATE and
-                        channels == config.CHANNELS and
-                        bytes_per_sample == config.BYTES_PER_SAMPLE)
-        except Exception:
-            return False
-
-    def clear_cache(self) -> None:
-        """Leert den internen Cache."""
-        if self._cache:
-            self._cache.clear()
+            np = self.transcription_engine._np
+            if np is not None:
+                # Mit numpy: in float konvertieren, verstärken, clippen, zurück
+                audio = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
+                audio *= gain
+                np.clip(audio, -32767, 32767, out=audio)
+                return audio.astype(np.int16).tobytes()
+            else:
+                # Fallback ohne numpy: struct mit explizit little-endian
+                # < = little-endian, h = signed short
+                num_samples = len(audio_bytes) // 2
+                samples = struct.unpack(f'<{num_samples}h', audio_bytes)
+                amplified = [int(max(-32768, min(32767, s * gain))) for s in samples]
+                return struct.pack(f'<{num_samples}h', *amplified)
+        except Exception as e:
             if self._debug:
-                logger.debug("Sprachdetektions-Cache geleert")
-
-    def get_cache_stats(self) -> Dict[str, Any]:
-        """Gibt Statistiken zum Cache zurück."""
-        if self._cache:
-            return self._cache.get_stats()
-        return {"enabled": False}
+                logger.debug(f"Fehler bei Audio-Verstärkung: {e}")
+            return None
 
 
 class OllamaSummarizer:
+    """
+    Zusammenfassung von Texten mit Ollama (lokal laufendes LLM).
+
+    Diese Klasse kommuniziert mit einem Ollama-Server, sendet Prompts und empfängt
+    Antworten im Streaming-Modus. Sie unterstützt das Abrufen verfügbarer Modelle,
+    das Prüfen der Server-Erreichbarkeit und das asynchrone Zusammenfassen von
+    Texten mit Abbruchmöglichkeit.
+
+    Features:
+        - Automatische Erkennung der installierten Modelle
+        - Streaming-Antworten mit Callbacks für Teil- und Fehler-Ergebnisse
+        - Abbruch einer laufenden Anfrage über ein Cancel-Event
+        - Caching der verfügbaren Modelle (TTL-gesteuert)
+        - Thread-sicherer Zugriff über interne Locks
+        - Unterstützung für benutzerdefinierte System-Prompts
+
+    Attributes:
+        parent (Any): Referenz auf das aufrufende Objekt (für Callbacks).
+        model (str): Name des zu verwendenden Ollama-Modells.
+        host (str): Basis-URL des Ollama-Servers (z.B. 'http://localhost:11434').
+        timeout (int): Timeout in Sekunden für die API-Anfrage.
+        cache_ttl (int): Lebensdauer des Modell-Caches in Sekunden.
+        system_prompt (Optional[str]): Optionaler System-Prompt für das Modell.
+        cache_manager (Optional[CacheManager]): Optionaler Cache-Manager (derzeit nicht genutzt).
+        available (bool): True, wenn requests installiert ist.
+        _session (Optional[requests.Session]): Session für wiederholte API-Aufrufe.
+        _requests: Das requests-Modul (lazy geladen).
+        _lock (threading.RLock): Lock für thread-sicheren Zugriff.
+        _models_cache (List[str]): Cache der verfügbaren Modelle.
+        _models_cache_time (float): Zeitstempel des Caches.
+        _stop_event (threading.Event): Internes Stop-Event (für stop-Methode).
+        last_result (Optional[str]): Letzte vollständige Antwort (für spätere Verwendung).
+    """
+
     def __init__(
         self,
         parent: Any,
@@ -8199,6 +10051,18 @@ class OllamaSummarizer:
         system_prompt: Optional[str] = None,
         cache_manager: Optional[CacheManager] = None,
     ) -> None:
+        """
+        Initialisiert den OllamaSummarizer.
+
+        Args:
+            parent: Referenz auf das aufrufende Objekt (für Callbacks).
+            model: Name des zu verwendenden Ollama-Modells (z.B. 'llama3.1:8b').
+            host: Basis-URL des Ollama-Servers (ohne abschließenden Slash).
+            timeout: Timeout in Sekunden für die API-Anfrage.
+            cache_ttl: Lebensdauer des Modell-Caches in Sekunden.
+            system_prompt: Optionaler System-Prompt (wird dem Modell mitgegeben).
+            cache_manager: Optionaler Cache-Manager (derzeit nicht genutzt).
+        """
         self.parent = parent
         self.model = model
         self.host = host.rstrip("/")
@@ -8214,29 +10078,54 @@ class OllamaSummarizer:
 
         self._models_cache: List[str] = []
         self._models_cache_time = 0.0
-        self._models_cache_ttl = 300
+        self._stop_event = threading.Event()
 
         self.last_result: Optional[str] = None
 
-    def _get_session(self):
+    # -------------------------------------------------------------------------
+    # Private Hilfsmethoden
+    # -------------------------------------------------------------------------
+    def _get_session(self) -> Optional[requests.Session]:
+        """
+        Liefert die interne Requests-Session (lazy initialisiert).
+
+        Returns:
+            Die Session oder None, wenn requests nicht verfügbar ist.
+        """
         if not self.available:
             return None
         with self._lock:
             if self._session is None:
                 self._session = self._requests.Session()
-                self._session.headers.update({"Content-Type": "application/json", "Accept": "application/json"})
+                self._session.headers.update({
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                })
         return self._session
 
+    # -------------------------------------------------------------------------
+    # Öffentliche Methoden
+    # -------------------------------------------------------------------------
     def get_available_models(self) -> List[str]:
+        """
+        Ruft die Liste der auf dem Server verfügbaren Modelle ab (mit Caching).
+
+        Returns:
+            Liste der Modellnamen (z.B. ['llama3.1:8b', 'qwen2.5:7b', ...]).
+            Bei Fehlern oder wenn der Server nicht erreichbar ist, wird eine leere Liste zurückgegeben.
+        """
         if not self.available:
             return []
+
         now = time.time()
         with self._lock:
-            if now - self._models_cache_time < self._models_cache_ttl and self._models_cache:
+            if now - self._models_cache_time < self.cache_ttl and self._models_cache:
                 return self._models_cache.copy()
 
         try:
             session = self._get_session()
+            if session is None:
+                return []
             r = session.get(f"{self.host}/api/tags", timeout=5)
             if r.status_code == 200:
                 data = r.json()
@@ -8248,23 +10137,47 @@ class OllamaSummarizer:
             else:
                 logger.warning(f"Ollama model list error: {r.status_code}")
         except self._requests.exceptions.RequestException as e:
-            logger.warning(f"Ollama model list error: {e}")
+            if DEBUG_LEVEL >= 3:
+                log_exception("ollama", "Ollama request error getting models", e, level="warning")
+            else:
+                logger.warning(f"Ollama model list error: {e}")
         except Exception as e:
-            logger.warning(f"Unexpected error getting models: {e}")
+            if DEBUG_LEVEL >= 3:
+                log_exception("ollama", "Unexpected error getting models", e, level="warning")
+            else:
+                logger.warning(f"Unexpected error getting models: {e}")
         return []
 
     def is_model_available(self, model: Optional[str] = None) -> bool:
+        """
+        Prüft, ob ein bestimmtes Modell auf dem Server verfügbar ist.
+
+        Args:
+            model: Modellname (wenn None, wird das aktuell gesetzte Modell verwendet).
+
+        Returns:
+            True, wenn das Modell verfügbar ist oder keine Liste verfügbar ist (Fallback).
+        """
         check_model = model or self.model
         available = self.get_available_models()
         if not available:
+            # Wenn wir keine Liste bekommen, nehmen wir an, dass das Modell vorhanden ist
             return True
         return check_model in available
 
     def is_server_reachable(self) -> bool:
+        """
+        Prüft, ob der Ollama-Server erreichbar ist.
+
+        Returns:
+            True, wenn der Server antwortet, sonst False.
+        """
         if not self.available:
             return False
         try:
             session = self._get_session()
+            if session is None:
+                return False
             r = session.get(f"{self.host}/api/tags", timeout=2)
             return r.status_code == 200
         except Exception:
@@ -8280,23 +10193,46 @@ class OllamaSummarizer:
         complete_callback: Optional[Callable[[], None]] = None,
         cancel_event: Optional[threading.Event] = None,
     ) -> None:
+        """
+        Startet eine asynchrone Zusammenfassung mit Streaming-Antwort.
+
+        Die Methode erstellt einen neuen Thread, der die Anfrage an Ollama sendet.
+        Teile der Antwort werden über `callback` geliefert, Fehler über `error_callback`.
+        Nach Abschluss wird `complete_callback` aufgerufen (falls angegeben).
+
+        Args:
+            text: Der zu verarbeitende Text (z.B. das Transkript).
+            prompt: Der Prompt, der an das Modell gesendet wird.
+            temperature: Kreativitätsparameter (0.0 = deterministisch, 1.0 = kreativ).
+            callback: Wird bei jedem eingehenden Teilstring aufgerufen.
+            error_callback: Wird bei Fehlern mit einer Fehlermeldung aufgerufen.
+            complete_callback: Wird nach erfolgreichem Abschluss aufgerufen.
+            cancel_event: Optionales Event zum vorzeitigen Abbruch der Anfrage.
+        """
         if not self.available:
             error_callback("Ollama nicht verfügbar (requests nicht installiert)")
             return
+
         if not text or not text.strip():
             error_callback("Kein Text zum Zusammenfassen")
             return
+
         if not self.is_model_available():
             error_callback(f"Ollama-Modell '{self.model}' nicht auf Server gefunden.")
             return
 
-        self._stop_event = threading.Event()
+        # Interne Stop-Events zurücksetzen
+        self._stop_event.clear()
         cancel = cancel_event or threading.Event()
 
         def worker():
             full_response = ""
             try:
                 session = self._get_session()
+                if session is None:
+                    error_callback("Keine Session (requests nicht verfügbar)")
+                    return
+
                 full_prompt = f"{prompt}\n\n{text}"
                 payload = {
                     "model": self.model,
@@ -8362,6 +10298,17 @@ class OllamaSummarizer:
         error_callback: Callable[[str], None],
         complete_callback: Optional[Callable[[], None]] = None,
     ) -> None:
+        """
+        Korrigiert ein Transkript mit einem Standard-Prompt.
+
+        Nutzt die `summarize`-Methode mit einem vordefinierten Prompt zur Textkorrektur.
+
+        Args:
+            text: Der zu korrigierende Text.
+            callback: Wird bei jedem eingehenden Teilstring aufgerufen.
+            error_callback: Wird bei Fehlern mit einer Fehlermeldung aufgerufen.
+            complete_callback: Wird nach erfolgreichem Abschluss aufgerufen.
+        """
         if not self.available:
             error_callback("Ollama nicht verfügbar (requests fehlt)")
             return
@@ -8389,11 +10336,18 @@ class OllamaSummarizer:
         )
 
     def stop(self) -> None:
-        if hasattr(self, "_stop_event"):
-            self._stop_event.set()
+        """
+        Signalisiert der laufenden Anfrage, abzubrechen.
+        Setzt ein internes Event, das im Worker-Thread geprüft wird.
+        """
+        self._stop_event.set()
         logger.info("OllamaSummarizer: Stop signalisiert")
 
     def dispose(self) -> None:
+        """
+        Gibt Ressourcen frei (schließt die HTTP-Session).
+        Sollte beim Beenden des Dialogs aufgerufen werden.
+        """
         self.stop()
         if self._session:
             try:
@@ -8407,6 +10361,47 @@ class OllamaSummarizer:
 
 
 class QueueManager:
+    """
+    Zentrales Queue-Management für thread-sichere GUI- und Text-Updates.
+
+    Diese Klasse verwaltet zwei Warteschlangen:
+    - GUI-Queue: Enthält (msg_type, callback, important)-Tupel für GUI-Updates.
+    - Text-Queue: Enthält (update_type, text_data)-Tupel für Transkriptions-/Übersetzungstexte.
+
+    Die Verarbeitung erfolgt in Batches, deren Größe dynamisch an die aktuelle
+    Queue-Auslastung angepasst wird. Unwichtige Elemente können bei Überlast
+    verworfen werden, um die GUI reaktionsfähig zu halten.
+
+    Features:
+        - Dynamische Batch-Größe basierend auf Queue-Auslastung
+        - Automatische Queue-Bereinigung bei Überlast
+        - Schutz wichtiger Nachrichtentypen (z.B. Status, Fehler)
+        - Detailliertes Logging mit Debug-Modus
+        - Thread-sichere Zugriffe über Locks
+        - Dynamisches Intervall: Bei Leerlauf seltener abfragen
+
+    Attributes:
+        gui (DragonWhispererGUI): Referenz auf die Haupt-GUI.
+        root (tk.Tk): Das Tkinter-Hauptfenster.
+        _gui_update_limiter: Rate-Limiter für GUI-Updates.
+        GUI_QUEUE_MAX_SIZE (int): Maximale Größe der GUI-Queue.
+        GUI_QUEUE_CLEANUP_TARGET (int): Zielgröße nach Bereinigung.
+        TEXT_QUEUE_MAX_SIZE (int): Maximale Größe der Text-Queue.
+        TEXT_QUEUE_CLEANUP_TARGET (int): Zielgröße nach Bereinigung.
+        GUI_PROCESS_MAX_ITEMS (int): Maximale Anzahl Items pro Batch (GUI).
+        TEXT_PROCESS_MAX_ITEMS (int): Maximale Anzahl Items pro Batch (Text).
+        GUI_PROCESS_MAX_DURATION (float): Maximale Batch-Laufzeit in Sekunden.
+        TEXT_PROCESS_MAX_DURATION (float): Maximale Batch-Laufzeit in Sekunden.
+        _gui_queue_lock (threading.RLock): Lock für GUI-Queue.
+        _text_queue_lock (threading.RLock): Lock für Text-Queue.
+        _important_types_lock (threading.RLock): Lock für wichtige Nachrichtentypen.
+        _important_msg_types (set): Menge von Nachrichtentypen, die nie verworfen werden.
+        gui_queue (queue.Queue): Queue für GUI-Updates.
+        text_queue (queue.Queue): Queue für Text-Updates.
+        _last_queue_warning_time (float): Zeitpunkt der letzten Queue-Warnung.
+    """
+
+    # Standardwerte (können im Konstruktor überschrieben werden)
     GUI_QUEUE_MAX_SIZE = 200
     GUI_QUEUE_CLEANUP_TARGET = 100
     TEXT_QUEUE_MAX_SIZE = 150
@@ -8417,11 +10412,18 @@ class QueueManager:
     TEXT_PROCESS_MAX_DURATION = 0.05
 
     def __init__(self, gui: "DragonWhispererGUI", **kwargs):
+        """
+        Initialisiert den QueueManager.
+
+        Args:
+            gui: Referenz auf die Haupt-GUI.
+            **kwargs: Überschreibungen für Queue-Größen und Verarbeitungsparameter.
+        """
         self.gui = gui
         self.root = gui.root
-        self._last_gui_update_time = 0.0
         self._gui_update_limiter = gui._gui_update_limiter
 
+        # Queue-Größen und Verarbeitungsparameter überschreibbar
         self.GUI_QUEUE_MAX_SIZE = kwargs.get("gui_queue_max_size", self.GUI_QUEUE_MAX_SIZE)
         self.GUI_QUEUE_CLEANUP_TARGET = kwargs.get("gui_queue_cleanup_target", self.GUI_QUEUE_CLEANUP_TARGET)
         self.TEXT_QUEUE_MAX_SIZE = kwargs.get("text_queue_max_size", self.TEXT_QUEUE_MAX_SIZE)
@@ -8431,15 +10433,18 @@ class QueueManager:
         self.GUI_PROCESS_MAX_DURATION = kwargs.get("gui_process_max_duration", self.GUI_PROCESS_MAX_DURATION)
         self.TEXT_PROCESS_MAX_DURATION = kwargs.get("text_process_max_duration", self.TEXT_PROCESS_MAX_DURATION)
 
+        # Locks für Thread-Sicherheit
         self._gui_queue_lock = threading.RLock()
         self._text_queue_lock = threading.RLock()
         self._important_types_lock = threading.RLock()
 
+        # Wichtige Nachrichtentypen, die bei Überlast nicht verworfen werden
         self._important_msg_types = {
             "status", "error", "file_finished",
             "info", "controller_state", "stream_info"
         }
 
+        # Queues aus der GUI übernehmen oder Dummy-Queues erstellen
         self.gui_queue = getattr(gui, "gui_queue", None)
         self.text_queue = getattr(gui, "_text_update_queue", None)
 
@@ -8452,21 +10457,47 @@ class QueueManager:
 
         self._last_queue_warning_time = 0.0
 
+    # -------------------------------------------------------------------------
+    # Öffentliche Methoden
+    # -------------------------------------------------------------------------
     def cleanup_gui_queue(self, max_size: int) -> int:
         """
-        Öffentliche Methode zum Aufräumen der GUI-Queue.
-        Entfernt überzählige Elemente, bis die Größe <= max_size ist.
-        Gibt die Anzahl der gelöschten Elemente zurück.
+        Bereinigt die GUI-Queue auf die angegebene maximale Größe.
+        Behält wichtige Nachrichten, verwirft unwichtige.
+
+        Args:
+            max_size: Maximale Anzahl Elemente nach der Bereinigung.
+
+        Returns:
+            Anzahl der gelöschten Elemente.
         """
         with self._gui_queue_lock:
             return self._cleanup_queue(self.gui_queue, max_size, self._gui_queue_lock, "GUI")
 
+    def cleanup_text_queue(self, max_size: int) -> int:
+        return self._cleanup_queue(self.text_queue, max_size, self._text_queue_lock, "Text")
+
     def start(self) -> None:
+        """
+        Startet die periodische Verarbeitung der Queues.
+        Wird nach der GUI-Initialisierung aufgerufen.
+        """
         self.root.after(50, self._process_gui_queue_dynamic)
         self.root.after(75, self._process_text_updates)
         self.root.after(5000, self._check_queue_sizes)
 
     def safe_put(self, queue_type: Literal["gui", "text"], item: Any) -> bool:
+        """
+        Fügt ein Element sicher in eine Queue ein.
+        Bei voller Queue werden unwichtige Elemente verworfen oder älteste Elemente entfernt.
+
+        Args:
+            queue_type: "gui" oder "text".
+            item: Das einzufügende Element.
+
+        Returns:
+            True bei Erfolg, False bei Fehler.
+        """
         if queue_type == "gui":
             q = self.gui_queue
             lock = self._gui_queue_lock
@@ -8490,6 +10521,7 @@ class QueueManager:
                         return True
                     except queue.Full:
                         pass
+                # Falls immer noch voll: ältestes Element entfernen
                 try:
                     q.get_nowait()
                     q.put_nowait(item)
@@ -8503,13 +10535,30 @@ class QueueManager:
                 return False
 
     def add_important_type(self, msg_type: str) -> None:
+        """
+        Fügt einen Nachrichtentyp zur Liste der wichtigen Typen hinzu.
+        Wichtige Typen werden bei Queue-Bereinigung nicht verworfen.
+
+        Args:
+            msg_type: Der Nachrichtentyp (z.B. "status", "error").
+        """
         with self._important_types_lock:
             self._important_msg_types.add(msg_type)
 
     def get_queue_sizes(self) -> Tuple[int, int]:
+        """
+        Gibt die aktuellen Größen der GUI- und Text-Queue zurück.
+
+        Returns:
+            (gui_size, text_size).
+        """
         return (self._safe_qsize(self.gui_queue), self._safe_qsize(self.text_queue))
 
+    # -------------------------------------------------------------------------
+    # Private Verarbeitungsmethoden (periodisch)
+    # -------------------------------------------------------------------------
     def _process_gui_queue_dynamic(self) -> None:
+        """Verarbeitet die GUI-Queue mit dynamischer Batch-Größe."""
         self._process_queue_batch(
             queue_obj=self.gui_queue,
             lock=self._gui_queue_lock,
@@ -8523,6 +10572,7 @@ class QueueManager:
         )
 
     def _process_text_updates(self) -> None:
+        """Verarbeitet die Text-Queue mit dynamischer Batch-Größe."""
         self._process_queue_batch(
             queue_obj=self.text_queue,
             lock=self._text_queue_lock,
@@ -8547,11 +10597,27 @@ class QueueManager:
         process_func: Callable[[Any], None],
         queue_name: str,
     ) -> None:
+        """
+        Verarbeitet einen Batch von Elementen aus einer Queue.
+        Die Batch-Größe wird dynamisch an die aktuelle Queue-Auslastung angepasst.
+
+        Args:
+            queue_obj: Die zu verarbeitende Queue.
+            lock: Lock für die Queue (wird hier nicht benötigt, nur für die Bereinigung).
+            max_size_threshold: Schwellwert, bei dem eine Bereinigung ausgelöst wird.
+            cleanup_target: Zielgröße nach Bereinigung.
+            max_items_base: Basis-Batch-Größe (wird mit Lastfaktor multipliziert).
+            max_duration_base: Basis-Maximaldauer für Batch-Verarbeitung (Sekunden).
+            interval_base: Basis-Intervall für die nächste Verarbeitung (ms).
+            process_func: Funktion zur Verarbeitung eines einzelnen Elements.
+            queue_name: Name der Queue (für Logging).
+        """
         if self.gui._shutting_down or not self._root_exists():
             return
 
         current_size = self._safe_qsize(queue_obj)
 
+        # Dynamische Batch-Größe basierend auf Auslastung
         if max_size_threshold > 0:
             load_factor = min(1.0, current_size / max_size_threshold)
         else:
@@ -8572,20 +10638,25 @@ class QueueManager:
                 process_func(item)
                 processed += 1
 
+            # Wenn die Queue nach der Verarbeitung zu groß ist, bereinigen
             new_size = self._safe_qsize(queue_obj)
             if new_size > max_size_threshold:
                 if logger.isEnabledFor(logging.DEBUG):
                     log_debug("queue", f"{queue_name} queue zu groß ({new_size}) – bereinige")
                 self._cleanup_queue(queue_obj, cleanup_target, lock, queue_name)
 
-            if logger.isEnabledFor(logging.DEBUG) and processed > 0:
+            # ===== Debug‑Ausgabe bei --debug=3 und relevanten Mengen =====
+            if DEBUG_LEVEL >= 3 and processed > 5:
                 log_debug(
                     "queue",
                     f"{queue_name} queue: {processed} Items verarbeitet, verbleibend: {new_size}"
                 )
+            # =============================================================
+
         except Exception as e:
             logger.error(f"❌ Kritischer Fehler in {queue_name} queue processing: {e}", exc_info=True)
 
+        # Dynamisches Intervall: Bei leerer Queue seltener abfragen
         if current_size == 0:
             next_interval = interval_base * 2
         elif current_size < max_size_threshold / 2:
@@ -8603,10 +10674,18 @@ class QueueManager:
             )
 
     def _process_gui_item(self, item: Any) -> None:
+        """
+        Verarbeitet ein einzelnes GUI-Queue-Element.
+        Erwartet Tupel (msg_type, callback, important).
+
+        Args:
+            item: Das Queue-Element.
+        """
         if isinstance(item, tuple) and len(item) in (2, 3):
             msg_type, callback = item[0], item[1]
             important = item[2] if len(item) == 3 else False
             if callable(callback):
+                # Wichtige Updates werden sofort ausgeführt (ohne Rate-Limit)
                 if important or self._gui_update_limiter.can_update(f"gui_{msg_type}"):
                     try:
                         callback()
@@ -8621,6 +10700,13 @@ class QueueManager:
             logger.warning(f"⚠️ Unbekanntes Element in GUI‑Queue entfernt: {type(item)}")
 
     def _process_text_item(self, item: Any) -> None:
+        """
+        Verarbeitet ein einzelnes Text-Queue-Element.
+        Erwartet Tupel (update_type, text_data).
+
+        Args:
+            item: Das Queue-Element.
+        """
         if not isinstance(item, tuple) or len(item) != 2:
             return
         update_type, text_data = item
@@ -8640,18 +10726,25 @@ class QueueManager:
         except Exception as e:
             logger.warning(f"⚠️ Text update error: {e}")
 
+    # -------------------------------------------------------------------------
+    # Queue-Wartung
+    # -------------------------------------------------------------------------
     def _check_queue_sizes(self) -> None:
+        """
+        Periodische Überwachung der Queue-Größen.
+        Bei Überschreitung der Schwellwerte wird eine Bereinigung ausgelöst und eine Warnung ausgegeben.
+        """
         if self.gui._shutting_down or not self._root_exists():
             return
         try:
             gui_size = self._safe_qsize(self.gui_queue)
-            text_size = self._safe_qsize(self.text_queue)
+            text_size = self._safe_qsize(self.text_queue)   # <-- korrigiert
             now = time.time()
 
             if gui_size > self.GUI_QUEUE_MAX_SIZE * 0.8:
-                logger.info(f"📊 GUI queue size: {gui_size}/{self.GUI_QUEUE_MAX_SIZE} (high)")
+                log_debug("queue", f"GUI queue size: {gui_size}/{self.GUI_QUEUE_MAX_SIZE} (high)")
             if text_size > self.TEXT_QUEUE_MAX_SIZE * 0.8:
-                logger.info(f"📊 Text queue size: {text_size}/{self.TEXT_QUEUE_MAX_SIZE} (high)")
+                log_debug("queue", f"Text queue size: {text_size}/{self.TEXT_QUEUE_MAX_SIZE} (high)")
 
             if gui_size > self.GUI_QUEUE_MAX_SIZE:
                 logger.warning(f"⚠️ GUI queue size {gui_size} exceeds threshold, cleaning up")
@@ -8673,7 +10766,21 @@ class QueueManager:
         if not self.gui._shutting_down and self._root_exists():
             self.root.after(10000, self._check_queue_sizes)
 
+    # -------------------------------------------------------------------------
+    # Hilfsmethoden für Queue-Bereinigung
+    # -------------------------------------------------------------------------
     def _discard_unimportant(self, queue_obj: queue.Queue, queue_type: str) -> int:
+        """
+        Entfernt unwichtige Elemente aus der Queue, behält wichtige.
+        Wird bei Überlast aufgerufen.
+
+        Args:
+            queue_obj: Die Queue.
+            queue_type: "gui" oder "text".
+
+        Returns:
+            Anzahl der entfernten Elemente.
+        """
         removed = 0
         try:
             items = []
@@ -8692,6 +10799,7 @@ class QueueManager:
                 else:
                     others.append(item)
 
+            # Wichtige Elemente wieder einreihen
             for item in important:
                 try:
                     queue_obj.put_nowait(item)
@@ -8714,21 +10822,17 @@ class QueueManager:
             logger.warning(f"Fehler beim Verwerfen unwichtiger Elemente: {e}")
             return 0
 
-    def _get_maxsize(self, q: queue.Queue) -> int:
-        try:
-            return q.maxsize
-        except AttributeError:
-            return 0
-
-    def _is_important_item(self, item: Any, queue_type: str) -> bool:
-        if queue_type == "gui":
-            if isinstance(item, tuple) and len(item) >= 2:
-                msg_type = item[0]
-                if (len(item) == 3 and item[2] is True) or self._is_important(msg_type):
-                    return True
-        return False
-
     def _cleanup_queue(self, queue_obj: queue.Queue, max_size: int, lock: threading.RLock, queue_name: str = "") -> None:
+        """
+        Bereinigt eine Queue auf die angegebene maximale Größe.
+        Behält wichtige Elemente, verwirft unwichtige.
+
+        Args:
+            queue_obj: Die Queue.
+            max_size: Maximale Anzahl Elemente nach Bereinigung.
+            lock: Lock für die Queue.
+            queue_name: Name für Logging.
+        """
         if not queue_obj or self._safe_qsize(queue_obj) <= max_size:
             return
 
@@ -8770,11 +10874,41 @@ class QueueManager:
             except Exception as e:
                 logger.warning(f"⚠️ Queue cleanup error: {e}")
 
+    def _is_important_item(self, item: Any, queue_type: str) -> bool:
+        """
+        Prüft, ob ein Queue-Element wichtig ist (nicht verworfen werden darf).
+
+        Args:
+            item: Das Queue-Element.
+            queue_type: "gui" oder "text".
+
+        Returns:
+            True, wenn das Element wichtig ist.
+        """
+        if queue_type == "gui":
+            if isinstance(item, tuple) and len(item) >= 2:
+                msg_type = item[0]
+                if (len(item) == 3 and item[2] is True) or self._is_important(msg_type):
+                    return True
+        return False
+
     def _is_important(self, msg_type: str) -> bool:
+        """Prüft, ob ein Nachrichtentyp als wichtig markiert ist."""
         with self._important_types_lock:
             return msg_type in self._important_msg_types
 
+    # -------------------------------------------------------------------------
+    # Hilfsmethoden
+    # -------------------------------------------------------------------------
+    def _get_maxsize(self, q: queue.Queue) -> int:
+        """Gibt die maximale Größe einer Queue zurück (falls vorhanden)."""
+        try:
+            return q.maxsize
+        except AttributeError:
+            return 0
+
     def _safe_qsize(self, q: Optional[queue.Queue]) -> int:
+        """Sicherer Zugriff auf qsize() (fängt NotImplementedError ab)."""
         if q is None:
             return 0
         try:
@@ -8783,6 +10917,7 @@ class QueueManager:
             return 0
 
     def _root_exists(self) -> bool:
+        """Prüft, ob das Tkinter-Hauptfenster noch existiert."""
         try:
             return self.root.winfo_exists()
         except tk.TclError:
@@ -8792,32 +10927,71 @@ class QueueManager:
 # 17. GUI-KLASSEN
 # =============================================================================
 class StatusBar:
-    def __init__(self, parent: tk.Frame, gui: "DragonWhispererGUI"):
+    """
+    Statusleiste am unteren Rand des Hauptfensters.
+
+    Die Statusleiste enthält:
+    - Eine Reihe von Schnellzugriffs-Buttons (Löschen, Speichern, Export, Statistiken,
+      Einstellungen, Übersetzung, Zusammenfassung, Paketinstallation).
+    - Eine Fortschrittsanzeige (Progressbar) mit Prozentwert.
+    - Ein Label mit Systeminformationen (CPU, RAM, VRAM, Modell).
+    - Buttons für Exit, TTS, Hilfe, VAD-Fallback und Live-Modus.
+
+    Die Statusleiste ist dynamisch und reagiert auf Zustandsänderungen der GUI.
+    Sie verwendet das aktuelle Theme und bietet Tooltips für alle Buttons.
+
+    Attributes:
+        gui (DragonWhispererGUI): Referenz auf die Haupt-GUI.
+        root (tk.Tk): Das Tkinter-Hauptfenster.
+        frame (tk.Frame): Das Rahmen-Widget der Statusleiste.
+    """
+
+    def __init__(self, parent: tk.Frame, gui: "DragonWhispererGUI") -> None:
+        """
+        Initialisiert die Statusleiste.
+
+        Args:
+            parent: Das übergeordnete Widget (normalerweise das Hauptfenster).
+            gui: Referenz auf die Haupt-GUI (für Zugriff auf Controller, Einstellungen etc.).
+        """
         self.gui = gui
         self.root = gui.root
         self.frame = tk.Frame(parent, bg=gui.current_theme.BG_SECONDARY, height=36)
         self.frame.grid_propagate(True)
+
+        # Trennlinie oben
         separator = tk.Frame(self.frame, height=2, bg=gui.current_theme.DRAGON_GREEN)
         separator.pack(fill="x", side="top")
+
+        # Hauptcontainer
         main_container = tk.Frame(self.frame, bg=gui.current_theme.BG_SECONDARY)
         main_container.pack(fill="x", expand=True, padx=8, pady=3)
         main_container.columnconfigure(0, weight=0)
         main_container.columnconfigure(1, weight=1)
         main_container.columnconfigure(2, weight=0)
 
+        # Linke Buttons (Schnellzugriff)
         left_panel = tk.Frame(main_container, bg=gui.current_theme.BG_SECONDARY)
         left_panel.grid(row=0, column=0, sticky="w", padx=2)
         self._create_left_buttons(left_panel)
 
+        # Mittlerer Bereich (Progressbar + Systeminfo)
         center_panel = tk.Frame(main_container, bg=gui.current_theme.BG_SECONDARY)
         center_panel.grid(row=0, column=1, sticky="ew", padx=3)
         self._create_center_panel(center_panel)
 
+        # Rechte Buttons (Exit, TTS, Hilfe, VAD, Live-Modus)
         right_panel = tk.Frame(main_container, bg=gui.current_theme.BG_SECONDARY)
         right_panel.grid(row=0, column=2, sticky="e", padx=2)
         self._create_right_buttons(right_panel)
 
-    def _create_left_buttons(self, parent: tk.Frame):
+    def _create_left_buttons(self, parent: tk.Frame) -> None:
+        """
+        Erstellt die Schnellzugriffs-Buttons auf der linken Seite der Statusleiste.
+
+        Args:
+            parent: Das übergeordnete Frame-Widget.
+        """
         quick_actions = [
             ("🗑️", self.gui.clear_all, "Alles löschen (Ctrl+Shift+C)"),
             ("💾", self.gui.save_transcript, "Transkription speichern (Ctrl+S)"),
@@ -8844,6 +11018,8 @@ class StatusBar:
             )
             btn.grid(row=0, column=i, padx=1, sticky="w")
             ToolTip(btn, tooltip)
+
+        # Installations-Button (nur im Demo-Modus oder wenn Übersetzer fehlt)
         if getattr(self.gui, "demo_mode", False) or not TRANSLATOR_AVAILABLE:
             install_btn = tk.Button(
                 parent,
@@ -8862,11 +11038,20 @@ class StatusBar:
             install_btn.grid(row=0, column=len(quick_actions) + 1, padx=1, sticky="w")
             ToolTip(install_btn, "Fehlende Pakete installieren")
 
-    def _create_center_panel(self, parent: tk.Frame):
+    def _create_center_panel(self, parent: tk.Frame) -> None:
+        """
+        Erstellt den mittleren Bereich der Statusleiste mit Progressbar und Systeminfo.
+
+        Args:
+            parent: Das übergeordnete Frame-Widget.
+        """
+        # Fortschrittsbalken
         self.gui.progress_bar = ttk.Progressbar(
             parent, mode="determinate", length=90, style="Dark.Horizontal.TProgressbar"
         )
         self.gui.progress_bar.pack(side="left", padx=(3, 3))
+
+        # Prozent-/Status-Label
         self.gui.progress_label = tk.Label(
             parent,
             text="",
@@ -8876,6 +11061,7 @@ class StatusBar:
         )
         self.gui.progress_label.pack(side="left", padx=(0, 5))
 
+        # Systeminfo-Label (CPU, RAM, VRAM, Modell)
         default_text = f"{SYSTEM[:3]} | CPU: --% | RAM: --/--G | VRAM: --/--G | Model: --"
         self.gui.system_info_label = tk.Label(
             parent,
@@ -8887,7 +11073,14 @@ class StatusBar:
         )
         self.gui.system_info_label.pack(side="left", fill="x", expand=True)
 
-    def _create_right_buttons(self, parent: tk.Frame):
+    def _create_right_buttons(self, parent: tk.Frame) -> None:
+        """
+        Erstellt die Buttons auf der rechten Seite der Statusleiste.
+
+        Args:
+            parent: Das übergeordnete Frame-Widget.
+        """
+        # Exit-Button
         self.gui.exit_button = tk.Button(
             parent,
             text="⏻ EXIT",
@@ -8904,6 +11097,7 @@ class StatusBar:
         self.gui.exit_button.pack(side="right")
         ToolTip(self.gui.exit_button, "Programm beenden (Strg+Q / Cmd+Q)")
 
+        # TTS-Speichern-Button
         self.gui.save_tts_btn = tk.Button(
             parent,
             text="💾🎤",
@@ -8920,6 +11114,7 @@ class StatusBar:
         self.gui.save_tts_btn.pack(side="right", padx=2)
         ToolTip(self.gui.save_tts_btn, "Ausgewählten Text als MP3 speichern")
 
+        # TTS-Vorlese-Button
         self.gui.tts_btn = tk.Button(
             parent,
             text="🔊",
@@ -8936,6 +11131,7 @@ class StatusBar:
         self.gui.tts_btn.pack(side="right", padx=2)
         ToolTip(self.gui.tts_btn, "Ausgewählten Text vorlesen (TTS)")
 
+        # Hilfe-Button
         help_btn = tk.Button(
             parent,
             text="⌨️",
@@ -8952,6 +11148,7 @@ class StatusBar:
         help_btn.pack(side="right", padx=2)
         ToolTip(help_btn, "Tastenkürzel anzeigen (F1)")
 
+        # Korrektur-Button (Ollama)
         self.gui.correct_btn = tk.Button(
             parent,
             text="🔧",
@@ -8968,6 +11165,7 @@ class StatusBar:
         self.gui.correct_btn.pack(side="right", padx=2)
         ToolTip(self.gui.correct_btn, "Transkript mit Ollama korrigieren")
 
+        # VAD-Fallback-Button
         self.gui.vad_fallback_btn = tk.Button(
             parent,
             text="🔁 VAD ON",
@@ -8981,8 +11179,10 @@ class StatusBar:
             width=6,
         )
         self.gui.vad_fallback_btn.pack(side="right", padx=2)
-        ToolTip(self.gui.vad_fallback_btn, "VAD-Fallback aktivieren/deaktivieren (wenn aus, werden leere Chunks ignoriert)")
+        ToolTip(self.gui.vad_fallback_btn,
+                "VAD-Fallback aktivieren/deaktivieren (wenn aus, werden leere Chunks ignoriert)")
 
+        # Live-Modus-Button (Chunk-Dauer umschalten)
         self.gui.live_mode_btn = tk.Button(
             parent,
             text="⏱️ 20s",
@@ -9744,7 +11944,7 @@ class DarkMessageBox:
 
     @staticmethod
     def _cancel_timeout(dialog: tk.Toplevel, timeout_id: Optional[str]) -> None:
-        if timeout_id:
+        if timeout_id is not None:
             try:
                 dialog.after_cancel(timeout_id)
             except Exception:
@@ -9910,25 +12110,76 @@ class StatisticsDialog(BaseDialog):
 
 
 class SummarizeDialog(BaseDialog):
+    """
+    Dialog zur Zusammenfassung von Texten mit Ollama.
+
+    Diese Klasse erstellt einen modalen Dialog, in dem der Benutzer ein Ollama-Modell
+    auswählen, die Temperatur einstellen und optional einen Videotitel als Kontext
+    einbeziehen kann. Der Text wird in einer Zusammenfassung ausgegeben, die kopiert,
+    gespeichert oder übersetzt werden kann.
+
+    Features:
+        - Unterstützt große Texte durch automatische Aufteilung in Chunks
+        - Asynchrone Verarbeitung mit Thread-Pool und Abbruchmöglichkeit
+        - Sprachauswahl für die Zusammenfassung (Deutsch, Englisch, Spanisch, Koreanisch, Chinesisch)
+        - Integration des Videotitels als Kontext (falls verfügbar)
+        - Zusammenfassung kann kopiert, als Datei gespeichert oder übersetzt werden
+        - Fortschrittsanzeige und Statusmeldungen
+        - Saubere Ressourcenfreigabe beim Schließen
+
+    Attributes:
+        text (str): Der zu zusammenfassende Text.
+        gui (DragonWhispererGUI): Referenz auf die Haupt-GUI für Zugriff auf Einstellungen.
+        stream_title (Optional[str]): Titel des aktuellen Streams (falls vorhanden).
+        summarizer (OllamaSummarizer): Die Ollama-Instanz für die Zusammenfassung.
+        _request_cancel (threading.Event): Event zum Abbrechen der Verarbeitung.
+        _destroyed (bool): Flag, ob der Dialog bereits zerstört wurde (für thread-sichere GUI-Updates).
+    """
+
     def __init__(self, parent: Any, text: str, gui_ref: Any) -> None:
+        """
+        Initialisiert den Zusammenfassungs-Dialog.
+
+        Args:
+            parent: Das Eltern-Widget (normalerweise das Hauptfenster).
+            text: Der zu zusammenfassende Text.
+            gui_ref: Referenz auf die Haupt-GUI (für Einstellungen und Stream-Titel).
+        """
         self.text = text
         self.gui = gui_ref
         self.stream_title = None
 
+        # Videotitel aus GUI auslesen (falls vorhanden)
         if self.gui and hasattr(self.gui, 'current_stream_info') and self.gui.current_stream_info:
             self.stream_title = self.gui.current_stream_info.title
         elif self.gui and hasattr(self.gui, 'last_stream_title') and self.gui.last_stream_title:
             self.stream_title = self.gui.last_stream_title
 
         self._request_cancel = threading.Event()
-        self.summarizer = OllamaSummarizer(parent)
+        self.summarizer = OllamaSummarizer(
+            parent,
+            model=self.gui.advanced_settings.summarize_model,
+            host=self.gui.advanced_settings.ollama_host,
+            cache_manager=self.gui.app_context.cache_manager
+        )
 
+        # Temporär gespeicherte Einstellungen (werden beim Schließen zurückgeschrieben)
         self.saved_temp = self.gui.advanced_settings.summarize_temperature
         self.saved_model = self.gui.advanced_settings.summarize_model
+
+        # Status-Variablen für die chunkweise Verarbeitung
+        self._chunk_results: List[str] = []
+        self._chunks: List[str] = []
+        self._current_chunk = 0
+        self._prompt = ""
+        self._temp = 0.1
+        self._destroyed = False
 
         super().__init__(parent, "Zusammenfassung mit Ollama", width=750, height=650, modal=True)
 
     def build_ui(self) -> None:
+        """Erstellt die Benutzeroberfläche des Dialogs."""
+        # Prüfen, ob Ollama erreichbar ist
         if not self.summarizer.is_server_reachable():
             DarkMessageBox.showwarning(
                 "Ollama nicht erreichbar",
@@ -9939,6 +12190,7 @@ class SummarizeDialog(BaseDialog):
             self.close()
             return
 
+        # 1. Modell-Auswahl
         model_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
         model_frame.pack(fill="x", pady=5)
 
@@ -9948,6 +12200,7 @@ class SummarizeDialog(BaseDialog):
         self.model_var = tk.StringVar(value=self.saved_model)
         available = self.summarizer.get_available_models()
         if available:
+            # Bevorzugte Modelle zuerst
             preferred = ["qwen2.5:7b", "glm4:9b", "llama3.1:8b"]
             values = []
             for pref in preferred:
@@ -9972,6 +12225,7 @@ class SummarizeDialog(BaseDialog):
         self.model_combo.pack(side="left", padx=10)
         ToolTip(self.model_combo, "Wähle das Ollama-Modell für die Zusammenfassung")
 
+        # 2. Temperatur (Kreativität)
         tk.Label(model_frame, text="Temperatur:", bg=CURRENT_THEME.BG_PRIMARY,
                  fg=CURRENT_THEME.TEXT_PRIMARY).pack(side="left", padx=(20,5))
         self.temp_var = tk.DoubleVar(value=self.saved_temp)
@@ -9986,6 +12240,7 @@ class SummarizeDialog(BaseDialog):
                  bg=CURRENT_THEME.BG_PRIMARY, fg=CURRENT_THEME.TEXT_SECONDARY).pack(side="left", padx=5)
         ToolTip(temp_scale, "Zufälligkeit der Ausgabe (höher = kreativer)")
 
+        # 3. Sprachauswahl für die Zusammenfassung
         lang_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
         lang_frame.pack(fill="x", pady=5)
         tk.Label(lang_frame, text="Zusammenfassen auf:", bg=CURRENT_THEME.BG_PRIMARY,
@@ -10005,6 +12260,7 @@ class SummarizeDialog(BaseDialog):
         lang_combo.bind("<<ComboboxSelected>>", lambda e: self._set_default_prompt())
         ToolTip(lang_combo, "Sprache der Zusammenfassung")
 
+        # 4. Checkbox für Videotitel als Kontext
         self.use_title_var = tk.BooleanVar(value=False)
         self.title_checkbox = tk.Checkbutton(
             self.main,
@@ -10022,6 +12278,7 @@ class SummarizeDialog(BaseDialog):
         else:
             self.title_checkbox.bind("<ButtonRelease-1>", lambda e: self._set_default_prompt())
 
+        # 5. Prompt-Textfeld (editierbar)
         tk.Label(self.main, text="Prompt (optional):", bg=CURRENT_THEME.BG_PRIMARY,
                  fg=CURRENT_THEME.TEXT_PRIMARY).pack(anchor="w", pady=(10,2))
         self.prompt_text = scrolledtext.ScrolledText(
@@ -10034,6 +12291,7 @@ class SummarizeDialog(BaseDialog):
         self._set_default_prompt()
         ToolTip(self.prompt_text, "Optionaler Prompt – wird an das Modell gesendet")
 
+        # 6. Ausgabe der Zusammenfassung
         tk.Label(self.main, text="Zusammenfassung:", bg=CURRENT_THEME.BG_PRIMARY,
                  fg=CURRENT_THEME.TEXT_PRIMARY).pack(anchor="w")
         self.summary_text = scrolledtext.ScrolledText(
@@ -10045,6 +12303,7 @@ class SummarizeDialog(BaseDialog):
         self.summary_text.pack(fill="both", expand=True, pady=10)
         ContextMenuMixin(self.summary_text)
 
+        # 7. Button-Leiste
         btn_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
         btn_frame.pack(fill="x", pady=5)
 
@@ -10074,7 +12333,8 @@ class SummarizeDialog(BaseDialog):
             command=self.copy_summary,
             bg=CURRENT_THEME.BG_TERTIARY,
             fg=CURRENT_THEME.TEXT_PRIMARY,
-            font=Fonts.BUTTON, padx=15
+            font=Fonts.BUTTON, padx=15,
+            state="disabled"
         )
         self.copy_btn.pack(side="left", padx=5)
 
@@ -10085,7 +12345,8 @@ class SummarizeDialog(BaseDialog):
             command=self.save_summary,
             bg=CURRENT_THEME.BG_TERTIARY,
             fg=CURRENT_THEME.TEXT_PRIMARY,
-            font=Fonts.BUTTON, padx=15
+            font=Fonts.BUTTON, padx=15,
+            state="disabled"
         )
         self.save_btn.pack(side="left", padx=5)
 
@@ -10103,25 +12364,32 @@ class SummarizeDialog(BaseDialog):
             btn_row2, text="Schließen",
             command=self.close,
             bg=CURRENT_THEME.BG_TERTIARY,
-            fg=CURRENT_THEME.TEXT_PRIMARY
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.BUTTON, padx=15
         )
         self.close_btn.pack(side="left", padx=5)
 
+        # 8. Statuszeile
         self.status_label = tk.Label(
             self.main, text="", bg=CURRENT_THEME.BG_PRIMARY,
-            fg=CURRENT_THEME.TEXT_SECONDARY
+            fg=CURRENT_THEME.TEXT_SECONDARY, font=Fonts.SMALL
         )
         self.status_label.pack(pady=5)
 
+        # Interne Variablen
         self.full_summary = ""
-        self._chunk_results: List[str] = []
-        self._chunks: List[str] = []
+        self._chunk_results = []
+        self._chunks = []
         self._current_chunk = 0
         self._prompt = ""
         self._temp = 0.1
         self._destroyed = False
 
+    # -------------------------------------------------------------------------
+    # Interne Hilfsmethoden
+    # -------------------------------------------------------------------------
     def _set_default_prompt(self) -> None:
+        """Setzt den Standard-Prompt basierend auf der ausgewählten Sprache und dem Videotitel."""
         target = self.summary_lang_var.get()
         if target == "Deutsch":
             prompt = (
@@ -10183,6 +12451,16 @@ class SummarizeDialog(BaseDialog):
         self.prompt_text.insert("1.0", full_prompt)
 
     def _split_text(self, text: str, max_words: int = 2000) -> List[str]:
+        """
+        Teilt einen langen Text in mehrere Chunks auf, basierend auf der Wortanzahl.
+
+        Args:
+            text: Der zu teilende Text.
+            max_words: Maximale Anzahl von Wörtern pro Chunk.
+
+        Returns:
+            Liste von Text-Chunks.
+        """
         words = text.split()
         if len(words) <= max_words:
             return [text]
@@ -10200,26 +12478,209 @@ class SummarizeDialog(BaseDialog):
             chunks.append(" ".join(chunk))
         return chunks
 
-    def start_summarize(self) -> None:
+    def _process_next_chunk(self, retry_count: int = 0) -> None:
+        """
+        Verarbeitet den nächsten Text-Chunk (für große Texte).
+
+        Args:
+            retry_count: Anzahl bisheriger Wiederholungsversuche.
+        """
+        if self._destroyed or self._request_cancel.is_set():
+            self._create_final_summary()
+            return
+
+        if self._current_chunk >= len(self._chunks):
+            self._create_final_summary()
+            return
+
+        chunk_text = self._chunks[self._current_chunk]
+        self.status_label.config(
+            text=f"⏳ Verarbeite Abschnitt {self._current_chunk+1}/{len(self._chunks)}... (Versuch {retry_count+1})"
+        )
+
+        def on_chunk_complete():
+            if self.summarizer.last_result:
+                self._chunk_results.append(self.summarizer.last_result)
+            else:
+                self._chunk_results.append("")
+            self._current_chunk += 1
+            # Nächsten Chunk starten
+            self._safe_after(100, lambda: self._process_next_chunk(0))
+
+        def on_chunk_error(error: str):
+            if retry_count < 3:
+                delay_ms = 1000 * (2 ** retry_count)
+                self.status_label.config(
+                    text=f"⏳ Fehler, Wiederholung in {delay_ms//1000}s... (Versuch {retry_count+2}/4)"
+                )
+                self._safe_after(delay_ms, lambda: self._process_next_chunk(retry_count + 1))
+            else:
+                error_msg = f"[Fehler in Abschnitt {self._current_chunk+1} nach 3 Versuchen: {error}]"
+                self._chunk_results.append(error_msg)
+                self.status_label.config(
+                    text=f"❌ Abschnitt {self._current_chunk+1} fehlgeschlagen – fahre mit nächstem fort"
+                )
+                self._current_chunk += 1
+                self._safe_after(100, lambda: self._process_next_chunk(0))
+
+        self.summarizer.summarize(
+            chunk_text,
+            self._prompt,
+            self._temp,
+            callback=lambda chunk: None,  # bei Chunks keine Einzelausgaben, nur Gesamtergebnis
+            error_callback=on_chunk_error,
+            complete_callback=on_chunk_complete,
+            cancel_event=self._request_cancel,
+        )
+
+    def _create_final_summary(self) -> None:
+        """
+        Erstellt aus den einzelnen Chunk-Ergebnissen eine finale Zusammenfassung.
+        """
+        if not self._chunk_results:
+            self.status_label.config(text="❌ Keine Teilzusammenfassungen vorhanden.")
+            self._reset_ui()
+            return
+
+        valid_chunks = [res for res in self._chunk_results if res and not res.startswith("[Fehler")]
+        if not valid_chunks:
+            self.status_label.config(text="❌ Keine gültigen Teilzusammenfassungen.")
+            self._reset_ui()
+            return
+
+        combined = "\n\n".join(valid_chunks)
+        target_lang = self.summary_lang_var.get()
+        final_prompt = (f"Fasse die folgenden Teilzusammenfassungen zu einer kohärenten Gesamtzusammenfassung in {target_lang} zusammen. "
+                        f"Antworte ausschließlich auf {target_lang}.\n\n{combined}")
+
+        self.status_label.config(text="⏳ Erstelle finale Zusammenfassung...")
+
+        def on_final_complete():
+            if self._destroyed:
+                return
+            if self.dialog and self.dialog.winfo_exists():
+                self._safe_after(0, self._reset_ui)
+
+        self.summarizer.summarize(
+            combined,
+            final_prompt,
+            self._temp,
+            callback=self.on_chunk,
+            error_callback=self.on_error,
+            complete_callback=on_final_complete,
+            cancel_event=self._request_cancel,
+        )
+
+    def _reset_ui(self) -> None:
+        """
+        Setzt die UI nach Abschluss oder Abbruch zurück (Buttons aktivieren, Status löschen).
+        """
         if self._destroyed:
             return
+        try:
+            if self.dialog and self.dialog.winfo_exists():
+                self.summarize_btn.config(state="normal", text="🤖 Zusammenfassen")
+                self.cancel_btn.config(state="disabled")
+                self.copy_btn.config(state="normal" if self.full_summary else "disabled")
+                self.save_btn.config(state="normal" if self.full_summary else "disabled")
+                self.translate_btn.config(state="normal" if self.full_summary else "disabled")
+                self.status_label.config(text="✅ Zusammenfassung abgeschlossen")
+
+                # Optional: Blacklist-Prüfung und Sprachvalidierung
+                if self.full_summary and hasattr(self.gui, "advanced_settings"):
+                    blacklist = getattr(self.gui.advanced_settings, "blacklist", [])
+                    found = []
+                    for phrase in blacklist:
+                        if phrase and phrase.lower() in self.full_summary.lower():
+                            found.append(phrase)
+                    if found:
+                        logger.warning(f"Zusammenfassung enthält Blacklist-Phrasen: {found}")
+                        self.status_label.config(
+                            text=f"⚠️ Warnung: Blacklist-Phrasen gefunden: {', '.join(found[:2])}"
+                        )
+        except tk.TclError:
+            pass
+
+    # -------------------------------------------------------------------------
+    # Öffentliche Callback-Methoden (werden von OllamaSummarizer aufgerufen)
+    # -------------------------------------------------------------------------
+    def on_chunk(self, chunk: str) -> None:
+        """
+        Wird bei jedem eingehenden Teil der Zusammenfassung aufgerufen.
+
+        Args:
+            chunk: Ein Teilstring der Antwort.
+        """
+        if self._destroyed:
+            return
+
+        def update():
+            if self._destroyed:
+                return
+            try:
+                if self.dialog and self.dialog.winfo_exists():
+                    if hasattr(self, "summary_text") and self.summary_text.winfo_exists():
+                        self.summary_text.insert("end", chunk)
+                        self.summary_text.see("end")
+                        self.full_summary += chunk
+            except tk.TclError:
+                pass
+
+        self._safe_after(0, update)
+
+    def on_error(self, error: str) -> None:
+        """
+        Wird bei einem Fehler während der Zusammenfassung aufgerufen.
+
+        Args:
+            error: Fehlermeldung.
+        """
+        if self._destroyed:
+            return
+
+        def update():
+            if self._destroyed:
+                return
+            try:
+                if self.dialog and self.dialog.winfo_exists():
+                    if hasattr(self, "summary_text") and self.summary_text.winfo_exists():
+                        self.summary_text.delete("1.0", "end")
+                        self.summary_text.insert("1.0", f"Fehler: {error}")
+                    self._reset_ui()
+                    if hasattr(self, "status_label") and self.status_label.winfo_exists():
+                        self.status_label.config(text="❌ Fehler")
+            except tk.TclError:
+                pass
+
+        self._safe_after(0, update)
+
+    # -------------------------------------------------------------------------
+    # Benutzeraktionen
+    # -------------------------------------------------------------------------
+    def start_summarize(self) -> None:
+        """Startet die Zusammenfassung."""
+        if self._destroyed:
+            return
+
         model = self.model_var.get().strip()
         if model == "--- Modell auswählen ---" or model.startswith("(keine"):
             self.status_label.config(text="❌ Bitte ein gültiges Modell auswählen")
             return
+
         if not self.summarizer.is_model_available(model):
             self.status_label.config(text=f"❌ Modell '{model}' nicht auf Server gefunden.")
             return
+
+        # Konfiguration aktualisieren
         self.summarizer.model = model
-        if hasattr(self.gui, "advanced_settings"):
-            self.summarizer.host = self.gui.advanced_settings.ollama_host
-        else:
-            self.summarizer.host = "http://localhost:11434"
+        self.summarizer.host = self.gui.advanced_settings.ollama_host
         target_lang = self.summary_lang_var.get()
         system_prompt = f"Du bist ein Assistent, der Texte auf {target_lang} zusammenfasst. Antworte ausschließlich auf {target_lang}."
         self.summarizer.system_prompt = system_prompt
-        prompt = self.prompt_text.get("1.0", "end-1c").strip()
-        temp = self.temp_var.get()
+        self._prompt = self.prompt_text.get("1.0", "end-1c").strip()
+        self._temp = self.temp_var.get()
+
+        # Text aufteilen, falls zu lang
         word_count = len(self.text.split())
         if word_count > 2000:
             self.status_label.config(text="⏳ Text wird in Abschnitte zerlegt...")
@@ -10234,8 +12695,8 @@ class SummarizeDialog(BaseDialog):
             chunks = self._split_text(self.text, max_words=2000)
             self.status_label.config(text=f"⏳ Verarbeite {len(chunks)} Abschnitte...")
             self._chunks = chunks
-            self._prompt = prompt
-            self._temp = temp
+            self._prompt = self._prompt
+            self._temp = self._temp
             self._chunk_results = []
             self._current_chunk = 0
             self._process_next_chunk()
@@ -10254,191 +12715,27 @@ class SummarizeDialog(BaseDialog):
                 if self._destroyed:
                     return
                 if self.dialog and self.dialog.winfo_exists():
-                    self.dialog.after(0, self._reset_ui)
+                    self._safe_after(0, self._reset_ui)
 
             self.summarizer.summarize(
                 self.text,
-                prompt,
-                temp,
+                self._prompt,
+                self._temp,
                 callback=self.on_chunk,
                 error_callback=self.on_error,
                 complete_callback=on_complete,
                 cancel_event=self._request_cancel,
             )
 
-    def _process_next_chunk(self, retry_count: int = 0) -> None:
-        if self._destroyed or self._request_cancel.is_set():
-            self._create_final_summary()
-            return
-        if self._current_chunk >= len(self._chunks):
-            self._create_final_summary()
-            return
-
-        chunk_text = self._chunks[self._current_chunk]
-        self.status_label.config(
-            text=f"⏳ Verarbeite Abschnitt {self._current_chunk+1}/{len(self._chunks)}... (Versuch {retry_count+1})"
-        )
-
-        def on_chunk_complete():
-            if self.summarizer.last_result:
-                self._chunk_results.append(self.summarizer.last_result)
-            else:
-                self._chunk_results.append("")
-            self._current_chunk += 1
-            self.dialog.after(100, lambda: self._process_next_chunk(0))
-
-        def on_chunk_error(error: str):
-            if retry_count < 3:
-                delay_ms = 1000 * (2 ** retry_count)
-                self.status_label.config(
-                    text=f"⏳ Fehler, Wiederholung in {delay_ms//1000}s... (Versuch {retry_count+2}/4)"
-                )
-                self.dialog.after(delay_ms, lambda: self._process_next_chunk(retry_count + 1))
-            else:
-                error_msg = f"[Fehler in Abschnitt {self._current_chunk+1} nach 3 Versuchen: {error}]"
-                self._chunk_results.append(error_msg)
-                self.status_label.config(
-                    text=f"❌ Abschnitt {self._current_chunk+1} fehlgeschlagen – fahre mit nächstem fort"
-                )
-                self._current_chunk += 1
-                self.dialog.after(100, lambda: self._process_next_chunk(0))
-
-        self.summarizer.summarize(
-            chunk_text,
-            self._prompt,
-            self._temp,
-            callback=lambda chunk: None,
-            error_callback=on_chunk_error,
-            complete_callback=on_chunk_complete,
-            cancel_event=self._request_cancel,
-        )
-
-    def _create_final_summary(self) -> None:
-        if not self._chunk_results:
-            self.status_label.config(text="❌ Keine Teilzusammenfassungen vorhanden.")
-            self._reset_ui()
-            return
-        valid_chunks = [res for res in self._chunk_results if res and not res.startswith("[Fehler")]
-        if not valid_chunks:
-            self.status_label.config(text="❌ Keine gültigen Teilzusammenfassungen.")
-            self._reset_ui()
-            return
-        combined = "\n\n".join(valid_chunks)
-        target_lang = self.summary_lang_var.get()
-        final_prompt = (f"Fasse die folgenden Teilzusammenfassungen zu einer kohärenten Gesamtzusammenfassung in {target_lang} zusammen. "
-                        f"Antworte ausschließlich auf {target_lang}.\n\n{combined}")
-
-        self.status_label.config(text="⏳ Erstelle finale Zusammenfassung...")
-
-        def on_final_complete():
-            if self._destroyed:
-                return
-            if self.dialog and self.dialog.winfo_exists():
-                self.dialog.after(0, self._reset_ui)
-
-        self.summarizer.summarize(
-            combined,
-            final_prompt,
-            self._temp,
-            callback=self.on_chunk,
-            error_callback=self.on_error,
-            complete_callback=on_final_complete,
-            cancel_event=self._request_cancel,
-        )
-
-    def _reset_ui(self) -> None:
-        if self._destroyed:
-            return
-        try:
-            if self.dialog and self.dialog.winfo_exists():
-                if hasattr(self, "summarize_btn") and self.summarize_btn.winfo_exists():
-                    self.summarize_btn.config(state="normal", text="🤖 Zusammenfassen")
-                if hasattr(self, "cancel_btn") and self.cancel_btn.winfo_exists():
-                    self.cancel_btn.config(state="disabled")
-                if hasattr(self, "copy_btn") and self.copy_btn.winfo_exists():
-                    self.copy_btn.config(state="normal")
-                if hasattr(self, "save_btn") and self.save_btn.winfo_exists():
-                    self.save_btn.config(state="normal")
-                if hasattr(self, "translate_btn") and self.translate_btn.winfo_exists():
-                    self.translate_btn.config(state="normal" if self.full_summary else "disabled")
-                if hasattr(self, "status_label") and self.status_label.winfo_exists():
-                    self.status_label.config(text="✅ Zusammenfassung abgeschlossen")
-
-                if self.full_summary and hasattr(self.gui, "advanced_settings"):
-                    blacklist = getattr(self.gui.advanced_settings, "blacklist", [])
-                    found = []
-                    for phrase in blacklist:
-                        if phrase and phrase.lower() in self.full_summary.lower():
-                            found.append(phrase)
-                    if found:
-                        logger.warning(f"Zusammenfassung enthält Blacklist-Phrasen: {found}")
-                        self.status_label.config(
-                            text=f"⚠️ Warnung: Blacklist-Phrasen gefunden: {', '.join(found[:2])}"
-                        )
-                try:
-                    from langdetect import detect
-                    detected = detect(self.full_summary)
-                    target = self.summary_lang_var.get()
-                    target_map = {"Deutsch": "de", "Englisch": "en", "Spanisch": "es", "Koreanisch": "ko"}
-                    expected = target_map.get(target, "de")
-                    if detected != expected:
-                        logger.warning(f"Zusammenfassung in falscher Sprache erkannt: {detected}, erwartet {expected}")
-                        self.status_label.config(
-                            text=f"⚠️ Warnung: Sprache erkannt als {detected}, erwartet {target}"
-                        )
-                except ImportError:
-                    pass
-                except Exception as e:
-                    logger.debug(f"Spracherkennung fehlgeschlagen: {e}")
-
-        except tk.TclError:
-            pass
-
     def cancel_request(self) -> None:
+        """Bricht die laufende Zusammenfassung ab."""
         self._request_cancel.set()
         self.status_label.config(text="⏹️ Abbruch eingeleitet...")
         self.cancel_btn.config(state="disabled")
-        self.dialog.after(500, self._reset_ui)
-
-    def on_chunk(self, chunk: str) -> None:
-        if self._destroyed:
-            return
-
-        def update() -> None:
-            if self._destroyed:
-                return
-            try:
-                if self.dialog and self.dialog.winfo_exists():
-                    if hasattr(self, "summary_text") and self.summary_text.winfo_exists():
-                        self.summary_text.insert("end", chunk)
-                        self.summary_text.see("end")
-                        self.full_summary += chunk
-            except tk.TclError:
-                pass
-
-        self._safe_after(0, update)
-
-    def on_error(self, error: str) -> None:
-        if self._destroyed:
-            return
-
-        def update() -> None:
-            if self._destroyed:
-                return
-            try:
-                if self.dialog and self.dialog.winfo_exists():
-                    if hasattr(self, "summary_text") and self.summary_text.winfo_exists():
-                        self.summary_text.delete("1.0", "end")
-                        self.summary_text.insert("1.0", f"Fehler: {error}")
-                    self._reset_ui()
-                    if hasattr(self, "status_label") and self.status_label.winfo_exists():
-                        self.status_label.config(text="❌ Fehler")
-            except tk.TclError:
-                pass
-
-        self._safe_after(0, update)
+        self._safe_after(500, self._reset_ui)
 
     def copy_summary(self) -> None:
+        """Kopiert die Zusammenfassung in die Zwischenablage."""
         if self._destroyed:
             return
         try:
@@ -10446,15 +12743,14 @@ class SummarizeDialog(BaseDialog):
                 if self.full_summary:
                     self.dialog.clipboard_clear()
                     self.dialog.clipboard_append(self.full_summary)
-                    if hasattr(self, "status_label") and self.status_label.winfo_exists():
-                        self.status_label.config(text="✅ In Zwischenablage kopiert")
+                    self.status_label.config(text="✅ In Zwischenablage kopiert")
                 else:
-                    if hasattr(self, "status_label") and self.status_label.winfo_exists():
-                        self.status_label.config(text="⚠️ Keine Zusammenfassung vorhanden")
+                    self.status_label.config(text="⚠️ Keine Zusammenfassung vorhanden")
         except tk.TclError:
             pass
 
     def save_summary(self) -> None:
+        """Speichert die Zusammenfassung als Textdatei."""
         if not self.full_summary:
             self.status_label.config(text="⚠️ Keine Zusammenfassung zum Speichern")
             return
@@ -10473,6 +12769,7 @@ class SummarizeDialog(BaseDialog):
                 self.status_label.config(text=f"❌ Fehler beim Speichern: {e}")
 
     def translate_summary(self) -> None:
+        """Öffnet einen Übersetzungsdialog für die Zusammenfassung."""
         if not self.full_summary:
             self.status_label.config(text="⚠️ Keine Zusammenfassung zum Übersetzen")
             return
@@ -10486,32 +12783,74 @@ class SummarizeDialog(BaseDialog):
         TranslationDialog(self.dialog, engine, initial_text=self.full_summary)
 
     def close(self) -> None:
+        """
+        Schließt den Dialog und gibt Ressourcen frei.
+        Stoppt die laufende Verarbeitung und speichert die Einstellungen.
+        """
+        # Einstellungen zurückschreiben
         if hasattr(self, 'temp_var') and hasattr(self, 'model_var'):
             self.gui.advanced_settings.summarize_temperature = self.temp_var.get()
             self.gui.advanced_settings.summarize_model = self.model_var.get()
             self.gui.advanced_settings.save_to_file()
 
+        # Verarbeitung abbrechen
+        self._request_cancel.set()
         if hasattr(self, 'summarizer'):
             try:
                 self.summarizer.dispose()
             except Exception:
                 pass
 
+        self._destroyed = True
         super().close()
 
 
 class TranslationDialog(BaseDialog):
+    """
+    Dialog zum Übersetzen von Text mit verschiedenen Übersetzungs‑Engines.
+
+    Bietet:
+    - Auswahl der Quell‑ und Zielsprache (nur lesbare Namen)
+    - Auswahl der Übersetzungs‑Engine (Google, Ollama, Argos)
+    - Parallele Übersetzung von Sätzen
+    - Automatischer Fallback auf eine zweite Engine bei schlechter Qualität
+    - Abbruchmöglichkeit während der Übersetzung
+    - Saubere Ressourcenfreigabe beim Schließen
+    """
+
     def __init__(self, parent: tk.Widget, translation_engine: BaseTranslationEngine,
                  initial_text: str = "") -> None:
+        """
+        Initialisiert den Übersetzungsdialog.
+
+        Args:
+            parent: Das übergeordnete Widget (i.d.R. das Hauptfenster).
+            translation_engine: Die Standard‑Übersetzungs‑Engine (z.B. Google).
+            initial_text: Text, der im Quellfeld vorausgefüllt wird.
+        """
         self.engine = translation_engine
         self.gui = parent.gui if hasattr(parent, "gui") else None
         self.initial_text = initial_text
         self._cancel_event = threading.Event()
         self.engine_var = tk.StringVar(value=self.engine.__class__.__name__.replace('TranslationEngine', '').lower())
         self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="TransDialog")
+        self._executor_shutdown = False
+
+        # Fallback‑Engine aus der GUI holen (falls vorhanden)
+        self.fallback_engine: Optional[BaseTranslationEngine] = None
+        if self.gui and hasattr(self.gui, 'audio_processor'):
+            ap = self.gui.audio_processor
+            if hasattr(ap, '_fallback_translation_engine') and ap._fallback_translation_engine:
+                self.fallback_engine = ap._fallback_translation_engine
+                # Zielsprache für Fallback setzen, sobald bekannt
+                if hasattr(self.fallback_engine, 'set_target_language'):
+                    self.fallback_engine.set_target_language(self.engine.default_target_lang)
+
         super().__init__(parent, "Text Translation", width=600, height=600, modal=True)
 
     def build_ui(self) -> None:
+        """Erstellt die GUI-Elemente des Dialogs."""
+        # Quelltext
         tk.Label(self.main, text="Source text:", bg=CURRENT_THEME.BG_PRIMARY,
                  fg=CURRENT_THEME.TEXT_PRIMARY, font=Fonts.PRIMARY).pack(anchor="w")
         self.source_text = scrolledtext.ScrolledText(self.main, height=8,
@@ -10523,6 +12862,7 @@ class TranslationDialog(BaseDialog):
             self.source_text.insert("1.0", self.initial_text)
         ContextMenuMixin(self.source_text)
 
+        # Sprachauswahl
         lang_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
         lang_frame.pack(fill="x", pady=5)
 
@@ -10545,6 +12885,7 @@ class TranslationDialog(BaseDialog):
         tgt_combo.pack(side="left")
         ToolTip(tgt_combo, "Zielsprache für die Übersetzung")
 
+        # Engine-Auswahl
         engine_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
         engine_frame.pack(fill="x", pady=5)
         tk.Label(engine_frame, text="Engine:", bg=CURRENT_THEME.BG_PRIMARY,
@@ -10555,6 +12896,7 @@ class TranslationDialog(BaseDialog):
         engine_combo.pack(side="left")
         ToolTip(engine_combo, "Übersetzungs-Engine auswählen (Google, Ollama, Argos)")
 
+        # Steuerbuttons
         btn_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
         btn_frame.pack(fill="x", pady=10)
 
@@ -10573,6 +12915,7 @@ class TranslationDialog(BaseDialog):
                                      state="disabled")
         self.cancel_btn.pack(side="left", padx=10)
 
+        # Übersetzungsergebnis
         tk.Label(self.main, text="Translation:", bg=CURRENT_THEME.BG_PRIMARY,
                  fg=CURRENT_THEME.TEXT_PRIMARY, font=Fonts.PRIMARY).pack(anchor="w", pady=(10,0))
         self.target_text = scrolledtext.ScrolledText(self.main, height=8,
@@ -10594,12 +12937,15 @@ class TranslationDialog(BaseDialog):
 
         self.source_text.focus_set()
 
+    # ----- Hilfsmethoden -----
     def _split_sentences(self, text: str) -> List[str]:
+        """Zerlegt einen Text in Sätze (einfache Implementierung mit Satzendzeichen)."""
         sentence_endings = r'(?<=[.!?。！？])\s+'
         sentences = re.split(sentence_endings, text)
         return [s.strip() for s in sentences if s.strip()]
 
     def _translate_one(self, sentence: str, src_code: str, engine: BaseTranslationEngine) -> str:
+        """Übersetzt einen einzelnen Satz mit der angegebenen Engine."""
         try:
             result = engine.translate_text(sentence, src_code)
             if result and result.translated:
@@ -10610,14 +12956,34 @@ class TranslationDialog(BaseDialog):
             logger.error(f"Fehler bei Übersetzung von Satz: {e}", exc_info=True)
             return sentence
 
+    def _is_valid_translation(self, original: str, translated: str) -> bool:
+        """Prüft, ob eine Übersetzung sinnvoll ist (nicht leer, nicht identisch, nicht zu viele Sonderzeichen)."""
+        if not translated or len(translated) < 2:
+            return False
+        if translated.lower() == original.lower():
+            return False
+        # Nicht zu lange (maximal 10-fache Länge)
+        if len(translated) > len(original) * 10:
+            return False
+        # Mindestens 20% Buchstaben (für nicht-asiatische Sprachen)
+        alpha_ratio = sum(c.isalpha() for c in translated) / max(len(translated), 1)
+        if alpha_ratio < 0.2 and len(translated) > 20:
+            return False
+        return True
+
+    # ----- Hauptmethoden -----
     def translate(self) -> None:
+        """Startet die Übersetzung des eingegebenen Textes."""
         source = self.source_text.get("1.0", "end-1c").strip()
         if not source:
             return
+
         src_name = self.src_lang_var.get().strip()
         tgt_name = self.tgt_lang_var.get().strip()
         engine_name = self.engine_var.get().strip()
         logger.debug(f"TranslationDialog: translate called with src='{src_name}', tgt='{tgt_name}', engine='{engine_name}'")
+
+        # Sprachcodes aus Namen ermitteln
         valid_language_names = [name for name, code in SORTED_LANGUAGES]
         if src_name not in valid_language_names and src_name != "auto":
             src_name = "auto"
@@ -10625,45 +12991,76 @@ class TranslationDialog(BaseDialog):
         if tgt_name not in valid_language_names:
             tgt_name = "Deutsch"
             self.tgt_lang_var.set("Deutsch")
+
         try:
             src_code = "auto" if src_name == "auto" else next(code for name, code in SORTED_LANGUAGES if name == src_name)
             tgt_code = next(code for name, code in SORTED_LANGUAGES if name == tgt_name)
         except StopIteration:
             self._display_error("Ungültige Sprachauswahl")
             return
+
+        # Engine erstellen (entweder temporär oder vorhandene Engine anpassen)
         if self.gui and hasattr(self.gui, "_create_temporary_translation_engine"):
             engine = self.gui._create_temporary_translation_engine(engine_name, tgt_code)
             if engine is None:
                 self._display_error(f"Engine '{engine_name}' nicht verfügbar")
                 return
+            fallback = self.fallback_engine
         else:
             engine = self.engine
             old_target = engine.default_target_lang
             engine.set_target_language(tgt_code)
+            fallback = self.fallback_engine
+            if fallback and hasattr(fallback, 'set_target_language'):
+                fallback.set_target_language(tgt_code)
+
+        # UI zurücksetzen
         self.translate_btn.config(state="disabled", text="⏳ Translating...")
         self.cancel_btn.config(state="normal")
         self.target_text.delete("1.0", "end")
         self.progress_label.config(text="")
         self._cancel_event.clear()
+
+        # Sätze aufteilen
         sentences = self._split_sentences(source)
         total = len(sentences)
         if total == 0:
             self._reset_ui()
             return
-        if total == 1:
-            self._translate_single(sentences[0], src_code, engine, old_target if not self.gui else None)
-        else:
-            self._translate_multi(sentences, src_code, engine, old_target)
 
-    def _translate_single(self, text: str, src_code: str, engine: BaseTranslationEngine,
-                          old_target: Optional[str]):
+        if total == 1:
+            # Einzelner Satz: synchron übersetzen
+            self._translate_single(sentences[0], src_code, engine, fallback,
+                                   old_target if not self.gui else None)
+        else:
+            # Mehrere Sätze: parallel übersetzen
+            self._translate_multi(sentences, src_code, engine, fallback,
+                                  old_target if not self.gui else None)
+
+    def _translate_single(self, text: str, src_code: str,
+                          engine: BaseTranslationEngine, fallback: Optional[BaseTranslationEngine],
+                          old_target: Optional[str]) -> None:
+        """Übersetzt einen einzelnen Satz im Hintergrundthread mit Fallback bei schlechter Qualität."""
         def worker():
             try:
+                # Primäre Engine
                 result = engine.translate_text(text, src_code)
-                if result and result.translated and not self._cancel_event.is_set():
-                    self._display_result(result.translated)
+                translated = result.translated if result else None
+                # Qualitätsprüfung
+                if translated and not self._is_valid_translation(text, translated):
+                    logger.debug(f"Primäre Übersetzung ungültig: '{translated[:50]}...'")
+                    if fallback and fallback.is_functional():
+                        logger.info("🔄 Versuche Fallback-Engine...")
+                        fallback_result = fallback.translate_text(text, src_code)
+                        if fallback_result and fallback_result.translated:
+                            translated = fallback_result.translated
+                            logger.info("✅ Fallback erfolgreich")
+                        else:
+                            translated = None
+                if translated and not self._cancel_event.is_set():
+                    self._display_result(translated)
                 elif not self._cancel_event.is_set():
-                    self._display_result("(Übersetzung fehlgeschlagen)")
+                    self._display_error("Übersetzung fehlgeschlagen")
             except Exception as e:
                 if not self._cancel_event.is_set():
                     self._display_error(str(e))
@@ -10675,17 +13072,32 @@ class TranslationDialog(BaseDialog):
         self._executor.submit(worker)
 
     def _translate_multi(self, sentences: List[str], src_code: str,
-                         engine: BaseTranslationEngine, old_target: Optional[str]):
+                         engine: BaseTranslationEngine, fallback: Optional[BaseTranslationEngine],
+                         old_target: Optional[str]) -> None:
+        """Übersetzt mehrere Sätze parallel und sammelt die Ergebnisse, mit Fallback bei schlechten Sätzen."""
         translated_sentences = [None] * len(sentences)
         futures = []
         for i, sentence in enumerate(sentences):
+            # Übersetzung mit primärer Engine
             future = self._executor.submit(self._translate_one, sentence, src_code, engine)
             futures.append((i, future))
 
         def collect_results():
+            # Primäre Ergebnisse sammeln und ggf. Fallback für schlechte
             for i, future in futures:
+                if self._cancel_event.is_set():
+                    break
                 try:
                     result = future.result()
+                    # Qualitätsprüfung
+                    if not self._is_valid_translation(sentences[i], result):
+                        if fallback and fallback.is_functional():
+                            logger.debug(f"Satz {i} ungültig, verwende Fallback")
+                            fallback_result = fallback.translate_text(sentences[i], src_code)
+                            if fallback_result and fallback_result.translated:
+                                result = fallback_result.translated
+                            else:
+                                result = sentences[i]  # Fallback: Original beibehalten
                     translated_sentences[i] = result
                 except Exception as e:
                     logger.error(f"Fehler bei Übersetzung von Satz {i}: {e}")
@@ -10698,28 +13110,42 @@ class TranslationDialog(BaseDialog):
         threading.Thread(target=collect_results, daemon=True).start()
 
     def _display_result(self, translated_text: str) -> None:
+        """Zeigt das Übersetzungsergebnis im GUI an."""
         if self.dialog and self.dialog.winfo_exists():
             self.target_text.delete("1.0", "end")
             self.target_text.insert("1.0", translated_text)
 
     def _display_error(self, error: str) -> None:
+        """Zeigt einen Fehler im Ergebnisbereich an."""
         if self.dialog and self.dialog.winfo_exists():
             self.target_text.delete("1.0", "end")
             self.target_text.insert("1.0", f"Error: {error}")
 
     def _reset_ui(self) -> None:
+        """Setzt die Buttons und die Statusanzeige zurück."""
         if self.dialog and self.dialog.winfo_exists():
             self.translate_btn.config(state="normal", text="🌐 Translate")
             self.cancel_btn.config(state="disabled")
             self.progress_label.config(text="")
 
     def cancel_translation(self) -> None:
+        """Bricht die laufende Übersetzung ab."""
         self._cancel_event.set()
         self._reset_ui()
         self.target_text.insert("1.0", "(Translation cancelled)")
 
     def close(self) -> None:
-        self._executor.shutdown(wait=False)
+        """
+        Schließt den Dialog und gibt alle Ressourcen frei.
+        Stellt sicher, dass der ThreadPoolExecutor heruntergefahren wird.
+        """
+        self._cancel_event.set()
+        if not self._executor_shutdown:
+            self._executor_shutdown = True
+            try:
+                self._executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
         super().close()
 
 
@@ -11184,7 +13610,33 @@ class InstallDependencyDialog(BaseDialog):
 
 
 class AdvancedSettingsDialog:
-    def __init__(self, parent: tk.Tk, gui: "DragonWhispererGUI"):
+    """
+    Dialog für erweiterte Einstellungen von Dragon Whisperer.
+
+    Bietet Zugriff auf Audio‑, Modell‑, Übersetzungs‑, GUI‑ und Systemparameter.
+    Profile können gespeichert und geladen werden.
+    """
+
+    # =========================================================================
+    #  Konstanten für wiederkehrende Werte
+    # =========================================================================
+    SPINBOX_WIDTH = 8
+    SCALE_LENGTH = 150
+    COMBO_WIDTH_SMALL = 10
+    COMBO_WIDTH_MEDIUM = 12
+    COMBO_WIDTH_LARGE = 20
+
+    # =========================================================================
+    #  Konstruktor und Initialisierung
+    # =========================================================================
+    def __init__(self, parent: tk.Tk, gui: "DragonWhispererGUI") -> None:
+        """
+        Initialisiert den AdvancedSettingsDialog.
+
+        Args:
+            parent: Das übergeordnete Fenster (Tk oder Toplevel).
+            gui: Referenz auf die Haupt-GUI (für Zugriff auf Einstellungen und Themes).
+        """
         self.parent = parent
         self.gui = gui
         self.dialog = tk.Toplevel(parent)
@@ -11202,6 +13654,7 @@ class AdvancedSettingsDialog:
             self.gui._open_dialogs.append(self.dialog)
             self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # Vordefinierte Profile
         self.profiles = {
             "Default": {
                 "chunk_duration": 15.0,
@@ -11392,23 +13845,108 @@ class AdvancedSettingsDialog:
         all_profiles = list(self.profiles.keys()) + list(self.custom_profiles.keys())
         self.profile_list = all_profiles
 
+        # =========================================================================
+        # Tk-Variablen frühzeitig initialisieren (damit sie im Mapping existieren)
+        # =========================================================================
+        self.chunk_var = tk.DoubleVar(value=15.0)
+        self.vad_filter_var = tk.BooleanVar(value=False)
+        self.vad_threshold_var = tk.DoubleVar(value=0.25)
+        self.vad_min_speech_var = tk.IntVar(value=225)
+        self.vad_min_silence_var = tk.IntVar(value=80)
+        self.beam_var = tk.IntVar(value=10)
+        self.temp_var = tk.DoubleVar(value=0.0)
+        self.no_speech_var = tk.DoubleVar(value=0.6)
+        self.log_prob_var = tk.DoubleVar(value=-1.0)
+        self.comp_ratio_var = tk.DoubleVar(value=2.4)
+        self.patience_var = tk.DoubleVar(value=1.0)
+        self.condition_prev_var = tk.BooleanVar(value=True)
+        self.profile_var_audio = tk.StringVar(value="transcription")
+        self.min_conf_var = tk.DoubleVar(value=0.1)
+        self.dup_thresh_var = tk.DoubleVar(value=0.98)
+        self.low_words_var = tk.IntVar(value=3)
+        self.high_words_var = tk.IntVar(value=12)
+        self.max_mem_var = tk.IntVar(value=1024)
+        self.auto_save_interval_var = tk.IntVar(value=300)
+        self.optimize_var = tk.BooleanVar(value=False)
+        self.sentiment_var = tk.BooleanVar(value=False)
+        self.diarize_var = tk.BooleanVar(value=False)
+        self.hotwords_var = tk.StringVar(value="")
+        self.blacklist_mode_var = tk.StringVar(value="word")
+        self.tts_engine_var = tk.StringVar(value="piper")
+        # TTS‑Zusatzvariablen (fehlten bisher)
+        self.tts_voice_var = tk.StringVar(value="de_DE-thorsten-medium")
+        self.tts_length_scale_var = tk.DoubleVar(value=0.9)
+        self.tts_sentence_silence_var = tk.DoubleVar(value=0.1)
+
+        self.best_of_var = tk.IntVar(value=5)
+        self.suppress_tokens_var = tk.StringVar(value="-1")
+        self.proxy_var = tk.StringVar(value="socks5://127.0.0.1:18080")
+        self.proxy_enabled_var = tk.BooleanVar(value=False)
+        self.summarize_temperature_var = tk.DoubleVar(value=0.1)
+        self.summarize_model_var = tk.StringVar(value="qwen2.5:7b")
+
+        # Mapping für Profil‑Attribute zu GUI‑Variablen
+        self._profile_mapping = {
+            "chunk_duration": self.chunk_var,
+            "vad_filter": self.vad_filter_var,
+            "vad_threshold": self.vad_threshold_var,
+            "vad_min_speech_ms": self.vad_min_speech_var,
+            "vad_min_silence_ms": self.vad_min_silence_var,
+            "beam_size": self.beam_var,
+            "temperature": self.temp_var,
+            "no_speech_threshold": self.no_speech_var,
+            "log_prob_threshold": self.log_prob_var,
+            "compression_ratio_threshold": self.comp_ratio_var,
+            "condition_on_previous_text": self.condition_prev_var,
+            "patience": self.patience_var,
+            "audio_profile": self.profile_var_audio,
+            "min_confidence": self.min_conf_var,
+            "duplicate_threshold": self.dup_thresh_var,
+            "adaptive_low_words": self.low_words_var,
+            "adaptive_high_words": self.high_words_var,
+            "max_memory_mb": self.max_mem_var,
+            "auto_save_interval": self.auto_save_interval_var,
+            "optimize_translations": self.optimize_var,
+            "sentiment": self.sentiment_var,
+            "diarize": self.diarize_var,
+            "hotwords": self.hotwords_var,
+            "blacklist_mode": self.blacklist_mode_var,
+            "tts_engine": self.tts_engine_var,
+            "best_of": self.best_of_var,
+            "suppress_tokens": self.suppress_tokens_var,
+            "proxy_url": self.proxy_var,
+            "proxy_enabled": self.proxy_enabled_var,
+            "summarize_temperature": self.summarize_temperature_var,
+            "summarize_model": self.summarize_model_var,
+        }
+
+        # =========================================================================
+        # GUI aufbauen
+        # =========================================================================
         self._create_widgets()
         self._bind_events()
 
-    def _on_close(self):
+    # =========================================================================
+    #  Hilfsmethoden für UI und Theme
+    # =========================================================================
+    def _show_help(self, text: str) -> None:
+        """Zeigt Hilfetext im unteren Label an."""
+        if hasattr(self, "help_label") and self.help_label.winfo_exists():
+            self.help_label.config(text=text)
+
+    def _on_close(self) -> None:
+        """Schließt den Dialog und entfernt ihn aus der Liste offener Dialoge."""
         if hasattr(self.gui, '_open_dialogs') and self.dialog in self.gui._open_dialogs:
             self.gui._open_dialogs.remove(self.dialog)
         self.dialog.destroy()
 
-    def _create_widgets(self):
-        main_frame = tk.Frame(
-            self.dialog, bg=self.gui.current_theme.BG_PRIMARY, padx=20, pady=20
-        )
+    def _create_widgets(self) -> None:
+        """Erstellt das Hauptlayout mit Canvas, Scrollbar und fixen Buttons."""
+        main_frame = tk.Frame(self.dialog, bg=self.gui.current_theme.BG_PRIMARY, padx=20, pady=20)
         main_frame.pack(fill="both", expand=True)
 
-        canvas = tk.Canvas(
-            main_frame, bg=self.gui.current_theme.BG_PRIMARY, highlightthickness=0
-        )
+        # Canvas für den scrollbaren Inhalt
+        canvas = tk.Canvas(main_frame, bg=self.gui.current_theme.BG_PRIMARY, highlightthickness=0)
         scrollbar = tk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
         scrollable_frame = tk.Frame(canvas, bg=self.gui.current_theme.BG_PRIMARY)
 
@@ -11422,92 +13960,107 @@ class AdvancedSettingsDialog:
         canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
         canvas.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
 
-        canvas.pack(side="left", fill="both", expand=True)
+        canvas.pack(side="top", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
         self.settings_frame = scrollable_frame
         self._build_content_safe()
 
-    def _build_content_safe(self):
+        # Nach dem Aufbau des Inhalts die Scrollregion setzen
+        self.dialog.update_idletasks()
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+        # =====================================================================
+        # FIXE BUTTONS – immer sichtbar, unabhängig vom Scrollen
+        # =====================================================================
+        button_frame = tk.Frame(main_frame, bg=self.gui.current_theme.BG_PRIMARY)
+        button_frame.pack(side="bottom", fill="x", pady=(10, 0))
+
+        reset_btn = tk.Button(
+            button_frame,
+            text="Reset to Defaults",
+            command=self.reset_to_defaults,
+            bg=self.gui.current_theme.BG_TERTIARY,
+            fg=self.gui.current_theme.TEXT_PRIMARY,
+            relief="flat",
+            padx=15,
+            font=("Segoe UI", 8),
+        )
+        reset_btn.pack(side="left", padx=5)
+
+        save_btn = tk.Button(
+            button_frame,
+            text="Save",
+            command=self.save_settings,
+            bg=self.gui.current_theme.SUCCESS,
+            fg=self.gui.current_theme.TEXT_PRIMARY,
+            relief="flat",
+            padx=15,
+            font=("Segoe UI", 8, "bold"),
+        )
+        save_btn.pack(side="left", padx=5)
+
+        cancel_btn = tk.Button(
+            button_frame,
+            text="Cancel",
+            command=self.dialog.destroy,
+            bg=self.gui.current_theme.BG_TERTIARY,
+            fg=self.gui.current_theme.TEXT_PRIMARY,
+            relief="flat",
+            padx=15,
+            font=("Segoe UI", 8),
+        )
+        cancel_btn.pack(side="left", padx=5)
+
+    def _build_content_safe(self) -> None:
+        """
+        Baut den Inhalt des Dialogs auf. Jede Sektion ist in einem try/except
+        eingeschlossen, um Fehler in einer Sektion nicht den gesamten Dialog zu zerstören.
+        """
         row = 0
 
-        try:
-            self._create_profile_section(row)
-            row += 1
-        except Exception:
-            logger.exception("Fehler beim Erstellen der Profil-Sektion")
+        sections = [
+            ("Profil", self._create_profile_section),
+            ("Audio & VAD", self._create_audio_section),
+            ("Modell & Inferenz", self._create_model_section),
+            ("Transkriptions‑Filter", self._create_filter_section),
+            ("Übersetzung", self._create_translation_section),
+            ("GUI & Display", self._create_gui_section),
+            ("Erweitert & System", self._create_advanced_section),
+            ("Blacklist", self._create_blacklist_section),
+            ("Erlaubte Verzeichnisse", self._create_allowed_dirs_section),
+            ("Text-to-Speech", self._create_tts_section),
+            ("Optionale Python-Pakete", self._create_optional_section),
+        ]
 
-        try:
-            self._create_audio_section(row)
-            row += 1
-        except Exception:
-            logger.exception("Fehler beim Erstellen der Audio-Sektion")
+        for name, creator in sections:
+            try:
+                creator(row)
+                row += 1
+            except Exception as e:
+                logger.exception(f"Fehler beim Erstellen der Sektion {name}: {e}")
 
+        # Hilfe-Label am Ende des scrollbaren Bereichs
         try:
-            self._create_model_section(row)
+            self._create_help_label(row)
             row += 1
-        except Exception:
-            logger.exception("Fehler beim Erstellen der Modell-Sektion")
+        except Exception as e:
+            logger.exception(f"Fehler beim Erstellen des Hilfe-Labels: {e}")
 
-        try:
-            self._create_filter_section(row)
-            row += 1
-        except Exception:
-            logger.exception("Fehler beim Erstellen der Filter-Sektion")
-
-        try:
-            self._create_translation_section(row)
-            row += 1
-        except Exception:
-            logger.exception("Fehler beim Erstellen der Übersetzungs-Sektion")
-
-        try:
-            self._create_gui_section(row)
-            row += 1
-        except Exception:
-            logger.exception("Fehler beim Erstellen der GUI-Sektion")
-
-        try:
-            self._create_advanced_section(row)
-            row += 1
-        except Exception:
-            logger.exception("Fehler beim Erstellen der Erweitert-Sektion")
-
-        try:
-            self._create_blacklist_section(row)
-            row += 1
-        except Exception:
-            logger.exception("Fehler beim Erstellen der Blacklist-Sektion")
-
-        try:
-            self._create_allowed_dirs_section(row)
-            row += 1
-        except Exception:
-            logger.exception("Fehler beim Erstellen der Verzeichnis-Sektion")
-
-        try:
-            self._create_tts_section(row)
-            row += 1
-        except Exception:
-            logger.exception("Fehler beim Erstellen der TTS-Sektion")
-
-        try:
-            self._create_optional_section(row)
-            row += 1
-        except Exception:
-            logger.exception("Fehler beim Erstellen der Optional-Sektion")
-
+        # Whisper-Sektion bleibt im scrollbaren Bereich
         try:
             self._create_whisper_section(row)
             row += 1
-        except Exception:
-            logger.exception("Fehler beim Erstellen der Whisper-Sektion")
-
-        self._create_help_and_buttons(row)
+        except Exception as e:
+            logger.exception(f"Fehler beim Erstellen der Whisper-Sektion: {e}")
 
         self.settings_frame.columnconfigure(0, weight=1)
 
-    def _create_profile_section(self, row):
+    # -------------------------------------------------------------------------
+    #  Sektion: Profil
+    # -------------------------------------------------------------------------
+    def _create_profile_section(self, row: int) -> None:
+        """Erstellt die Sektion für die Profilauswahl und -speicherung."""
         profile_frame = tk.LabelFrame(
             self.settings_frame,
             text="📋 Vordefinierte Profile",
@@ -11551,7 +14104,11 @@ class AdvancedSettingsDialog:
         )
         self.save_profile_btn.grid(row=0, column=2, padx=5)
 
-    def _create_audio_section(self, row):
+    # -------------------------------------------------------------------------
+    #  Sektion: Audio & VAD
+    # -------------------------------------------------------------------------
+    def _create_audio_section(self, row: int) -> None:
+        """Erstellt die Sektion für Audio-Einstellungen und VAD-Parameter."""
         audio_frame = tk.LabelFrame(
             self.settings_frame,
             text="🎵 Audio & VAD",
@@ -11596,16 +14153,13 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=0, column=2, sticky="w", pady=1)
-        self.chunk_var = tk.DoubleVar(
-            value=getattr(self.gui.advanced_settings, 'chunk_duration', 15.0)
-        )
         self.chunk_spin = tk.Spinbox(
             audio_frame,
             from_=2.0,
             to=30.0,
             increment=0.5,
             textvariable=self.chunk_var,
-            width=8,
+            width=self.SPINBOX_WIDTH,
             bg=self.gui.current_theme.BG_TERTIARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
@@ -11644,9 +14198,6 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=1, column=2, sticky="w", pady=1)
-        self.profile_var_audio = tk.StringVar(
-            value=getattr(self.gui.advanced_settings, 'audio_profile', 'transcription')
-        )
         try:
             filter_profiles = list(Config.FILTER_PROFILES.keys())
         except Exception:
@@ -11655,13 +14206,12 @@ class AdvancedSettingsDialog:
             audio_frame,
             textvariable=self.profile_var_audio,
             values=filter_profiles,
-            width=12,
+            width=self.COMBO_WIDTH_MEDIUM,
             state="readonly",
             style="Dark.TCombobox",
         )
         self.profile_combo_audio.grid(row=1, column=3, sticky="w", pady=1)
 
-        self.vad_filter_var = tk.BooleanVar(value=getattr(self.gui.advanced_settings, 'vad_filter', False))
         self.vad_filter_cb = tk.Checkbutton(
             audio_frame,
             text="VAD Filter aktivieren",
@@ -11682,9 +14232,6 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=3, column=0, sticky="w", pady=1)
-        self.vad_threshold_var = tk.DoubleVar(
-            value=getattr(self.gui.advanced_settings, 'vad_threshold', 0.25)
-        )
         self.vad_scale = tk.Scale(
             audio_frame,
             from_=0.0,
@@ -11692,7 +14239,7 @@ class AdvancedSettingsDialog:
             resolution=0.05,
             orient=tk.HORIZONTAL,
             variable=self.vad_threshold_var,
-            length=150,
+            length=self.SCALE_LENGTH,
             showvalue=True,
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
@@ -11709,16 +14256,13 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=3, column=2, sticky="w", pady=1)
-        self.vad_min_speech_var = tk.IntVar(
-            value=getattr(self.gui.advanced_settings, 'vad_min_speech_duration_ms', 225)
-        )
         self.vad_speech_spin = tk.Spinbox(
             audio_frame,
             from_=0,
             to=2000,
             increment=50,
             textvariable=self.vad_min_speech_var,
-            width=8,
+            width=self.SPINBOX_WIDTH,
             bg=self.gui.current_theme.BG_TERTIARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
@@ -11734,16 +14278,13 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=4, column=0, sticky="w", pady=1)
-        self.vad_min_silence_var = tk.IntVar(
-            value=getattr(self.gui.advanced_settings, 'vad_min_silence_duration_ms', 80)
-        )
         self.vad_silence_spin = tk.Spinbox(
             audio_frame,
             from_=0,
             to=2000,
             increment=50,
             textvariable=self.vad_min_silence_var,
-            width=8,
+            width=self.SPINBOX_WIDTH,
             bg=self.gui.current_theme.BG_TERTIARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
@@ -11751,7 +14292,11 @@ class AdvancedSettingsDialog:
         )
         self.vad_silence_spin.grid(row=4, column=1, sticky="w", pady=1)
 
-    def _create_model_section(self, row):
+    # -------------------------------------------------------------------------
+    #  Sektion: Modell & Inferenz
+    # -------------------------------------------------------------------------
+    def _create_model_section(self, row: int) -> None:
+        """Erstellt die Sektion für Modell- und Inferenz-Parameter."""
         model_frame = tk.LabelFrame(
             self.settings_frame,
             text="🤖 Modell & Inferenz",
@@ -11773,13 +14318,12 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=0, column=0, sticky="w", pady=1)
-        self.beam_var = tk.IntVar(value=getattr(self.gui.advanced_settings, 'beam_size', 10))
         self.beam_spin = tk.Spinbox(
             model_frame,
             from_=1,
             to=20,
             textvariable=self.beam_var,
-            width=8,
+            width=self.SPINBOX_WIDTH,
             bg=self.gui.current_theme.BG_TERTIARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
@@ -11795,7 +14339,6 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=0, column=2, sticky="w", pady=1)
-        self.temp_var = tk.DoubleVar(value=getattr(self.gui.advanced_settings, 'temperature', 0.0))
         self.temp_scale = tk.Scale(
             model_frame,
             from_=0.0,
@@ -11803,7 +14346,7 @@ class AdvancedSettingsDialog:
             resolution=0.1,
             orient=tk.HORIZONTAL,
             variable=self.temp_var,
-            length=150,
+            length=self.SCALE_LENGTH,
             showvalue=True,
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
@@ -11856,7 +14399,6 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=2, column=0, sticky="w", pady=1)
-        self.hotwords_var = tk.StringVar(value=getattr(self.gui.advanced_settings, "hotwords", ""))
         self.hotwords_entry = tk.Entry(
             model_frame,
             textvariable=self.hotwords_var,
@@ -11868,7 +14410,11 @@ class AdvancedSettingsDialog:
         self.hotwords_entry.grid(row=2, column=1, columnspan=3, sticky="ew", pady=1, padx=5)
         ToolTip(self.hotwords_entry, "Kommagetrennte Hotwords für faster-whisper")
 
-    def _create_filter_section(self, row):
+    # -------------------------------------------------------------------------
+    #  Sektion: Transkriptions‑Filter
+    # -------------------------------------------------------------------------
+    def _create_filter_section(self, row: int) -> None:
+        """Erstellt die Sektion für Confidence‑, Duplikat‑ und adaptive Chunk‑Filter."""
         filter_frame = tk.LabelFrame(
             self.settings_frame,
             text="🔍 Transkriptions‑Filter",
@@ -11890,9 +14436,6 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=0, column=0, sticky="w", pady=1)
-        self.min_conf_var = tk.DoubleVar(
-            value=getattr(self.gui.advanced_settings, 'min_confidence', 0.1)
-        )
         self.min_conf_scale = tk.Scale(
             filter_frame,
             from_=0.0,
@@ -11900,7 +14443,7 @@ class AdvancedSettingsDialog:
             resolution=0.05,
             orient=tk.HORIZONTAL,
             variable=self.min_conf_var,
-            length=150,
+            length=self.SCALE_LENGTH,
             showvalue=True,
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
@@ -11917,9 +14460,6 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=0, column=2, sticky="w", pady=1, padx=(10, 0))
-        self.dup_thresh_var = tk.DoubleVar(
-            value=getattr(self.gui.advanced_settings, 'duplicate_similarity_threshold', 0.98)
-        )
         self.dup_thresh_scale = tk.Scale(
             filter_frame,
             from_=0.5,
@@ -11927,7 +14467,7 @@ class AdvancedSettingsDialog:
             resolution=0.01,
             orient=tk.HORIZONTAL,
             variable=self.dup_thresh_var,
-            length=150,
+            length=self.SCALE_LENGTH,
             showvalue=True,
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
@@ -11944,15 +14484,12 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=1, column=0, sticky="w", pady=1)
-        self.low_words_var = tk.IntVar(
-            value=getattr(self.gui.advanced_settings, 'adaptive_chunk_low_words', 3)
-        )
         self.low_words_spin = tk.Spinbox(
             filter_frame,
             from_=1,
             to=20,
             textvariable=self.low_words_var,
-            width=8,
+            width=self.SPINBOX_WIDTH,
             bg=self.gui.current_theme.BG_TERTIARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
@@ -11968,15 +14505,12 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=1, column=2, sticky="w", pady=1, padx=(10, 0))
-        self.high_words_var = tk.IntVar(
-            value=getattr(self.gui.advanced_settings, 'adaptive_chunk_high_words', 12)
-        )
         self.high_words_spin = tk.Spinbox(
             filter_frame,
             from_=1,
             to=20,
             textvariable=self.high_words_var,
-            width=8,
+            width=self.SPINBOX_WIDTH,
             bg=self.gui.current_theme.BG_TERTIARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
@@ -11984,7 +14518,11 @@ class AdvancedSettingsDialog:
         )
         self.high_words_spin.grid(row=1, column=3, sticky="w", pady=1)
 
-    def _create_translation_section(self, row):
+    # -------------------------------------------------------------------------
+    #  Sektion: Übersetzung
+    # -------------------------------------------------------------------------
+    def _create_translation_section(self, row: int) -> None:
+        """Erstellt die Sektion für Übersetzungseinstellungen (Engine, Ollama)."""
         trans_frame = tk.LabelFrame(
             self.settings_frame,
             text="🌐 Übersetzung",
@@ -12013,7 +14551,7 @@ class AdvancedSettingsDialog:
             trans_frame,
             textvariable=self.engine_var,
             values=["google", "ollama", "argos"],
-            width=10,
+            width=self.COMBO_WIDTH_SMALL,
             state="readonly",
             style="Dark.TCombobox",
         )
@@ -12067,7 +14605,7 @@ class AdvancedSettingsDialog:
         )
         self.ollama_host_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
 
-        def test_ollama():
+        def test_ollama() -> None:
             host = self.ollama_host_var.get().strip()
             if not host:
                 host = "http://localhost:11434"
@@ -12095,7 +14633,11 @@ class AdvancedSettingsDialog:
 
         self._fetch_ollama_models()
 
-    def _create_gui_section(self, row):
+    # -------------------------------------------------------------------------
+    #  Sektion: GUI & Display
+    # -------------------------------------------------------------------------
+    def _create_gui_section(self, row: int) -> None:
+        """Erstellt die Sektion für GUI‑Einstellungen (Zeilenlimits, Theme)."""
         gui_frame = tk.LabelFrame(
             self.settings_frame,
             text="🖥️ GUI & Display",
@@ -12126,7 +14668,7 @@ class AdvancedSettingsDialog:
             to=5000,
             increment=100,
             textvariable=self.trans_lines_var,
-            width=8,
+            width=self.SPINBOX_WIDTH,
             bg=self.gui.current_theme.BG_TERTIARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
@@ -12151,7 +14693,7 @@ class AdvancedSettingsDialog:
             to=5000,
             increment=100,
             textvariable=self.transl_lines_var,
-            width=8,
+            width=self.SPINBOX_WIDTH,
             bg=self.gui.current_theme.BG_TERTIARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
@@ -12172,13 +14714,13 @@ class AdvancedSettingsDialog:
             gui_frame,
             textvariable=self.theme_var,
             values=["dark", "light", "pastel", "system", "highcontrast"],
-            width=10,
+            width=self.COMBO_WIDTH_SMALL,
             state="readonly",
             style="Dark.TCombobox",
         )
         self.theme_combo.grid(row=1, column=1, sticky="w", pady=1)
 
-        def on_theme_change(*args):
+        def on_theme_change(*args: Any) -> None:
             new_theme = self.theme_var.get()
             if new_theme != self.gui.settings.theme:
                 self.gui.settings.theme = new_theme
@@ -12201,7 +14743,11 @@ class AdvancedSettingsDialog:
         )
         self.auto_save_cb.grid(row=1, column=2, columnspan=2, sticky="w", pady=1)
 
-    def _create_advanced_section(self, row):
+    # -------------------------------------------------------------------------
+    #  Sektion: Erweitert & System
+    # -------------------------------------------------------------------------
+    def _create_advanced_section(self, row: int) -> None:
+        """Erstellt die Sektion für erweiterte System‑ und Performance‑Einstellungen."""
         adv_frame = tk.LabelFrame(
             self.settings_frame,
             text="⚙️ Erweitert & System",
@@ -12230,7 +14776,7 @@ class AdvancedSettingsDialog:
             to=1000,
             increment=10,
             textvariable=self.cache_var,
-            width=8,
+            width=self.SPINBOX_WIDTH,
             bg=self.gui.current_theme.BG_TERTIARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
@@ -12327,7 +14873,6 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         ).grid(row=4, column=1, sticky="w", pady=1, padx=(5,0))
 
-        self.proxy_var = tk.StringVar(value=getattr(self.gui.advanced_settings, 'proxy_url', 'socks5://127.0.0.1:18080'))
         self.proxy_entry = tk.Entry(
             adv_frame,
             textvariable=self.proxy_var,
@@ -12349,14 +14894,13 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=5, column=0, sticky="w", pady=1)
-        self.max_mem_var = tk.IntVar(value=getattr(self.gui.advanced_settings, 'max_memory_mb', 1024))
         self.max_mem_spin = tk.Spinbox(
             adv_frame,
             from_=100,
             to=16384,
             increment=100,
             textvariable=self.max_mem_var,
-            width=8,
+            width=self.SPINBOX_WIDTH,
             bg=self.gui.current_theme.BG_TERTIARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
@@ -12372,16 +14916,13 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=5, column=2, sticky="w", pady=1, padx=(10, 0))
-        self.auto_save_interval_var = tk.IntVar(
-            value=getattr(self.gui.advanced_settings, 'auto_save_interval', 300)
-        )
         self.auto_save_interval_spin = tk.Spinbox(
             adv_frame,
             from_=0,
             to=3600,
             increment=60,
             textvariable=self.auto_save_interval_var,
-            width=8,
+            width=self.SPINBOX_WIDTH,
             bg=self.gui.current_theme.BG_TERTIARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
@@ -12389,9 +14930,6 @@ class AdvancedSettingsDialog:
         )
         self.auto_save_interval_spin.grid(row=5, column=3, sticky="w", pady=1)
 
-        self.optimize_var = tk.BooleanVar(
-            value=getattr(self.gui.advanced_settings, 'optimize_translations', False)
-        )
         self.optimize_cb = tk.Checkbutton(
             adv_frame,
             text="Optimize Translations",
@@ -12404,9 +14942,6 @@ class AdvancedSettingsDialog:
         )
         self.optimize_cb.grid(row=6, column=0, columnspan=2, sticky="w", pady=1)
 
-        self.sentiment_var = tk.BooleanVar(
-            value=getattr(self.gui.advanced_settings, 'enable_sentiment_analysis', False)
-        )
         self.sentiment_cb = tk.Checkbutton(
             adv_frame,
             text="Sentiment Analysis",
@@ -12419,9 +14954,6 @@ class AdvancedSettingsDialog:
         )
         self.sentiment_cb.grid(row=6, column=2, columnspan=2, sticky="w", pady=1)
 
-        self.diarize_var = tk.BooleanVar(
-            value=getattr(self.gui.advanced_settings, 'enable_speaker_diarization', False)
-        )
         self.diarize_cb = tk.Checkbutton(
             adv_frame,
             text="Speaker Diarization",
@@ -12434,7 +14966,11 @@ class AdvancedSettingsDialog:
         )
         self.diarize_cb.grid(row=7, column=0, columnspan=2, sticky="w", pady=1)
 
-    def _create_blacklist_section(self, row):
+    # -------------------------------------------------------------------------
+    #  Sektion: Blacklist
+    # -------------------------------------------------------------------------
+    def _create_blacklist_section(self, row: int) -> None:
+        """Erstellt die Sektion für die Blacklist (zu entfernende Phrasen)."""
         blacklist_frame = tk.LabelFrame(
             self.settings_frame,
             text="🚫 Blacklist (Phrasen entfernen)",
@@ -12456,7 +14992,6 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).pack(side="left")
-        self.blacklist_mode_var = tk.StringVar(value=getattr(self.gui.advanced_settings, 'blacklist_mode', 'word'))
         mode_combo = ttk.Combobox(
             mode_frame,
             textvariable=self.blacklist_mode_var,
@@ -12490,8 +15025,11 @@ class AdvancedSettingsDialog:
         blacklist = getattr(self.gui.advanced_settings, 'blacklist', [])
         self.blacklist_text.insert("1.0", "\n".join(blacklist))
 
-    def _create_allowed_dirs_section(self, row):
-        """Erlaubte Verzeichnisse für den Dateizugriff."""
+    # -------------------------------------------------------------------------
+    #  Sektion: Erlaubte Verzeichnisse
+    # -------------------------------------------------------------------------
+    def _create_allowed_dirs_section(self, row: int) -> None:
+        """Erstellt die Sektion für zusätzlich erlaubte Verzeichnisse (Dateizugriff)."""
         dirs_frame = tk.LabelFrame(
             self.settings_frame,
             text="📁 Erlaubte Verzeichnisse (Dateizugriff)",
@@ -12535,7 +15073,11 @@ class AdvancedSettingsDialog:
             justify="left",
         ).grid(row=2, column=0, sticky="w", pady=(2, 0))
 
-    def _create_tts_section(self, row):
+    # -------------------------------------------------------------------------
+    #  Sektion: Text-to-Speech
+    # -------------------------------------------------------------------------
+    def _create_tts_section(self, row: int) -> None:
+        """Erstellt die Sektion für TTS‑Einstellungen (Engine, Stimme, Geschwindigkeit)."""
         tts_frame = tk.LabelFrame(
             self.settings_frame,
             text="🔊 Text-to-Speech",
@@ -12556,14 +15098,11 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=0, column=0, sticky="w", pady=1)
-        self.tts_engine_var = tk.StringVar(
-            value=getattr(self.gui.advanced_settings, 'tts_engine', 'piper')
-        )
         self.tts_engine_combo = ttk.Combobox(
             tts_frame,
             textvariable=self.tts_engine_var,
             values=["piper", "pyttsx3"],
-            width=10,
+            width=self.COMBO_WIDTH_SMALL,
             state="readonly",
             style="Dark.TCombobox",
         )
@@ -12578,9 +15117,6 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=1, column=0, sticky="w", pady=1)
-        self.tts_voice_var = tk.StringVar(
-            value=getattr(self.gui.advanced_settings, 'tts_voice', 'de_DE-thorsten-medium')
-        )
         voice_options = [
             "de_DE-thorsten-medium",
             "de_DE-thorsten-high",
@@ -12591,7 +15127,7 @@ class AdvancedSettingsDialog:
             tts_frame,
             textvariable=self.tts_voice_var,
             values=voice_options,
-            width=20,
+            width=self.COMBO_WIDTH_LARGE,
             state="readonly",
             style="Dark.TCombobox",
         )
@@ -12606,9 +15142,6 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=2, column=0, sticky="w", pady=1)
-        self.tts_length_scale_var = tk.DoubleVar(
-            value=getattr(self.gui.advanced_settings, 'tts_length_scale', 0.9)
-        )
         self.tts_length_scale_scale = tk.Scale(
             tts_frame,
             from_=0.5,
@@ -12616,7 +15149,7 @@ class AdvancedSettingsDialog:
             resolution=0.05,
             orient=tk.HORIZONTAL,
             variable=self.tts_length_scale_var,
-            length=150,
+            length=self.SCALE_LENGTH,
             showvalue=True,
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
@@ -12634,9 +15167,6 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=3, column=0, sticky="w", pady=1)
-        self.tts_sentence_silence_var = tk.DoubleVar(
-            value=getattr(self.gui.advanced_settings, 'tts_sentence_silence', 0.1)
-        )
         self.tts_sentence_silence_scale = tk.Scale(
             tts_frame,
             from_=0.0,
@@ -12644,7 +15174,7 @@ class AdvancedSettingsDialog:
             resolution=0.01,
             orient=tk.HORIZONTAL,
             variable=self.tts_sentence_silence_var,
-            length=150,
+            length=self.SCALE_LENGTH,
             showvalue=True,
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
@@ -12654,7 +15184,11 @@ class AdvancedSettingsDialog:
         self.tts_sentence_silence_scale.grid(row=3, column=1, sticky="ew", pady=1)
         ToolTip(self.tts_sentence_silence_scale, "Pause zwischen Sätzen in Sekunden")
 
-    def _create_optional_section(self, row):
+    # -------------------------------------------------------------------------
+    #  Sektion: Optionale Python-Pakete
+    # -------------------------------------------------------------------------
+    def _create_optional_section(self, row: int) -> None:
+        """Erstellt die Sektion mit Status optionaler Python-Pakete und Installationsbutton."""
         optional_frame = tk.LabelFrame(
             self.settings_frame,
             text="📦 Optionale Python-Pakete",
@@ -12699,10 +15233,27 @@ class AdvancedSettingsDialog:
         )
         install_btn.grid(row=len(packages), column=0, pady=10)
 
-    def _create_whisper_section(self, row):
-        def show_help(text):
-            self.help_label.config(text=text)
+    # -------------------------------------------------------------------------
+    #  Sektion: Hilfe-Label (im scrollbaren Bereich)
+    # -------------------------------------------------------------------------
+    def _create_help_label(self, row: int) -> None:
+        """Erstellt das Hilfe-Label (im scrollbaren Bereich)."""
+        self.help_label = tk.Label(
+            self.settings_frame,
+            text="Bewegen Sie die Maus über eine Einstellung für Details.",
+            bg=self.gui.current_theme.BG_PRIMARY,
+            fg=self.gui.current_theme.TEXT_SECONDARY,
+            font=("Segoe UI", 7),
+            anchor="w",
+            justify="left",
+        )
+        self.help_label.grid(row=row, column=0, sticky="ew", pady=(10, 0))
 
+    # -------------------------------------------------------------------------
+    #  Sektion: Erweiterte Whisper-Parameter
+    # -------------------------------------------------------------------------
+    def _create_whisper_section(self, row: int) -> None:
+        """Erstellt die Sektion für erweiterte Whisper‑Parameter (best_of, patience, etc.)."""
         whisper_frame = tk.LabelFrame(
             self.settings_frame,
             text="🔧 Erweiterte Whisper-Parameter",
@@ -12724,20 +15275,19 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=0, column=0, sticky="w", pady=1)
-        self.best_of_var = tk.IntVar(value=getattr(self.gui.advanced_settings, 'best_of', 5))
         self.best_of_spin = tk.Spinbox(
             whisper_frame,
             from_=1,
             to=20,
             textvariable=self.best_of_var,
-            width=8,
+            width=self.SPINBOX_WIDTH,
             bg=self.gui.current_theme.BG_TERTIARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
             font=("Segoe UI", 8),
         )
         self.best_of_spin.grid(row=0, column=1, sticky="w", pady=1)
-        self.best_of_spin.bind("<Enter>", lambda e: show_help("Anzahl der Suchpfade (größer = besser, aber langsamer)"))
+        self.best_of_spin.bind("<Enter>", lambda e: self._show_help("Anzahl der Suchpfade (größer = besser, aber langsamer)"))
 
         tk.Label(
             whisper_frame,
@@ -12747,7 +15297,6 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=0, column=2, sticky="w", pady=1, padx=(10,0))
-        self.patience_var = tk.DoubleVar(value=getattr(self.gui.advanced_settings, 'patience', 1.0))
         self.patience_scale = tk.Scale(
             whisper_frame,
             from_=0.0,
@@ -12755,7 +15304,7 @@ class AdvancedSettingsDialog:
             resolution=0.1,
             orient=tk.HORIZONTAL,
             variable=self.patience_var,
-            length=150,
+            length=self.SCALE_LENGTH,
             showvalue=True,
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
@@ -12763,7 +15312,7 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         self.patience_scale.grid(row=0, column=3, sticky="ew", pady=1)
-        self.patience_scale.bind("<Enter>", lambda e: show_help("Geduld bei der Beam-Suche (höher = genauer, aber langsamer)"))
+        self.patience_scale.bind("<Enter>", lambda e: self._show_help("Geduld bei der Beam-Suche (höher = genauer, aber langsamer)"))
 
         tk.Label(
             whisper_frame,
@@ -12773,7 +15322,6 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=1, column=0, sticky="w", pady=1)
-        self.no_speech_var = tk.DoubleVar(value=getattr(self.gui.advanced_settings, 'no_speech_threshold', 0.6))
         self.no_speech_scale = tk.Scale(
             whisper_frame,
             from_=0.0,
@@ -12781,7 +15329,7 @@ class AdvancedSettingsDialog:
             resolution=0.05,
             orient=tk.HORIZONTAL,
             variable=self.no_speech_var,
-            length=150,
+            length=self.SCALE_LENGTH,
             showvalue=True,
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
@@ -12789,7 +15337,7 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         self.no_speech_scale.grid(row=1, column=1, sticky="ew", pady=1)
-        self.no_speech_scale.bind("<Enter>", lambda e: show_help("Schwellwert für ‚Keine Sprache‘ (niedriger = mehr Segmente)"))
+        self.no_speech_scale.bind("<Enter>", lambda e: self._show_help("Schwellwert für ‚Keine Sprache‘ (niedriger = mehr Segmente)"))
 
         tk.Label(
             whisper_frame,
@@ -12799,7 +15347,6 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=1, column=2, sticky="w", pady=1, padx=(10,0))
-        self.log_prob_var = tk.DoubleVar(value=getattr(self.gui.advanced_settings, 'log_prob_threshold', -1.2))
         self.log_prob_scale = tk.Scale(
             whisper_frame,
             from_=-5.0,
@@ -12807,7 +15354,7 @@ class AdvancedSettingsDialog:
             resolution=0.1,
             orient=tk.HORIZONTAL,
             variable=self.log_prob_var,
-            length=150,
+            length=self.SCALE_LENGTH,
             showvalue=True,
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
@@ -12815,7 +15362,7 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         self.log_prob_scale.grid(row=1, column=3, sticky="ew", pady=1)
-        self.log_prob_scale.bind("<Enter>", lambda e: show_help("Log‑Wahrscheinlichkeits‑Schwelle (höher = weniger Segmente)"))
+        self.log_prob_scale.bind("<Enter>", lambda e: self._show_help("Log‑Wahrscheinlichkeits‑Schwelle (höher = weniger Segmente)"))
 
         tk.Label(
             whisper_frame,
@@ -12825,7 +15372,6 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=2, column=0, sticky="w", pady=1)
-        self.comp_ratio_var = tk.DoubleVar(value=getattr(self.gui.advanced_settings, 'compression_ratio_threshold', 2.8))
         self.comp_ratio_scale = tk.Scale(
             whisper_frame,
             from_=1.0,
@@ -12833,7 +15379,7 @@ class AdvancedSettingsDialog:
             resolution=0.1,
             orient=tk.HORIZONTAL,
             variable=self.comp_ratio_var,
-            length=150,
+            length=self.SCALE_LENGTH,
             showvalue=True,
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
@@ -12841,9 +15387,8 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         self.comp_ratio_scale.grid(row=2, column=1, sticky="ew", pady=1)
-        self.comp_ratio_scale.bind("<Enter>", lambda e: show_help("Maximales Kompressionsverhältnis (höher = mehr Segmente)"))
+        self.comp_ratio_scale.bind("<Enter>", lambda e: self._show_help("Maximales Kompressionsverhältnis (höher = mehr Segmente)"))
 
-        self.condition_prev_var = tk.BooleanVar(value=getattr(self.gui.advanced_settings, 'condition_on_previous_text', True))
         self.condition_prev_cb = tk.Checkbutton(
             whisper_frame,
             text="Condition on previous text",
@@ -12855,7 +15400,7 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         self.condition_prev_cb.grid(row=3, column=0, columnspan=2, sticky="w", pady=1)
-        self.condition_prev_cb.bind("<Enter>", lambda e: show_help("Vorherigen Text als Kontext verwenden (ausschalten reduziert Wiederholungen)"))
+        self.condition_prev_cb.bind("<Enter>", lambda e: self._show_help("Vorherigen Text als Kontext verwenden (ausschalten reduziert Wiederholungen)"))
 
         tk.Label(
             whisper_frame,
@@ -12865,7 +15410,6 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=3, column=2, sticky="w", pady=1, padx=(10,0))
-        self.suppress_tokens_var = tk.StringVar(value=getattr(self.gui.advanced_settings, 'suppress_tokens', '-1'))
         self.suppress_tokens_entry = tk.Entry(
             whisper_frame,
             textvariable=self.suppress_tokens_var,
@@ -12875,7 +15419,7 @@ class AdvancedSettingsDialog:
             insertbackground=self.gui.current_theme.TEXT_PRIMARY,
         )
         self.suppress_tokens_entry.grid(row=3, column=3, sticky="w", pady=1)
-        self.suppress_tokens_entry.bind("<Enter>", lambda e: show_help("Komma-getrennte Token-IDs, die unterdrückt werden (z.B. '-1,0,1')"))
+        self.suppress_tokens_entry.bind("<Enter>", lambda e: self._show_help("Komma-getrennte Token-IDs, die unterdrückt werden (z.B. '-1,0,1')"))
 
         tk.Label(
             whisper_frame,
@@ -12885,9 +15429,6 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=4, column=0, sticky="w", pady=1)
-        self.summarize_temperature_var = tk.DoubleVar(
-            value=getattr(self.gui.advanced_settings, 'summarize_temperature', 0.1)
-        )
         self.summarize_temp_scale = tk.Scale(
             whisper_frame,
             from_=0.0,
@@ -12895,7 +15436,7 @@ class AdvancedSettingsDialog:
             resolution=0.05,
             orient=tk.HORIZONTAL,
             variable=self.summarize_temperature_var,
-            length=150,
+            length=self.SCALE_LENGTH,
             showvalue=True,
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
@@ -12903,7 +15444,7 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         self.summarize_temp_scale.grid(row=4, column=1, sticky="ew", pady=1)
-        self.summarize_temp_scale.bind("<Enter>", lambda e: show_help("Temperatur für die Zusammenfassung (höher = kreativer)"))
+        self.summarize_temp_scale.bind("<Enter>", lambda e: self._show_help("Temperatur für die Zusammenfassung (höher = kreativer)"))
 
         tk.Label(
             whisper_frame,
@@ -12913,9 +15454,6 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=4, column=2, sticky="w", pady=1)
-        self.summarize_model_var = tk.StringVar(
-            value=getattr(self.gui.advanced_settings, 'summarize_model', 'qwen2.5:7b')
-        )
         self.summarize_model_entry = tk.Entry(
             whisper_frame,
             textvariable=self.summarize_model_var,
@@ -12925,81 +15463,20 @@ class AdvancedSettingsDialog:
             insertbackground=self.gui.current_theme.TEXT_PRIMARY,
         )
         self.summarize_model_entry.grid(row=4, column=3, sticky="w", pady=1)
-        self.summarize_model_entry.bind("<Enter>", lambda e: show_help("Ollama-Modell für die Zusammenfassung (z.B. qwen2.5:7b)"))
+        self.summarize_model_entry.bind("<Enter>", lambda e: self._show_help("Ollama-Modell für die Zusammenfassung (z.B. qwen2.5:7b)"))
 
-    def _create_help_and_buttons(self, row):
-        self.help_label = tk.Label(
-            self.settings_frame,
-            text="Bewegen Sie die Maus über eine Einstellung für Details.",
-            bg=self.gui.current_theme.BG_PRIMARY,
-            fg=self.gui.current_theme.TEXT_SECONDARY,
-            font=("Segoe UI", 7),
-            anchor="w",
-            justify="left",
-        )
-        self.help_label.grid(row=row, column=0, sticky="ew", pady=(10, 0))
-
-        def show_help(text):
-            self.help_label.config(text=text)
-
-        self.best_of_spin.bind("<Enter>", lambda e: show_help("Anzahl der Suchpfade (größer = besser, aber langsamer)"))
-        self.patience_scale.bind("<Enter>", lambda e: show_help("Geduld bei der Beam-Suche (höher = genauer, aber langsamer)"))
-        self.no_speech_scale.bind("<Enter>", lambda e: show_help("Schwellwert für ‚Keine Sprache‘ (niedriger = mehr Segmente)"))
-        self.log_prob_scale.bind("<Enter>", lambda e: show_help("Log‑Wahrscheinlichkeits‑Schwelle (höher = weniger Segmente)"))
-        self.comp_ratio_scale.bind("<Enter>", lambda e: show_help("Maximales Kompressionsverhältnis (höher = mehr Segmente)"))
-        self.condition_prev_cb.bind("<Enter>", lambda e: show_help("Vorherigen Text als Kontext verwenden (ausschalten reduziert Wiederholungen)"))
-        self.suppress_tokens_entry.bind("<Enter>", lambda e: show_help("Komma-getrennte Token-IDs, die unterdrückt werden (z.B. '-1,0,1')"))
-        self.summarize_temp_scale.bind("<Enter>", lambda e: show_help("Temperatur für die Zusammenfassung (höher = kreativer)"))
-        self.summarize_model_entry.bind("<Enter>", lambda e: show_help("Ollama-Modell für die Zusammenfassung"))
-
-        button_frame = tk.Frame(
-            self.settings_frame, bg=self.gui.current_theme.BG_PRIMARY
-        )
-        button_frame.grid(row=row+1, column=0, pady=20)
-
-        reset_btn = tk.Button(
-            button_frame,
-            text="Reset to Defaults",
-            command=self.reset_to_defaults,
-            bg=self.gui.current_theme.BG_TERTIARY,
-            fg=self.gui.current_theme.TEXT_PRIMARY,
-            relief="flat",
-            padx=15,
-            font=("Segoe UI", 8),
-        )
-        reset_btn.pack(side="left", padx=5)
-
-        save_btn = tk.Button(
-            button_frame,
-            text="Save",
-            command=self.save_settings,
-            bg=self.gui.current_theme.SUCCESS,
-            fg=self.gui.current_theme.TEXT_PRIMARY,
-            relief="flat",
-            padx=15,
-            font=("Segoe UI", 8, "bold"),
-        )
-        save_btn.pack(side="left", padx=5)
-
-        cancel_btn = tk.Button(
-            button_frame,
-            text="Cancel",
-            command=self.dialog.destroy,
-            bg=self.gui.current_theme.BG_TERTIARY,
-            fg=self.gui.current_theme.TEXT_PRIMARY,
-            relief="flat",
-            padx=15,
-            font=("Segoe UI", 8),
-        )
-        cancel_btn.pack(side="left", padx=5)
-
-    def _toggle_proxy_entry(self):
+    # -------------------------------------------------------------------------
+    #  Hilfsmethoden für UI‑Logik
+    # -------------------------------------------------------------------------
+    def _toggle_proxy_entry(self) -> None:
+        """Aktiviert/deaktiviert das Proxy‑Eingabefeld je nach Checkbox-Zustand."""
         if self.proxy_enabled_var.get():
             self.proxy_entry.config(state="normal")
         else:
             self.proxy_entry.config(state="disabled")
 
     def _load_custom_profiles(self) -> Dict[str, Dict[str, Any]]:
+        """Lädt benutzerdefinierte Profile aus dem Konfigurationsverzeichnis."""
         profiles_dir = PlatformUtils.get_platform_config_dir() / "profiles"
         profiles = {}
         if not profiles_dir.exists():
@@ -13015,9 +15492,9 @@ class AdvancedSettingsDialog:
                 logger.warning(f"Fehler beim Laden des Profils {file.name}: {e}")
         return profiles
 
-    def save_custom_profile(self):
-        from tkinter.simpledialog import askstring
-        name = askstring("Profil speichern", "Name des Profils:", parent=self.dialog)
+    def save_custom_profile(self) -> None:
+        """Speichert die aktuellen Einstellungen als benutzerdefiniertes Profil."""
+        name = simpledialog.askstring("Profil speichern", "Name des Profils:", parent=self.dialog)
         if not name:
             return
         profile_data = {
@@ -13070,7 +15547,8 @@ class AdvancedSettingsDialog:
                 raise
             DarkMessageBox.showerror("Fehler", f"Speichern fehlgeschlagen: {e}", self.parent)
 
-    def reset_to_defaults(self):
+    def reset_to_defaults(self) -> None:
+        """Setzt alle Einstellungen auf die Standardwerte zurück."""
         default = AdvancedSettings()
         self.chunk_var.set(default.chunk_duration)
         self.profile_var_audio.set("transcription")
@@ -13112,10 +15590,12 @@ class AdvancedSettingsDialog:
         self.blacklist_mode_var.set("word")
         self.blacklist_text.delete("1.0", "end")
         self.blacklist_text.insert("1.0", "\n".join(default.blacklist))
-        # Verzeichnisse
         self.allowed_dirs_text.delete("1.0", "end")
         self.allowed_dirs_text.insert("1.0", "\n".join(default.allowed_dirs))
         self.tts_engine_var.set(default.tts_engine)
+        self.tts_voice_var.set(default.tts_voice)
+        self.tts_length_scale_var.set(default.tts_length_scale)
+        self.tts_sentence_silence_var.set(default.tts_sentence_silence)
         self.best_of_var.set(default.best_of)
         self.no_speech_var.set(default.no_speech_threshold)
         self.log_prob_var.set(default.log_prob_threshold)
@@ -13130,10 +15610,21 @@ class AdvancedSettingsDialog:
         self.summarize_temperature_var.set(default.summarize_temperature)
         self.summarize_model_var.set(default.summarize_model)
 
-    def save_settings(self):
+    def save_settings(self) -> None:
+        """
+        Übernimmt alle aktuellen Werte aus den GUI-Elementen, validiert sie,
+        schreibt sie in die Einstellungsobjekte und speichert sie dauerhaft.
+        """
+        # Sicherheitscheck: GUI und Einstellungen müssen existieren
+        if self.gui is None or not hasattr(self.gui, "advanced_settings"):
+            logger.error("save_settings: GUI oder advanced_settings nicht verfügbar")
+            DarkMessageBox.showerror("Fehler", "Interner Fehler: GUI nicht verfügbar", self.parent)
+            return
+
         old_gpu = self.gui.advanced_settings.gpu_acceleration
 
         try:
+            # 1. Einstellungen aus den GUI-Variablen übernehmen
             self.gui.advanced_settings.chunk_duration = self.chunk_var.get()
             self.gui.advanced_settings.audio_profile = self.profile_var_audio.get()
             self.gui.advanced_settings.vad_filter = self.vad_filter_var.get()
@@ -13189,16 +15680,40 @@ class AdvancedSettingsDialog:
             self.gui.advanced_settings.tts_length_scale = self.tts_length_scale_var.get()
             self.gui.advanced_settings.tts_sentence_silence = self.tts_sentence_silence_var.get()
 
-            # Erlaubte Verzeichnisse
+            # 2. Erlaubte Verzeichnisse validieren
             allowed_dirs_text = self.allowed_dirs_text.get("1.0", "end-1c").strip()
-            allowed_dirs = [line.strip() for line in allowed_dirs_text.split("\n") if line.strip()]
+            allowed_dirs = []
+            invalid_dirs = []
+            for line in allowed_dirs_text.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    p = Path(line).expanduser().resolve()
+                    if p.exists() and p.is_dir():
+                        allowed_dirs.append(str(p))
+                    else:
+                        invalid_dirs.append(line)
+                except Exception as e:
+                    invalid_dirs.append(f"{line} ({e})")
+
+            if invalid_dirs:
+                DarkMessageBox.showerror(
+                    "Ungültige Verzeichnisse",
+                    "Die folgenden Pfade existieren nicht oder sind keine Verzeichnisse:\n\n" +
+                    "\n".join(invalid_dirs[:5]) +
+                    ("\n..." if len(invalid_dirs) > 5 else "") +
+                    "\n\nDie Einstellungen wurden nicht gespeichert.",
+                    self.parent
+                )
+                return
+
             self.gui.advanced_settings.allowed_dirs = allowed_dirs
-            # PlatformUtils erlaubte Verzeichnisse aktualisieren
             PlatformUtils.set_allowed_dirs(allowed_dirs)
 
+            # 3. Proxy-URL validieren
             proxy_url = self.proxy_var.get().strip()
             proxy_enabled = self.proxy_enabled_var.get()
-
             if proxy_enabled and proxy_url:
                 try:
                     parsed = urllib.parse.urlparse(proxy_url)
@@ -13213,36 +15728,46 @@ class AdvancedSettingsDialog:
             self.gui.advanced_settings.proxy_url = proxy_url
             self.gui.advanced_settings.proxy_enabled = proxy_enabled
 
+            # 4. Blacklist speichern
             blacklist_text = self.blacklist_text.get("1.0", "end-1c").strip()
             blacklist = [line.strip() for line in blacklist_text.split("\n") if line.strip()]
             self.gui.advanced_settings.blacklist = blacklist
 
+            # 5. Host ggf. mit http:// ergänzen
             host = self.gui.advanced_settings.ollama_host
             if host and not host.startswith(("http://", "https://")):
                 self.gui.advanced_settings.ollama_host = "http://" + host
 
+            # 6. Persistenz
             self.gui.advanced_settings.save_to_file()
             self.gui.settings.save_to_file()
 
+            # 7. Laufzeit‑Anpassungen
             if hasattr(self.gui, "stream_manager"):
                 self.gui.stream_manager.use_browser_cookies = self.gui.settings.use_browser_cookies
-                self.gui.stream_manager.set_proxy(self.gui.advanced_settings.proxy_url,
-                                               self.gui.advanced_settings.proxy_enabled)
+                self.gui.stream_manager.set_proxy(
+                    self.gui.advanced_settings.proxy_url,
+                    self.gui.advanced_settings.proxy_enabled
+                )
             if hasattr(self.gui, "stream_info_extractor"):
                 self.gui.stream_info_extractor.use_browser_cookies = self.gui.settings.use_browser_cookies
 
+            # 8. GPU‑Umschaltung: Modell neu laden, falls nötig
             if old_gpu != self.gui.advanced_settings.gpu_acceleration:
                 current_model = self.gui.transcription_engine.get_current_model()
                 if current_model and current_model != "None":
                     self.gui.transcription_engine.reload_model(current_model)
                     self.gui.update_status("🔄 Lade Modell mit neuen GPU-Einstellungen neu...")
 
+            # 9. Übersetzungs‑Engine aktualisieren
             if hasattr(self.gui, 'update_translation_engine'):
                 self.gui.update_translation_engine()
 
+            # 10. TTS‑Engine neu konfigurieren
             if hasattr(self.gui, 'tts_manager'):
                 self.gui.tts_manager.set_engine(self.gui.advanced_settings.tts_engine)
 
+            # 11. Dialog schließen und Bestätigung anzeigen
             self.dialog.destroy()
             self.gui.update_status("✅ Settings saved")
 
@@ -13251,65 +15776,52 @@ class AdvancedSettingsDialog:
                 raise
             DarkMessageBox.showerror("Error", f"Invalid settings: {e}", self.parent)
 
-    def _bind_events(self):
+    def _bind_events(self) -> None:
+        """Bindet Event‑Handler für die Profil‑Combobox."""
         self.profile_combo.bind("<<ComboboxSelected>>", self.apply_profile)
 
-    def apply_profile(self, event=None):
+    def apply_profile(self, event: Optional[tk.Event] = None) -> None:
+        """
+        Wendet ein ausgewähltes Profil (vordefiniert oder benutzerdefiniert) an.
+        Verwendet das zentrale Mapping, um die Werte zuzuweisen.
+        """
         profil = self.profiles.get(self.profile_var.get()) or self.custom_profiles.get(self.profile_var.get())
         if not profil:
             logger.warning(f"Profil {self.profile_var.get()} nicht gefunden")
             return
-        self.chunk_var.set(profil["chunk_duration"])
-        self.vad_filter_var.set(profil.get("vad_filter", True))
-        self.vad_threshold_var.set(profil["vad_threshold"])
-        self.vad_min_speech_var.set(profil["vad_min_speech_ms"])
-        self.vad_min_silence_var.set(profil["vad_min_silence_ms"])
-        self.beam_var.set(profil["beam_size"])
-        self.temp_var.set(profil["temperature"])
-        self.profile_var_audio.set(profil["audio_profile"])
-        self.gui.src_lang_var.set(profil["source_lang_name"])
-        self.min_conf_var.set(profil.get("min_confidence", 0.25))
-        self.dup_thresh_var.set(profil.get("duplicate_threshold", 0.85))
-        self.low_words_var.set(profil.get("adaptive_low_words", 3))
-        self.high_words_var.set(profil.get("adaptive_high_words", 10))
-        self.max_mem_var.set(profil.get("max_memory_mb", 1024))
-        self.auto_save_interval_var.set(profil.get("auto_save_interval", 300))
-        self.optimize_var.set(profil.get("optimize_translations", False))
-        self.sentiment_var.set(profil.get("sentiment", False))
-        self.diarize_var.set(profil.get("diarize", False))
-        self.no_speech_var.set(profil.get("no_speech_threshold", 0.5))
-        self.log_prob_var.set(profil.get("log_prob_threshold", -1.0))
-        self.comp_ratio_var.set(profil.get("compression_ratio_threshold", 2.4))
-        self.patience_var.set(profil.get("patience", 1.0))
-        self.condition_prev_var.set(profil.get("condition_on_previous_text", True))
-        self.hotwords_var.set(profil.get("hotwords", ""))
-        self.blacklist_mode_var.set(profil.get("blacklist_mode", "word"))
-        self.tts_engine_var.set(profil.get("tts_engine", "piper"))
-        self.best_of_var.set(profil.get("best_of", 5))
-        self.no_speech_var.set(profil.get("no_speech_threshold", 0.6))
-        self.log_prob_var.set(profil.get("log_prob_threshold", -1.2))
-        self.comp_ratio_var.set(profil.get("compression_ratio_threshold", 2.8))
-        self.condition_prev_var.set(profil.get("condition_on_previous_text", True))
-        self.suppress_tokens_var.set(profil.get("suppress_tokens", "-1"))
-        if "adaptive_chunk" in profil:
-            self.adaptive_chunk_var.set(profil["adaptive_chunk"])
-        if "proxy_url" in profil:
-            self.proxy_var.set(profil["proxy_url"])
-        if "proxy_enabled" in profil:
-            self.proxy_enabled_var.set(profil["proxy_enabled"])
-        else:
-            self.proxy_enabled_var.set(False)
-        self._toggle_proxy_entry()
-        if "summarize_temperature" in profil:
-            self.summarize_temperature_var.set(profil["summarize_temperature"])
-        if "summarize_model" in profil:
-            self.summarize_model_var.set(profil["summarize_model"])
 
-    def _open_install_dialog(self):
+        # Zentralisierte Zuweisung über Mapping
+        for key, var in self._profile_mapping.items():
+            if key in profil:
+                try:
+                    var.set(profil[key])
+                except Exception as e:
+                    logger.warning(f"Fehler beim Setzen von {key}: {e}")
+
+        # Spezielle Behandlung für die Quellsprache (nicht im Mapping)
+        if "source_lang_name" in profil:
+            self.gui.src_lang_var.set(profil["source_lang_name"])
+
+        # Proxy-Eingabefeld aktivieren/deaktivieren
+        self._toggle_proxy_entry()
+
+        # Blacklist‑Textfeld befüllen (nicht über Mapping)
+        if "blacklist" in profil and isinstance(profil["blacklist"], list):
+            self.blacklist_text.delete("1.0", "end")
+            self.blacklist_text.insert("1.0", "\n".join(profil["blacklist"]))
+
+        # Erlaubte Verzeichnisse befüllen
+        if "allowed_dirs" in profil and isinstance(profil["allowed_dirs"], list):
+            self.allowed_dirs_text.delete("1.0", "end")
+            self.allowed_dirs_text.insert("1.0", "\n".join(profil["allowed_dirs"]))
+
+    def _open_install_dialog(self) -> None:
+        """Öffnet den Installationsdialog für fehlende Pakete."""
         InstallDependencyDialog(self.dialog, self.gui)
         self._refresh_package_status()
 
-    def _refresh_package_status(self):
+    def _refresh_package_status(self) -> None:
+        """Aktualisiert die Anzeige der Paket‑Status im Optional‑Bereich."""
         if not hasattr(self, "package_labels") or not self.package_labels:
             return
 
@@ -13327,12 +15839,16 @@ class AdvancedSettingsDialog:
             status = "✅" if available else "❌"
             lbl.config(text=f"{status} {name}")
 
-    def _fetch_ollama_models(self):
+    def _fetch_ollama_models(self) -> None:
+        """
+        Holt die Liste der verfügbaren Ollama‑Modelle im Hintergrund.
+        Bei Fehlern wird ein Hinweis in der Combobox angezeigt.
+        """
         host = self.ollama_host_var.get().strip()
         if not host:
             host = "http://localhost:11434"
 
-        def fetch():
+        def fetch() -> None:
             try:
                 import requests
                 response = requests.get(f"{host}/api/tags", timeout=3)
@@ -13341,8 +15857,26 @@ class AdvancedSettingsDialog:
                     models = [m["name"] for m in data.get("models", [])]
                     if models and self.dialog and self.dialog.winfo_exists():
                         self.dialog.after(0, lambda: self.ollama_model_combo.config(values=models))
+                    else:
+                        if self.dialog and self.dialog.winfo_exists():
+                            self.dialog.after(0, lambda: self.ollama_model_combo.config(values=["(keine Modelle)"]))
+                else:
+                    if self.dialog and self.dialog.winfo_exists():
+                        self.dialog.after(0, lambda: self.ollama_model_combo.config(values=["(Serverfehler)"]))
+            except ImportError:
+                if self.dialog and self.dialog.winfo_exists():
+                    self.dialog.after(0, lambda: self.ollama_model_combo.config(values=["(requests fehlt)"]))
+                    self.dialog.after(0, lambda: self.ollama_model_combo.config(state="disabled"))
+            except requests.exceptions.ConnectionError:
+                if self.dialog and self.dialog.winfo_exists():
+                    self.dialog.after(0, lambda: self.ollama_model_combo.config(values=["(Server nicht erreichbar)"]))
+            except requests.exceptions.Timeout:
+                if self.dialog and self.dialog.winfo_exists():
+                    self.dialog.after(0, lambda: self.ollama_model_combo.config(values=["(Timeout)"]))
             except Exception as e:
                 logger.debug(f"Fehler beim Abrufen der Ollama-Modelle: {e}")
+                if self.dialog and self.dialog.winfo_exists():
+                    self.dialog.after(0, lambda: self.ollama_model_combo.config(values=["(Fehler)"]))
 
         threading.Thread(target=fetch, daemon=True).start()
 
@@ -13434,7 +15968,7 @@ class ExitConfirmDialog(BaseDialog):
 
     def _exit_program(self) -> None:
         self.close()
-        if hasattr(self.gui, '_direct_shutdown'):
+        if self.gui is not None and hasattr(self.gui, '_direct_shutdown'):
             self.gui._direct_shutdown()
         else:
             self.controller.safe_exit()
@@ -13576,6 +16110,7 @@ class DragonWhispererGUI:
         self._shutting_down = False
         self._shutdown_lock = threading.Lock()
         self._exit_dialog_active = False
+        self._cleanup_done = False
         self.is_processing = False
         self.subtitle_mode = False
         self.exit_confirmed = False
@@ -13654,6 +16189,9 @@ class DragonWhispererGUI:
         self._last_gui_update_time = 0.0
         self._processing_lock = threading.Lock()
 
+        # Timer für verzögertes Speichern (Entprellung)
+        self._save_settings_timer = None
+
         self.performance_monitor = SimplePerformanceTracker()
         self._last_text_queue_size = 0
 
@@ -13712,6 +16250,7 @@ class DragonWhispererGUI:
         self._safe_after(1000, self._start_system_monitoring)
         self._safe_after(2000, self._final_initialization_check)
         self._schedule_gui_health_check()
+        atexit.register(self._atexit_cleanup)
 
     # ------------------------------------------------------------------------
     #  Initialisierungshilfen
@@ -13795,6 +16334,13 @@ class DragonWhispererGUI:
     def _setup_callbacks(self) -> None:
         """Platzhalter für zusätzliche Callbacks (z. B. für Plugins)."""
         pass
+
+    def _atexit_cleanup(self) -> None:
+        """Notfall‑Cleanup, falls regulärer Shutdown nicht erfolgt."""
+        if hasattr(self, '_cleanup_done') and self._cleanup_done:
+            return
+        logger.info("⚠️ atexit‑Cleanup wird ausgeführt (GUI wurde nicht normal beendet)")
+        self._cleanup_resources(emergency=True)
 
     # ------------------------------------------------------------------------
     #  Theme‑Methoden (verbessert)
@@ -14315,35 +16861,45 @@ class DragonWhispererGUI:
 
     @gui_operation_decorator
     def update_progress(self, data: dict) -> None:
-        """Aktualisiert die Fortschrittsanzeige (Bytes, Chunks, Zeit)."""
+        """
+        Aktualisiert die Fortschrittsanzeige (Bytes, Chunks, Zeit).
+        Wird über den Event‑Bus aufgerufen (kann aus Worker‑Thread kommen),
+        daher erfolgt der GUI‑Zugriff über _safe_gui_update.
+        """
         processed = data.get("processed", 0)
         total = data.get("total", None)
         chunks = data.get("chunks", 0)
 
-        if not hasattr(self, "progress_bar") or not self.progress_bar.winfo_exists():
-            return
+        def _update():
+            """Wird im Hauptthread ausgeführt."""
+            if self.is_shutting_down():
+                return
+            if not hasattr(self, "progress_bar") or not self.progress_bar.winfo_exists():
+                return
+            try:
+                if total is not None and total > 0:
+                    if not self.progress_bar.winfo_ismapped():
+                        self.progress_bar.pack(side="left", padx=(10, 10))
+                    percent = (processed / total) * 100
+                    self.progress_bar.config(mode="determinate", value=percent)
+                    mb = processed // (1024 * 1024)
+                    tb = total // (1024 * 1024)
+                    remaining_text = ""
+                    if hasattr(self, "audio_processor") and self.audio_processor and self.audio_processor._expected_duration:
+                        expected = self.audio_processor._expected_duration
+                        processed_secs = self.audio_processor.get_processed_seconds()
+                        remaining = max(0, expected - processed_secs)
+                        remaining_text = f" | ⏳ {int(remaining//60):02d}:{int(remaining%60):02d} verbleibend"
+                    self.progress_label.config(text=f"{mb}MB/{tb}MB{remaining_text}")
+                else:
+                    if self.progress_bar.winfo_ismapped():
+                        self.progress_bar.pack_forget()
+                    self.progress_label.config(text=f"Chunks: {chunks}  |  Daten: {processed // 1024} KB")
+            except tk.TclError:
+                # Widget wurde während des Updates zerstört – ignorieren
+                pass
 
-        try:
-            if total is not None and total > 0:
-                if not self.progress_bar.winfo_ismapped():
-                    self.progress_bar.pack(side="left", padx=(10,10))
-                percent = (processed / total) * 100
-                self.progress_bar.config(mode="determinate", value=percent)
-                mb = processed // (1024 * 1024)
-                tb = total // (1024 * 1024)
-                remaining_text = ""
-                if hasattr(self, "audio_processor") and self.audio_processor and self.audio_processor._expected_duration:
-                    expected = self.audio_processor._expected_duration
-                    processed_secs = self.audio_processor.get_processed_seconds()
-                    remaining = max(0, expected - processed_secs)
-                    remaining_text = f" | ⏳ {int(remaining//60):02d}:{int(remaining%60):02d} verbleibend"
-                self.progress_label.config(text=f"{mb}MB/{tb}MB{remaining_text}")
-            else:
-                if self.progress_bar.winfo_ismapped():
-                    self.progress_bar.pack_forget()
-                self.progress_label.config(text=f"Chunks: {chunks}  |  Daten: {processed // 1024} KB")
-        except tk.TclError:
-            pass
+        self._safe_gui_update(_update, important=False)
 
     @gui_operation_decorator
     def update_stream_info(self, info: Optional[StreamInfo]) -> None:
@@ -14549,22 +17105,30 @@ class DragonWhispererGUI:
             self.current_video_language = None
 
     def on_language_change(self, event: Optional[tk.Event] = None) -> None:
-        """Wird aufgerufen, wenn die Zielsprache geändert wird."""
         try:
             selected_name = self.lang_var.get()
-            lang_code: Optional[str] = None
-            for name, code in SORTED_LANGUAGES:
-                if name == selected_name:
-                    lang_code = code
-                    break
+            lang_code = next((code for name, code in SORTED_LANGUAGES if name == selected_name), None)
             if lang_code and lang_code != self.current_language:
+                logger.info(f"🌐 Zielsprache wechselt von {self.current_language} zu {lang_code} ({selected_name})")
                 self.current_language = lang_code
+                # Übersetzungs-Engine in GUI aktualisieren
                 if hasattr(self, "translation_engine"):
                     self.translation_engine.set_target_language(lang_code)
+                    # Cache zusätzlich leeren
+                    if hasattr(self.translation_engine, "_cache_manager"):
+                        self.translation_engine._cache_manager.translation_cache.clear()
+                    if hasattr(self.translation_engine, "_last_translations"):
+                        self.translation_engine._last_translations.clear()
+                # AudioProcessor informieren (Sequenz erhöhen)
+                if hasattr(self, "audio_processor") and self.audio_processor:
+                    self.audio_processor.update_target_language(lang_code)
+                # GUI-Header aktualisieren
                 lang_display = LANGUAGE_SHORT_CODES.get(lang_code, lang_code)
                 if hasattr(self, "translation_header"):
                     self._safe_gui_update(lambda: self.translation_header.config(text=f"🌐 Translation ({lang_display})"))
                 self.update_status(f"🌍 Target language: {selected_name}")
+            else:
+                logger.debug(f"Sprachwechsel ignoriert: {selected_name} -> {lang_code} (aktuell {self.current_language})")
         except Exception as e:
             logger.debug(f"Fehler in on_language_change: {e}")
 
@@ -15218,41 +17782,97 @@ class DragonWhispererGUI:
                 self.tts_btn.config(text="🔊", bg=self.current_theme.BG_TERTIARY, fg=self.current_theme.TEXT_PRIMARY)
                 ToolTip(self.tts_btn, "Read selected text aloud (TTS)")
 
-    def toggle_vad_fallback(self):
+    def toggle_vad_fallback(self) -> None:
+        """
+        Aktiviert oder deaktiviert den VAD-Fallback-Modus.
+
+        Der VAD-Fallback bewirkt, dass bei leeren Transkriptionsergebnissen
+        (z.B. durch VAD gefilterte Stille) ein zweiter Versuch ohne VAD gestartet wird.
+        Die Änderung wirkt sofort auf den Audio-Processor, das Speichern der
+        Einstellungen erfolgt verzögert (Entprellung), um häufige I/O zu vermeiden.
+        """
         current = self.vad_fallback_enabled.get()
-        self.vad_fallback_enabled.set(not current)
+        new_state = not current
+
+        # GUI-Button sofort aktualisieren
+        self.vad_fallback_enabled.set(new_state)
         self._update_vad_fallback_button()
-        self.advanced_settings.vad_fallback_enabled = not current
-        self.advanced_settings.save_to_file()
+
+        # Audio-Processor sofort anpassen (kritisch für laufende Transkription)
         if hasattr(self, 'audio_processor'):
-            self.audio_processor.set_vad_fallback_enabled(not current)
-        self.update_status(f"VAD-Fallback {'aktiviert' if not current else 'deaktiviert'}")
+            self.audio_processor.set_vad_fallback_enabled(new_state)
+
+        # Statusmeldung sofort anzeigen
+        self.update_status(f"VAD-Fallback {'aktiviert' if new_state else 'deaktiviert'}")
+
+        # Einstellungen verzögert speichern (Entprellung)
+        self._schedule_settings_save()
+
+    def _schedule_settings_save(self) -> None:
+        """
+        Speichert die Einstellungen verzögert (Entprellung).
+        Verwendet einen Timer, der bei mehrfachen Aufrufen zurückgesetzt wird.
+        """
+        # Vorhandenen Timer abbrechen, wenn vorhanden und noch nicht abgelaufen
+        if hasattr(self, '_save_settings_timer') and self._save_settings_timer is not None:
+            try:
+                self.root.after_cancel(self._save_settings_timer)
+            except ValueError:
+                # Timer ist bereits abgelaufen oder wurde anderweitig ungültig
+                pass
+        # Neuen Timer starten
+        self._save_settings_timer = self.root.after(500, self._save_settings_impl)
+
+    def _save_settings_impl(self) -> None:
+        """Führt das eigentliche Speichern der Einstellungen durch."""
+        try:
+            self.advanced_settings.save_to_file()
+            self.settings.save_to_file()
+        except Exception as e:
+            logger.error(f"Fehler beim Speichern der Einstellungen: {e}")
+        finally:
+            self._save_settings_timer = None
 
     def _update_vad_fallback_button(self):
         if hasattr(self, 'vad_fallback_btn') and self.vad_fallback_btn.winfo_exists():
             new_text = "🔁VAD 1" if self.vad_fallback_enabled.get() else "🔁VAD 0"
             self._safe_gui_update(lambda: self.vad_fallback_btn.config(text=new_text))
 
-    def toggle_live_mode(self):
+    def toggle_live_mode(self) -> None:
+        """
+        Schaltet zwischen zwei Chunk-Dauern um (20s ↔ 10s).
+
+        Der Live-Modus (kürzere Chunks) ist für interaktive Streams gedacht,
+        der normale Modus (längere Chunks) für bessere Transkriptionsqualität.
+        Die Änderung ist nur im Leerlauf möglich; während einer laufenden
+        Transkription wird eine Warnung angezeigt.
+        Die Einstellungen werden verzögert gespeichert (Entprellung).
+        """
         if self.is_processing:
             DarkMessageBox.showwarning(
                 "Achtung",
-                "Live-Modus kann während einer laufenden Transkription nicht geändert werden.\nBitte stoppen Sie zuerst die Verarbeitung.",
+                "Live-Modus kann während einer laufenden Transkription nicht geändert werden.\n"
+                "Bitte stoppen Sie zuerst die Verarbeitung.",
                 self.root
             )
             return
+
         current_duration = self.advanced_settings.chunk_duration
-        if current_duration == 20.0:
-            new_duration = 10.0
-        else:
-            new_duration = 20.0
+        new_duration = 10.0 if current_duration == 20.0 else 20.0
         self.advanced_settings.chunk_duration = new_duration
-        self.advanced_settings.save_to_file()
+
+        # Audio-Processor sofort aktualisieren (falls vorhanden)
         if hasattr(self, 'audio_processor'):
             self.audio_processor.config.CHUNK_DURATION = new_duration
             self.audio_processor._update_chunk_size()
+
+        # Button-Beschriftung aktualisieren
         self._update_live_mode_button()
+
         self.update_status(f"Chunk-Dauer auf {new_duration:.0f}s umgestellt")
+
+        # Einstellungen verzögert speichern (Entprellung)
+        self._schedule_settings_save()
 
     def _update_live_mode_button(self):
         if hasattr(self, 'live_mode_btn') and self.live_mode_btn.winfo_exists():
@@ -15528,6 +18148,11 @@ class DragonWhispererGUI:
             self._safe_after(30000, self._perform_gui_health_check)
 
     def _perform_gui_health_check(self) -> None:
+        """
+        Führt regelmäßige Gesundheitschecks der GUI durch: Queue‑Größen, Widget‑Zustand,
+        Speichernutzung, Cache‑Auslastung und automatische Bereinigung bei Überlastung.
+        Diese Methode wird periodisch über `after` aufgerufen.
+        """
         try:
             checks: List[str] = []
             start_time = time.time()
@@ -15558,11 +18183,9 @@ class DragonWhispererGUI:
             if hasattr(self, "gui_queue") and self.gui_queue.qsize() > 50:
                 if hasattr(self, "queue_manager") and self.queue_manager:
                     old_size = self.gui_queue.qsize()
-                    self.queue_manager.cleanup_gui_queue(30)
+                    removed = self.queue_manager.cleanup_gui_queue(30)
                     new_size = self.gui_queue.qsize()
-                    checks.append(f"🧹 GUI queue cleaned: {old_size} → {new_size}")
-                    if logger.isEnabledFor(logging.DEBUG):
-                        log_debug("queue", f"GUI queue cleaned: {old_size} → {new_size}")
+                    checks.append(f"🧹 GUI queue cleaned: {old_size} → {new_size} (removed {removed})")
 
             if hasattr(self, "_text_update_queue") and self._text_update_queue.qsize() > 150:
                 if hasattr(self, "queue_manager") and self.queue_manager:
@@ -15594,6 +18217,7 @@ class DragonWhispererGUI:
                 if logger.isEnabledFor(logging.DEBUG):
                     log_debug("cache", f"Stats error: {e}")
 
+            # Text‑Widget‑Bereinigung (mit Warnung bei Überschreitung)
             for attr in ["transcript_text", "translation_text"]:
                 widget = getattr(self, attr, None)
                 if widget and widget.winfo_exists():
@@ -15602,11 +18226,19 @@ class DragonWhispererGUI:
                         max_lines = (self.advanced_settings.transcript_max_lines
                                      if attr == "transcript_text"
                                      else self.advanced_settings.translation_max_lines)
-                        if lines > max_lines:
+                        # Nur löschen, wenn deutlich über dem Limit (mehr als 20 % Überschreitung)
+                        if lines > max_lines * 1.2:
                             keep_lines = max_lines - 100
                             delete_to = f"{lines - keep_lines}.0"
                             widget.delete("1.0", delete_to)
-                            checks.append(f"🧹 {attr} bereinigt: {lines} → {keep_lines} Zeilen")
+                            logger.info(f"🧹 {attr} bereinigt: {lines} → {keep_lines} Zeilen (Überschreitung >20%)")
+                            self.update_status(f"📝 {attr.replace('_', ' ')} gekürzt (zu viele Zeilen)")
+                            checks.append(f"🧹 {attr} trimmed: {lines}→{keep_lines}")
+                        elif lines > max_lines:
+                            # Bei geringer Überschreitung nur eine Warnung ausgeben
+                            logger.info(f"⚠️ {attr} hat {lines} Zeilen (Limit {max_lines}) – baldige Bereinigung empfohlen")
+                            self.update_status(f"⚠️ {attr.replace('_', ' ')} erreicht Zeilengrenze")
+                            checks.append(f"⚠️ {attr} close to limit ({lines}/{max_lines})")
                     except Exception as e:
                         logger.debug(f"Fehler bei Zeilenbereinigung {attr}: {e}")
 
@@ -15631,6 +18263,7 @@ class DragonWhispererGUI:
         except Exception as e:
             logger.warning(f"⚠️ Health check error: {e}")
         finally:
+            # Nur erneut planen, wenn die GUI noch existiert und nicht heruntergefahren wird
             if not self.is_shutting_down() and hasattr(self, "root") and self.root.winfo_exists():
                 self._safe_after(30000, self._perform_gui_health_check)
 
@@ -15666,7 +18299,7 @@ class DragonWhispererGUI:
         self._exit_dialog_active = True
         try:
             is_processing = self.controller.is_processing
-            ExitConfirmDialog(self.root, self.controller, self, is_processing)
+            _ = ExitConfirmDialog(self.root, self.controller, self, is_processing)   # <-- '_' statt 'dialog'
         except Exception as e:
             logger.exception(f"Fehler beim Öffnen des Exit-Dialogs: {e}")
             result = DarkMessageBox.askyesno(
@@ -15685,13 +18318,22 @@ class DragonWhispererGUI:
                 self.exit_button.config(state="normal", text=" ⏻ EXIT ")
 
     def _direct_shutdown(self) -> None:
+        """
+        Führt einen sofortigen Shutdown des Programms durch.
+        Stoppt alle Prozesse, gibt Ressourcen frei und schließt die GUI.
+        Diese Methode wird vom Exit‑Dialog oder direkt bei Signal aufgerufen.
+        """
+        # Vermeide doppelten Shutdown
         if self.is_shutting_down():
             logger.warning("⚠️ Shutdown already in progress, skipping...")
             return
+
         logger.info("🔧 Performing confirmed shutdown...")
-        with self._shutdown_lock:
-            self._shutting_down = True
-        self._safe_stop_all_processes()
+
+        # 1. Ressourcenbereinigung (stoppt Manager, Engines, Prozesse)
+        self._cleanup_resources(emergency=False)
+
+        # 2. Alle offenen Dialoge schließen (falls noch vorhanden)
         for dlg in self._open_dialogs[:]:
             try:
                 if dlg.winfo_exists():
@@ -15699,7 +18341,11 @@ class DragonWhispererGUI:
             except Exception:
                 pass
         self._open_dialogs.clear()
+
+        # 3. Kurze Verzögerung, um laufende `after`-Aufrufe abzuschließen
         time.sleep(0.3)
+
+        # 4. Hauptfenster sauber beenden
         try:
             if hasattr(self, "root") and self.root.winfo_exists():
                 self.root.title("🐉 Dragon Whisperer - Beendet...")
@@ -15707,6 +18353,7 @@ class DragonWhispererGUI:
                 self.root.quit()
                 self.root.destroy()
         except tk.TclError:
+            # Fenster existiert nicht mehr – nichts zu tun
             pass
         except Exception as e:
             logger.warning(f"⚠️ GUI shutdown error: {e}")
@@ -15727,15 +18374,16 @@ class DragonWhispererGUI:
         atexit.register(self._cleanup_resources)
         logger.info("✅ atexit-Handler registriert")
 
-    def _cleanup_resources(self) -> None:
+    def _cleanup_resources(self, emergency: bool = False) -> None:
         """Bereinigt alle Ressourcen vor dem Programmende."""
-        if self.is_shutting_down():
+        if getattr(self, '_cleanup_done', False):
             return
         logger.info("🧹 Führe Ressourcenbereinigung durch...")
         with self._shutdown_lock:
             self._shutting_down = True
+            self._cleanup_done = True
 
-        # 1. Event‑Bus‑Abonnements entfernen
+        # 1. Event‑Bus‑Abonnements entfernen (damit keine Events mehr an die GUI gesendet werden)
         for event_type, callback in self._event_subscriptions:
             try:
                 self.event_bus.unsubscribe(event_type, callback)
@@ -15743,76 +18391,85 @@ class DragonWhispererGUI:
                 logger.warning(f"⚠️ Fehler beim Entfernen von Event '{event_type}': {e}")
         self._event_subscriptions.clear()
 
-        # 2. Alle laufenden Prozesse stoppen
+        # 2. Controller stoppen (falls aktiv)
+        if hasattr(self, 'controller'):
+            try:
+                self.controller.stop_processing(wait=True, timeout=5.0)
+            except Exception as e:
+                logger.warning(f"⚠️ Fehler beim Stoppen des Controllers: {e}")
+
+        # 3. Alle laufenden Prozesse stoppen
         try:
             self._safe_stop_all_processes()
         except Exception as e:
             logger.exception(f"Fehler beim Stoppen der Prozesse: {e}")
 
-        # 3. Manager und Engines entsorgen
-        if hasattr(self, "ffmpeg_manager") and self.ffmpeg_manager:
+        # 4. Manager und Engines entsorgen (mit Logging)
+        managers = [
+            ("FFmpegManager", self.ffmpeg_manager),
+            ("AudioProcessor", self.audio_processor),  
+            ("TranscriptionEngine", self.transcription_engine),
+            ("TranslationEngine", self.translation_engine),
+            ("MemoryManager", self.memory_manager),
+            ("StreamManager", self.stream_manager),
+            ("ResourceManager", self.resource_manager),
+        ]
+        for name, mgr in managers:
+            if mgr is None:
+                continue
             try:
-                self.ffmpeg_manager.dispose()
+                logger.info(f"🧹 Entsorge {name}...")
+                mgr.dispose()
+                logger.info(f"✅ {name} entsorgt")
             except Exception as e:
-                logger.exception(f"Fehler beim Entsorgen des FFmpegManagers: {e}")
+                logger.exception(f"❌ Fehler beim Entsorgen von {name}: {e}")
 
-        if hasattr(self, "transcription_engine") and self.transcription_engine:
-            try:
-                self.transcription_engine.dispose()
-            except Exception as e:
-                logger.exception(f"Fehler beim Entsorgen der TranscriptionEngine: {e}")
-
-        if hasattr(self, "translation_engine") and self.translation_engine:
-            try:
-                self.translation_engine.dispose()
-            except Exception as e:
-                logger.exception(f"Fehler beim Entsorgen der TranslationEngine: {e}")
-
-        if hasattr(self, "memory_manager") and self.memory_manager:
-            try:
-                self.memory_manager.dispose()
-            except Exception as e:
-                logger.exception(f"Fehler beim Entsorgen des MemoryManagers: {e}")
-
-        if hasattr(self, "stream_manager") and self.stream_manager:
-            try:
-                self.stream_manager.dispose()
-            except Exception as e:
-                logger.exception(f"Fehler beim Entsorgen des StreamManagers: {e}")
-
-        if hasattr(self, "resource_manager") and self.resource_manager:
-            try:
-                self.resource_manager.cleanup()
-            except Exception as e:
-                logger.exception(f"Fehler beim Entsorgen des ResourceManagers: {e}")
-
-        # 4. Linux‑spezifische Optimierungen zurücksetzen
+        # 5. Linux‑spezifische Optimierungen zurücksetzen
         self._safe_linux_optimizer_cleanup()
 
-        # 5. CacheManager entsorgen
+        # 6. CacheManager entsorgen
         if self.app_context and self.app_context.cache_manager:
             try:
+                logger.info("🧹 Entsorge CacheManager...")
                 self.app_context.cache_manager.dispose()
+                logger.info("✅ CacheManager entsorgt")
             except Exception as e:
-                logger.exception(f"Fehler beim Entsorgen des CacheManagers: {e}")
+                logger.exception(f"❌ Fehler beim Entsorgen des CacheManagers: {e}")
 
-        # 6. Executoren herunterfahren
-        try:
-            self.translation_executor.shutdown(wait=False)
-        except Exception as e:
-            logger.exception(f"Fehler beim Herunterfahren des Translation-Executors: {e}")
+        # 7. Executoren herunterfahren
+        executors = [
+            ("TranslationExecutor", getattr(self, 'translation_executor', None)),
+            ("GlobalExecutor", _EXECUTOR),
+        ]
+        for name, exec_ in executors:
+            if exec_ is None:
+                continue
+            try:
+                logger.info(f"🧹 Fahre {name} herunter...")
+                exec_.shutdown(wait=not emergency, cancel_futures=emergency)
+                logger.info(f"✅ {name} heruntergefahren")
+            except Exception as e:
+                logger.warning(f"⚠️ Fehler beim Herunterfahren von {name}: {e}")
 
-        try:
-            _EXECUTOR.shutdown(wait=True, cancel_futures=True)
-        except Exception as e:
-            logger.exception(f"Fehler beim Herunterfahren des globalen Executors: {e}")
-
-        # 7. Warteschlangen leeren
+        # 8. Warteschlangen leeren
         self._cleanup_queues()
 
-        # 8. Garbage Collection anregen
+        # 9. Garbage Collection anregen
         gc.collect()
+
+        # 10. Logger flushen
+        self._flush_logs()
+
         logger.info("✅ Ressourcenbereinigung abgeschlossen")
+
+    def _flush_logs(self) -> None:
+        """Sicherstellen, dass alle Logs geschrieben werden."""
+        for handler in logging.getLogger().handlers:
+            try:
+                handler.flush()
+            except Exception:
+                pass
+        logging.shutdown()
 
     def _safe_stop_all_processes(self) -> None:
         if getattr(self, "_stopping_done", False):
@@ -15827,9 +18484,7 @@ class DragonWhispererGUI:
 
         if hasattr(self, "audio_processor"):
             try:
-                self.audio_processor._processing.clear()
-                if hasattr(self.audio_processor, "_stop_event"):
-                    self.audio_processor._stop_event.set()
+                self.audio_processor.stop_processing(wait=False)
             except Exception as e:
                 logger.warning(f"⚠️ Audio processor stop error: {e}")
 
@@ -16158,9 +18813,8 @@ class WhisperController:
         if gui is not None:
             if hasattr(gui, "audio_processor"):
                 try:
-                    gui.audio_processor._processing.clear()
-                    if hasattr(gui.audio_processor, "_stop_event"):
-                        gui.audio_processor._stop_event.set()
+                    # Verwende die öffentliche Methode
+                    gui.audio_processor.stop_processing(wait=False)
                 except Exception:
                     pass
             if hasattr(gui, "ffmpeg_manager"):
@@ -16176,6 +18830,9 @@ class WhisperController:
         src_lang_name: str,
         target_lang_name: str
     ) -> None:
+        """
+        Interne Methode zum Starten der Verarbeitung im Controller-Thread.
+        """
         if not self._wait_for_state_not_stopping(timeout=self._STOP_WAIT_TIMEOUT):
             self._handle_error("Stop process did not finish in time")
             return
@@ -16408,10 +19065,8 @@ class WhisperController:
         try:
             if gui is not None:
                 if hasattr(gui, "audio_processor"):
-                    ap = gui.audio_processor
-                    ap._processing.clear()
-                    if hasattr(ap, "_stop_event"):
-                        ap._stop_event.set()
+                    # Nutze die öffentliche Methode zum Stoppen
+                    gui.audio_processor.stop_processing(wait=False)
 
                 if hasattr(gui, "ffmpeg_manager"):
                     gui.ffmpeg_manager.stop_all_streams()
@@ -16426,14 +19081,24 @@ class WhisperController:
 
 
 class StreamHandler:
+    """
+    Verarbeitet den eigentlichen Stream‑Loop: liest Audiodaten vom FFmpeg‑Prozess,
+    übergibt sie an den AudioProcessor und übernimmt bei Bedarf den URL‑Refresh.
+    """
+
+    # Anzahl Timeouts, bevor ein Reconnect ausgelöst wird
+    MAX_EMPTY_READS = 3
+    # Maximale Anzahl Reconnect‑Versuche pro Stream
+    MAX_RECONNECT_ATTEMPTS = 2
+    # Inaktivitätstimeout in Sekunden (keine Daten für diese Dauer -> Reconnect)
+    INACTIVITY_TIMEOUT = 30.0
+
     def __init__(self, audio_processor: "AudioProcessor", stream_manager: "StreamManager"):
         self._ap_ref = weakref.ref(audio_processor)
         self.config = audio_processor.config
         self.stream_manager = stream_manager
         self._ffmpeg_manager_ref = weakref.ref(audio_processor.ffmpeg_manager)
         self._max_backoff = Config.MAX_BACKOFF
-        self._last_stderr_read = 0.0
-        self._stderr_read_interval = 5.0
 
     def _get_ap(self):
         return self._ap_ref()
@@ -16455,41 +19120,32 @@ class StreamHandler:
         normal_ending_container: List[bool],
         process_id: str,
     ) -> None:
-        ap = self._get_ap()
-        if ap is None:
-            logger.error("StreamHandler: AudioProcessor nicht mehr verfügbar – breche ab.")
-            return
-
+        """
+        Haupt‑Stream‑Loop. Liest Audiodaten vom FFmpeg‑Prozess,
+        übergibt sie an den AudioProcessor und führt bei Bedarf Reconnects durch.
+        """
         normal_ending = False
         platform_id, platform_name = self.stream_manager.detect_platform(original_video_url)
         logger.info(f"🎯 StreamHandler loop started for {platform_name}")
 
         last_data_time = time.time()
-        consecutive_timeouts = 0
-        backoff = 1.0
-        max_reconnects = Config.MAX_STREAM_RECONNECTS
+        empty_reads = 0
         reconnect_attempts = 0
-        refresh_count = 0
-        max_refresh_attempts = Config.YOUTUBE_URL_REFRESH_MAX_ATTEMPTS
         current_process = process
-        last_url_refresh = time.time()
-        url_refresh_interval = Config.YOUTUBE_URL_REFRESH_INTERVAL
-        consecutive_low_quality_chunks = 0
-        max_low_quality_chunks = Config.YOUTUBE_LOW_QUALITY_MAX_CHUNKS
-        refresh_platforms = ("youtube", "youtube_live", "twitch")
-        effective_stream_timeout = 40 if (is_youtube or platform_id in refresh_platforms) else ap.config.STREAM_TIMEOUT
-
-        ffmpeg = self._get_ffmpeg()
-        if ffmpeg is None:
-            error_callback("❌ FFmpegManager nicht verfügbar")
-            return
 
         while True:
+            # --- Aktuelle Referenzen holen (für den Fall, dass Manager ersetzt wurden) ---
             ap = self._get_ap()
             if ap is None:
                 logger.info("AudioProcessor nicht mehr verfügbar – beende StreamHandler.")
                 break
-            if not ap._processing.is_set() or ap._stop_event.is_set():
+
+            ffmpeg = self._get_ffmpeg()
+            if ffmpeg is None:
+                error_callback("❌ FFmpegManager nicht verfügbar")
+                break
+
+            if ap._state != AudioProcessor.State.PROCESSING or ap._stop_event.is_set():
                 logger.info("Processing stopped by user.")
                 break
 
@@ -16500,78 +19156,37 @@ class StreamHandler:
                     normal_ending_container[0] = True
                 break
 
-            current_time = time.time()
-            if current_time - last_data_time > effective_stream_timeout:
-                consecutive_timeouts += 1
-                if consecutive_timeouts > ap.config.MAX_CONSECUTIVE_ERRORS:
-                    if reconnect_attempts < max_reconnects:
-                        reconnect_attempts += 1
-                        wait = min(ap._max_backoff, backoff)
-                        logger.warning(f"⚠️ Stream timeout - reconnecting attempt {reconnect_attempts}/{max_reconnects}, waiting {wait:.1f}s")
-                        if consecutive_timeouts % 2 == 0:
-                            info_callback(f"🔄 Reconnecting... ({reconnect_attempts}/{max_reconnects})")
-                        if ap._stop_event.wait(wait):
-                            break
-                        backoff *= 2
-                        consecutive_timeouts = 0
-                        continue
-                    else:
-                        logger.info("📴 Stream appears to be offline – ending processing.")
-                        break
-                else:
-                    wait = min(ap._max_backoff, backoff)
-                    logger.warning(f"⚠️ Temporary timeout ({consecutive_timeouts}/{ap.config.MAX_CONSECUTIVE_ERRORS}), waiting {wait:.1f}s")
-                    if consecutive_timeouts % 2 == 0:
-                        info_callback(f"⏳ Timeout {consecutive_timeouts}/{ap.config.MAX_CONSECUTIVE_ERRORS} – waiting...")
-                    if ap._stop_event.wait(wait):
-                        break
+            # ----- Inaktivitätserkennung -----
+            if time.time() - last_data_time > self.INACTIVITY_TIMEOUT:
+                logger.info(f"📴 Stream inactive for {self.INACTIVITY_TIMEOUT}s – trying reconnect.")
+                info_callback("Stream inactive – reconnecting...")
+                new_process = ffmpeg.refresh_and_restart(
+                    process_id=process_id,
+                    video_url=original_video_url,
+                    detected_language=detected_language,
+                    max_attempts=1
+                )
+                if new_process:
+                    current_process = new_process
+                    empty_reads = 0
+                    last_data_time = time.time()
+                    logger.info(f"✅ Reconnect after inactivity successful (PID: {new_process.pid})")
                     continue
-            else:
-                consecutive_timeouts = 0
-                backoff = 1.0
+                else:
+                    error_callback("❌ Reconnect after inactivity failed")
+                    break
 
+            # ----- Dateiende für lokale Dateien -----
             if original_video_url.startswith("file://") and ap._expected_duration is not None and ap._processed_seconds >= ap._expected_duration - 1.0:
                 logger.info(f"⏱️ Erwartete Dauer erreicht ({ap._processed_seconds:.1f}s), beende Stream.")
                 normal_ending = True
                 normal_ending_container[0] = True
                 break
 
-            if platform_id in refresh_platforms and time.time() - last_url_refresh > url_refresh_interval:
-                logger.info(f"🔄 Scheduled URL refresh for {platform_name}")
-                try:
-                    new_url = self.stream_manager.extract_audio_url(original_video_url, force_refresh=True)
-                except Exception as e:
-                    logger.error(f"Fehler beim URL-Refresh: {e}", exc_info=True)
-                    new_url = None
-
-                if new_url and new_url != audio_url:
-                    logger.info(f"✅ New {platform_name} URL obtained, restarting FFmpeg...")
-                    ffmpeg.stop_stream(ap._current_stream_id)
-                    if ap._stop_event.wait(1.0):
-                        break
-                    try:
-                        new_process = ffmpeg.start_stream(
-                            video_url=original_video_url,
-                            output_queue=None,
-                            process_id=ap._current_stream_id,
-                            force_refresh_audio_url=True,
-                            seek_seconds=ap._processed_seconds,
-                            detected_language=detected_language,
-                        )
-                    except Exception as e:
-                        logger.error(f"Fehler beim Neustart von FFmpeg: {e}", exc_info=True)
-                        new_process = None
-
-                    if new_process is None:
-                        logger.error("❌ Could not restart FFmpeg after URL refresh")
-                        break
-                    current_process = new_process
-                    audio_url = new_url
-                    last_url_refresh = time.time()
-                    logger.info(f"✅ FFmpeg restarted with new URL (PID: {current_process.pid})")
-                    if ap._stop_event.wait(2.0):
-                        break
-                    continue
+            # ----- Lesen der Audiodaten -----
+            if ap._stop_event.is_set() or ap._state != AudioProcessor.State.PROCESSING:
+                logger.info("Stop detected before reading, breaking loop.")
+                break
 
             try:
                 audio_data = ffmpeg.read_audio_data(process_id, ap.config.CHUNK_SIZE_BYTES)
@@ -16579,164 +19194,111 @@ class StreamHandler:
                 logger.error(f"Fehler beim Lesen der Audiodaten: {e}", exc_info=True)
                 audio_data = None
 
-            if ap._stop_event.is_set() or not ap._processing.is_set():
+            if ap._stop_event.is_set() or ap._state != AudioProcessor.State.PROCESSING:
                 logger.info("Stop detected after read, discarding chunk")
                 break
 
-            if audio_data is None or len(audio_data) == 0:
-                ap._empty_reads += 1
-                if ap._empty_reads > ap.config.MAX_EMPTY_READS:
-                    logger.warning(f"⚠️ Too many empty reads: {ap._empty_reads}")
-                    error_callback("❌ No audio data received")
-                    break
-                sleep_time = min(1.0, ap.config.READ_RETRY_DELAY * ap._empty_reads)
-                if ap._stop_event.wait(sleep_time):
-                    break
-                continue
-
-            if ap._stop_event.is_set() or not ap._processing.is_set():
-                logger.info("Stop detected before processing, discarding chunk")
-                break
-
-            ffmpeg.update_process_activity(process_id)
-            last_data_time = time.time()
-            ap._empty_reads = 0
-            with ap._stats_lock:
-                ap._chunk_counter += 1
-                ap._total_bytes_processed += len(audio_data)
-                ap._processed_seconds = ap._total_bytes_processed / ap.config.BYTES_PER_SECOND
-
-            min_expected = int(ap.config.MIN_CHUNK_BYTES * Config.LOW_QUALITY_CHUNK_THRESHOLD_FACTOR)
-            if len(audio_data) < min_expected:
-                consecutive_low_quality_chunks += 1
-                if consecutive_low_quality_chunks >= max_low_quality_chunks:
-                    logger.warning(f"📴 Too many low-quality chunks ({consecutive_low_quality_chunks}), forcing reconnect")
-                    if platform_id in refresh_platforms and refresh_count < max_refresh_attempts:
-                        new_url = self._refresh_platform_url(original_video_url, platform_id)
-                        if new_url:
-                            refresh_count += 1
-                            try:
-                                new_process = self._restart_ffmpeg_with_new_url(
-                                    ap._current_stream_id,
-                                    original_video_url,
-                                    detected_language,
-                                )
-                            except Exception as e:
-                                logger.error(f"Fehler beim Neustart von FFmpeg: {e}", exc_info=True)
-                                new_process = None
-
-                            if new_process:
-                                current_process = new_process
-                                audio_url = new_url
-                                consecutive_low_quality_chunks = 0
-                                last_data_time = time.time()
-                                continue
-                    if reconnect_attempts < max_reconnects:
-                        reconnect_attempts += 1
-                        wait = min(ap._max_backoff, backoff)
-                        logger.info(f"🔄 Reconnecting after low quality... ({reconnect_attempts}/{max_reconnects})")
-                        if ap._stop_event.wait(wait):
-                            break
-                        backoff *= 2
-                        try:
-                            new_process = self._restart_ffmpeg_with_new_url(
-                                ap._current_stream_id,
-                                original_video_url,
-                                detected_language,
-                            )
-                        except Exception as e:
-                            logger.error(f"Fehler beim Neustart von FFmpeg: {e}", exc_info=True)
-                            new_process = None
-
-                        if new_process:
-                            current_process = new_process
-                            consecutive_low_quality_chunks = 0
-                            last_data_time = time.time()
-                            continue
+            # ----- Verarbeitung des Leseergebnisses -----
+            if audio_data is None:
+                # Timeout – keine Daten
+                empty_reads += 1
+                if empty_reads >= self.MAX_EMPTY_READS:
+                    logger.warning(f"⚠️ Too many consecutive timeouts ({empty_reads}), trying reconnect...")
+                    info_callback("🔄 Stream timeout – reconnecting...")
+                    new_process = ffmpeg.refresh_and_restart(
+                        process_id=process_id,
+                        video_url=original_video_url,
+                        detected_language=detected_language,
+                        max_attempts=1
+                    )
+                    if new_process is not None:
+                        current_process = new_process
+                        empty_reads = 0
+                        last_data_time = time.time()
+                        logger.info(f"✅ Reconnect after timeout successful (PID: {new_process.pid})")
+                        continue
                     else:
+                        reconnect_attempts += 1
+                        if reconnect_attempts >= self.MAX_RECONNECT_ATTEMPTS:
+                            error_callback("❌ Stream connection lost after multiple reconnect attempts")
+                            break
+                        else:
+                            logger.warning(f"⚠️ Reconnect attempt {reconnect_attempts}/{self.MAX_RECONNECT_ATTEMPTS} failed, waiting before retry...")
+                            time.sleep(5.0)
+                            continue
+                else:
+                    time.sleep(1.0)
+                    continue
+            elif audio_data == b"":
+                # Prozess beendet – keine weiteren Daten
+                if current_process.poll() is not None:
+                    logger.info("FFmpeg process terminated – trying reconnect.")
+                    info_callback("Stream process ended – reconnecting...")
+                    new_process = ffmpeg.refresh_and_restart(
+                        process_id=process_id,
+                        video_url=original_video_url,
+                        detected_language=detected_language,
+                        max_attempts=1
+                    )
+                    if new_process is not None:
+                        current_process = new_process
+                        empty_reads = 0
+                        last_data_time = time.time()
+                        logger.info(f"✅ Reconnect after termination successful (PID: {new_process.pid})")
+                        continue
+                    else:
+                        error_callback("❌ Stream connection lost after process termination")
                         break
+                else:
+                    time.sleep(0.5)
+                    continue
             else:
-                consecutive_low_quality_chunks = 0
+                # Erfolgreicher Read
+                empty_reads = 0
+                reconnect_attempts = 0
+                last_data_time = time.time()
+                ffmpeg.update_process_activity(process_id)
+                with ap._stats_lock:
+                    ap._chunk_counter += 1
+                    ap._total_bytes_processed += len(audio_data)
+                    ap._processed_seconds = ap._total_bytes_processed / ap.config.BYTES_PER_SECOND
 
-            try:
-                ap._process_audio_data(
-                    audio_data,
-                    transcription_callback,
-                    translation_callback,
-                    info_callback,
-                    error_callback,
-                )
-            except Exception as e:
-                logger.error(f"Fehler bei der Verarbeitung der Audiodaten: {e}", exc_info=True)
-                error_callback("❌ Fehler bei der Verarbeitung")
+                # ----- Verarbeitung der Audiodaten im AudioProcessor -----
+                try:
+                    ap._process_audio_data(
+                        audio_data,
+                        transcription_callback,
+                        translation_callback,
+                        info_callback,
+                        error_callback,
+                    )
+                except Exception as e:
+                    logger.error(f"Fehler bei der Verarbeitung der Audiodaten: {e}", exc_info=True)
+                    error_callback("❌ Fehler bei der Verarbeitung")
 
         if not normal_ending and not ap._stop_event.is_set():
             normal_ending_container[0] = True
         logger.info("StreamHandler loop finished.")
 
-    def _refresh_platform_url(self, video_url: str, platform: str) -> Optional[str]:
-        max_attempts = 3
-        for attempt in range(1, max_attempts + 1):
-            try:
-                logger.info(f"🔄 Attempt {attempt}/{max_attempts} to refresh {platform} URL...")
-                new_url = self.stream_manager.extract_audio_url(video_url, force_refresh=True)
-                if new_url:
-                    logger.info(f"✅ Successfully obtained new {platform} URL (attempt {attempt})")
-                    return new_url
-            except Exception as e:
-                logger.warning(f"⚠️ Refresh attempt {attempt} error: {e}")
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.exception("Stacktrace:")
-            if attempt < max_attempts:
-                wait = 2 ** (attempt - 1)
-                time.sleep(wait)
-        logger.error(f"❌ All attempts to refresh {platform} URL failed")
-        return None
-
-    def _restart_ffmpeg_with_new_url(
-        self, process_id: str, video_url: str, detected_language: Optional[str] = None
-    ) -> Optional[subprocess.Popen]:
-        ap = self._get_ap()
-        if ap is None:
-            logger.error("AudioProcessor nicht verfügbar – Neustart abgebrochen.")
-            return None
-        logger.info(f"🔄 Restarting FFmpeg for {process_id} with new URL...")
-        ffmpeg = self._get_ffmpeg()
-        if ffmpeg is not None:
-            try:
-                ffmpeg.stop_stream(process_id)
-            except Exception as e:
-                logger.error(f"Fehler beim Stoppen des Streams: {e}", exc_info=True)
-            time.sleep(0.5)
-        else:
-            logger.error("FFmpegManager nicht verfügbar – Neustart abgebrochen.")
-            return None
-        seek_seconds = ap.get_processed_seconds()
-        if ap._expected_duration is not None and seek_seconds > ap._expected_duration:
-            seek_seconds = max(0, ap._expected_duration - 5)
-            logger.info(f"⏩ Seek adjusted to {seek_seconds:.1f}s (within expected duration)")
-        try:
-            new_process = ffmpeg.start_stream(
-                video_url=video_url,
-                output_queue=None,
-                process_id=process_id,
-                force_refresh_audio_url=True,
-                seek_seconds=seek_seconds,
-                detected_language=detected_language,
-            )
-        except Exception as e:
-            logger.error(f"Fehler beim Starten von FFmpeg: {e}", exc_info=True)
-            new_process = None
-        if new_process:
-            logger.info(f"✅ Successfully restarted FFmpeg (new PID: {new_process.pid})")
-            return new_process
-        else:
-            logger.error("❌ Failed to restart FFmpeg")
-            return None
-
-
 class AudioProcessor:
+    """
+    Optimierte Audioverarbeitung mit Zustandsmaschine, Lock-Entflechtung,
+    effizienter Pufferung und verbesserter Fehlerbehandlung.
+    """
+
+    # -------------------------------------------------------------------------
+    #  Zustandsmaschine
+    # -------------------------------------------------------------------------
+    class State(Enum):
+        IDLE = auto()
+        STARTING = auto()
+        PROCESSING = auto()
+        STOPPING = auto()
+        ERROR = auto()
+
+    # Konstanten (werden aus Config übernommen)
     MAX_BUFFER_SECONDS = 30
+    PROGRESS_UPDATE_INTERVAL = Config.PROGRESS_UPDATE_INTERVAL
 
     def __init__(
         self,
@@ -16746,7 +19308,7 @@ class AudioProcessor:
         use_browser_cookies: bool = True,
         stream_manager: Optional[StreamManager] = None,
     ) -> None:
-        self._silent_chunk_counter = 0
+        """Initialisiert den AudioProcessor (optimierte Version)."""
         self.controller_ref = controller_ref
         self.ffmpeg_manager = ffmpeg_manager
         self.settings = settings or AdvancedSettings()
@@ -16759,41 +19321,54 @@ class AudioProcessor:
         self.overlap_size = self.config.OVERLAP_SIZE_BYTES
         self._max_buffer_bytes = self.MAX_BUFFER_SECONDS * self.config.BYTES_PER_SECOND
 
+        # Engines (werden später gesetzt)
         self.transcription_engine: Optional["TranscriptionEngine"] = None
         self.translation_engine: Optional["BaseTranslationEngine"] = None
         self._fallback_translation_engine: Optional["BaseTranslationEngine"] = None
         self.plugin_manager: Optional["PluginManager"] = None
 
+        # Zustand (ersetzt _processing, _stop_event, _cleanup_done)
+        self._state = AudioProcessor.State.IDLE
+        self._state_lock = threading.RLock()
+        self._state_condition = threading.Condition(self._state_lock)
+
+        # Internes Stop‑Event für Worker‑Thread (wird nur noch zum Signal verwendet)
         self._stop_event = threading.Event()
-        self._processing = threading.Event()
-        self._processing_lock = threading.RLock()
+
+        # Weitere Flags
         self._current_stream_id: Optional[str] = None
-        self._last_successful_read_time = time.time()
-        self._consecutive_empty_chunks = 0
         self._cleanup_done = False
         self._resource_lock = threading.RLock()
 
+        # Übersetzung
         self._translation_enabled = threading.Event()
         self._translation_enabled.set()
+        self._translation_seq = 0
+        self._translation_seq_lock = threading.RLock()
 
+        # Duplikatschutz
         self._last_transcription_text = ""
         self._recent_transcriptions: Deque[str] = deque(maxlen=self.config.RECENT_TRANSCRIPTIONS_SIZE)
         self._duplicate_lock = threading.RLock()
 
+        # Untertitel (zeitgestempelt)
         self._timed_transcriptions: Deque["TranscriptionResult"] = deque(maxlen=self.config.SUBTITLE_BUFFER_SIZE)
         self._timed_translations: Deque["TranslationResult"] = deque(maxlen=self.config.SUBTITLE_BUFFER_SIZE)
         self._subtitle_lock = threading.RLock()
         self.subtitle_mode = False
 
+        # Adaptive Chunk
         self._word_count_history: Deque[float] = deque(maxlen=10)
         self._word_count_lock = threading.RLock()
         self._smoothed_word_count: Optional[float] = None
         self._last_chunk_duration = self.config.CHUNK_DURATION
         self._chunk_stable_counter = 0
 
+        # Performance‑Messung
         self._slow_chunks = 0
         self._last_realtime_factor = 0.0
 
+        # Statistik (eigener Lock)
         self._stats_lock = threading.RLock()
         self._chunk_counter = 0
         self._empty_reads = 0
@@ -16807,89 +19382,78 @@ class AudioProcessor:
         self._read_error_count = 0
         self._max_backoff = Config.MAX_BACKOFF
 
-        self._audio_buffer = bytearray()
-        self._max_buffer_size = self.config.MAX_CHUNK_BYTES * 5
-        self._last_buffer_flush = time.time()
+        # Audio‑Puffer (Ringpuffer mit deque)
+        self._audio_chunks: deque = deque()          # Liste von Bytes
+        self._audio_total_bytes = 0
+        self._max_buffer_chunks = self._max_buffer_bytes // self.config.MIN_CHUNK_BYTES + 10
         self._buffer_lock = threading.RLock()
+        self._last_buffer_flush = time.time()
 
-        # Satzpuffer mit Timer
-        self._sentence_buffer = ""
+        # Satzpuffer (Liste für Teile, vermeidet String‑Konkatenation)
+        self._sentence_parts: List[str] = []
         self._sentence_segments: List[TranscriptionResult] = []
         self._last_sentence_time = time.time()
         self._sentence_flush_interval = getattr(self.settings, 'sentence_flush_interval', 2.0)
         self._sentence_flush_word_threshold = getattr(self.settings, 'sentence_flush_word_threshold', 20)
         self._sentence_lock = threading.RLock()
 
-        # Worker-Anzahl anpassen
+        # Executors (Worker‑Anzahl aus Settings)
         cpu_count = os.cpu_count() or 4
-        transcribe_workers = max(1, cpu_count // 8)       # z.B. 3 bei 24 Kernen
-        translate_workers = min(8, max(1, cpu_count // 4)) # 6 bei 24 Kernen
+        transcribe_workers = getattr(self.settings, 'transcription_workers', max(1, cpu_count // 8))
+        translate_workers = getattr(self.settings, 'translation_workers', min(8, max(1, cpu_count // 4)))
 
-        temp_transcription_executor = None
-        temp_translation_executor = None
-        try:
-            temp_transcription_executor = OptimizedThreadPoolExecutor(
-                max_workers=transcribe_workers, thread_name_prefix="Transcribe", max_queue_size=50
-            )
-            temp_translation_executor = OptimizedThreadPoolExecutor(
-                max_workers=translate_workers, thread_name_prefix="Translate", max_queue_size=100
-            )
-            self._transcription_executor = temp_transcription_executor
-            self._translation_executor = temp_translation_executor
-        except Exception:
-            if temp_transcription_executor:
-                try:
-                    temp_transcription_executor.shutdown(wait=False, cancel_futures=True)
-                except Exception:
-                    pass
-            if temp_translation_executor:
-                try:
-                    temp_translation_executor.shutdown(wait=False, cancel_futures=True)
-                except Exception:
-                    pass
-            raise
-
+        self._transcription_executor = OptimizedThreadPoolExecutor(
+            max_workers=transcribe_workers,
+            thread_name_prefix="Transcribe",
+            max_queue_size=50
+        )
+        self._translation_executor = OptimizedThreadPoolExecutor(
+            max_workers=translate_workers,
+            thread_name_prefix="Translate",
+            max_queue_size=100
+        )
         self._transcribe_lock = threading.Lock()
 
+        # Fortschritt
         self._total_file_size: Optional[int] = None
         self._progress_callback: Optional[Callable[[int, Optional[int], int], None]] = None
         self._last_progress_update = 0.0
-        self._progress_update_interval = Config.PROGRESS_UPDATE_INTERVAL
         self._expected_duration: Optional[float] = None
         self._finished_callback: Optional[Callable] = None
         self._min_chunk_duration = self.config.MIN_CHUNK_DURATION
 
+        # Audio‑Enhancement
         self._audio_enhancer = AudioEnhancer(self.config, self.settings)
 
+        # StreamManager
         if stream_manager is not None:
             self.stream_manager = stream_manager
-            logger.debug("AudioProcessor: Using external StreamManager")
         else:
-            proxy = self.settings.proxy_url if hasattr(self.settings, 'proxy_url') else ""
+            proxy = getattr(self.settings, 'proxy_url', "")
             self.stream_manager = StreamManager(
                 enable_debug=(DEBUG_LEVEL >= 1),
                 use_browser_cookies=self.use_browser_cookies,
                 proxy=proxy,
-                proxy_enabled=self.settings.proxy_enabled,
+                proxy_enabled=getattr(self.settings, 'proxy_enabled', False),
             )
-            logger.debug(f"AudioProcessor: Created internal StreamManager with proxy={proxy}")
 
         self._stream_handler = StreamHandler(self, self.stream_manager)
 
+        # Confidence & Noise‑Reduce
         self.last_confidence = 1.0
         self._last_confidence_lock = threading.RLock()
         self._noisereduce_counter = 0
         self._noisereduce_lock = threading.RLock()
         self._last_gpu_stats_time = 0.0
+        self._gpu_stats_lock = threading.RLock()
 
-        if logger.isEnabledFor(logging.DEBUG):
-            self._last_gpu_stats_time = 0.0
-
+        # VAD‑Fallback
         self._vad_fallback_enabled = True
 
+        # Übersetzungssemaphor
         self._translation_semaphore = threading.Semaphore(8)
 
-        logger.info("✅ AudioProcessor initialized (optimized with OptimizedThreadPoolExecutor):")
+        logger.info("✅ AudioProcessor initialized (optimized):")
         logger.info(f"   Config Type: {self._get_config_type()}")
         logger.info(f"   Chunk: {self.config.CHUNK_DURATION}s / {self.chunk_size:,} bytes")
         logger.info(f"   Sample Rate: {self.sample_rate} Hz")
@@ -16898,6 +19462,9 @@ class AudioProcessor:
         logger.info(f"   Max Buffer: {self._max_buffer_bytes:,} bytes ({self.MAX_BUFFER_SECONDS}s)")
         logger.info(f"   Transcribe Workers: {transcribe_workers}, Translate Workers: {translate_workers}")
 
+    # -------------------------------------------------------------------------
+    #  Öffentliche Methoden (unveränderte Schnittstelle)
+    # -------------------------------------------------------------------------
     def _get_config_type(self) -> str:
         if isinstance(self.config, RealtimeConfig):
             return "realtime"
@@ -16942,6 +19509,13 @@ class AudioProcessor:
         self.subtitle_mode = enabled
         logger.info(f"🎬 Subtitle mode: {'ENABLED' if enabled else 'DISABLED'}")
 
+    def update_target_language(self, lang_code: str) -> None:
+        if hasattr(self, "translation_engine"):
+            self.translation_engine.set_target_language(lang_code)
+        with self._translation_seq_lock:
+            self._translation_seq += 1
+        logger.info(f"🌐 AudioProcessor: Zielsprache auf {lang_code} gesetzt, Sequenz {self._translation_seq}")
+
     def start_processing(
         self,
         url: str,
@@ -16951,89 +19525,309 @@ class AudioProcessor:
         error_callback: ErrorCallback,
         finished_callback: Optional[FinishedCallback] = None,
     ) -> None:
-        """
-        Startet die Audioverarbeitung für eine gegebene URL.
-        """
+        """Startet die Audioverarbeitung."""
         logger.info(f"\n🔊 [START_PROCESSING] URL: {url[:80]}...")
-        logger.info(f"   Config Type: {self._get_config_type()}")
-        logger.info(f"   Chunk Size: {self.chunk_size:,} bytes")
+        with self._state_lock:
+            if self._state != AudioProcessor.State.IDLE:
+                error_callback("⚠️ Already processing")
+                return
+            self._state = AudioProcessor.State.STARTING
 
+        # URL validieren und vorbereiten
         url = PlatformUtils.sanitize_url(url)
-
         if url.startswith("file://"):
             try:
                 ok, real_path = PlatformUtils.validate_file_path(url)
                 if not ok:
                     error_callback(f"❌ {real_path}")
+                    self._set_state(AudioProcessor.State.IDLE)
                     return
                 file_path = real_path
                 self._total_file_size = os.path.getsize(file_path)
                 logger.info(f"📁 Lokale Datei, Größe: {self._total_file_size} bytes")
             except OSError as e:
                 error_callback(f"❌ Dateizugriffsfehler: {e}")
-                return
-            except Exception as e:
-                logger.error(f"Unerwarteter Fehler bei Dateiprüfung: {e}", exc_info=True)
-                error_callback("❌ Fehler bei der Dateiprüfung")
+                self._set_state(AudioProcessor.State.IDLE)
                 return
         else:
             self._total_file_size = None
 
-        try:
-            health_issues = self._platform_specific_health_check()
-            if health_issues:
-                for issue in health_issues:
-                    logger.warning(f"⚠️ {issue}")
-                    info_callback(f"⚠️ {issue}")
-        except Exception as e:
-            logger.error(f"Fehler beim Health-Check: {e}", exc_info=True)
+        # Zustand vorbereiten
+        self._stop_event.clear()
+        self._current_stream_id = f"stream_{int(time.time())}"
+        with self._stats_lock:
+            self._chunk_counter = 0
+            self._total_bytes_processed = 0
+            self._processed_seconds = 0.0
+            self._read_error_count = 0
+            self._consecutive_timeouts = 0
+            self._consecutive_errors = 0
+            self._consecutive_successes = 0
+            self._low_conf_counter = 0
+            self._slow_chunks = 0
+            self._last_realtime_factor = 0.0
+        with self._buffer_lock:
+            self._audio_chunks.clear()
+            self._audio_total_bytes = 0
+        self._finished_callback = finished_callback
+        with self._word_count_lock:
+            self._word_count_history.clear()
+            self._smoothed_word_count = None
+        self._last_chunk_duration = self.config.CHUNK_DURATION
+        self._chunk_stable_counter = 0
 
-        with self._processing_lock:
-            if self._processing.is_set():
-                logger.warning("⚠️ Vorheriger Prozess läuft noch – stoppe diesen zuerst.")
-                if not self.stop_processing(wait=True, timeout=10.0):
-                    error_callback("❌ Vorheriger Prozess konnte nicht gestoppt werden")
-                    return
-            self._processing.set()
-            self._stop_event.clear()
-            self._current_stream_id = f"stream_{int(time.time())}"
-            self._stream_start_time = time.time()
+        def _process_thread():
+            try:
+                self._process_loop_enhanced(
+                    url,
+                    transcription_callback,
+                    translation_callback,
+                    info_callback,
+                    error_callback,
+                    finished_callback,
+                )
+            except Exception as e:
+                logger.exception(f"❌ Unhandled exception in processing thread: {e}")
+                error_callback(f"Internal error: {e}")
+            finally:
+                with self._state_lock:
+                    if self._state == AudioProcessor.State.STOPPING:
+                        self._set_state(AudioProcessor.State.IDLE)
+                    elif self._state == AudioProcessor.State.PROCESSING:
+                        self._set_state(AudioProcessor.State.IDLE)
+                    else:
+                        self._set_state(AudioProcessor.State.IDLE)
+                self._stop_event.set()
+
+        thread = threading.Thread(target=_process_thread, daemon=True, name=f"AudioProc_{self._current_stream_id}")
+        thread.start()
+        with self._state_lock:
+            if self._state == AudioProcessor.State.STARTING:
+                self._set_state(AudioProcessor.State.PROCESSING)
+        logger.info("✅ Processing thread started")
+
+    def stop_processing(self, wait: bool = False, timeout: float = 5.0) -> bool:
+        """Stoppt die Verarbeitung."""
+        with self._state_lock:
+            if self._state not in (AudioProcessor.State.PROCESSING, AudioProcessor.State.STARTING):
+                return True
+            self._set_state(AudioProcessor.State.STOPPING)
+            self._stop_event.set()
+
+        if self._current_stream_id and self.ffmpeg_manager:
+            try:
+                self.ffmpeg_manager.stop_stream(self._current_stream_id)
+            except Exception as e:
+                logger.error(f"Fehler beim Stoppen des Streams: {e}")
+
+        # Auf Beendigung warten, falls gewünscht
+        if wait:
+            # Einfache Warteschleife – könnte später durch Thread-Join ersetzt werden
+            start = time.time()
+            while self._state != AudioProcessor.State.IDLE and time.time() - start < timeout:
+                time.sleep(0.1)
+            return self._state == AudioProcessor.State.IDLE
+        return True
+
+    def emergency_reset(self, force: bool = False) -> bool:
+        """Setzt den Prozessor zurück (auch während der Verarbeitung)."""
+        logger.info(f"\n🚨 [EMERGENCY_RESET] force={force}")
+        with self._resource_lock:
+            with self._state_lock:
+                self._set_state(AudioProcessor.State.IDLE)
+            self._stop_event.set()
+            self._current_stream_id = None
             with self._stats_lock:
-                self._chunk_counter = 0
-                self._total_bytes_processed = 0
-                self._processed_seconds = 0.0
-                self._read_error_count = 0
-                self._consecutive_timeouts = 0
                 self._consecutive_errors = 0
-                self._consecutive_successes = 0
+                self._consecutive_timeouts = 0
                 self._low_conf_counter = 0
                 self._slow_chunks = 0
                 self._last_realtime_factor = 0.0
+            if force:
+                with self._subtitle_lock:
+                    self._timed_transcriptions.clear()
+                    self._timed_translations.clear()
+                with self._duplicate_lock:
+                    self._recent_transcriptions.clear()
+                    self._last_transcription_text = ""
             with self._buffer_lock:
-                self._audio_buffer = bytearray()
-            self._finished_callback = finished_callback
-            with self._word_count_lock:
-                self._word_count_history.clear()
-                self._smoothed_word_count = None
-            self._last_chunk_duration = self.config.CHUNK_DURATION
-            self._chunk_stable_counter = 0
-            logger.info(f"✅ Flags gesetzt: processing=True, ID={self._current_stream_id}")
+                self._audio_chunks.clear()
+                self._audio_total_bytes = 0
+        logger.info("✅ Reset completed")
+        return True
 
-        thread = threading.Thread(
-            target=self._process_loop_enhanced,
-            args=(
-                url,
-                transcription_callback,
-                translation_callback,
-                info_callback,
-                error_callback,
-            ),
-            daemon=True,
-            name=f"AudioProc_{self._current_stream_id}",
-        )
-        thread.start()
-        logger.info(f"✅ Processing thread gestartet: {thread.name}")
+    def get_timed_transcriptions(self) -> List["TranscriptionResult"]:
+        with self._subtitle_lock:
+            return list(self._timed_transcriptions)
 
+    def get_timed_translations(self) -> List["TranslationResult"]:
+        with self._subtitle_lock:
+            return list(self._timed_translations)
+
+    def get_status(self) -> Dict[str, Any]:
+        with self._state_lock:
+            state_name = self._state.name
+        with self._stats_lock:
+            return {
+                "processing": self._state == AudioProcessor.State.PROCESSING,
+                "stop_event_set": self._stop_event.is_set(),
+                "current_stream_id": self._current_stream_id,
+                "cleanup_done": self._cleanup_done,
+                "config_type": self._get_config_type(),
+                "chunk_size": self.chunk_size,
+                "chunks_processed": self._chunk_counter,
+                "total_bytes": self._total_bytes_processed,
+                "empty_reads": self._empty_reads,
+                "subtitle_mode": self.subtitle_mode,
+                "translation_active": self._translation_enabled.is_set(),
+                "active_threads": threading.active_count(),
+                "consecutive_errors": self._consecutive_errors,
+                "consecutive_timeouts": self._consecutive_timeouts,
+                "low_conf_counter": self._low_conf_counter,
+                "slow_chunks": self._slow_chunks,
+                "last_realtime_factor": self._last_realtime_factor,
+                "state": state_name,
+            }
+
+    def get_processed_seconds(self) -> float:
+        with self._stats_lock:
+            return self._processed_seconds
+
+    def dispose(self) -> None:
+        logger.info("🧹 AudioProcessor: Starting dispose...")
+        try:
+            self._stop_event.set()
+            with self._state_lock:
+                self._set_state(AudioProcessor.State.IDLE)
+            self._cleanup_done = True
+
+            if self.ffmpeg_manager:
+                self.ffmpeg_manager.stop_all_streams()
+
+            for exec_ in (self._transcription_executor, self._translation_executor):
+                if exec_ is not None:
+                    try:
+                        exec_.shutdown(wait=False, cancel_futures=True)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Fehler beim Shutdown des Executors: {e}")
+
+            if self.plugin_manager is not None:
+                try:
+                    self.plugin_manager.dispose()
+                except Exception as e:
+                    logger.error(f"Fehler beim Dispose des PluginManagers: {e}")
+
+            with self._subtitle_lock:
+                self._timed_transcriptions.clear()
+                self._timed_translations.clear()
+            with self._duplicate_lock:
+                self._recent_transcriptions.clear()
+                self._last_transcription_text = ""
+            with self._buffer_lock:
+                self._audio_chunks.clear()
+                self._audio_total_bytes = 0
+
+            logger.info("✅ AudioProcessor disposed")
+        except Exception as e:
+            logger.error(f"⚠️ AudioProcessor dispose error: {e}", exc_info=True)
+
+    # -------------------------------------------------------------------------
+    #  Hilfsmethoden (State)
+    # -------------------------------------------------------------------------
+    def _set_state(self, new_state: "AudioProcessor.State") -> None:
+        with self._state_lock:
+            old = self._state
+            if old == new_state:
+                return
+            self._state = new_state
+            self._state_condition.notify_all()
+            logger.debug(f"AudioProcessor state: {old.name} -> {new_state.name}")
+
+    # -------------------------------------------------------------------------
+    #  Zentrale Fehlerbehandlung
+    # -------------------------------------------------------------------------
+    def _handle_error(
+        self,
+        error: Exception,
+        context: str,
+        error_callback: Optional[ErrorCallback] = None,
+        fatal: bool = False,
+        retry: bool = True,
+    ) -> bool:
+        """
+        Zentrale Fehlerbehandlung.
+        Gibt True zurück, wenn der Fehler behandelt wurde und die Verarbeitung
+        fortgesetzt werden kann (nur bei nicht‑fatalen Fehlern).
+        """
+        logger.warning(f"⚠️ {context}: {error}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.exception("Stacktrace:")
+
+        with self._stats_lock:
+            self._consecutive_errors += 1
+            if fatal or self._consecutive_errors >= self.config.MAX_CONSECUTIVE_ERRORS:
+                logger.critical(
+                    f"🚨 Too many consecutive errors ({self._consecutive_errors}), stopping processing."
+                )
+                with self._sentence_lock:
+                    self._sentence_parts.clear()
+                    self._sentence_segments.clear()
+                self._stop_event.set()
+                with self._state_lock:
+                    self._set_state(AudioProcessor.State.ERROR)
+                if error_callback:
+                    error_callback(f"Fatal error: {context}")
+                return False
+
+            if retry and self._consecutive_errors < 5:
+                delay = min(5.0, 0.5 * (2 ** (self._consecutive_errors - 1)))
+                logger.info(f"⏳ Waiting {delay:.1f}s before retry...")
+                time.sleep(delay)
+            return True
+
+    # -------------------------------------------------------------------------
+    #  Audio‑Puffer (Ringpuffer mit deque)
+    # -------------------------------------------------------------------------
+    def _add_audio_to_buffer(self, audio_data: bytes) -> None:
+        """Fügt Audiodaten zum Ringpuffer hinzu, verwirft alte Daten bei Überlauf."""
+        with self._buffer_lock:
+            self._audio_chunks.append(audio_data)
+            self._audio_total_bytes += len(audio_data)
+            # Alte Chunks entfernen, bis Gesamtgröße unter Limit
+            while self._audio_total_bytes > self._max_buffer_bytes and self._audio_chunks:
+                oldest = self._audio_chunks.popleft()
+                self._audio_total_bytes -= len(oldest)
+
+    def _get_audio_chunk_for_processing(self) -> Optional[bytes]:
+        """
+        Holt einen ausreichend großen Chunk aus dem Puffer (unter Lock).
+        Gibt die zusammengefügten Bytes zurück und entfernt sie aus dem Puffer.
+        """
+        with self._buffer_lock:
+            if self._audio_total_bytes < self.config.MIN_CHUNK_BYTES:
+                # Falls der Puffer zu lange nicht geflushed wurde, trotzdem verarbeiten
+                if self._audio_chunks and time.time() - self._last_buffer_flush > 5.0:
+                    # Nur verarbeiten, wenn überhaupt Daten vorhanden
+                    pass
+                else:
+                    return None
+
+            # Sammle genügend Chunks, um MIN_CHUNK_BYTES zu erreichen
+            chunks = []
+            size = 0
+            while self._audio_chunks and size < self.config.MIN_CHUNK_BYTES:
+                chunk = self._audio_chunks.popleft()
+                chunks.append(chunk)
+                size += len(chunk)
+            if not chunks:
+                return None
+            self._audio_total_bytes -= size
+            self._last_buffer_flush = time.time()
+            return b''.join(chunks)
+
+    # -------------------------------------------------------------------------
+    #  Haupt‑Processing‑Loop (zerlegt)
+    # -------------------------------------------------------------------------
     def _process_loop_enhanced(
         self,
         url: str,
@@ -17041,179 +19835,222 @@ class AudioProcessor:
         translation_callback: TranslationCallback,
         info_callback: InfoCallback,
         error_callback: ErrorCallback,
+        finished_callback: Optional[FinishedCallback],
     ) -> None:
-        """
-        Haupt‑Processing‑Loop für Audio‑Streams.
-        Verantwortlich für:
-          - Start des FFmpeg‑Prozesses (über FFmpegManager)
-          - Übergabe an StreamHandler.run_loop
-          - Saubere Freigabe aller Ressourcen
-        """
-        process: Optional[subprocess.Popen] = None
-        detected_language: Optional[str] = None
+        """Hauptschleife (koordiniert Extraktion, FFmpeg und StreamHandler)."""
+        callbacks = {
+            "transcription": transcription_callback,
+            "translation": translation_callback,
+            "info": info_callback,
+            "error": error_callback,
+            "finished": finished_callback,
+        }
         error_occurred = False
         normal_ending_container = [False]
 
         try:
-            logger.info(f"\n🎬 [PROCESS_LOOP] Start für: {url[:60]}...")
-            info_callback("🔍 Extracting audio URL...")
-
-            try:
-                audio_url = self.stream_manager.extract_audio_url(url)
-            except Exception as e:
-                logger.error(f"Fehler bei der Audio-URL-Extraktion: {e}", exc_info=True)
-                error_callback("❌ Audio-URL konnte nicht extrahiert werden")
-                return
-
+            audio_url = self._extract_audio_url(url, callbacks["error"])
             if not audio_url:
-                error_callback("❌ Could not extract audio URL")
                 error_occurred = True
                 return
 
-            logger.info(f"✅ Audio URL: {audio_url[:80]}...")
-            info_callback("🔍 Testing audio stream...")
-
-            if not self._test_audio_stream(audio_url):
-                logger.warning("⚠️ Stream test failed, trying anyway...")
-
-            info_callback("🔧 Setting up FFmpeg...")
-            logger.info("🚀 Starting FFmpeg process...")
-
-            try:
-                process = self.ffmpeg_manager.start_stream(
-                    video_url=url,
-                    output_queue=None,
-                    process_id=self._current_stream_id,
-                    audio_url=audio_url,
-                    detected_language=detected_language,
-                )
-                if process is None:
-                    error_callback("❌ FFmpeg konnte nicht gestartet werden")
-                    error_occurred = True
-                    return
-            except FileNotFoundError:
-                error_callback("❌ FFmpeg not found - please install")
-                error_occurred = True
-                return
-            except (OSError, PermissionError) as e:
-                error_callback(f"❌ FFmpeg konnte nicht gestartet werden: {e}")
-                error_occurred = True
-                return
-            except Exception as e:
-                logger.error(f"Unerwarteter Fehler beim Starten von FFmpeg: {e}", exc_info=True)
-                error_callback("❌ Unerwarteter Fehler beim Starten von FFmpeg")
+            detected_language = None  # später via LanguageDetector
+            process = self._start_ffmpeg_process(url, audio_url, detected_language, callbacks["error"])
+            if not process:
                 error_occurred = True
                 return
 
-            logger.info(f"✅ FFmpeg started (PID: {process.pid})")
-
-            # Warte kurz, damit FFmpeg initialisiert ist
-            wait_time = self.config.INITIAL_BUFFER_SECONDS
-            if any(keyword in audio_url.lower() for keyword in ["hls", ".m3u8", "manifest.googlevideo.com"]):
-                wait_time = 3.0
-                logger.info(f"🎯 HLS/Live stream detected, waiting {wait_time}s...")
-            time.sleep(wait_time)
-
-            if process.poll() is not None:
-                try:
-                    stderr = process.stderr.read(1000).decode("utf-8", errors="ignore")
-                    error_msg = f"FFmpeg died: {stderr[:200]}"
-                    logger.error(f"❌ {error_msg}")
-                    error_callback(f"❌ {error_msg}")
-                except Exception as e:
-                    logger.error(f"Fehler beim Lesen von FFmpeg stderr: {e}", exc_info=True)
-                    error_callback("❌ FFmpeg failed to start")
-                error_occurred = True
-                return
-
-            info_callback("✅ Stream connected - starting transcription...")
-            is_youtube = any(domain in audio_url for domain in ["youtube.com", "youtu.be", "googlevideo.com"])
-            if logger.isEnabledFor(logging.DEBUG):
-                log_debug("audio", f"Detected stream type: {'YouTube' if is_youtube else 'Standard'}")
-
-            logger.info("🎯 Using {} streaming loop".format("YouTube-optimized" if is_youtube else "standard"))
-
-            # Übergabe an StreamHandler
-            self._stream_handler.run_loop(
-                process,
-                audio_url,
-                url,
-                detected_language,
-                transcription_callback,
-                translation_callback,
-                info_callback,
-                error_callback,
-                is_youtube=is_youtube,
-                normal_ending_container=normal_ending_container,
-                process_id=self._current_stream_id,
+            self._run_stream_loop(
+                process, audio_url, url, detected_language,
+                callbacks, normal_ending_container
             )
-            logger.info(f"🔚 [LOOP END] Reason: {'Stop requested' if self._stop_event.is_set() else 'Process ended'}")
-
-        except subprocess.TimeoutExpired as e:
-            error_callback(f"❌ Timeout - stream not reachable: {e}")
-            error_occurred = True
-        except FileNotFoundError:
-            error_callback("❌ FFmpeg not found - please install")
-            error_occurred = True
-        except OSError as e:
-            error_msg = f"OS error: {str(e)[:100]}"
-            logger.error(f"❌ {error_msg}")
-            error_callback(f"❌ {error_msg}")
-            error_occurred = True
         except Exception as e:
-            error_msg = f"Unexpected error: {str(e)[:100]}"
-            logger.error(f"❌ {error_msg}")
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.exception("Stacktrace:")
-            error_callback(f"❌ {error_msg}")
+            logger.error(f"Unexpected error in processing loop: {e}", exc_info=True)
             error_occurred = True
-
         finally:
-            # Flushe noch ausstehende Sätze
-            with self._sentence_lock:
-                if self._sentence_buffer.strip():
-                    sentence = self._sentence_buffer.strip()
-                    if self.translation_engine and self._translation_enabled.is_set():
-                        detected_lang = self.transcription_engine._last_detected_language if self.transcription_engine else "auto"
-                        first = self._sentence_segments[0] if self._sentence_segments else None
-                        last = self._sentence_segments[-1] if self._sentence_segments else None
+            self._cleanup_after_stream(normal_ending_container[0], error_occurred, callbacks)
+            self._guaranteed_cleanup()
+
+    def _extract_audio_url(self, url: str, error_callback: ErrorCallback) -> Optional[str]:
+        """Extrahiert die Audio‑URL über den StreamManager."""
+        try:
+            audio_url = self.stream_manager.extract_audio_url(url)
+            if not audio_url:
+                if error_callback:
+                    error_callback("❌ Could not extract audio URL")
+                return None
+            logger.info(f"✅ Audio URL: {audio_url[:80]}...")
+            return audio_url
+        except Exception as e:
+            logger.error(f"Fehler bei der Audio-URL-Extraktion: {e}", exc_info=True)
+            if error_callback:
+                error_callback("❌ Audio-URL konnte nicht extrahiert werden")
+            return None
+
+    def _start_ffmpeg_process(
+        self,
+        video_url: str,
+        audio_url: str,
+        detected_language: Optional[str],
+        error_callback: ErrorCallback,
+    ) -> Optional[subprocess.Popen]:
+        """Startet FFmpeg (direkt oder im Pipe‑Modus)."""
+        try:
+            process = self.ffmpeg_manager.start_stream(
+                video_url=video_url,
+                output_queue=None,
+                process_id=self._current_stream_id,
+                audio_url=audio_url,
+                detected_language=detected_language,
+            )
+            if process is None:
+                if error_callback:
+                    error_callback("❌ FFmpeg konnte nicht gestartet werden")
+                return None
+            if process.poll() is not None:
+                stderr = self._read_stderr(process)
+                if error_callback:
+                    error_callback(f"❌ FFmpeg died immediately: {stderr[:200]}")
+                return None
+            logger.info(f"✅ FFmpeg started (PID: {process.pid})")
+            return process
+        except FileNotFoundError:
+            if error_callback:
+                error_callback("❌ FFmpeg not found - please install")
+            return None
+        except (OSError, PermissionError) as e:
+            if error_callback:
+                error_callback(f"❌ FFmpeg konnte nicht gestartet werden: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unerwarteter Fehler beim Starten von FFmpeg: {e}", exc_info=True)
+            if error_callback:
+                error_callback("❌ Unerwarteter Fehler beim Starten von FFmpeg")
+            return None
+
+    def _run_stream_loop(
+        self,
+        process: subprocess.Popen,
+        audio_url: str,
+        original_url: str,
+        detected_language: Optional[str],
+        callbacks: Dict[str, Callable],
+        normal_ending_container: List[bool],
+    ) -> None:
+        """Ruft den StreamHandler auf und aktualisiert normal_ending_container."""
+        is_youtube = any(domain in audio_url for domain in ["youtube.com", "youtu.be", "googlevideo.com"])
+        self._stream_handler.run_loop(
+            process,
+            audio_url,
+            original_url,
+            detected_language,
+            callbacks["transcription"],
+            callbacks["translation"],
+            callbacks["info"],
+            callbacks["error"],
+            is_youtube=is_youtube,
+            normal_ending_container=normal_ending_container,
+            process_id=self._current_stream_id,
+        )
+
+    def _cleanup_after_stream(
+        self,
+        normal_ending: bool,
+        error_occurred: bool,
+        callbacks: Dict[str, Callable],
+    ) -> None:
+        """Führt finale Bereinigungen durch und ruft ggf. finished_callback auf."""
+        with self._sentence_lock:
+            if self._sentence_parts:
+                sentence = " ".join(self._sentence_parts).strip()
+                if sentence and self.translation_engine and self._translation_enabled.is_set():
+                    detected_lang = "auto"
+                    if self._sentence_segments:
+                        first = self._sentence_segments[0]
+                        last = self._sentence_segments[-1]
                         self._translate_and_send_async(
                             sentence,
                             detected_lang,
-                            translation_callback,
-                            start=first.start if first and hasattr(first, "start") else None,
-                            end=last.end if last and hasattr(last, "end") else None,
+                            callbacks["translation"],
+                            start=first.start if hasattr(first, "start") else None,
+                            end=last.end if hasattr(last, "end") else None,
                         )
-                    self._sentence_buffer = ""
-                    self._sentence_segments.clear()
-            self._flush_audio_buffer(transcription_callback, translation_callback)
+                self._sentence_parts.clear()
+                self._sentence_segments.clear()
+        self._flush_audio_buffer(callbacks["transcription"], callbacks["translation"])
+        if self._current_stream_id and self.ffmpeg_manager:
+            self.ffmpeg_manager.stop_stream(self._current_stream_id)
+        self._log_final_stats()
+        self._current_stream_id = None
 
-            if process:
-                self.ffmpeg_manager.stop_stream(self._current_stream_id)
-
-            self._log_final_stats()
-            self._guaranteed_cleanup()
-
-            if not self._stop_event.is_set() and not error_occurred:
-                if normal_ending_container[0]:
-                    logger.info("✅ Stream normal beendet – rufe finished_callback auf")
-                    if self._finished_callback:
-                        try:
-                            self._finished_callback()
-                        except Exception as e:
-                            logger.error(f"Fehler im finished_callback: {e}", exc_info=True)
-                else:
-                    error_callback("❌ Stream wurde unerwartet beendet – versuche Neuverbindung...")
-            elif not self._stop_event.is_set() and error_occurred:
-                pass
+        if not self._stop_event.is_set() and not error_occurred:
+            if normal_ending:
+                logger.info("✅ Stream normal beendet – rufe finished_callback auf")
+                if callbacks.get("finished"):
+                    try:
+                        callbacks["finished"]()
+                    except Exception as e:
+                        logger.error(f"Fehler im finished_callback: {e}", exc_info=True)
             else:
-                logger.info("Stream processing stopped by user.")
+                if callbacks.get("error"):
+                    callbacks["error"]("❌ Stream wurde unerwartet beendet")
+        elif not self._stop_event.is_set() and error_occurred:
+            pass
+        else:
+            logger.info("Stream processing stopped by user.")
 
-            logger.info("✅ Processing loop ended")
-
-    def get_processed_seconds(self) -> float:
+    # -------------------------------------------------------------------------
+    #  Audio‑Verarbeitung (Chunk‑Verarbeitung)
+    # -------------------------------------------------------------------------
+    def _process_audio_data(
+        self,
+        audio_data: bytes,
+        transcription_callback: TranscriptionCallback,
+        translation_callback: TranslationCallback,
+        info_callback: InfoCallback,
+        error_callback: ErrorCallback,
+    ) -> None:
+        """Verarbeitet eingehende Audiodaten (wird vom StreamHandler aufgerufen)."""
         with self._stats_lock:
-            return self._processed_seconds
+            chunk_num = self._chunk_counter
+
+        # Enhancement
+        with self._last_confidence_lock:
+            last_conf = self.last_confidence
+        apply_enhancement = (last_conf < 0.3)
+        if apply_enhancement:
+            try:
+                with self._noisereduce_lock:
+                    enhanced_audio = self._audio_enhancer.enhance_audio(
+                        audio_data, last_conf, self._noisereduce_counter
+                    )
+                    self._noisereduce_counter = (self._noisereduce_counter + 1) % 10000
+            except Exception as e:
+                logger.warning(f"⚠️ Audio enhancement failed: {e}")
+                enhanced_audio = audio_data
+        else:
+            enhanced_audio = audio_data
+
+        # Pufferung (Ringpuffer)
+        self._add_audio_to_buffer(enhanced_audio)
+
+        # Chunk zur Verarbeitung holen
+        chunk_to_process = self._get_audio_chunk_for_processing()
+        if chunk_to_process and self.transcription_engine:
+            self._process_audio_chunk(
+                chunk_to_process,
+                transcription_callback,
+                translation_callback
+            )
+
+        # Statistik
+        with self._stats_lock:
+            self._chunk_counter += 1
+            self._total_bytes_processed += len(audio_data)
+            self._processed_seconds = self._total_bytes_processed / self.config.BYTES_PER_SECOND
+
+        if chunk_num % 50 == 0:
+            info_callback(f"📊 {chunk_num} chunks processed...")
 
     def _process_audio_chunk(
         self,
@@ -17221,196 +20058,53 @@ class AudioProcessor:
         transcription_callback: TranscriptionCallback,
         translation_callback: TranslationCallback,
     ) -> None:
-        """
-        Verarbeitet einen einzelnen Audio-Chunk.
-        """
+        """Startet die Transkription für einen kompletten Chunk."""
         if not self.transcription_engine:
             return
 
-        start_time = None
-        audio_len = 0.0
-        if logger.isEnabledFor(logging.DEBUG):
-            start_time = time.perf_counter()
-            audio_len = len(audio_data) / (16000 * 2)
-        if DEBUG_LEVEL >= 3:
-            rms = self._calculate_rms(audio_data)
-            logger.debug(f"Chunk {self._chunk_counter}: {len(audio_data)} bytes, RMS={rms:.4f}")
-
         try:
-            self._process_chunk_core(
-                audio_data,
-                transcription_callback,
-                translation_callback,
-                start_time,
-                audio_len,
-            )
-        except FutureTimeout as e:
-            self._handle_chunk_error(e, "Timeout in audio chunk processing")
-        except TimeoutError as e:
-            self._handle_chunk_error(e, "Timeout in audio chunk processing")
-        except (ValueError, TypeError, RuntimeError) as e:
-            self._handle_chunk_error(e, "Audio chunk processing error", log_exception=True)
-        except Exception as e:
-            self._handle_chunk_error(e, "Unexpected error in audio chunk processing", log_exception=True, critical=True)
-
-    def _process_chunk_core(
-        self,
-        audio_data: bytes,
-        transcription_callback: TranscriptionCallback,
-        translation_callback: TranslationCallback,
-        start_time: Optional[float],
-        audio_len: float,
-    ) -> None:
-        try:
-            with self._resource_lock:
-                bytes_before_chunk = self._total_bytes_processed
-            chunk_start_time = bytes_before_chunk / self.config.BYTES_PER_SECOND
-
-            if logger.isEnabledFor(logging.DEBUG):
-                chunk_start = time.perf_counter()
-
-            transcribe_start = time.perf_counter()
             if self.subtitle_mode:
                 self._handle_subtitle_transcription(
-                    audio_data,
-                    transcription_callback,
-                    translation_callback,
-                    chunk_start_time,
+                    audio_data, transcription_callback, translation_callback
                 )
             else:
                 self._handle_normal_transcription(
-                    audio_data,
-                    transcription_callback,
-                    translation_callback,
-                    start_time,
-                    audio_len,
+                    audio_data, transcription_callback, translation_callback
                 )
-
-            transcribe_duration = time.perf_counter() - transcribe_start
-            if audio_len > 0:
-                self._last_realtime_factor = transcribe_duration / audio_len
-            else:
-                self._last_realtime_factor = 0.0
-
-            if self._last_realtime_factor > 1.5:
-                self._slow_chunks += 1
-            else:
-                self._slow_chunks = 0
-
+        except (FutureTimeout, TimeoutError) as e:
+            if not self._handle_error(e, "Timeout in audio chunk processing", None, fatal=False, retry=False):
+                return
             with self._stats_lock:
-                self._consecutive_errors = 0
-                self._consecutive_successes += 1
-
-            if self.settings.adaptive_chunk:
-                self._update_adaptive_chunk()
-
-            if logger.isEnabledFor(logging.DEBUG):
-                chunk_duration = (time.perf_counter() - chunk_start) * 1000
-                log_debug(
-                    "time",
-                    f"Chunk {self._chunk_counter} processing took {chunk_duration:.2f}ms total "
-                    f"(realtime factor: {self._last_realtime_factor:.2f})",
-                )
-
-            self._log_gpu_stats()
-            self._log_queue_stats()
-            self._log_cache_stats()
-
-        except FutureTimeout as e:
-            self._handle_chunk_error(e, "Timeout in audio chunk processing")
-
+                self._consecutive_timeouts += 1
+                if self._consecutive_timeouts >= 3:
+                    self._reload_model_on_timeout()
         except (ValueError, TypeError, RuntimeError) as e:
-            self._handle_chunk_error(e, "Audio chunk processing error", log_exception=True)
-
+            self._handle_error(e, "Audio chunk processing error", None, fatal=False, retry=True)
         except Exception as e:
-            self._handle_chunk_error(e, "Unexpected error in audio chunk processing", log_exception=True, critical=True)
-
-    def _handle_chunk_error(
-        self,
-        error: Exception,
-        message: str,
-        log_exception: bool = False,
-        critical: bool = False,
-    ) -> None:
-        logger.warning(f"⚠️ {message}: {error}")
-        if log_exception and logger.isEnabledFor(logging.DEBUG):
-            logger.exception("Stacktrace:")
-
-        with self._stats_lock:
-            self._consecutive_errors += 1
-            self._consecutive_successes = 0
-
-            if self._consecutive_errors >= self.config.MAX_CONSECUTIVE_ERRORS:
-                logger.critical(
-                    f"🚨 Too many consecutive errors ({self._consecutive_errors}), stopping processing."
-                )
-                self._stop_event.set()
-                self._processing.clear()
-
-    def _calculate_rms(self, audio_data: bytes) -> float:
-        if self.transcription_engine and self.transcription_engine._np is not None:
-            np = self.transcription_engine._np
-            try:
-                audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
-                rms = np.sqrt(np.mean(audio_np**2))
-                return float(rms)
-            except Exception:
-                pass
-        return 0.0
+            self._handle_error(e, "Unexpected error in audio chunk processing", None, fatal=True, retry=False)
 
     def _handle_normal_transcription(
         self,
         audio_data: bytes,
         transcription_callback: TranscriptionCallback,
         translation_callback: TranslationCallback,
-        start_time: float,
-        audio_len: float,
     ) -> None:
-        if logger.isEnabledFor(logging.DEBUG):
-            log_debug("thread", f"Starte Transkription in Thread {threading.current_thread().name}")
-        try:
-            timeout_val = max(30, self.config.CHUNK_DURATION * 3)
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"⏳ Normal-Transkription, Timeout={timeout_val}s")
-            with self._transcribe_lock:
-                transcription = self._transcription_executor.submit_with_timeout(
-                    self.transcription_engine.safe_transcribe, timeout_val, audio_data
-                )
-        except TimeoutError as e:
-            logger.error(f"⏰ safe_transcribe Timeout nach {self.config.CHUNK_DURATION*3}s: {e}")
-            with self._stats_lock:
-                self._consecutive_timeouts += 1
-                if self._consecutive_timeouts >= 3:
-                    self._reload_model_on_timeout()
-            return
-        except Exception as e:
-            logger.warning(f"⚠️ Transkriptionsfehler: {e}")
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.exception("Stacktrace:")
-            with self._stats_lock:
-                self._consecutive_errors += 1
-                if self._consecutive_errors >= self.config.MAX_CONSECUTIVE_ERRORS:
-                    logger.critical(f"🚨 Zu viele Fehler ({self._consecutive_errors}), stoppe.")
-                    self._stop_event.set()
-                    self._processing.clear()
-            return
-        with self._stats_lock:
-            self._consecutive_timeouts = 0
+        """Transkription für normalen Modus (keine Zeitstempel)."""
+        timeout_val = max(30, self.config.CHUNK_DURATION * 3)
+        with self._transcribe_lock:
+            transcription = self._transcription_executor.submit_with_timeout(
+                self.transcription_engine.safe_transcribe, timeout_val, audio_data
+            )
         if transcription and hasattr(transcription, "confidence"):
             with self._last_confidence_lock:
                 self.last_confidence = transcription.confidence
         else:
             with self._last_confidence_lock:
                 self.last_confidence = 0.0
-        if logger.isEnabledFor(logging.DEBUG) and start_time is not None and transcription:
-            elapsed = time.perf_counter() - start_time
-            realtime_factor = elapsed / audio_len if audio_len > 0 else 0
-            logger.debug(
-                f"Chunk {self._chunk_counter}: {audio_len:.2f}s audio, "
-                f"transcribe {elapsed*1000:.1f}ms ({realtime_factor:.2f}x realtime)"
-            )
+
         if not transcription or not transcription.text:
             return
+
         clean_text = transcription.text.strip()
         conf = getattr(transcription, "confidence", 0.0)
         with self._stats_lock:
@@ -17418,6 +20112,8 @@ class AudioProcessor:
                 self._low_conf_counter += 1
             else:
                 self._low_conf_counter = 0
+
+        # Duplikatprüfung
         if self.settings.enable_duplicate_check and self.config.DUPLICATE_CHECK_ENABLED:
             with self._duplicate_lock:
                 if self._audio_enhancer.is_duplicate(
@@ -17431,14 +20127,12 @@ class AudioProcessor:
                 self._last_transcription_text = clean_text
                 self._recent_transcriptions.append(self._audio_enhancer._normalize_text(clean_text))
 
-        # === Timer‑basierte Satzverarbeitung ===
+        # Satzpufferung
         with self._sentence_lock:
             now = time.time()
-
-            # Timer‑basierter Flush: wenn Puffer existiert und länger als _sentence_flush_interval inaktiv
-            if (self._sentence_buffer and
-                (now - self._last_sentence_time) > self._sentence_flush_interval):
-                sentence = self._sentence_buffer.strip()
+            # Prüfen, ob aufgrund von Zeitablauf geflushed werden muss
+            if self._sentence_parts and (now - self._last_sentence_time) > self._sentence_flush_interval:
+                sentence = " ".join(self._sentence_parts).strip()
                 if sentence and self.translation_engine and self._translation_enabled.is_set():
                     detected_lang = transcription.language or "auto"
                     first = self._sentence_segments[0] if self._sentence_segments else None
@@ -17450,56 +20144,52 @@ class AudioProcessor:
                         start=first.start if first and hasattr(first, "start") else None,
                         end=last.end if last and hasattr(last, "end") else None,
                     )
-                self._sentence_buffer = ""
+                self._sentence_parts.clear()
                 self._sentence_segments.clear()
                 self._last_sentence_time = now
 
-            # Neues Segment hinzufügen
-            self._sentence_buffer += " " + clean_text if self._sentence_buffer else clean_text
+            # Neuen Teil hinzufügen
+            self._sentence_parts.append(clean_text)
             self._sentence_segments.append(transcription)
             self._last_sentence_time = now
 
-            # Satzende-Check (Punkt, Fragezeichen, Ausrufezeichen)
+            # Prüfen, ob Satzende
             if clean_text and clean_text[-1] in ".!?。！？":
-                sentence = self._sentence_buffer.strip()
-                if sentence:
-                    if self.translation_engine and self._translation_enabled.is_set() and hasattr(transcription, "language"):
-                        detected_lang = transcription.language or "auto"
-                        if self._sentence_segments:
-                            first = self._sentence_segments[0]
-                            last = self._sentence_segments[-1]
-                            self._translate_and_send_async(
-                                sentence,
-                                detected_lang,
-                                translation_callback,
-                                start=first.start if hasattr(first, "start") else None,
-                                end=last.end if hasattr(last, "end") else None,
-                            )
-                self._sentence_buffer = ""
+                sentence = " ".join(self._sentence_parts).strip()
+                if sentence and self.translation_engine and self._translation_enabled.is_set():
+                    detected_lang = transcription.language or "auto"
+                    first = self._sentence_segments[0]
+                    last = transcription
+                    self._translate_and_send_async(
+                        sentence,
+                        detected_lang,
+                        translation_callback,
+                        start=first.start,
+                        end=last.end,
+                    )
+                self._sentence_parts.clear()
                 self._sentence_segments.clear()
                 self._last_sentence_time = time.time()
-            else:
-                # Längenbasierter Flush bei langen Sätzen ohne Satzende
-                if len(self._sentence_buffer.split()) > self._sentence_flush_word_threshold:
-                    sentence = self._sentence_buffer.strip()
-                    if sentence and self.translation_engine and self._translation_enabled.is_set():
-                        detected_lang = transcription.language or "auto"
-                        first = self._sentence_segments[0] if self._sentence_segments else None
-                        last = transcription
-                        self._translate_and_send_async(
-                            sentence,
-                            detected_lang,
-                            translation_callback,
-                            start=first.start if first and hasattr(first, "start") else None,
-                            end=last.end if hasattr(last, "end") else None,
-                        )
-                    self._sentence_buffer = ""
-                    self._sentence_segments.clear()
-                    self._last_sentence_time = time.time()
+            elif len(self._sentence_parts) > self._sentence_flush_word_threshold:
+                sentence = " ".join(self._sentence_parts).strip()
+                if sentence and self.translation_engine and self._translation_enabled.is_set():
+                    detected_lang = transcription.language or "auto"
+                    first = self._sentence_segments[0] if self._sentence_segments else None
+                    last = transcription
+                    self._translate_and_send_async(
+                        sentence,
+                        detected_lang,
+                        translation_callback,
+                        start=first.start if first and hasattr(first, "start") else None,
+                        end=last.end,
+                    )
+                self._sentence_parts.clear()
+                self._sentence_segments.clear()
+                self._last_sentence_time = time.time()
 
         transcription_callback(transcription)
-        with self._stats_lock:
-            self._consecutive_errors = 0
+
+        # Wortzahl für adaptive Chunk
         word_count = len(clean_text.split())
         with self._word_count_lock:
             self._word_count_history.append(word_count)
@@ -17509,53 +20199,17 @@ class AudioProcessor:
         audio_data: bytes,
         transcription_callback: TranscriptionCallback,
         translation_callback: TranslationCallback,
-        chunk_start_time: float,
     ) -> None:
-        if logger.isEnabledFor(logging.DEBUG):
-            log_debug("thread", f"Starte Transkription in Thread {threading.current_thread().name}")
-        try:
-            timeout_val = max(30, self.config.CHUNK_DURATION * 3)
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"⏳ Subtitle-Transkription, Timeout={timeout_val}s")
-            with self._transcribe_lock:
-                segments = self._transcription_executor.submit_with_timeout(
-                    self.transcription_engine.transcribe_audio,
-                    timeout_val,
-                    audio_data,
-                    True,
-                )
-        except TimeoutError as e:
-            logger.error(f"⏰ Transkriptions-Timeout (Subtitle-Modus) nach {self.config.CHUNK_DURATION*3}s: {e}")
-            with self._stats_lock:
-                self._consecutive_timeouts += 1
-                if self._consecutive_timeouts >= 3:
-                    self._reload_model_on_timeout()
-            return
-        except Exception as e:
-            logger.warning(f"⚠️ Transkriptionsfehler (Subtitle-Modus): {e}")
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.exception("Stacktrace:")
-            with self._stats_lock:
-                self._consecutive_errors += 1
-                if self._consecutive_errors >= self.config.MAX_CONSECUTIVE_ERRORS:
-                    logger.critical(f"🚨 Zu viele Fehler ({self._consecutive_errors}), stoppe.")
-                    self._stop_event.set()
-                    self._processing.clear()
-            return
+        """Transkription für Untertitel‑Modus (mit Zeitstempeln)."""
+        timeout_val = max(30, self.config.CHUNK_DURATION * 3)
+        with self._transcribe_lock:
+            segments = self._transcription_executor.submit_with_timeout(
+                self.transcription_engine.transcribe_audio, timeout_val, audio_data, True
+            )
         if not segments:
             return
-        if logger.isEnabledFor(logging.DEBUG):
-            log_debug("subtitle", f"Received {len(segments)} segments")
+
         for segment in segments:
-            if segment.start is not None:
-                segment.start += chunk_start_time
-            if segment.end is not None:
-                segment.end += chunk_start_time
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.info(
-                    f"🎤 SEGMENT [{segment.start:.2f} - {segment.end:.2f}] {segment.text.strip()} "
-                    f"(Sprache: {getattr(segment, 'language', 'unbekannt')})"
-                )
             if not segment or not segment.text:
                 continue
             clean_text = segment.text.strip()
@@ -17567,6 +20221,7 @@ class AudioProcessor:
                     self._low_conf_counter += 1
                 else:
                     self._low_conf_counter = 0
+
             if self.settings.enable_duplicate_check and self.config.DUPLICATE_CHECK_ENABLED and not self.subtitle_mode:
                 with self._duplicate_lock:
                     if self._audio_enhancer.is_duplicate(
@@ -17579,24 +20234,21 @@ class AudioProcessor:
                         continue
                     self._last_transcription_text = clean_text
                     self._recent_transcriptions.append(self._audio_enhancer._normalize_text(clean_text))
+
             if not self.transcription_engine.is_valid_segment(clean_text, conf):
                 continue
+
             if self.config.ENABLE_TIMED_TRANSCRIPTIONS:
                 with self._subtitle_lock:
                     self._timed_transcriptions.append(segment)
-            transcription_callback(segment)
-            word_count = len(clean_text.split())
-            with self._word_count_lock:
-                self._word_count_history.append(word_count)
 
-            # === Timer‑basierte Satzverarbeitung für Subtitle‑Modus ===
+            transcription_callback(segment)
+
+            # Satzpufferung für Untertitel (ähnlich wie normal)
             with self._sentence_lock:
                 now = time.time()
-
-                # Timer‑basierter Flush
-                if (self._sentence_buffer and
-                    (now - self._last_sentence_time) > self._sentence_flush_interval):
-                    sentence = self._sentence_buffer.strip()
+                if self._sentence_parts and (now - self._last_sentence_time) > self._sentence_flush_interval:
+                    sentence = " ".join(self._sentence_parts).strip()
                     if sentence and self.translation_engine and self._translation_enabled.is_set():
                         detected_lang = segment.language or "auto"
                         first = self._sentence_segments[0] if self._sentence_segments else None
@@ -17608,18 +20260,16 @@ class AudioProcessor:
                             start=first.start if first and hasattr(first, "start") else None,
                             end=last.end if last and hasattr(last, "end") else None,
                         )
-                    self._sentence_buffer = ""
+                    self._sentence_parts.clear()
                     self._sentence_segments.clear()
                     self._last_sentence_time = now
 
-                # Neues Segment hinzufügen
-                self._sentence_buffer += " " + clean_text if self._sentence_buffer else clean_text
+                self._sentence_parts.append(clean_text)
                 self._sentence_segments.append(segment)
                 self._last_sentence_time = now
 
-                # Satzende-Check
                 if clean_text and clean_text[-1] in ".!?。！？":
-                    sentence = self._sentence_buffer.strip()
+                    sentence = " ".join(self._sentence_parts).strip()
                     if sentence and self.translation_engine and self._translation_enabled.is_set():
                         detected_lang = segment.language or "auto"
                         first = self._sentence_segments[0]
@@ -17631,32 +20281,38 @@ class AudioProcessor:
                             start=first.start,
                             end=last.end,
                         )
-                    self._sentence_buffer = ""
+                    self._sentence_parts.clear()
                     self._sentence_segments.clear()
                     self._last_sentence_time = time.time()
-                else:
-                    # Längenbasierter Flush
-                    if len(self._sentence_buffer.split()) > self._sentence_flush_word_threshold:
-                        sentence = self._sentence_buffer.strip()
-                        if sentence and self.translation_engine and self._translation_enabled.is_set():
-                            detected_lang = segment.language or "auto"
-                            first = self._sentence_segments[0] if self._sentence_segments else None
-                            last = segment
-                            self._translate_and_send_async(
-                                sentence,
-                                detected_lang,
-                                translation_callback,
-                                start=first.start if first and hasattr(first, "start") else None,
-                                end=last.end if hasattr(last, "end") else None,
-                            )
-                        self._sentence_buffer = ""
-                        self._sentence_segments.clear()
-                        self._last_sentence_time = time.time()
+                elif len(self._sentence_parts) > self._sentence_flush_word_threshold:
+                    sentence = " ".join(self._sentence_parts).strip()
+                    if sentence and self.translation_engine and self._translation_enabled.is_set():
+                        detected_lang = segment.language or "auto"
+                        first = self._sentence_segments[0] if self._sentence_segments else None
+                        last = segment
+                        self._translate_and_send_async(
+                            sentence,
+                            detected_lang,
+                            translation_callback,
+                            start=first.start if first and hasattr(first, "start") else None,
+                            end=last.end,
+                        )
+                    self._sentence_parts.clear()
+                    self._sentence_segments.clear()
+                    self._last_sentence_time = time.time()
+
+            # Wortzahl für adaptive Chunk
+            word_count = len(clean_text.split())
+            with self._word_count_lock:
+                self._word_count_history.append(word_count)
 
         with self._stats_lock:
             self._consecutive_timeouts = 0
             self._consecutive_errors = 0
 
+    # -------------------------------------------------------------------------
+    #  Übersetzung (asynchron mit Sequenzprüfung)
+    # -------------------------------------------------------------------------
     def _translate_and_send_async(
         self,
         text: str,
@@ -17665,31 +20321,23 @@ class AudioProcessor:
         start: Optional[float] = None,
         end: Optional[float] = None,
     ) -> None:
-        """
-        Übersetzt einen Text asynchron in einem separaten Thread.
-        Verwendet ein Semaphor, um die Anzahl gleichzeitiger Übersetzungen zu begrenzen.
-        Bei Überlastung wartet kurz (max. 1 Sekunde), anstatt die Aufgabe zu verwerfen.
-
-        Args:
-            text: Der zu übersetzende Text.
-            source_lang: Quellsprache (z. B. "de", "en" oder "auto").
-            translation_callback: Callback, der mit dem Übersetzungsergebnis aufgerufen wird.
-            start: Optionaler Startzeitstempel für Untertitel.
-            end: Optionaler Endzeitstempel für Untertitel.
-        """
+        """Übersetzt einen Text asynchron mit Semaphor und Sequenzprüfung."""
         if not self._translation_enabled.is_set():
             return
         if source_lang != "auto" and source_lang == self.translation_engine.default_target_lang:
             return
 
-        # Versuche, ein Semaphor zu erwerben. Bei voller Auslastung warte bis zu 1 Sekunde.
-        try:
-            if not self._translation_semaphore.acquire(blocking=True, timeout=1.0):
-                logger.warning("Übersetzungs-Semaphore nach 1s noch belegt – Aufgabe verworfen")
-                return
-        except Exception as e:
-            logger.error(f"Semaphore acquire error: {e}")
+        if not self._translation_semaphore.acquire(blocking=False):
+            if logger.isEnabledFor(logging.DEBUG):
+                log_debug("translate", "Übersetzung verworfen: keine freien Slots")
             return
+
+        if self._stop_event.is_set():
+            self._translation_semaphore.release()
+            return
+
+        with self._translation_seq_lock:
+            current_seq = self._translation_seq
 
         def task():
             try:
@@ -17709,7 +20357,7 @@ class AudioProcessor:
                         else:
                             log_debug("translate", f"Primary translation error: {e}")
 
-                # Fallback-Engine, falls primär fehlschlug
+                # Fallback
                 if translation is None and self._fallback_translation_engine is not None:
                     fallback_ok = True
                     if hasattr(self._fallback_translation_engine, "is_functional"):
@@ -17723,12 +20371,16 @@ class AudioProcessor:
                             else:
                                 log_debug("translate", f"Fallback error: {e}")
 
-                # Performance-Logging
                 duration_ms = (time.perf_counter() - start_time) * 1000
                 if logger.isEnabledFor(logging.DEBUG):
                     log_debug("time", f"_translate_and_send took {duration_ms:.2f}ms for {len(text)} chars")
 
-                # Ergebnis weiterleiten, wenn vorhanden
+                # Sequenzprüfung
+                with self._translation_seq_lock:
+                    if current_seq != self._translation_seq:
+                        logger.debug(f"Übersetzung verworfen: Sequenz {current_seq} != aktuell {self._translation_seq}")
+                        return
+
                 if translation:
                     translation.start = start
                     translation.end = end
@@ -17736,131 +20388,23 @@ class AudioProcessor:
                         with self._subtitle_lock:
                             self._timed_translations.append(translation)
                     translation_callback(translation)
-
             except Exception as e:
-                logger.error(f"❌ Unerwarteter Fehler in Übersetzungs-Task: {e}", exc_info=True)
+                logger.error(f"❌ Unerwarteter Fehler in Übersetzungs‑Task: {e}", exc_info=True)
             finally:
                 self._translation_semaphore.release()
 
-        # Aufgabe in den Thread-Pool einreihen
         try:
             self._translation_executor.submit(task)
+        except RuntimeError as e:
+            logger.debug(f"Translation executor shutdown, discarding task: {e}")
+            self._translation_semaphore.release()
         except Exception as e:
             logger.error(f"Fehler beim Einreichen der Übersetzungsaufgabe: {e}")
             self._translation_semaphore.release()
 
-    def _process_audio_data(
-        self,
-        audio_data: bytes,
-        transcription_callback: TranscriptionCallback,
-        translation_callback: TranslationCallback,
-        info_callback: InfoCallback,
-        error_callback: ErrorCallback,
-    ) -> None:
-        """
-        Verarbeitet einen eingehenden Audio-Chunk.
-
-        Diese Methode:
-        - Führt eine Stummschwellenerkennung durch,
-        - verbessert das Audio ggf. (Rauschunterdrückung, Verstärkung),
-        - puffert das Audio,
-        - löst bei Erreichen der Mindestchunkgröße oder nach 5 Sekunden Inaktivität
-          die Transkription aus,
-        - führt eine adaptive Chunk-Größenanpassung durch (wenn aktiviert),
-        - aktualisiert Fortschritts- und Statusmeldungen.
-        """
-        with self._stats_lock:
-            chunk_num = self._chunk_counter
-
-        if chunk_num <= 3:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"📦 Chunk #{chunk_num}: {len(audio_data)} bytes")
-
-        # Stummschwellenerkennung (optional)
-        if len(audio_data) > 0:
-            is_silent = self._is_silent(audio_data)
-            if is_silent:
-                self._silent_chunk_counter += 1
-                if self._silent_chunk_counter % 10 == 0 and logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(f"Still receiving silent chunks ({self._silent_chunk_counter} in a row)")
-            else:
-                self._silent_chunk_counter = 0
-
-        # Fortschritts-Callback (maximal alle 0.5 Sekunden)
-        if self._progress_callback:
-            now = time.time()
-            if now - self._last_progress_update >= self._progress_update_interval:
-                self._last_progress_update = now
-                try:
-                    with self._stats_lock:
-                        total_bytes = self._total_bytes_processed
-                    self._progress_callback(total_bytes, self._total_file_size, chunk_num)
-                except Exception as e:
-                    logger.error(f"Fehler im progress_callback: {e}", exc_info=True)
-
-        # Audio-Enhancement (nur wenn niedrige Confidence)
-        with self._last_confidence_lock:
-            last_conf = self.last_confidence
-        apply_enhancement = (last_conf < 0.3)
-        if apply_enhancement:
-            try:
-                with self._noisereduce_lock:
-                    enhanced_audio = self._audio_enhancer.enhance_audio(
-                        audio_data, last_conf, self._noisereduce_counter
-                    )
-                    self._noisereduce_counter = (self._noisereduce_counter + 1) % 10000
-            except Exception as e:
-                logger.warning(f"⚠️ Audio enhancement failed: {e}")
-                enhanced_audio = audio_data
-        else:
-            enhanced_audio = audio_data
-
-        # Buffer-Verwaltung
-        with self._buffer_lock:
-            self._audio_buffer.extend(enhanced_audio)
-
-            # Überlaufschutz: wenn Buffer zu groß, kürzen
-            if len(self._audio_buffer) > self._max_buffer_bytes:
-                excess = len(self._audio_buffer) - self._max_buffer_bytes
-                self._audio_buffer = self._audio_buffer[excess:]
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(f"⚠️ Audio buffer truncated by {excess} bytes (max {self._max_buffer_bytes} bytes)")
-
-            # Adaptive Flush: Wenn nach 5 Sekunden Daten im Buffer sind, diese verarbeiten
-            if len(self._audio_buffer) > 0 and time.time() - self._last_buffer_flush > 5.0:
-                chunk_to_process = bytes(self._audio_buffer)
-                self._audio_buffer.clear()
-                if self.transcription_engine:
-                    self._process_audio_chunk(chunk_to_process, transcription_callback, translation_callback)
-                self._last_buffer_flush = time.time()
-
-            # Normale Flush-Schwelle: Mindestchunkgröße erreicht
-            if len(self._audio_buffer) >= self.config.MIN_CHUNK_BYTES:
-                chunk_to_process = bytes(self._audio_buffer)
-                self._audio_buffer.clear()
-                if self.transcription_engine:
-                    self._process_audio_chunk(chunk_to_process, transcription_callback, translation_callback)
-                self._last_buffer_flush = time.time()
-
-            # Sicherheitsflush: falls Buffer zu groß wird (z. B. bei Stream-Ende)
-            if len(self._audio_buffer) > self._max_buffer_size:
-                logger.warning(f"⚠️ Audio buffer too large ({len(self._audio_buffer)} bytes) – forcing flush")
-                chunk_to_process = bytes(self._audio_buffer)
-                self._audio_buffer.clear()
-                if self.transcription_engine:
-                    self._process_audio_chunk(chunk_to_process, transcription_callback, translation_callback)
-                self._last_buffer_flush = time.time()
-
-        # Statistik aktualisieren
-        with self._stats_lock:
-            self._chunk_counter += 1
-            self._total_bytes_processed += len(audio_data)
-            self._processed_seconds = self._total_bytes_processed / self.config.BYTES_PER_SECOND
-
-        # Alle 50 Chunks eine Info-Meldung ausgeben
-        if chunk_num % 50 == 0:
-            info_callback(f"📊 {chunk_num} chunks processed...")
-
+    # -------------------------------------------------------------------------
+    #  Hilfsmethoden für Audio‑Enhancement, Adaptive Chunk, etc.
+    # -------------------------------------------------------------------------
     def _is_silent(self, audio_data: bytes, threshold: float = 0.001) -> bool:
         if len(audio_data) < 160:
             return False
@@ -17883,7 +20427,6 @@ class AudioProcessor:
         return False
 
     def _update_adaptive_chunk(self) -> None:
-        """Passt die Chunk-Dauer dynamisch an die durchschnittliche Wortzahl an."""
         if self.subtitle_mode:
             return
 
@@ -17907,7 +20450,6 @@ class AudioProcessor:
             min_dur = self.config.MIN_CHUNK_DURATION
             max_dur = self.config.MAX_CHUNK_DURATION
 
-            # Realtime-Faktor beeinflusst die Dauer
             if self._last_realtime_factor > 1.5 and self.config.CHUNK_DURATION > min_dur + 0.5:
                 new_duration = max(min_dur, self.config.CHUNK_DURATION - 1)
                 if logger.isEnabledFor(logging.DEBUG):
@@ -17917,7 +20459,6 @@ class AudioProcessor:
             elif smoothed > high_thresh and self.config.CHUNK_DURATION < max_dur - 0.5:
                 new_duration = min(max_dur, self.config.CHUNK_DURATION + 1)
 
-            # Chunk-Dauer aktualisieren, wenn stabil
             if new_duration != self.config.CHUNK_DURATION:
                 if new_duration != self._last_chunk_duration:
                     self._chunk_stable_counter += 1
@@ -17934,7 +20475,7 @@ class AudioProcessor:
                     self._chunk_stable_counter = 0
                 self._last_chunk_duration = new_duration
 
-    def _reload_model_on_timeout(self):
+    def _reload_model_on_timeout(self) -> None:
         logger.warning("🔄 Drei aufeinanderfolgende Timeouts – lade Modell neu...")
         if hasattr(self.transcription_engine, "reload_model"):
             current_model = self.transcription_engine.get_current_model()
@@ -17947,6 +20488,9 @@ class AudioProcessor:
             self._consecutive_errors = 0
         time.sleep(2)
 
+    # -------------------------------------------------------------------------
+    #  Logging und Statistik
+    # -------------------------------------------------------------------------
     def _log_final_stats(self) -> None:
         if self._chunk_counter == 0:
             return
@@ -17986,73 +20530,106 @@ class AudioProcessor:
                 logger.error(f"Unerwarteter Fehler bei GPU-Statistik: {e}", exc_info=True)
 
         now = time.time()
-        if now - getattr(self, '_last_gpu_stats_time', 0) > 10:
-            if GPUStats.is_available():
-                temp = GPUStats.get_temperature()
-                util = GPUStats.get_utilization()
-                if temp is not None and util is not None:
-                    log_debug("gpu", f"Temp={temp}°C, Util={util}%")
-                elif temp is not None:
-                    log_debug("gpu", f"Temp={temp}°C (Util nicht verfügbar)")
-                elif util is not None:
-                    log_debug("gpu", f"Util={util}% (Temp nicht verfügbar)")
-            self._last_gpu_stats_time = now
+        with self._gpu_stats_lock:
+            last = self._last_gpu_stats_time
+            if now - last > 10:
+                self._last_gpu_stats_time = now
+            else:
+                return
+
+        if GPUStats.is_available():
+            temp = GPUStats.get_temperature()
+            util = GPUStats.get_utilization()
+            if temp is not None and util is not None:
+                log_debug("gpu", f"Temp={temp}°C, Util={util}%")
+            elif temp is not None:
+                log_debug("gpu", f"Temp={temp}°C (Util nicht verfügbar)")
+            elif util is not None:
+                log_debug("gpu", f"Util={util}% (Temp nicht verfügbar)")
 
     def _log_queue_stats(self) -> None:
-        if not logger.isEnabledFor(logging.DEBUG):
+        """
+        Loggt Queue‑Größen und aktive Threads (nur bei DEBUG_LEVEL >= 3 und alle 50 Chunks).
+        """
+        # Nur bei tiefem Debug-Modus aktiv
+        if DEBUG_LEVEL < 3:
             return
-        if self._chunk_counter % 50 == 0:
-            gui = self.controller_ref.gui_ref() if hasattr(self.controller_ref, "gui_ref") else None
-            if gui is not None:
-                try:
-                    qsize_gui = gui.gui_queue.qsize()
-                    qsize_text = gui._text_update_queue.qsize()
-                except Exception as e:
-                    logger.error(f"Fehler beim Lesen der Queue-Größen: {e}", exc_info=True)
-                    qsize_gui = qsize_text = 0
-            else:
-                qsize_gui = qsize_text = 0
-            active_threads = threading.active_count()
-            thread_names = [t.name for t in threading.enumerate()]
-            log_debug("queue", f"Chunk {self._chunk_counter}: gui_queue={qsize_gui}, text_queue={qsize_text}, active_threads={active_threads}")
-            if logger.isEnabledFor(logging.DEBUG):
-                log_debug("threads", f"Thread names: {thread_names}")
 
-    def _log_cache_stats(self) -> None:
-        if not logger.isEnabledFor(logging.DEBUG):
+        # Nur alle 50 Chunks loggen (reduziert Overhead)
+        if self._chunk_counter % 50 != 0:
             return
-        if self._chunk_counter % 100 == 0:
-            try:
-                stats = AppContext().cache_manager.get_stats()
-                log_debug("cache", f"Cache stats: {stats}")
-            except Exception as e:
-                logger.error(f"Fehler beim Abrufen der Cache-Statistiken: {e}", exc_info=True)
 
-    def _platform_specific_health_check(self) -> List[str]:
-        issues: List[str] = []
-        if IS_WINDOWS:
+        # Aktive Threads auflisten
+        threads = threading.enumerate()
+        thread_names = [t.name for t in threads]
+        log_debug("threads", f"Active threads ({len(threads)}): {', '.join(thread_names)}")
+
+        # Queue‑Größen aus GUI holen (falls verfügbar)
+        gui = self.controller_ref.gui_ref() if hasattr(self.controller_ref, "gui_ref") else None
+        if gui is not None:
             try:
-                import psutil
-                memory = psutil.virtual_memory()
-                if memory.percent > 85:
-                    issues.append("High memory usage - consider closing other applications")
-            except ImportError:
-                pass
+                qsize_gui = gui.gui_queue.qsize()
+                qsize_text = gui._text_update_queue.qsize()
+                log_debug("queue", f"Chunk {self._chunk_counter}: gui_queue={qsize_gui}, text_queue={qsize_text}")
             except Exception as e:
-                logger.error(f"Fehler beim Health-Check: {e}", exc_info=True)
-        return issues
+                log_exception("queue", "Error getting queue sizes", e, level="debug")
+        else:
+            log_debug("queue", f"Chunk {self._chunk_counter}: GUI not available, queue sizes unknown")
 
     def _flush_audio_buffer(
-        self, transcription_callback: TranscriptionCallback, translation_callback: TranslationCallback
+        self,
+        transcription_callback: TranscriptionCallback,
+        translation_callback: TranslationCallback,
     ) -> None:
+        """Verarbeitet restliche Audiodaten am Ende des Streams."""
         with self._buffer_lock:
-            if not self._audio_buffer:
+            if not self._audio_chunks:
                 return
-            buffer_len = len(self._audio_buffer)
-            logger.info(f"🧹 Flushing audio buffer ({buffer_len} bytes) at end of stream")
-            if self.transcription_engine:
-                self._process_audio_chunk(bytes(self._audio_buffer), transcription_callback, translation_callback)
-            self._audio_buffer.clear()
+            # Alle verbleibenden Chunks zusammenfügen
+            remaining = b''.join(self._audio_chunks)
+            self._audio_chunks.clear()
+            self._audio_total_bytes = 0
+        if remaining and self.transcription_engine:
+            try:
+                self._process_audio_chunk(remaining, transcription_callback, translation_callback)
+            except Exception as e:
+                logger.error(f"❌ Fehler beim Verarbeiten des finalen Audio-Chunks: {e}", exc_info=True)
+
+    def _guaranteed_cleanup(self) -> None:
+        """Stellt sicher, dass alle Ressourcen freigegeben werden."""
+        logger.info("\n🧹 [GUARANTEED_CLEANUP]")
+        with self._resource_lock:
+            with self._state_lock:
+                self._set_state(AudioProcessor.State.IDLE)
+            self._current_stream_id = None
+            with self._stats_lock:
+                self._chunk_counter = 0
+                self._total_bytes_processed = 0
+                self._consecutive_errors = 0
+                self._consecutive_timeouts = 0
+                self._low_conf_counter = 0
+                self._slow_chunks = 0
+                self._last_realtime_factor = 0.0
+            with self._buffer_lock:
+                self._audio_chunks.clear()
+                self._audio_total_bytes = 0
+            self._cleanup_done = True
+        logger.info("✅ Cleanup completed")
+
+    # -------------------------------------------------------------------------
+    #  Weitere Hilfsmethoden
+    # -------------------------------------------------------------------------
+    def _read_stderr(self, process: subprocess.Popen) -> str:
+        try:
+            if process.stderr:
+                if DEBUG_LEVEL >= 3:
+                    # Vollständigen Inhalt lesen (keine Kürzung)
+                    return process.stderr.read().decode("utf-8", errors="ignore")
+                else:
+                    return process.stderr.read(300).decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+        return ""
 
     def _test_audio_stream(self, audio_url: str) -> bool:
         logger.info(f"🔍 Testing audio stream: {audio_url[:60]}...")
@@ -18133,153 +20710,34 @@ class AudioProcessor:
             logger.info(f"  ⚠️ Emergency diagnosis error: {e}")
             return False
 
-    def get_timed_transcriptions(self) -> List["TranscriptionResult"]:
-        with self._subtitle_lock:
-            return list(self._timed_transcriptions)
-
-    def get_timed_translations(self) -> List["TranslationResult"]:
-        with self._subtitle_lock:
-            return list(self._timed_translations)
-
-    def get_status(self) -> Dict[str, Any]:
-        with self._stats_lock:
-            return {
-                "processing": self._processing.is_set(),
-                "stop_event_set": self._stop_event.is_set(),
-                "current_stream_id": self._current_stream_id,
-                "consecutive_empty_chunks": self._consecutive_empty_chunks,
-                "cleanup_done": self._cleanup_done,
-                "config_type": self._get_config_type(),
-                "chunk_size": self.chunk_size,
-                "chunks_processed": self._chunk_counter,
-                "total_bytes": self._total_bytes_processed,
-                "empty_reads": self._empty_reads,
-                "subtitle_mode": self.subtitle_mode,
-                "translation_active": self._translation_enabled.is_set(),
-                "active_threads": threading.active_count(),
-                "consecutive_errors": self._consecutive_errors,
-                "consecutive_timeouts": self._consecutive_timeouts,
-                "low_conf_counter": self._low_conf_counter,
-                "slow_chunks": self._slow_chunks,
-                "last_realtime_factor": self._last_realtime_factor,
-            }
-
-    def stop_processing(self, wait: bool = False, timeout: float = 5.0) -> bool:
-        with self._processing_lock:
-            self._stop_event.set()
-            self._processing.clear()
-        if self._current_stream_id:
-            logger.info(f"📛 Stream {self._current_stream_id} stopped by user")
-            if self.ffmpeg_manager:
-                try:
-                    self.ffmpeg_manager.stop_stream(self._current_stream_id)
-                except Exception as e:
-                    logger.error(f"Fehler beim Stoppen des Streams: {e}", exc_info=True)
-        return True
-
-    def emergency_reset(self, force: bool = False) -> bool:
-        logger.info(f"\n🚨 [EMERGENCY_RESET] force={force}")
-        with self._resource_lock:
-            with self._processing_lock:
-                self._processing.clear()
-            self._stop_event.set()
-            self._current_stream_id = None
-            self._consecutive_empty_chunks = 0
-            with self._stats_lock:
-                self._consecutive_errors = 0
-                self._consecutive_timeouts = 0
-                self._low_conf_counter = 0
-                self._slow_chunks = 0
-                self._last_realtime_factor = 0.0
-            if force:
-                with self._subtitle_lock:
-                    self._timed_transcriptions.clear()
-                    self._timed_translations.clear()
-                with self._duplicate_lock:
-                    self._recent_transcriptions.clear()
-                    self._last_transcription_text = ""
-            with self._buffer_lock:
-                self._audio_buffer.clear()
-        logger.info("✅ Reset completed")
-        return True
-
-    def _guaranteed_cleanup(self) -> None:
-        logger.info("\n🧹 [GUARANTEED_CLEANUP]")
-        with self._resource_lock:
-            with self._processing_lock:
-                self._processing.clear()
-            self._current_stream_id = None
-            self._consecutive_empty_chunks = 0
-            self._empty_reads = 0
-            with self._stats_lock:
-                self._chunk_counter = 0
-                self._total_bytes_processed = 0
-                self._consecutive_errors = 0
-                self._consecutive_timeouts = 0
-                self._low_conf_counter = 0
-                self._slow_chunks = 0
-                self._last_realtime_factor = 0.0
-            with self._buffer_lock:
-                self._audio_buffer.clear()
-            self._cleanup_done = True
-        logger.info("✅ Cleanup completed")
-
-    def _shutdown_executor(self, executor_attr: str, timeout: float = 2.0) -> None:
-        executor = getattr(self, executor_attr, None)
-        if executor is None:
-            return
-        try:
-            def shutdown_task():
-                executor.shutdown(wait=True, cancel_futures=True)
-            thread = threading.Thread(target=shutdown_task, daemon=True)
-            thread.start()
-            thread.join(timeout)
-            if thread.is_alive():
-                logger.warning(f"⚠️ Executor {executor_attr} konnte nicht innerhalb von {timeout}s beendet werden")
-        except Exception as e:
-            logger.error(f"Fehler beim Shutdown von {executor_attr}: {e}", exc_info=True)
-
-    def dispose(self) -> None:
-        logger.info("🧹 AudioProcessor: Starting dispose...")
-        try:
-            self._stop_event.set()
-            with self._processing_lock:
-                self._processing.clear()
-            self._cleanup_done = True
-
-            if self.ffmpeg_manager:
-                self.ffmpeg_manager.stop_all_streams()
-
-            self._shutdown_executor("_transcription_executor", timeout=2.0)
-            self._shutdown_executor("_translation_executor", timeout=2.0)
-
-            if self.plugin_manager is not None:
-                try:
-                    self.plugin_manager.dispose()
-                except Exception as e:
-                    logger.error(f"Fehler beim Dispose des PluginManagers: {e}")
-
-            with self._subtitle_lock:
-                self._timed_transcriptions.clear()
-                self._timed_translations.clear()
-            with self._duplicate_lock:
-                self._recent_transcriptions.clear()
-                self._last_transcription_text = ""
-            with self._buffer_lock:
-                self._audio_buffer.clear()
-
-            logger.info("✅ AudioProcessor disposed")
-        except Exception as e:
-            logger.error(f"⚠️ AudioProcessor dispose error: {e}", exc_info=True)
+    def _platform_specific_health_check(self) -> List[str]:
+        issues: List[str] = []
+        if IS_WINDOWS:
+            try:
+                import psutil
+                memory = psutil.virtual_memory()
+                if memory.percent > 85:
+                    issues.append("High memory usage - consider closing other applications")
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.error(f"Fehler beim Health-Check: {e}", exc_info=True)
+        return issues
 
 
 class WhisperLayoutManager:
+    """
+    Verwaltet das Layout der GUI (vertikal/horizontal) und die Erstellung
+    der Text‑Widgets. Die Verarbeitung von Text‑Updates erfolgt zentral über
+    den QueueManager – diese Klasse enthält keine Queue‑Verarbeitung mehr.
+    """
+
     def __init__(self, gui_ref: "DragonWhispererGUI") -> None:
         self.gui_ref = gui_ref
         self.root = gui_ref.root
         self._batch_timer_id: Optional[str] = None
 
-        # Queues nicht überschreiben, sondern nur sicherstellen, dass sie existieren
+        # Sicherstellen, dass die Queues existieren (werden vom QueueManager genutzt)
         if not hasattr(self.gui_ref, "_text_update_queue") or self.gui_ref._text_update_queue is None:
             try:
                 self.gui_ref._text_update_queue = queue.Queue(maxsize=150)
@@ -18326,6 +20784,7 @@ class WhisperLayoutManager:
             gui.root.configure(bg=theme.BG_PRIMARY)
 
     def setup_gui(self) -> None:
+        """Erstellt das Hauptfenster und ruft die Layout‑Erstellung auf."""
         self.root.configure(bg=self.gui_ref.current_theme.BG_PRIMARY)
         self.root.title("🐉 Dragon Whisperer - Plattformunabhängig")
         self.root.geometry("900x700")
@@ -18340,7 +20799,8 @@ class WhisperLayoutManager:
         self.center_window()
         self.root.protocol("WM_DELETE_WINDOW", self.gui_ref._safe_exit_dialog)
         self.create_layout()
-        self.root.after(100, self.start_batch_updates)
+        # Die Batch‑Verarbeitung wird jetzt vom QueueManager übernommen.
+        # Kein separater Aufruf mehr nötig.
 
     def setup_dark_styles(self) -> None:
         style = ttk.Style()
@@ -18393,6 +20853,7 @@ class WhisperLayoutManager:
         self.root.geometry(f"+{x}+{y}")
 
     def create_layout(self) -> None:
+        """Erstellt das Hauptlayout und die Steuerelemente."""
         header_frame = tk.Frame(self.root, bg=self.gui_ref.current_theme.BG_PRIMARY, height=35)
         header_frame.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
         header_frame.grid_propagate(False)
@@ -18408,10 +20869,13 @@ class WhisperLayoutManager:
                                                bg=self.gui_ref.current_theme.BG_PRIMARY,
                                                fg=self.gui_ref.current_theme.TEXT_SECONDARY)
         self.gui_ref.status_label.pack(side="right")
+
         self.create_stream_info_display()
         self.gui_ref.stream_info_frame.grid(row=1, column=0, sticky="ew", padx=12, pady=3)
+
         input_frame = tk.Frame(self.root, bg=self.gui_ref.current_theme.BG_PRIMARY)
         input_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=3)
+
         url_frame = tk.Frame(input_frame, bg=self.gui_ref.current_theme.BG_PRIMARY)
         url_frame.pack(fill="x", pady=2)
         tk.Label(url_frame, text="URL:", bg=self.gui_ref.current_theme.BG_PRIMARY,
@@ -18430,11 +20894,15 @@ class WhisperLayoutManager:
                                                       bg=self.gui_ref.current_theme.BG_PRIMARY,
                                                       fg=self.gui_ref.current_theme.TEXT_ACCENT)
         self.gui_ref.language_info_label.pack(side="right", padx=(5,0))
+
         self.create_compact_control_panel(input_frame)
+
         self.setup_status_bar()
         self.gui_ref.status_bar_frame.grid(row=4, column=0, sticky="ew", pady=(2,0))
+
         self.create_text_areas()
         self.gui_ref.text_container.grid(row=3, column=0, sticky="nsew", padx=12, pady=8)
+
         self.gui_ref.url_entry.bind("<KeyRelease>", self.gui_ref.on_url_change)
         self.gui_ref.url_entry.bind("<FocusOut>", self.gui_ref.on_url_change)
 
@@ -18460,8 +20928,11 @@ class WhisperLayoutManager:
         self.gui_ref.stream_details_label.pack(fill="x", padx=8, pady=(2,6))
 
     def create_compact_control_panel(self, parent: tk.Frame) -> None:
+        """Erstellt die kompakte Steuerleiste mit Quellsprache, Modell und Zielsprache."""
         control_frame = tk.Frame(parent, bg=self.gui_ref.current_theme.BG_PRIMARY)
         control_frame.pack(fill="x", pady=8)
+
+        # Linke Buttons (Datei, URL, Layout)
         left_controls = tk.Frame(control_frame, bg=self.gui_ref.current_theme.BG_PRIMARY)
         left_controls.pack(side="left")
         action_buttons = [
@@ -18470,111 +20941,142 @@ class WhisperLayoutManager:
         ]
         for icon, command, tooltip in action_buttons:
             btn = tk.Button(left_controls, text=icon, command=command,
-                             bg=self.gui_ref.current_theme.BG_TERTIARY,
-                             fg=self.gui_ref.current_theme.TEXT_PRIMARY,
-                             relief="flat", bd=0, font=("Segoe UI", 9), cursor="hand2")
+                            bg=self.gui_ref.current_theme.BG_TERTIARY,
+                            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+                            relief="flat", bd=0, font=("Segoe UI", 9), cursor="hand2")
             btn.pack(side="left", padx=1)
             ToolTip(btn, tooltip)
+
         self.gui_ref.layout_btn = tk.Button(left_controls, text="🔄",
-                                              command=self.gui_ref.toggle_layout,
-                                              bg=self.gui_ref.current_theme.BG_TERTIARY,
-                                              fg=self.gui_ref.current_theme.TEXT_PRIMARY,
-                                              relief="flat", bd=0, font=("Segoe UI", 9),
-                                              cursor="hand2")
+                                            command=self.gui_ref.toggle_layout,
+                                            bg=self.gui_ref.current_theme.BG_TERTIARY,
+                                            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+                                            relief="flat", bd=0, font=("Segoe UI", 9),
+                                            cursor="hand2")
         self.gui_ref.layout_btn.pack(side="left", padx=5)
         ToolTip(self.gui_ref.layout_btn, "Layout umschalten (vertikal/horizontal)")
+
+        # Zentrale Steuerung (Quellsprache, Modell, Zielsprache)
         center_controls = tk.Frame(control_frame, bg=self.gui_ref.current_theme.BG_PRIMARY)
         center_controls.pack(side="left", padx=15)
+
+        # Quellsprache (From)
         src_lang_frame = tk.Frame(center_controls, bg=self.gui_ref.current_theme.BG_PRIMARY)
         src_lang_frame.pack(side="left", padx=5)
         tk.Label(src_lang_frame, text="From:", bg=self.gui_ref.current_theme.BG_PRIMARY,
                  fg=self.gui_ref.current_theme.TEXT_SECONDARY, font=Fonts.PRIMARY).pack(side="left")
         self.gui_ref.src_lang_var = tk.StringVar(value="Automatisch")
         self.gui_ref.src_lang_combo = ttk.Combobox(src_lang_frame,
-                                                     textvariable=self.gui_ref.src_lang_var,
-                                                     values=[name for name, code in SORTED_LANGUAGES],
-                                                     width=10, style="Dark.TCombobox",
-                                                     state="readonly")
+                                                   textvariable=self.gui_ref.src_lang_var,
+                                                   values=[name for name, code in SORTED_LANGUAGES],
+                                                   width=10, style="Dark.TCombobox",
+                                                   state="readonly")
         self.gui_ref.src_lang_combo.pack(side="left", padx=3)
         ToolTip(self.gui_ref.src_lang_combo, "Quellsprache (Automatisch = Whisper-Erkennung)")
+
+        # Modellauswahl
         model_frame = tk.Frame(center_controls, bg=self.gui_ref.current_theme.BG_PRIMARY)
         model_frame.pack(side="left", padx=5)
         tk.Label(model_frame, text="Model:", bg=self.gui_ref.current_theme.BG_PRIMARY,
                  fg=self.gui_ref.current_theme.TEXT_SECONDARY, font=Fonts.PRIMARY).pack(side="left")
         self.gui_ref.model_var = tk.StringVar(value=self.gui_ref.settings.default_model)
         self.gui_ref.model_combo = ttk.Combobox(model_frame,
-                                                  textvariable=self.gui_ref.model_var,
-                                                  values=Config.WHISPER_MODELS,
-                                                  width=8, style="Dark.TCombobox",
-                                                  state="readonly")
+                                                textvariable=self.gui_ref.model_var,
+                                                values=Config.WHISPER_MODELS,
+                                                width=8, style="Dark.TCombobox",
+                                                state="readonly")
         self.gui_ref.model_combo.pack(side="left", padx=3)
         ToolTip(self.gui_ref.model_combo, "Whisper-Modell auswählen (größer = genauer, aber langsamer)")
         if getattr(self.gui_ref, "demo_mode", False):
             self.gui_ref.model_combo.config(state="disabled")
             self.gui_ref.model_var.set("dummy (Demo)")
-        lang_frame = tk.Frame(center_controls, bg=self.gui_ref.current_theme.BG_PRIMARY)
-        lang_frame.pack(side="left", padx=5)
-        tk.Label(lang_frame, text="Translate:", bg=self.gui_ref.current_theme.BG_PRIMARY,
+
+        # Zielsprache (Translate) – hier erfolgt die Optimierung
+        target_lang_frame = tk.Frame(center_controls, bg=self.gui_ref.current_theme.BG_PRIMARY)
+        target_lang_frame.pack(side="left", padx=5)
+        tk.Label(target_lang_frame, text="Translate:", bg=self.gui_ref.current_theme.BG_PRIMARY,
                  fg=self.gui_ref.current_theme.TEXT_SECONDARY, font=Fonts.PRIMARY).pack(side="left")
+
+        # Sprachliste für Zielsprache (nur Namen, gruppiert)
         common_codes = ["de", "en", "fr", "es", "it"]
         asian_codes = ["ja", "zh", "ko", "vi", "th"]
+
         common_names = [SUPPORTED_LANGUAGES[code] for code in common_codes if code in SUPPORTED_LANGUAGES]
         asian_names = [SUPPORTED_LANGUAGES[code] for code in asian_codes if code in SUPPORTED_LANGUAGES]
+
         excluded_codes = set(common_codes + asian_codes)
-        more_names = [name for code, name in SORTED_LANGUAGES if code not in excluded_codes and code != "auto"]
-        all_languages = []
-        all_languages.append("--- Common ---")
-        all_languages.extend(common_names)
-        all_languages.append("--- Asian ---")
-        all_languages.extend(asian_names)
-        if more_names:
-            all_languages.append("--- More ---")
-            all_languages.extend(more_names)
+        other_names = [name for code, name in SORTED_LANGUAGES if code not in excluded_codes and code != "auto"]
+
+        target_lang_values = []
+        if common_names:
+            target_lang_values.append("--- Common ---")
+            target_lang_values.extend(common_names)
+        if asian_names:
+            target_lang_values.append("--- Asian ---")
+            target_lang_values.extend(asian_names)
+        if other_names:
+            target_lang_values.append("--- More ---")
+            target_lang_values.extend(other_names)
+
         self.gui_ref.lang_var = tk.StringVar()
-        self.gui_ref.lang_combo = ttk.Combobox(lang_frame,
-                                                 textvariable=self.gui_ref.lang_var,
-                                                 values=all_languages,
-                                                 width=12, style="Dark.TCombobox",
-                                                 state="readonly")
+
+        # Standard-Zielsprache aus den Einstellungen (als Name)
+        default_lang = self.gui_ref.settings.default_language
+        # Falls default_language ein Code ist, in Namen umwandeln
+        if default_lang in SUPPORTED_LANGUAGES:
+            default_lang_name = SUPPORTED_LANGUAGES[default_lang]
+        else:
+            default_lang_name = default_lang  # sollte bereits Name sein
+        if default_lang_name not in target_lang_values:
+            default_lang_name = "Deutsch"
+        self.gui_ref.lang_var.set(default_lang_name)
+
+        self.gui_ref.lang_combo = ttk.Combobox(target_lang_frame,
+                                               textvariable=self.gui_ref.lang_var,
+                                               values=target_lang_values,
+                                               width=12, style="Dark.TCombobox",
+                                               state="readonly")
         self.gui_ref.lang_combo.pack(side="left", padx=3)
         ToolTip(self.gui_ref.lang_combo, "Zielsprache für Übersetzung")
-        default_lang_name = SUPPORTED_LANGUAGES.get(self.gui_ref.settings.default_language, "German")
-        self.gui_ref.lang_var.set(default_lang_name)
         self.gui_ref.lang_combo.bind("<<ComboboxSelected>>", self.gui_ref.on_language_change)
+
+        # Rechte Buttons (Start/Stop, Übersetzung, Untertitel)
         right_controls = tk.Frame(control_frame, bg=self.gui_ref.current_theme.BG_PRIMARY)
         right_controls.pack(side="right")
         self.gui_ref.start_button = tk.Button(right_controls, text="🚀 START",
-                                                command=self.gui_ref._on_start_click,
-                                                bg=self.gui_ref.current_theme.SUCCESS,
-                                                fg=self.gui_ref.current_theme.TEXT_PRIMARY,
-                                                font=("Segoe UI", 9, "bold"),
-                                                relief="flat", padx=20)
+                                              command=self.gui_ref._on_start_click,
+                                              bg=self.gui_ref.current_theme.SUCCESS,
+                                              fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+                                              font=("Segoe UI", 9, "bold"),
+                                              relief="flat", padx=20)
         self.gui_ref.start_button.pack(side="left", padx=2)
         ToolTip(self.gui_ref.start_button, "Transkription/Übersetzung starten")
         self.gui_ref.stop_button = tk.Button(right_controls, text="⏹️ STOP",
-                                               command=self.gui_ref.controller.stop_processing,
-                                               bg=self.gui_ref.current_theme.ERROR,
-                                               fg=self.gui_ref.current_theme.TEXT_PRIMARY,
-                                               state="disabled",
-                                               font=("Segoe UI", 9, "bold"),
-                                               relief="flat", padx=20)
+                                             command=self.gui_ref.controller.stop_processing,
+                                             bg=self.gui_ref.current_theme.ERROR,
+                                             fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+                                             state="disabled",
+                                             font=("Segoe UI", 9, "bold"),
+                                             relief="flat", padx=20)
         self.gui_ref.stop_button.pack(side="left", padx=2)
         ToolTip(self.gui_ref.stop_button, "Laufende Verarbeitung stoppen")
         self.gui_ref.translate_btn = tk.Button(right_controls,
-                                                 text="🌐 ON" if self.gui_ref.translate_active else "🌐 OFF",
-                                                 command=self.gui_ref.toggle_translation,
-                                                 bg=(self.gui_ref.current_theme.SUCCESS if self.gui_ref.translate_active else self.gui_ref.current_theme.BG_TERTIARY),
-                                                 fg=self.gui_ref.current_theme.TEXT_PRIMARY,
-                                                 relief="flat", font=("Segoe UI", 9), padx=6)
+                                               text="🌐 ON" if self.gui_ref.translate_active else "🌐 OFF",
+                                               command=self.gui_ref.toggle_translation,
+                                               bg=(self.gui_ref.current_theme.SUCCESS if self.gui_ref.translate_active else self.gui_ref.current_theme.BG_TERTIARY),
+                                               fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+                                               relief="flat", font=("Segoe UI", 9), padx=6)
         self.gui_ref.translate_btn.pack(side="left", padx=2)
         ToolTip(self.gui_ref.translate_btn, "Übersetzung ein/aus")
         self.gui_ref.subtitle_btn = tk.Button(right_controls, text="🎬",
-                                                command=self.gui_ref.toggle_subtitle_mode,
-                                                bg=self.gui_ref.current_theme.SUBTITLE_INACTIVE,
-                                                fg=self.gui_ref.current_theme.TEXT_PRIMARY,
-                                                relief="flat", bd=0, font=("Segoe UI", 9), cursor="hand2")
+                                              command=self.gui_ref.toggle_subtitle_mode,
+                                              bg=self.gui_ref.current_theme.SUBTITLE_INACTIVE,
+                                              fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+                                              relief="flat", bd=0, font=("Segoe UI", 9), cursor="hand2")
         self.gui_ref.subtitle_btn.pack(side="left", padx=5)
         ToolTip(self.gui_ref.subtitle_btn, "Untertitel-Modus (mit Zeitstempeln)")
+
+        # Event-Bindung für Modellwechsel
         self.gui_ref.model_combo.bind("<<ComboboxSelected>>", self.gui_ref.on_model_change)
 
     def create_text_areas(self) -> Tuple[Optional[scrolledtext.ScrolledText], Optional[scrolledtext.ScrolledText]]:
@@ -18583,24 +21085,28 @@ class WhisperLayoutManager:
         if current_layout != self.gui_ref.layout_mode:
             layout_changed = True
             logger.info(f"🔄 Layout change detected: {current_layout} → {self.gui_ref.layout_mode}")
+
         if hasattr(self.gui_ref, "text_container") and layout_changed:
             try:
                 if self.gui_ref.text_container.winfo_exists():
                     logger.info("   🗑️ Destroying old container for layout change")
                     self.gui_ref.text_container.destroy()
-                    time.sleep(0.02)
+                    self.root.update_idletasks()  # GUI‑Ereignisse kurz abarbeiten, statt time.sleep
             except tk.TclError:
                 pass
             except Exception as e:
                 logger.warning(f"   ⚠️ Container destroy warning: {e}")
+
         if layout_changed or not hasattr(self.gui_ref, "text_container"):
             self.gui_ref.text_container = tk.Frame(self.root, bg=self.gui_ref.current_theme.BG_PRIMARY)
             self.gui_ref._current_layout = self.gui_ref.layout_mode
             logger.info(f"   ✅ New container created for {self.gui_ref.layout_mode} layout")
+
         if self.gui_ref.layout_mode == "horizontal":
             self.create_horizontal_layout()
         else:
             self.create_vertical_layout()
+
         self.gui_ref.text_container.grid(row=3, column=0, sticky="nsew", padx=12, pady=8)
         self.root.grid_rowconfigure(3, weight=1)
         self.root.grid_columnconfigure(0, weight=1)
@@ -18615,6 +21121,7 @@ class WhisperLayoutManager:
                                      fg=self.gui_ref.current_theme.TEXT_PRIMARY,
                                      font=Fonts.SUBTITLE, padx=8, pady=8)
         main_frame.pack(fill="both", expand=True)
+
         trans_frame = tk.Frame(main_frame, bg=self.gui_ref.current_theme.BG_SECONDARY)
         trans_frame.pack(fill="x", pady=(0,3))
         trans_header = tk.Frame(trans_frame, bg=self.gui_ref.current_theme.BG_SECONDARY)
@@ -18635,6 +21142,7 @@ class WhisperLayoutManager:
                  fg=self.gui_ref.current_theme.TEXT_SECONDARY,
                  font=("Segoe UI", 7)).pack(side="right", padx=1)
         self.gui_ref.transcript_text = self.create_text_widget(main_frame, height=6)
+
         transla_frame = tk.Frame(main_frame, bg=self.gui_ref.current_theme.BG_SECONDARY)
         transla_frame.pack(fill="x", pady=(8,0))
         transla_header = tk.Frame(transla_frame, bg=self.gui_ref.current_theme.BG_SECONDARY)
@@ -18665,12 +21173,15 @@ class WhisperLayoutManager:
                                      fg=self.gui_ref.current_theme.TEXT_PRIMARY,
                                      font=Fonts.SUBTITLE, padx=8, pady=8)
         main_frame.pack(fill="both", expand=True)
+
         self.gui_ref.paned_window = tk.PanedWindow(main_frame, orient=tk.HORIZONTAL,
                                                      bg=self.gui_ref.current_theme.BG_SECONDARY,
                                                      sashrelief="raised", sashwidth=4, sashpad=0)
         self.gui_ref.paned_window.pack(fill="both", expand=True)
+
         left_frame = tk.Frame(self.gui_ref.paned_window, bg=self.gui_ref.current_theme.BG_TERTIARY)
         self.gui_ref.paned_window.add(left_frame, stretch="always", width=400)
+
         trans_header = tk.Frame(left_frame, bg=self.gui_ref.current_theme.BG_TERTIARY)
         trans_header.pack(fill="x", padx=5, pady=2)
         tk.Label(trans_header, text="🎤 Transkription",
@@ -18689,8 +21200,10 @@ class WhisperLayoutManager:
                  fg=self.gui_ref.current_theme.TEXT_SECONDARY,
                  font=("Segoe UI", 7)).pack(side="right", padx=1)
         self.gui_ref.transcript_text = self.create_text_widget(left_frame)
+
         right_frame = tk.Frame(self.gui_ref.paned_window, bg=self.gui_ref.current_theme.BG_TERTIARY)
         self.gui_ref.paned_window.add(right_frame, stretch="always", width=400)
+
         transla_header = tk.Frame(right_frame, bg=self.gui_ref.current_theme.BG_TERTIARY)
         transla_header.pack(fill="x", padx=5, pady=2)
         self.gui_ref.translation_header = tk.Label(transla_header,
@@ -18711,6 +21224,7 @@ class WhisperLayoutManager:
                  fg=self.gui_ref.current_theme.TEXT_SECONDARY,
                  font=("Segoe UI", 7)).pack(side="right", padx=1)
         self.gui_ref.translation_text = self.create_text_widget(right_frame)
+
         self.gui_ref.paned_window.paneconfig(left_frame, minsize=250, width=400)
         self.gui_ref.paned_window.paneconfig(right_frame, minsize=250, width=400)
 
@@ -18756,6 +21270,16 @@ class WhisperLayoutManager:
             ("🌐", self.gui_ref.show_translation_dialog, "Text übersetzen"),
             ("🤖", self.gui_ref.show_summarize_dialog, "Mit Ollama zusammenfassen"),
         ]
+        for i, (icon, command, tooltip) in enumerate(quick_actions):
+            btn = tk.Button(left_panel, text=icon, command=command,
+                             bg=self.gui_ref.current_theme.BG_TERTIARY,
+                             fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+                             relief="flat", font=("Segoe UI", 9), cursor="hand2",
+                             padx=4, pady=2, activebackground=self.gui_ref.current_theme.BG_HOVER)
+            btn.grid(row=0, column=i, padx=1, sticky="w")
+            ToolTip(btn, tooltip)
+
+        # Installations-Button (nur im Demo-Modus oder wenn Übersetzer fehlt)
         if getattr(self.gui_ref, "demo_mode", False) or not TRANSLATOR_AVAILABLE:
             install_btn = tk.Button(left_panel, text="📦",
                                       command=self.gui_ref.show_install_dialog,
@@ -18765,15 +21289,6 @@ class WhisperLayoutManager:
                                       padx=4, pady=2, activebackground=self.gui_ref.current_theme.BG_HOVER)
             install_btn.grid(row=0, column=len(quick_actions) + 1, padx=1, sticky="w")
             ToolTip(install_btn, "Fehlende Pakete installieren")
-
-        for i, (icon, command, tooltip) in enumerate(quick_actions):
-            btn = tk.Button(left_panel, text=icon, command=command,
-                             bg=self.gui_ref.current_theme.BG_TERTIARY,
-                             fg=self.gui_ref.current_theme.TEXT_PRIMARY,
-                             relief="flat", font=("Segoe UI", 9), cursor="hand2",
-                             padx=4, pady=2, activebackground=self.gui_ref.current_theme.BG_HOVER)
-            btn.grid(row=0, column=i, padx=1, sticky="w")
-            ToolTip(btn, tooltip)
 
         center_panel = tk.Frame(main_container, bg=self.gui_ref.current_theme.BG_SECONDARY)
         center_panel.grid(row=0, column=1, sticky="ew", padx=5)
@@ -18786,6 +21301,7 @@ class WhisperLayoutManager:
                                                  bg=self.gui_ref.current_theme.BG_SECONDARY,
                                                  fg=self.gui_ref.current_theme.TEXT_SECONDARY)
         self.gui_ref.progress_label.pack(side="left", padx=(0,10))
+
         if IS_WINDOWS:
             default_text = "🪟 Windows | CPU: --% | RAM: --MB | GPU: --% | Model: --"
         elif IS_MACOS:
@@ -18861,122 +21377,34 @@ class WhisperLayoutManager:
         self.gui_ref.live_mode_btn.pack(side="right", padx=2)
         ToolTip(self.gui_ref.live_mode_btn, "Chunk-Dauer umschalten (20s/10s)")
 
-    def process_batch_text_updates(self) -> None:
-        if not hasattr(self.gui_ref, "_shutting_down") or getattr(self.gui_ref, "_shutting_down", False):
-            return
-        if not hasattr(self, "root") or self.root is None or not self.root.winfo_exists():
-            return
-        if not hasattr(self.gui_ref, "_text_update_queue"):
-            return
-        queue_obj = self.gui_ref._text_update_queue
-        if queue_obj is None:
-            return
-        if not hasattr(queue_obj, "empty") or not callable(queue_obj.empty):
-            return
-        if queue_obj.empty():
-            return
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"[QUEUE] process_batch_text_updates: Queue-Größe vor Verarbeitung: {queue_obj.qsize()}")
-        processed = 0
-        max_updates = 5
-        start_time = time.time()
-        while processed < max_updates and (time.time() - start_time) < 0.05:
-            if not self.root.winfo_exists():
-                break
-            try:
-                if hasattr(queue_obj, "get_nowait") and callable(queue_obj.get_nowait):
-                    item = queue_obj.get_nowait()
-                else:
-                    item = queue_obj.get(block=False)
-                if isinstance(item, tuple) and len(item) == 2:
-                    update_type, text_data = item
-                    self._process_update(update_type, text_data)
-                processed += 1
-                try:
-                    self.root.update_idletasks()
-                except tk.TclError:
-                    break
-            except Exception as e:
-                if "Empty" in type(e).__name__ or "empty" in str(e).lower():
-                    break
-                logger.warning(f"⚠️ Queue processing error: {e}")
-                break
-        if logger.isEnabledFor(logging.DEBUG) and processed > 0:
-            logger.debug(f"[QUEUE] Verarbeitet: {processed} Elemente, verbleibende Größe: {queue_obj.qsize()}")
-        self._schedule_next_update()
-
-    def _process_update(self, update_type: str, text_data: str) -> None:
-        if not hasattr(self, "gui_ref") or self.gui_ref is None:
-            return
-        try:
-            if update_type == "transcript":
-                widget = getattr(self.gui_ref, "transcript_text", None)
-                if widget is not None and widget.winfo_exists():
-                    widget.insert("end", text_data)
-                    self._auto_scroll("transcript")
-            elif update_type == "translation":
-                widget = getattr(self.gui_ref, "translation_text", None)
-                if widget is not None and widget.winfo_exists():
-                    widget.insert("end", text_data)
-                    self._auto_scroll("translation")
-        except tk.TclError:
-            pass
-        except AttributeError:
-            pass
-        except Exception as e:
-            logger.warning(f"⚠️ GUI update error: {e}")
-
-    def _auto_scroll(self, text_type: str) -> None:
-        try:
-            if text_type == "transcript":
-                if hasattr(self.gui_ref, "transcript_scroll_var") and self.gui_ref.transcript_scroll_var is not None and self.gui_ref.transcript_scroll_var.get():
-                    self.gui_ref.transcript_text.see("end")
-            elif text_type == "translation":
-                if hasattr(self.gui_ref, "translation_scroll_var") and self.gui_ref.translation_scroll_var is not None and self.gui_ref.translation_scroll_var.get():
-                    self.gui_ref.translation_text.see("end")
-        except Exception:
-            pass
-
-    def _schedule_next_update(self) -> None:
-        try:
-            if hasattr(self, "root") and self.root is not None and self.root.winfo_exists():
-                interval = 150
-                if hasattr(self.gui_ref, "_batch_update_interval"):
-                    try:
-                        interval = self.gui_ref._batch_update_interval
-                    except Exception:
-                        pass
-                if hasattr(self, "_batch_timer_id") and self._batch_timer_id:
-                    try:
-                        self.root.after_cancel(self._batch_timer_id)
-                    except Exception:
-                        pass
-                self._batch_timer_id = self.root.after(interval, self.process_batch_text_updates)
-            else:
-                self._batch_timer_id = None
-        except Exception as e:
-            logger.warning(f"⚠️ Timer scheduling error: {e}")
-
-    def start_batch_updates(self) -> None:
-        try:
-            if hasattr(self, "root") and self.root is not None and self.root.winfo_exists():
-                if not hasattr(self.gui_ref, "_text_update_queue") or self.gui_ref._text_update_queue is None:
-                    try:
-                        self.gui_ref._text_update_queue = queue.Queue(maxsize=150)
-                    except Exception:
-                        self.gui_ref._text_update_queue = DummyQueue(maxsize=150)
-                        logger.warning("⚠️ Queue-Fallback in start_batch_updates")
-                self.root.after(100, self.process_batch_text_updates)
-                logger.info("✅ Batch updates gestartet")
-        except Exception as e:
-            logger.warning(f"⚠️ Start batch updates error: {e}")
-
 
 # =============================================================================
 # 18. APPSETTINGS & ADVANCEDSETTINGS
 # =============================================================================
 @dataclass
 class AppSettings:
+    """
+    Anwendungseinstellungen für Dragon Whisperer.
+
+    Diese Klasse speichert benutzerspezifische Einstellungen wie die zuletzt
+    verwendete URL, das Standardmodell, die Sprache, das Layout, etc.
+    Die Daten werden im plattformspezifischen Konfigurationsverzeichnis
+    als JSON-Datei gespeichert.
+
+    Attributes:
+        last_url: Zuletzt verwendete URL (leerer String, falls nicht vorhanden).
+        default_model: Standard-Whisper-Modell (z.B. 'large-v3').
+        default_language: Standard-Quellsprache als ISO-Code (z.B. 'de', 'auto').
+        layout_mode: GUI-Layout ('vertical' oder 'horizontal').
+        recent_urls: Liste der zuletzt verwendeten URLs (max. 10).
+        enable_plugins: Ob Plugins aktiviert sind.
+        export_format: Standard-Exportformat ('txt', 'srt', 'vtt', 'json', 'docx').
+        auto_save_on_completion: Automatisches Speichern nach Abschluss.
+        theme: GUI-Theme ('dark', 'light', 'pastel', 'system', 'highcontrast').
+        use_browser_cookies: Browser-Cookies für YouTube/Twitch nutzen.
+        cookies_notice_shown: Ob der Cookie-Hinweis bereits angezeigt wurde.
+    """
+
     last_url: str = ""
     default_model: str = "large-v3"
     default_language: str = "auto"
@@ -18991,6 +21419,10 @@ class AppSettings:
 
     @classmethod
     def load_from_file(cls, filename: str = "dragon_settings.json") -> "AppSettings":
+        """
+        Lädt die Einstellungen aus einer JSON-Datei.
+        Konvertiert dabei die Standardsprache automatisch von einem Code in den lesbaren Namen.
+        """
         try:
             config_dir = PlatformUtils.get_platform_config_dir()
             file_path = config_dir / filename
@@ -18998,14 +21430,33 @@ class AppSettings:
                 return cls()
             with open(file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+
+            # Nur Felder übernehmen, die in der Dataclass existieren
             valid_fields = {f.name for f in fields(cls)}
             filtered = {k: v for k, v in data.items() if k in valid_fields}
+
+            # Typkorrekturen
             if "recent_urls" in filtered and not isinstance(filtered["recent_urls"], list):
                 filtered["recent_urls"] = []
             if "default_model" in filtered:
                 model = filtered["default_model"]
                 if model not in Config.WHISPER_MODELS and model != "large-v3":
                     filtered["default_model"] = "large-v3"
+
+            # ----- NEU: Sprach-Code in Namen umwandeln -----
+            if "default_language" in filtered:
+                lang = filtered["default_language"]
+                # Falls es ein Code ist, in Namen umwandeln
+                if lang in SUPPORTED_LANGUAGES:
+                    filtered["default_language"] = SUPPORTED_LANGUAGES[lang]
+                # Falls es weder Code noch Name ist, auf Deutsch setzen
+                elif lang not in [name for name, _ in SORTED_LANGUAGES]:
+                    filtered["default_language"] = "Deutsch"
+
+            # Leere recent_urls-Einträge filtern
+            if "recent_urls" in filtered and isinstance(filtered["recent_urls"], list):
+                filtered["recent_urls"] = [u for u in filtered["recent_urls"] if u and u.strip()]
+
             return cls(**filtered)
         except (json.JSONDecodeError, OSError, PermissionError) as e:
             logger.warning(f"⚠️ Konnte Einstellungen nicht laden: {e}")
@@ -19015,17 +21466,28 @@ class AppSettings:
             return cls()
 
     def save_to_file(self, filename: str = "dragon_settings.json") -> bool:
+        """
+        Speichert die Einstellungen in einer JSON-Datei (atomarer Schreibvorgang).
+
+        Args:
+            filename: Dateiname im Konfigurationsverzeichnis.
+
+        Returns:
+            True bei Erfolg, sonst False.
+        """
         try:
             config_dir = PlatformUtils.get_platform_config_dir()
             config_dir.mkdir(parents=True, exist_ok=True)
             file_path = config_dir / filename
             temp_path = file_path.with_suffix(".tmp")
+
+            # Daten für JSON vorbereiten
             data = {
                 "last_url": self.last_url,
                 "default_model": self.default_model,
                 "default_language": self.default_language,
                 "layout_mode": self.layout_mode,
-                "recent_urls": self.recent_urls[:10],
+                "recent_urls": self.recent_urls[:10],  # maximal 10 Einträge
                 "enable_plugins": self.enable_plugins,
                 "export_format": self.export_format,
                 "auto_save_on_completion": self.auto_save_on_completion,
@@ -19033,9 +21495,20 @@ class AppSettings:
                 "use_browser_cookies": self.use_browser_cookies,
                 "cookies_notice_shown": self.cookies_notice_shown,
             }
+
+            # Atomarer Schreibvorgang
             with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            temp_path.replace(file_path)
+
+            # Ersetzen der alten Datei (atomar unter Unix, nicht garantiert unter Windows)
+            try:
+                os.replace(temp_path, file_path)
+            except AttributeError:
+                temp_path.replace(file_path)
+            except FileNotFoundError:
+                config_dir.mkdir(parents=True, exist_ok=True)
+                os.replace(temp_path, file_path)
+
             logger.debug(f"💾 Einstellungen gespeichert: {file_path}")
             return True
         except (OSError, PermissionError) as e:
@@ -19046,6 +21519,10 @@ class AppSettings:
             return False
 
     def add_recent_url(self, url: str) -> None:
+        """
+        Fügt eine URL zur Liste der zuletzt verwendeten URLs hinzu.
+        Duplikate werden entfernt, die Liste wird auf 10 Einträge begrenzt.
+        """
         if not url:
             return
         if url in self.recent_urls:
@@ -19055,78 +21532,60 @@ class AppSettings:
         self.save_to_file()
 
     def update_last_url(self, url: str) -> None:
+        """
+        Aktualisiert die zuletzt verwendete URL.
+        """
         if url != self.last_url:
             self.last_url = url
             self.save_to_file()
 
+    def clean_recent_urls(self) -> int:
+        """
+        Entfernt ungültige oder leere Einträge aus der Liste der letzten URLs.
+
+        Returns:
+            Anzahl der entfernten Einträge.
+        """
+        old_len = len(self.recent_urls)
+        cleaned = [u for u in self.recent_urls if u and u.strip()]
+        removed = old_len - len(cleaned)
+        if removed > 0:
+            self.recent_urls = cleaned
+            self.save_to_file()
+        return removed
+
     def validate(self) -> List[str]:
         """
-        Validiert alle Einstellungen und gibt eine Liste von Problemen zurück.
-        Leere Liste bedeutet keine Probleme.
+        Validiert die aktuellen Einstellungen.
+
+        Returns:
+            Liste von Fehlermeldungen (leere Liste bei Erfolg).
         """
         issues = []
-        if not (1 <= self.beam_size <= 20):
-            issues.append(f"beam_size {self.beam_size} außerhalb 1-20")
-        if not (0.0 <= self.temperature <= 2.0):
-            issues.append(f"temperature {self.temperature} außerhalb 0.0-2.0")
-        if not (100 <= self.max_memory_mb <= 16384):
-            issues.append(f"max_memory_mb {self.max_memory_mb} außerhalb 100-16384")
-        if self.config_type not in ("default", "realtime", "high_accuracy", "youtube"):
-            issues.append(f"Ungültiger config_type '{self.config_type}'")
-        # Chunk-Dauer gegen config oder fallback prüfen
-        if self.config:
-            min_dur = self.config.MIN_CHUNK_DURATION
-            max_dur = self.config.MAX_CHUNK_DURATION
-            if not (min_dur <= self.chunk_duration <= max_dur):
-                issues.append(f"chunk_duration {self.chunk_duration}s außerhalb [{min_dur}, {max_dur}]")
-        else:
-            # Fallback auf ConfigDefaults (falls config noch nicht initialisiert)
-            min_dur = ConfigDefaults.MIN_CHUNK_DURATION
-            max_dur = ConfigDefaults.MAX_CHUNK_DURATION
-            if not (min_dur <= self.chunk_duration <= max_dur):
-                issues.append(f"chunk_duration {self.chunk_duration}s außerhalb [{min_dur}, {max_dur}] (config missing)")
-
-        if not (100 <= self.transcript_max_lines <= 5000):
-            issues.append(f"transcript_max_lines {self.transcript_max_lines} außerhalb 100-5000")
-        if not (100 <= self.translation_max_lines <= 5000):
-            issues.append(f"translation_max_lines {self.translation_max_lines} außerhalb 100-5000")
-        if self.translation_engine not in ("google", "ollama", "argos"):
-            issues.append(f"translation_engine '{self.translation_engine}' ungültig")
-        if not (0.5 <= self.duplicate_similarity_threshold <= 1.0):
-            issues.append(f"duplicate_similarity_threshold {self.duplicate_similarity_threshold} außerhalb 0.5-1.0")
-        if not (0.0 <= self.min_confidence <= 1.0):
-            issues.append(f"min_confidence {self.min_confidence} außerhalb 0.0-1.0")
-        if not (0.0 <= self.vad_threshold <= 1.0):
-            issues.append(f"vad_threshold {self.vad_threshold} außerhalb 0.0-1.0")
-        if self.vad_min_speech_duration_ms < 0:
-            issues.append("vad_min_speech_duration_ms negativ")
-        if self.vad_min_silence_duration_ms < 0:
-            issues.append("vad_min_silence_duration_ms negativ")
-        if self.blacklist_mode not in ("word", "substring"):
-            issues.append(f"blacklist_mode '{self.blacklist_mode}' ungültig")
-        if self.tts_engine not in ("piper", "pyttsx3"):
-            issues.append(f"tts_engine '{self.tts_engine}' ungültig")
-        if not (1 <= self.best_of <= 20):
-            issues.append(f"best_of {self.best_of} außerhalb 1-20")
-        if not (0.0 <= self.patience <= 2.0):
-            issues.append(f"patience {self.patience} außerhalb 0.0-2.0")
-        if not (0.0 <= self.no_speech_threshold <= 1.0):
-            issues.append(f"no_speech_threshold {self.no_speech_threshold} außerhalb 0.0-1.0")
-        if not (-5.0 <= self.log_prob_threshold <= 0.0):
-            issues.append(f"log_prob_threshold {self.log_prob_threshold} außerhalb -5.0-0.0")
-        if not (1.0 <= self.compression_ratio_threshold <= 5.0):
-            issues.append(f"compression_ratio_threshold {self.compression_ratio_threshold} außerhalb 1.0-5.0")
-        if self.proxy_url and not any(self.proxy_url.startswith(s) for s in ("http://", "https://", "socks4://", "socks5://")):
-            issues.append(f"proxy_url '{self.proxy_url}' ungültiges Schema")
-        if not (0.0 <= self.summarize_temperature <= 1.0):
-            issues.append(f"summarize_temperature {self.summarize_temperature} außerhalb 0.0-1.0")
-        if not self.summarize_model or not isinstance(self.summarize_model, str):
-            issues.append("summarize_model ungültig")
+        if self.default_model not in Config.WHISPER_MODELS and self.default_model != "large-v3":
+            issues.append(f"Ungültiges Modell: {self.default_model}")
+        valid_languages = [code for code, name in SUPPORTED_LANGUAGES.items()]
+        if self.default_language not in valid_languages:
+            issues.append(f"Ungültige Sprache: {self.default_language}")
+        if self.layout_mode not in ("vertical", "horizontal"):
+            issues.append(f"Ungültiges Layout: {self.layout_mode}")
+        if self.export_format not in ("txt", "srt", "vtt", "json", "docx"):
+            issues.append(f"Ungültiges Exportformat: {self.export_format}")
+        if self.theme not in ("dark", "light", "pastel", "system", "highcontrast"):
+            issues.append(f"Ungültiges Theme: {self.theme}")
         return issues
 
     def repair(self) -> List[str]:
+        """
+        Stellt die Konsistenz der Einstellungen wieder her.
+        Korrigiert ungültige Werte mit sinnvollen Standardwerten.
+
+        Returns:
+            Liste der durchgeführten Reparaturen.
+        """
         repairs = []
         default = AppSettings()
+
         if self.default_model not in Config.WHISPER_MODELS and self.default_model != "large-v3":
             old = self.default_model
             self.default_model = default.default_model
@@ -19148,6 +21607,7 @@ class AppSettings:
             old = self.theme
             self.theme = default.theme
             repairs.append(f"Theme {old} -> {self.theme}")
+
         if repairs:
             logger.info(f"✅ AppSettings repariert: {', '.join(repairs)}")
             self.save_to_file()
@@ -19186,6 +21646,15 @@ if IS_LINUX and PSUTIL_AVAILABLE:
             except Exception:
                 return False
 
+        def _run_in_main_thread(self, func: Callable, *args, **kwargs) -> None:
+            """Führt eine Funktion im Hauptthread aus (sicher für GUI-Updates)."""
+            if not self._is_gui_available_safe():
+                return
+            try:
+                self.gui.root.after(0, lambda: func(*args, **kwargs))
+            except tk.TclError:
+                pass
+
         def optimize_for_processing(self) -> None:
             if not IS_LINUX or self._optimization_active:
                 return
@@ -19215,11 +21684,7 @@ if IS_LINUX and PSUTIL_AVAILABLE:
                 if self._is_gui_available_safe() and hasattr(self.gui, "_batch_update_interval"):
                     self.gui._batch_update_interval = 250
 
-            if self._is_gui_available_safe():
-                try:
-                    self.gui.root.after(0, task)
-                except tk.TclError:
-                    pass
+            self._run_in_main_thread(task)
 
         def _optimize_text_widget(self, attr_name: str) -> None:
             if not self._is_gui_available_safe():
@@ -19231,7 +21696,12 @@ if IS_LINUX and PSUTIL_AVAILABLE:
                     "undo": widget.cget("undo"),
                     "autoseparators": widget.cget("autoseparators"),
                 }
-                widget.configure(maxundo=5, undo=True, autoseparators=True, height=12)
+
+                def configure():
+                    if widget.winfo_exists():
+                        widget.configure(maxundo=5, undo=True, autoseparators=True, height=12)
+
+                self._run_in_main_thread(configure)
 
         def _apply_linux_specific_optimizations(self) -> None:
             if not self._is_gui_available_safe():
@@ -19360,11 +21830,7 @@ if IS_LINUX and PSUTIL_AVAILABLE:
                 if adjustments:
                     logger.info(f"🔧 Anpassungen: {', '.join(adjustments)}")
 
-            if self._is_gui_available_safe():
-                try:
-                    self.gui.root.after(0, task)
-                except tk.TclError:
-                    pass
+            self._run_in_main_thread(task)
 
         def _clean_queue_safe(self, queue_obj: Optional[queue.Queue], target_size: int) -> int:
             if not queue_obj:
@@ -19413,15 +21879,11 @@ if IS_LINUX and PSUTIL_AVAILABLE:
                 if "batch_update_interval" in self._original_settings:
                     saved_interval = self._original_settings["batch_update_interval"]
 
-                    def restore_batch_interval(saved=saved_interval):
+                    def restore_batch_interval():
                         if self._is_gui_available_safe() and hasattr(self.gui, "_batch_update_interval"):
-                            self.gui._batch_update_interval = saved
+                            self.gui._batch_update_interval = saved_interval
 
-                    if self._is_gui_available_safe():
-                        try:
-                            self.gui.root.after(0, restore_batch_interval)
-                        except tk.TclError:
-                            pass
+                    self._run_in_main_thread(restore_batch_interval)
             self._original_settings.clear()
             logger.info("✅ Linux-Optimierer heruntergefahren")
 
@@ -19430,11 +21892,16 @@ if IS_LINUX and PSUTIL_AVAILABLE:
                 return
             widget = getattr(self.gui, attr_name, None)
             if widget and widget.winfo_exists() and attr_name in self._original_settings:
-                try:
-                    widget.configure(**self._original_settings[attr_name])
-                    logger.info(f"    ✅ {attr_name} wiederhergestellt")
-                except Exception as e:
-                    logger.warning(f"    ⚠️ {attr_name} konnte nicht wiederhergestellt werden: {e}")
+                settings = self._original_settings[attr_name]
+
+                def configure():
+                    if widget.winfo_exists():
+                        widget.configure(**settings)
+                        logger.info(f"    ✅ {attr_name} wiederhergestellt")
+
+                self._run_in_main_thread(configure)
+            else:
+                logger.debug(f"    ⚠️ {attr_name} nicht wiederhergestellt (fehlt im Original oder Widget existiert nicht)")
 
         def emergency_optimize(self) -> None:
             if self._shutdown_event.is_set():
@@ -19460,11 +21927,7 @@ if IS_LINUX and PSUTIL_AVAILABLE:
                 gc.collect()
                 logger.info("✅ Notfall-Optimierungen abgeschlossen")
 
-            if self._is_gui_available_safe():
-                try:
-                    self.gui.root.after(0, task)
-                except tk.TclError:
-                    pass
+            self._run_in_main_thread(task)
 
         def get_optimization_status(self) -> Dict[str, Any]:
             return {
@@ -19688,6 +22151,11 @@ class AdvancedSettings:
         Wendet spezielle Modus‑Einstellungen an (Asian‑Mode, Precision‑Mode).
         Diese Überschreibungen werden nach der Initialisierung angewendet.
         """
+        if not hasattr(self, 'config') or self.config is None:
+            # Fallback: config noch nicht vorhanden – Änderungen überspringen
+            logger.warning("_apply_mode_overrides aufgerufen, bevor config initialisiert wurde – überspringe")
+            return
+
         if self.asian_mode:
             self.chunk_duration = 10.0
             self.vad_threshold = 0.35
@@ -20255,9 +22723,57 @@ threading.excepthook = thread_exception_handler
 # =============================================================================
 # 20. MAIN-FUNKTION UND EINTRITTSPUNKT
 # =============================================================================
-def run_tests() -> int:
-    import unittest
+def configure_logging(debug_level: int, debug_components: List[str], quiet: bool) -> None:
+    log_level = logging.WARNING
+    if debug_level >= 1:
+        log_level = logging.DEBUG
+    if quiet:
+        log_level = logging.ERROR
 
+    logging.basicConfig(
+        level=log_level,
+        format="[%(asctime)s.%(msecs)03d] [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    # Externe Bibliotheken: bei DEBUG_LEVEL >= 3 auf DEBUG, sonst INFO
+    level_ext = logging.DEBUG if debug_level >= 3 else logging.INFO
+    for lib in ["huggingface_hub", "faster_whisper", "httpx", "urllib3", "httpcore"]:
+        logging.getLogger(lib).setLevel(level_ext)
+
+    class DebugFilter(logging.Filter):
+        def filter(self, record):
+            if debug_level >= 3:
+                return True
+            component = getattr(record, "component", None)
+            if component and component in debug_components:
+                return True
+            return record.levelno >= logging.WARNING
+
+    logging.getLogger("dragon").addFilter(DebugFilter())
+
+def setup_platform_environment() -> None:
+    if IS_WINDOWS:
+        _setup_windows_console()
+
+    PlatformUtils.setup_platform_environment()
+
+
+# =============================================================================
+# 20. MAIN-FUNKTION UND EINTRITTSPUNKT (optimiert & erweitert)
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Erweiterte Unit‑Tests (mit mehr Abdeckung und Mocking)
+# -----------------------------------------------------------------------------
+def run_tests() -> int:
+    """Führt alle internen Unit‑Tests aus und gibt 0 bei Erfolg, sonst 1 zurück."""
+    import unittest
+    from unittest.mock import MagicMock, patch
+
+    # -------------------------------------------------------------------------
+    # TestPlatformUtils (bestehend, bleibt unverändert)
+    # -------------------------------------------------------------------------
     class TestPlatformUtils(unittest.TestCase):
         def test_validate_url_http(self):
             valid, msg = PlatformUtils.validate_url("https://www.youtube.com/watch?v=abc")
@@ -20274,6 +22790,9 @@ def run_tests() -> int:
             self.assertFalse(valid)
             self.assertIn("existiert nicht", path)
 
+    # -------------------------------------------------------------------------
+    # TestStreamManager (bestehend, bleibt unverändert)
+    # -------------------------------------------------------------------------
     class TestStreamManager(unittest.TestCase):
         def setUp(self):
             self.manager = StreamManager(enable_debug=False)
@@ -20290,6 +22809,9 @@ def run_tests() -> int:
             result = self.manager.detect_platform("file:///home/user/video.mp4")
             self.assertEqual(result[0], "local")
 
+    # -------------------------------------------------------------------------
+    # TestAudioEnhancer (bestehend)
+    # -------------------------------------------------------------------------
     class TestAudioEnhancer(unittest.TestCase):
         def setUp(self):
             self.config = Config()
@@ -20304,6 +22826,9 @@ def run_tests() -> int:
             result = self.enhancer.is_duplicate("Hello world", "Goodbye world", deque())
             self.assertFalse(result)
 
+    # -------------------------------------------------------------------------
+    # TestTranscriptionEngine (erweitert)
+    # -------------------------------------------------------------------------
     class TestTranscriptionEngine(unittest.TestCase):
         def setUp(self):
             self.settings = AdvancedSettings()
@@ -20317,28 +22842,126 @@ def run_tests() -> int:
             self.assertGreater(conf, 0.5)
             self.assertLessEqual(conf, 0.95)
 
+        def test_is_valid_segment(self):
+            self.assertTrue(self.engine.is_valid_segment("Hello world", 0.8))
+            self.assertFalse(self.engine.is_valid_segment("", 0.8))
+            self.assertFalse(self.engine.is_valid_segment("   ", 0.8))
+            self.assertFalse(self.engine.is_valid_segment("123", 0.8))  # keine Buchstaben
+
+        def test_validate_audio_data(self):
+            # Dummy‑Audio (1 Sekunde Stille)
+            dummy = b'\x00' * (16000 * 2)  # 1 Sekunde, 16bit
+            valid, msg = self.engine.validate_audio_data(dummy)
+            self.assertFalse(valid)  # zu leise
+            self.assertIn("silent", msg)
+
+    # -------------------------------------------------------------------------
+    # TestConfig (bestehend)
+    # -------------------------------------------------------------------------
     class TestConfig(unittest.TestCase):
         def test_calculate_optimal_chunk_duration(self):
             config = Config()
             dur = config.calculate_optimal_chunk_duration("medium")
             self.assertEqual(dur, 5)
 
+        def test_config_properties(self):
+            config = Config()
+            self.assertEqual(config.BYTES_PER_SECOND, 16000 * 1 * 2)
+            self.assertEqual(config.CHUNK_SIZE_BYTES, int(config.CHUNK_DURATION * config.BYTES_PER_SECOND))
+
+    # -------------------------------------------------------------------------
+    # TestTranslationEngine (mit Mock)
+    # -------------------------------------------------------------------------
+    class TestGoogleTranslationEngine(unittest.TestCase):
+        def setUp(self):
+            self.engine = GoogleTranslationEngine(target_lang="de")
+
+        @patch('deep_translator.GoogleTranslator')
+        def test_translate_success(self, mock_translator_class):
+            mock_translator = MagicMock()
+            mock_translator.translate.return_value = "Hello world"
+            mock_translator_class.return_value = mock_translator
+            result = self.engine.translate_text("Hallo Welt", source_lang="auto")
+            self.assertIsNotNone(result)
+            self.assertEqual(result.translated, "Hello world")
+
+        def test_translate_failure_returns_none(self):
+            # Engine ohne translator (Mock)
+            self.engine.translator = None
+            result = self.engine.translate_text("Hallo Welt")
+            self.assertIsNone(result)
+
+    # -------------------------------------------------------------------------
+    # TestQueueManager (mit DummyQueue)
+    # -------------------------------------------------------------------------
+    class TestQueueManager(unittest.TestCase):
+        def setUp(self):
+            self.gui_mock = MagicMock()
+            self.gui_mock.root = MagicMock()
+            self.gui_mock._gui_update_limiter = MagicMock()
+            self.manager = QueueManager(self.gui_mock)
+
+        def test_safe_put_gui(self):
+            item = ("status", lambda: None, False)
+            self.assertTrue(self.manager.safe_put("gui", item))
+            self.assertEqual(self.manager.gui_queue.qsize(), 1)
+
+        def test_safe_put_text(self):
+            item = ("transcript", "test")
+            self.assertTrue(self.manager.safe_put("text", item))
+            self.assertEqual(self.manager.text_queue.qsize(), 1)
+
+        def test_cleanup_gui_queue(self):
+            for i in range(150):
+                self.manager.safe_put("gui", ("info", lambda: None, False))
+            self.manager.cleanup_gui_queue(100)
+            self.assertLessEqual(self.manager.gui_queue.qsize(), 100)
+
+    # -------------------------------------------------------------------------
+    # TestAudioProcessor (mit Mock)
+    # -------------------------------------------------------------------------
+    class TestAudioProcessor(unittest.TestCase):
+        def setUp(self):
+            self.ffmpeg_manager = MagicMock()
+            self.processor = AudioProcessor(None, self.ffmpeg_manager, settings=AdvancedSettings())
+
+        def test_set_expected_duration(self):
+            self.processor.set_expected_duration(120.0)
+            self.assertEqual(self.processor._expected_duration, 120.0)
+
+        def test_emergency_reset(self):
+            self.processor.emergency_reset(force=True)
+            self.assertFalse(self.processor._processing.is_set())
+            self.assertTrue(self.processor._stop_event.is_set())
+
+    # -------------------------------------------------------------------------
+    # Tests zusammenstellen und ausführen
+    # -------------------------------------------------------------------------
     loader = unittest.TestLoader()
     suite = loader.loadTestsFromTestCase(TestPlatformUtils)
     suite.addTests(loader.loadTestsFromTestCase(TestStreamManager))
     suite.addTests(loader.loadTestsFromTestCase(TestAudioEnhancer))
     suite.addTests(loader.loadTestsFromTestCase(TestTranscriptionEngine))
     suite.addTests(loader.loadTestsFromTestCase(TestConfig))
+    suite.addTests(loader.loadTestsFromTestCase(TestGoogleTranslationEngine))
+    suite.addTests(loader.loadTestsFromTestCase(TestQueueManager))
+    suite.addTests(loader.loadTestsFromTestCase(TestAudioProcessor))
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
     return 0 if result.wasSuccessful() else 1
 
+
+# -----------------------------------------------------------------------------
+# Argument‑Parser mit erweiterten Optionen
+# -----------------------------------------------------------------------------
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="🐉 Dragon Whisperer - Livestream Transcription & Translation",
-        epilog="For more information, visit: https://github.com/your-repo/dragon-whisperer"
+        epilog="For more information, visit: https://github.com/your-repo/dragon-whisperer",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    # Allgemeine Optionen
     parser.add_argument(
         "-q", "--quiet",
         action="store_true",
@@ -20367,44 +22990,139 @@ def parse_arguments() -> argparse.Namespace:
         action="store_true",
         help="Show version information and exit"
     )
-    return parser.parse_args()
 
-def configure_logging(debug_level: int, debug_components: List[str], quiet: bool) -> None:
-    log_level = logging.WARNING
-    if debug_level >= 1:
-        log_level = logging.DEBUG
-    if quiet:
-        log_level = logging.ERROR
-
-    logging.basicConfig(
-        level=log_level,
-        format="[%(asctime)s.%(msecs)03d] [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
+    # GUI‑Modus
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run in headless mode (no GUI, console output only). Useful for batch processing."
     )
 
-    for lib in ["huggingface_hub", "faster_whisper", "httpx", "urllib3", "httpcore"]:
-        logging.getLogger(lib).setLevel(logging.INFO)
+    # Profil‑Unterstützung
+    parser.add_argument(
+        "--profile",
+        metavar="NAME",
+        help="Load a custom settings profile (overrides default settings)."
+    )
 
-    class DebugFilter(logging.Filter):
-        def filter(self, record):
-            if debug_level >= 3:
-                return True
-            component = getattr(record, "component", None)
-            if component and component in debug_components:
-                return True
-            return record.levelno >= logging.WARNING
+    # Direkter Start ohne GUI (für Batch‑Verarbeitung)
+    parser.add_argument(
+        "--url",
+        metavar="URL",
+        help="Start processing the given URL immediately (implies --headless)."
+    )
+    parser.add_argument(
+        "--model",
+        help="Whisper model to use (e.g. 'large-v3', 'medium'). Overrides settings."
+    )
+    parser.add_argument(
+        "--language",
+        help="Target language for translation (e.g. 'de', 'en'). Overrides settings."
+    )
 
-    logging.getLogger("dragon").addFilter(DebugFilter())
+    # System‑Info (nur Debug)
+    parser.add_argument(
+        "--sysinfo",
+        action="store_true",
+        help="Print detailed system information and exit (useful for bug reports)."
+    )
 
-def setup_platform_environment() -> None:
-    if IS_WINDOWS:
-        _setup_windows_console()
+    return parser.parse_args()
 
-    PlatformUtils.setup_platform_environment()
 
+# -----------------------------------------------------------------------------
+# Verbesserte Fehlerbehandlung und Benutzerfeedback
+# -----------------------------------------------------------------------------
+def _print_welcome(debug_level: int, quiet: bool) -> None:
+    """Gibt eine Willkommensnachricht im Konsolen‑Modus aus."""
+    if quiet:
+        return
+    if debug_level >= 1:
+        print("\n" + "=" * 50)
+        print("🐉 DRAGON WHISPERER READY")
+        print("=" * 50)
+        print(f"Platform: {SYSTEM} {'ARM' if IS_ARM else 'x86'}")
+        print(f"Python: {sys.version.split()[0]}")
+        print(f"Working Dir: {os.getcwd()}")
+        # Model wird später geladen
+        print("Model: (wird beim Start geladen)")
+        print("=" * 50 + "\n")
+
+
+def _handle_headless_mode(args: argparse.Namespace) -> int:
+    """
+    Führt die Verarbeitung im Headless‑Modus aus (ohne GUI).
+    Gibt 0 bei Erfolg zurück, sonst 1.
+    """
+    logger = logging.getLogger("dragon")
+    logger.info("🐉 Starting in headless mode...")
+
+    try:
+        # Prüfe Abhängigkeiten
+        PlatformUtils.check_platform_dependencies()
+    except RuntimeError as e:
+        _show_user_error(str(e))
+        return 1
+
+    # Erstelle eine minimale AudioProcessor‑Instanz ohne GUI
+    # (für Batch‑Verarbeitung)
+    settings = AdvancedSettings()
+    if args.model:
+        # TODO: Modell in Settings übernehmen (muss später im Processor landen)
+        logger.info(f"Using model override: {args.model}")
+    if args.language:
+        logger.info(f"Using language override: {args.language}")
+
+    ffmpeg_manager = FFmpegManager(settings.config)
+    stream_manager = StreamManager()
+    processor = AudioProcessor(None, ffmpeg_manager, settings, stream_manager=stream_manager)
+
+    # Callbacks für Konsolenausgabe
+    def info_cb(msg: str):
+        logger.info(msg)
+    def error_cb(msg: str):
+        logger.error(msg)
+    def trans_cb(res: TranscriptionResult):
+        if res and res.text:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {res.text}")
+    def transl_cb(res: TranslationResult):
+        if res and res.translated:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] → {res.translated}")
+    def finished_cb():
+        logger.info("Processing finished.")
+
+    # Starte Verarbeitung
+    processor.start_processing(
+        url=args.url,
+        transcription_callback=trans_cb,
+        translation_callback=transl_cb,
+        info_callback=info_cb,
+        error_callback=error_cb,
+        finished_callback=finished_cb,
+    )
+
+    # Warte auf Abbruch (z.B. Ctrl+C)
+    try:
+        while processor._processing.is_set():
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+        processor.stop_processing(wait=True)
+    finally:
+        processor.dispose()
+        ffmpeg_manager.dispose()
+        stream_manager.dispose()
+
+    return 0
+
+
+# -----------------------------------------------------------------------------
+# Optimierte main‑Funktion
+# -----------------------------------------------------------------------------
 def main() -> int:
     args = parse_arguments()
 
+    # Debug‑Level und Komponenten aus Argumenten ableiten
     debug_level = 0
     debug_components = []
     if args.debug != "0":
@@ -20414,13 +23132,21 @@ def main() -> int:
             debug_components = args.debug.split(",")
             debug_level = 1
 
+    # Logging konfigurieren
     configure_logging(debug_level, debug_components, args.quiet)
 
+    # Plattform‑Umgebung einrichten
     setup_platform_environment()
 
+    # Hilfsfunktionen für schnelle Ausgaben
     if args.version:
-        print("🐉 Dragon Whisperer v4.0 (optimized)")
+        print("🐉 Dragon Whisperer v4.1 (optimized)")
         print(f"Platform: {SYSTEM} {'ARM' if IS_ARM else 'x86'}")
+        print(f"Python: {sys.version.split()[0]}")
+        return 0
+
+    if args.sysinfo:
+        print_system_info_debug3()
         return 0
 
     if args.check:
@@ -20429,9 +23155,14 @@ def main() -> int:
     if args.test:
         return run_tests()
 
-    if debug_level >= 3:
-        print_system_info_debug3()
+    # Headless‑Modus (auch wenn --url gesetzt)
+    if args.headless or args.url:
+        if not args.url:
+            print("Error: --headless requires --url to specify a stream.", file=sys.stderr)
+            return 1
+        return _handle_headless_mode(args)
 
+    # Normale GUI‑Ausführung
     logger = logging.getLogger("dragon")
     app = None
     try:
@@ -20452,22 +23183,33 @@ def main() -> int:
         logger.debug("🖥️ Initializing GUI...")
         app = DragonWhispererGUI()
 
-        if debug_level >= 1 and not args.quiet:
-            print("\n" + "=" * 50)
-            print("🐉 DRAGON WHISPERER READY")
-            print("=" * 50)
-            print(f"Platform: {SYSTEM} {'ARM' if IS_ARM else 'x86'}")
-            print(f"Python: {sys.version.split()[0]}")
-            print(f"Working Dir: {os.getcwd()}")
-            if hasattr(app, "transcription_engine"):
-                current_model = app.transcription_engine.get_current_model()
-                if current_model and current_model != "None":
-                    model_display = current_model
+        # Profil laden, falls angegeben
+        if args.profile:
+            try:
+                profile_path = PlatformUtils.get_platform_config_dir() / "profiles" / f"{args.profile}.json"
+                if profile_path.exists():
+                    with open(profile_path, 'r', encoding='utf-8') as f:
+                        profile_data = json.load(f)
+                    # Einstellungen aus dem Profil übernehmen
+                    for key, value in profile_data.items():
+                        if hasattr(app.advanced_settings, key):
+                            setattr(app.advanced_settings, key, value)
+                    logger.info(f"✅ Profile '{args.profile}' loaded")
                 else:
-                    model_display = "(wird beim Start geladen)"
-                print(f"Model: {model_display}")
-            else:
-                print("Model: (noch nicht initialisiert)")
+                    logger.warning(f"⚠️ Profile '{args.profile}' not found, using defaults")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to load profile: {e}")
+
+        # Befülle URL‑Feld, falls angegeben
+        if args.url:
+            if hasattr(app, "url_entry") and app.url_entry.winfo_exists():
+                app.url_entry.delete(0, "end")
+                app.url_entry.insert(0, args.url)
+                logger.info(f"📌 URL from command line: {args.url}")
+
+        # Willkommensnachricht (nur bei Debug)
+        if debug_level >= 1 and not args.quiet:
+            _print_welcome(debug_level, args.quiet)
 
         logger.info("🚀 Starting main loop...")
         app.run()
@@ -20515,7 +23257,9 @@ def main() -> int:
         gc.collect()
         logger.debug("✅ Shutdown complete")
 
+
 if __name__ == "__main__":
+    # Wechsle in das Verzeichnis der Skriptdatei (wenn möglich)
     try:
         if "__file__" in globals():
             script_dir = os.path.dirname(os.path.abspath(__file__))
