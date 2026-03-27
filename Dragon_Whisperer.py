@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-🐉 THE DRAGON WHISPERER (v4.0) - Ultimate Stream Transcription & Translation
-"""
+"""🐉 THE DRAGON WHISPERER (v4.0) - Ultimate Stream Transcription & Translation"""
 
 # =============================================================================
 # 1. STANDARDBIBLIOTHEK
@@ -43,7 +41,7 @@ from enum import Enum, auto
 from functools import wraps
 from pathlib import Path
 from typing import (Any, Callable, Deque, Dict, List, Optional, Tuple,
-                    TypeVar, Union, Literal)
+                    TypeVar, Union, Literal, ClassVar)
 
 # =============================================================================
 # 2. DRITTBIBLIOTHEKEN
@@ -917,11 +915,11 @@ class ConfigDefaults:
     # -------------------------------------------------------------------------
     MAX_CACHE_SIZE_MB: int = 100
     CACHE_ENABLED: bool = True
-    TRANSCRIPTION_CACHE_SIZE: int = 200
+    TRANSCRIPTION_CACHE_SIZE: int = 500          # erhöht von 200
     TRANSCRIPTION_CACHE_TTL: int = 300
-    TRANSLATION_CACHE_SIZE: int = 500
+    TRANSLATION_CACHE_SIZE: int = 1000           # erhöht von 500
     TRANSLATION_CACHE_TTL: int = 3600
-    AUDIO_CACHE_SIZE: int = 128
+    AUDIO_CACHE_SIZE: int = 256                  # erhöht von 128
     AUDIO_CACHE_TTL: int = 1800
 
     # -------------------------------------------------------------------------
@@ -931,30 +929,32 @@ class ConfigDefaults:
     VAD_MIN_SPEECH_DURATION_MS: int = 225
     VAD_MIN_SILENCE_DURATION_MS: int = 80
 
-    # Sprachspezifische VAD‑Überschreibungen
+    # Sprachspezifische VAD‑Überschreibungen (mutable → default_factory)
     LANGUAGE_VAD: Dict[str, Dict[str, Any]] = {
         "ja": {"threshold": 0.3, "min_speech_ms": 300, "min_silence_ms": 100},
         "ko": {"threshold": 0.3, "min_speech_ms": 300, "min_silence_ms": 100},
         "zh": {"threshold": 0.3, "min_speech_ms": 300, "min_silence_ms": 100},
         "th": {"threshold": 0.3, "min_speech_ms": 300, "min_silence_ms": 100},
         "vi": {"threshold": 0.3, "min_speech_ms": 250, "min_silence_ms": 90},
+        "ar": {"threshold": 0.35, "min_speech_ms": 280, "min_silence_ms": 100},
+        "ru": {"threshold": 0.3, "min_speech_ms": 240, "min_silence_ms": 80},
+        "hi": {"threshold": 0.32, "min_speech_ms": 280, "min_silence_ms": 110},
+        "tr": {"threshold": 0.32, "min_speech_ms": 260, "min_silence_ms": 95},
+        "fa": {"threshold": 0.33, "min_speech_ms": 270, "min_silence_ms": 100},
     }
 
     # -------------------------------------------------------------------------
     # Datei‑ und URL‑Konfiguration
     # -------------------------------------------------------------------------
     ALLOWED_FILE_SCHEME_PREFIX: str = "file://"
-    ALLOWED_FILE_BASE_DIRS: List[str] = [
-        str(Path.home()),
-        os.getcwd(),
-    ]
+    ALLOWED_FILE_BASE_DIRS: ClassVar[List[str]] = [str(Path.home()), os.getcwd()]
     URL_ALLOWED_CHARS: str = r"a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%"
 
     # -------------------------------------------------------------------------
     # YouTube & Plattform‑spezifisch
     # -------------------------------------------------------------------------
     YOUTUBE_HEADERS: Dict[str, str] = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
         "Referer": "https://www.youtube.com/",
         "Origin": "https://www.youtube.com",
         "Accept": "*/*",
@@ -991,15 +991,15 @@ class ConfigDefaults:
     ADAPTIVE_CHUNK_STABLE_THRESHOLD: int = 2
 
     # -------------------------------------------------------------------------
-    # Whisper‑Modelle
+    # Whisper‑Modelle (erweitert um large-v3-turbo)
     # -------------------------------------------------------------------------
     WHISPER_MODELS: List[str] = [
         "tiny", "tiny.en", "base", "base.en", "small", "small.en",
-        "medium", "medium.en", "large-v2", "large-v3",
+        "medium", "medium.en", "large-v2", "large-v3", "large-v3-turbo",
     ]
 
     # -------------------------------------------------------------------------
-    # URL‑Refresh (für Twitch, YouTube, etc.) – neu
+    # URL‑Refresh (für Twitch, YouTube, etc.)
     # -------------------------------------------------------------------------
     MAX_REFRESH_ATTEMPTS: int = 3
     REFRESH_RETRY_DELAY_BASE: float = 2.0
@@ -1125,7 +1125,21 @@ class Config(ConfigDefaults):
     def get_audio_filter(
         self, language: Optional[str] = None, profile: Optional[str] = None
     ) -> str:
-        return "aresample=16000"
+        """Gibt einen Audiofilter basierend auf Sprache und Profil zurück."""
+        # Basis: Standardfilter aus Konfiguration
+        filter_str = self.AUDIO_FILTER
+
+        # Wenn ein Profil angegeben ist und in FILTER_PROFILES existiert, verwende es
+        if profile and profile in self.FILTER_PROFILES:
+            filter_str = self.FILTER_PROFILES[profile]
+
+        # Sprachspezifische Anpassungen (optional)
+        if language and language in self.LANGUAGE_FILTERS:
+            # Hier könnte man spezifische Filter für Sprachen hinterlegen
+            # Aktuell überschreibt LANGUAGE_FILTERS nicht, sondern kann als Fallback dienen
+            filter_str = self.LANGUAGE_FILTERS[language]
+
+        return filter_str
 
     def get_youtube_headers(self, is_manifest: bool = False) -> Dict[str, str]:
         headers = self.YOUTUBE_HEADERS.copy()
@@ -1160,8 +1174,18 @@ class Config(ConfigDefaults):
             "large": 6,
             "large-v2": 6,
             "large-v3": 6,
+            "large-v3-turbo": 5,   # neues Modell
         }
         return model_durations.get(model_size.lower(), self._base_chunk_duration)
+
+    @classmethod
+    def get_dynamic_max_memory(cls) -> int:
+        """Ermittelt dynamisch die maximale Speichergrenze (75 % des verfügbaren RAM)."""
+        try:
+            import psutil
+            return int(psutil.virtual_memory().total * 0.75)
+        except ImportError:
+            return cls.MAX_MEMORY_USAGE
 
     def validate_config(self) -> bool:
         try:
@@ -13220,7 +13244,7 @@ class InstallDependencyDialog(BaseDialog):
 
     def __init__(self, parent, gui_ref):
         self.gui = gui_ref
-        self._stop_event = threading.Event()          # Ersetzt self._stop_requested
+        self._stop_event = threading.Event()
         self.in_venv = (hasattr(sys, 'real_prefix') or
                         (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix))
         super().__init__(parent, "Fehlende Abhängigkeiten installieren", width=750, height=600, modal=True)
@@ -19474,6 +19498,31 @@ class AudioProcessor:
             return "youtube"
         return "default"
 
+    def _fallback_language_detection(self, text: str) -> Optional[str]:
+        """
+        Versucht, die Sprache eines Textes mit langdetect zu erkennen.
+        Gibt ISO-Code zurück oder None bei Fehler/fehlender Bibliothek.
+        """
+        try:
+            import langdetect
+            # Kurze Texte führen oft zu Fehlern – ignorieren
+            if len(text) < 20:
+                return None
+            detected = langdetect.detect(text)
+            # Prüfen, ob der Code in SUPPORTED_LANGUAGES existiert
+            if detected in SUPPORTED_LANGUAGES:
+                return detected
+            # Fallback: chinesische Varianten normalisieren
+            if detected.startswith('zh'):
+                return 'zh'
+            return None
+        except ImportError:
+            return None
+        except Exception as e:
+            if DEBUG_LEVEL >= 3:
+                logger.debug(f"Language detection error: {e}")
+            return None
+
     def _update_chunk_size(self) -> None:
         self.chunk_size = int(self.config.CHUNK_DURATION * self.config.BYTES_PER_SECOND)
 
@@ -20134,7 +20183,16 @@ class AudioProcessor:
             if self._sentence_parts and (now - self._last_sentence_time) > self._sentence_flush_interval:
                 sentence = " ".join(self._sentence_parts).strip()
                 if sentence and self.translation_engine and self._translation_enabled.is_set():
-                    detected_lang = transcription.language or "auto"
+                    # Sprachfallback bei niedriger Konfidenz
+                    lang = transcription.language or "auto"
+                    conf_local = getattr(transcription, "confidence", 0.0)
+                    if lang == "auto" or conf_local < 0.5:
+                        fallback = self._fallback_language_detection(clean_text)
+                        if fallback:
+                            lang = fallback
+                            if DEBUG_LEVEL >= 3:
+                                logger.debug(f"Language fallback: {transcription.language} -> {lang} (conf={conf_local:.2f})")
+                    detected_lang = lang
                     first = self._sentence_segments[0] if self._sentence_segments else None
                     last = self._sentence_segments[-1] if self._sentence_segments else None
                     self._translate_and_send_async(
@@ -20157,7 +20215,16 @@ class AudioProcessor:
             if clean_text and clean_text[-1] in ".!?。！？":
                 sentence = " ".join(self._sentence_parts).strip()
                 if sentence and self.translation_engine and self._translation_enabled.is_set():
-                    detected_lang = transcription.language or "auto"
+                    # Sprachfallback bei niedriger Konfidenz
+                    lang = transcription.language or "auto"
+                    conf_local = getattr(transcription, "confidence", 0.0)
+                    if lang == "auto" or conf_local < 0.5:
+                        fallback = self._fallback_language_detection(clean_text)
+                        if fallback:
+                            lang = fallback
+                            if DEBUG_LEVEL >= 3:
+                                logger.debug(f"Language fallback: {transcription.language} -> {lang} (conf={conf_local:.2f})")
+                    detected_lang = lang
                     first = self._sentence_segments[0]
                     last = transcription
                     self._translate_and_send_async(
@@ -20173,7 +20240,16 @@ class AudioProcessor:
             elif len(self._sentence_parts) > self._sentence_flush_word_threshold:
                 sentence = " ".join(self._sentence_parts).strip()
                 if sentence and self.translation_engine and self._translation_enabled.is_set():
-                    detected_lang = transcription.language or "auto"
+                    # Sprachfallback bei niedriger Konfidenz
+                    lang = transcription.language or "auto"
+                    conf_local = getattr(transcription, "confidence", 0.0)
+                    if lang == "auto" or conf_local < 0.5:
+                        fallback = self._fallback_language_detection(clean_text)
+                        if fallback:
+                            lang = fallback
+                            if DEBUG_LEVEL >= 3:
+                                logger.debug(f"Language fallback: {transcription.language} -> {lang} (conf={conf_local:.2f})")
+                    detected_lang = lang
                     first = self._sentence_segments[0] if self._sentence_segments else None
                     last = transcription
                     self._translate_and_send_async(
@@ -20250,7 +20326,16 @@ class AudioProcessor:
                 if self._sentence_parts and (now - self._last_sentence_time) > self._sentence_flush_interval:
                     sentence = " ".join(self._sentence_parts).strip()
                     if sentence and self.translation_engine and self._translation_enabled.is_set():
-                        detected_lang = segment.language or "auto"
+                        # Sprachfallback bei niedriger Konfidenz
+                        lang = segment.language or "auto"
+                        conf_local = getattr(segment, "confidence", 0.0)
+                        if lang == "auto" or conf_local < 0.5:
+                            fallback = self._fallback_language_detection(clean_text)
+                            if fallback:
+                                lang = fallback
+                                if DEBUG_LEVEL >= 3:
+                                    logger.debug(f"Language fallback: {segment.language} -> {lang} (conf={conf_local:.2f})")
+                        detected_lang = lang
                         first = self._sentence_segments[0] if self._sentence_segments else None
                         last = self._sentence_segments[-1] if self._sentence_segments else None
                         self._translate_and_send_async(
@@ -20271,7 +20356,16 @@ class AudioProcessor:
                 if clean_text and clean_text[-1] in ".!?。！？":
                     sentence = " ".join(self._sentence_parts).strip()
                     if sentence and self.translation_engine and self._translation_enabled.is_set():
-                        detected_lang = segment.language or "auto"
+                        # Sprachfallback bei niedriger Konfidenz
+                        lang = segment.language or "auto"
+                        conf_local = getattr(segment, "confidence", 0.0)
+                        if lang == "auto" or conf_local < 0.5:
+                            fallback = self._fallback_language_detection(clean_text)
+                            if fallback:
+                                lang = fallback
+                                if DEBUG_LEVEL >= 3:
+                                    logger.debug(f"Language fallback: {segment.language} -> {lang} (conf={conf_local:.2f})")
+                        detected_lang = lang
                         first = self._sentence_segments[0]
                         last = segment
                         self._translate_and_send_async(
@@ -20287,7 +20381,16 @@ class AudioProcessor:
                 elif len(self._sentence_parts) > self._sentence_flush_word_threshold:
                     sentence = " ".join(self._sentence_parts).strip()
                     if sentence and self.translation_engine and self._translation_enabled.is_set():
-                        detected_lang = segment.language or "auto"
+                        # Sprachfallback bei niedriger Konfidenz
+                        lang = segment.language or "auto"
+                        conf_local = getattr(segment, "confidence", 0.0)
+                        if lang == "auto" or conf_local < 0.5:
+                            fallback = self._fallback_language_detection(clean_text)
+                            if fallback:
+                                lang = fallback
+                                if DEBUG_LEVEL >= 3:
+                                    logger.debug(f"Language fallback: {segment.language} -> {lang} (conf={conf_local:.2f})")
+                        detected_lang = lang
                         first = self._sentence_segments[0] if self._sentence_segments else None
                         last = segment
                         self._translate_and_send_async(
