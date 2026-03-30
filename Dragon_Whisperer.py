@@ -356,6 +356,7 @@ class EventBus:
         if self._debug:
             logger.debug(f"EventBus: Emitting '{event_type}'")
 
+        # Exact callbacks – Kopie unter Lock
         with self._lock:
             exact_callbacks = list(self._exact.get(event_type, []))
         for cb in exact_callbacks:
@@ -367,6 +368,7 @@ class EventBus:
                     with self._lock:
                         self._metrics["errors"] += 1
 
+        # Pattern callbacks – ebenfalls Kopie unter Lock
         with self._lock:
             pattern_callbacks = list(self._patterns)
         for pattern, cb in pattern_callbacks:
@@ -1216,36 +1218,86 @@ class Config(ConfigDefaults):
 
 
 class RealtimeConfig(Config):
+    """
+    Konfiguration für Echtzeit-Transkription mit minimaler Latenz.
+
+    Geeignet für Live-Streams, bei denen eine schnelle Ausgabe wichtiger ist als
+    höchste Genauigkeit. Die Chunk-Dauer ist kurz, der Audio-Filter ist optimiert
+    für schnelle Verarbeitung, und optionale Verbesserungen (Rauschunterdrückung,
+    Duplikaterkennung) sind deaktiviert, um die Verarbeitungsgeschwindigkeit zu maximieren.
+    """
+
     def __init__(self) -> None:
         super().__init__()
-        self.CHUNK_DURATION = 5
-        self.CHUNK_OVERLAP = 0.3
-        self.STREAM_TIMEOUT = 5
+        self.CHUNK_DURATION = 5.0               # kurze Chunks für niedrige Latenz
+        self.CHUNK_OVERLAP = 0.3                # minimale Überlappung
+        self.STREAM_TIMEOUT = 5                 # aggressives Timeout
         self.AUDIO_FILTER = self.FILTER_PROFILES["realtime"]
+
+        # Weitere Optimierungen für Echtzeitbetrieb
+        self.AUDIO_ENHANCEMENT_ENABLED = False   # spart Rechenzeit
+        self.DUPLICATE_CHECK_ENABLED = False     # vermeidet zusätzliche Berechnungen
+        self.MAX_CONSECUTIVE_ERRORS = 3          # schneller auf Fehler reagieren
 
 
 class HighAccuracyConfig(Config):
+    """
+    Konfiguration für höchste Transkriptionsgenauigkeit bei geringerem Zeitdruck.
+
+    Verwendet lange Chunks, eine große Überlappung, einen aufwändigen Audio-Filter
+    und aktiviert optionale Qualitätsverbesserungen (Rauschunterdrückung,
+    Duplikaterkennung, größere Beam‑Size). Ideal für vorab aufgenommene Dateien
+    oder Aufnahmen, bei denen die Verarbeitungszeit keine Rolle spielt.
+    """
+
     def __init__(self) -> None:
         super().__init__()
-        self.CHUNK_DURATION = 25
-        self.CHUNK_OVERLAP = 0.8
+        self.CHUNK_DURATION = 25.0              # lange Chunks für besseren Kontext
+        self.CHUNK_OVERLAP = 0.8                # hohe Überlappung für glatte Übergänge
         self.AUDIO_FILTER = (
             "aresample=16000,volume=1.8,highpass=f=80,"
             "lowpass=f=3800,dynaudnorm=p=0.3:s=3:g=20"
         )
 
+        # Qualitätssteigerung
+        self.AUDIO_ENHANCEMENT_ENABLED = True    # Rauschunterdrückung und Verstärkung
+        self.DUPLICATE_CHECK_ENABLED = True      # verhindert redundante Ausgaben
+        self.BEAM_SIZE = 15                      # breitere Suche → genauere Ergebnisse
+        self.TEMPERATURE = 0.0                   # deterministisch
+        self.VAD_FILTER = True                   # entfernt Stille vor der Transkription
+
 
 class YouTubeOptimizedConfig(Config):
+    """
+    Speziell auf YouTube‑Streams abgestimmte Konfiguration.
+
+    Behebt häufige Probleme bei YouTube (z. B. Timeouts, Verbindungsabbrüche)
+    durch angepasste FFmpeg‑Parameter, großzügigere Timeouts und einen robusten
+    Audio‑Filter. Die Einstellungen sind darauf ausgerichtet, auch bei instabilen
+    Verbindungen oder HLS‑Streams eine stabile Wiedergabe zu gewährleisten.
+    """
+
     def __init__(self) -> None:
         super().__init__()
+        # FFmpeg‑Parameter für stabile Wiedergabe
         self.FFMPEG_THREADS = 1
         self.FFMPEG_BUFSIZE = "1024k"
-        self.YOUTUBE_TIMEOUT = 5000000
-        self.RECONNECT_DELAY = 1
+
+        # Erweiterte Timeouts für YouTube
+        self.YOUTUBE_TIMEOUT = 5000000          # Mikrosekunden
+        self.RECONNECT_DELAY = 1                # Sekunden
+        self.YOUTUBE_URL_REFRESH_INTERVAL = 300 # 5 Minuten
+        self.MAX_REFRESH_ATTEMPTS = 5           # mehr Versuche bei Problemen
+        self.STREAM_TIMEOUT = 10                # etwas toleranter als Standard
+
+        # Audio‑Filter für YouTube‑spezifische Audio‑Spuren
         self.AUDIO_FILTER = (
             "aresample=16000,volume=2.2,highpass=f=120,"
             "lowpass=f=3200,compand=attacks=0:decays=0.3"
         )
+
+        # Optionale Verbesserungen deaktiviert (Filter sind bereits stark)
+        self.AUDIO_ENHANCEMENT_ENABLED = False
 
 
 def get_config(config_type: str = "default") -> Config:
@@ -5370,7 +5422,7 @@ class TranscriptionEngine:
                 if self._debug:
                     logger.debug("⚠️ Model reloading already in progress")
                 return False
-            self._reloading = True      # Kritischer Bugfix: sofort setzen!
+            self._reloading = True
 
         def _load_in_background():
             try:
@@ -5417,6 +5469,10 @@ class TranscriptionEngine:
         thread = threading.Thread(target=_load_in_background, daemon=True, name=f"ModelLoader-{model_size}")
         thread.start()
         return True
+
+    def is_functional(self) -> bool:
+        """Gibt True zurück, wenn die Engine tatsächlich Transkriptionen liefern kann."""
+        return self.model is not None and not isinstance(self, DummyTranscriptionEngine)
 
     def is_model_loading(self) -> bool:
         with self._lock:
@@ -6535,6 +6591,9 @@ class DummyTranscriptionEngine:
             return result[0]  # Falls doch Liste, nimm ersten
         return result
 
+    def is_functional(self) -> bool:
+        return False
+
     def get_current_model(self) -> str:
         return "dummy"
 
@@ -7096,15 +7155,21 @@ class StreamManager:
             return
         self._disposed = True
 
-        # 1. DVB-Monitor-Thread beenden
-        self._dvb_monitor_stop.set()
-        if self._dvb_monitor_thread and self._dvb_monitor_thread.is_alive():
-            timeout = 0.5 if force else 2.0
-            self._dvb_monitor_thread.join(timeout=timeout)
-            if self._dvb_monitor_thread.is_alive():
-                logger.warning("⚠️ DVBMonitor thread did not terminate within timeout")
-            elif self._debug:
-                logger.debug("✅ DVBMonitor thread terminated")
+        # 1. DVB-Monitor-Thread beenden (mit Event)
+        if hasattr(self, '_dvb_monitor_stop'):
+            self._dvb_monitor_stop.set()
+            if self._dvb_monitor_thread and self._dvb_monitor_thread.is_alive():
+                timeout = 0.5 if force else 2.0
+                self._dvb_monitor_thread.join(timeout=timeout)
+                if self._dvb_monitor_thread.is_alive():
+                    logger.warning("⚠️ DVBMonitor thread did not terminate within timeout")
+                else:
+                    logger.debug("✅ DVBMonitor thread terminated")
+        else:
+            # Fallback für ältere Instanzen ohne Event
+            if self._dvb_monitor_thread and self._dvb_monitor_thread.is_alive():
+                logger.debug("DVBMonitor thread still alive, but no stop event – forcing termination")
+                # Daemon-Thread wird beim Programmende ohnehin abgeschossen – nur Log
 
         # 2. Alle Caches leeren
         self.clear_caches()
@@ -7359,13 +7424,27 @@ class StreamManager:
             return None, str(e)
 
     def _start_dvb_monitor(self) -> None:
+        """
+        Startet einen Hintergrundthread, der regelmäßig prüft, ob DVB‑Prozesse
+        noch laufen, und sie ggf. bereinigt. Der Thread kann über das interne
+        _dvb_monitor_stop‑Event sauber beendet werden.
+        """
         if self._dvb_monitor_thread is not None:
             return
 
-        def monitor():
+        # Stop‑Event für den Monitor‑Thread (wird bei dispose() gesetzt)
+        self._dvb_monitor_stop = threading.Event()
+
+        def monitor() -> None:
+            """Überwachungsfunktion, läuft im eigenen Thread."""
+            logger.debug("🛰️ DVBMonitor thread started")
             while not self._dvb_monitor_stop.is_set():
                 try:
-                    time.sleep(30)
+                    # Warte 30 Sekunden oder bis Stop gesetzt wird
+                    if self._dvb_monitor_stop.wait(30):
+                        break
+
+                    # Prüfe alle DVB‑Prozesse
                     with self._dvb_lock:
                         for proc in self._dvb_processes[:]:
                             if proc.poll() is not None:
@@ -7374,16 +7453,21 @@ class StreamManager:
                 except Exception as e:
                     logger.error(f"Fehler im DVB-Monitor-Thread: {e}", exc_info=True)
 
-        self._dvb_monitor_thread = threading.Thread(target=monitor, daemon=True, name="DVBMonitor")
+            logger.debug("✅ DVBMonitor thread terminated")
+
+        # Thread-Objekt erstellen und SOFORT zuweisen, bevor gestartet wird
+        self._dvb_monitor_thread = threading.Thread(
+            target=monitor,
+            daemon=False,               # Nicht‑Daemon, damit wir kontrolliert beenden können
+            name="DVBMonitor"
+        )
         self._dvb_monitor_thread.start()
 
     def _start_dvb_stream(self, dvb_url: str) -> Optional[str]:
         """
         Startet einen VLC‑Prozess für DVB‑S‑Streaming.
-
         Args:
             dvb_url: DVB‑URL im Format dvb-s://frequency=...&symbolrate=...&polarization=...
-
         Returns:
             Die HTTP‑URL des VLC‑Streams oder None bei Fehler.
         """
@@ -7813,12 +7897,55 @@ class FFmpegManager:
     # --- Cache für YouTube-Headers (Optimierung) ---
     _YOUTUBE_HEADERS_STRING: Optional[str] = None
 
-    # --- Blockgröße für Lesethread (feste Größe) ---
+    # --- Blockgröße für Lesethread (wird dynamisch angepasst) ---
     READ_BLOCK_SIZE: int = 8192
 
     # -------------------------------------------------------------------------
-    #  Interne Datenstruktur für Prozessinformationen
+    #  Interne Hilfsklassen
     # -------------------------------------------------------------------------
+    class _LRUCache:
+        """Einfacher LRU-Cache mit maximaler Größe."""
+        def __init__(self, maxsize: int = 100):
+            self.maxsize = maxsize
+            self._cache = OrderedDict()
+            self._lock = threading.RLock()
+
+        def get(self, key: str) -> Optional[Any]:
+            with self._lock:
+                if key in self._cache:
+                    self._cache.move_to_end(key)
+                    return self._cache[key]
+                return None
+
+        def put(self, key: str, value: Any) -> None:
+            with self._lock:
+                if key in self._cache:
+                    self._cache.move_to_end(key)
+                self._cache[key] = value
+                if len(self._cache) > self.maxsize:
+                    self._cache.popitem(last=False)
+
+        def clear(self) -> None:
+            with self._lock:
+                self._cache.clear()
+
+    class _RateLimiter:
+        """Begrenzt die Anzahl von Log-Meldungen pro Zeitraum."""
+        def __init__(self, max_messages: int = 10, period: float = 60.0):
+            self.max = max_messages
+            self.period = period
+            self._timestamps: List[float] = []
+            self._lock = threading.RLock()
+
+        def allow(self) -> bool:
+            with self._lock:
+                now = time.time()
+                self._timestamps = [t for t in self._timestamps if now - t < self.period]
+                if len(self._timestamps) < self.max:
+                    self._timestamps.append(now)
+                    return True
+                return False
+
     class _ProcessInfo:
         __slots__ = (
             "process_id", "process", "yt_process", "output_queue", "start_time", "url",
@@ -7827,7 +7954,6 @@ class FFmpegManager:
             "refresh_attempts", "current_read_future", "pipe_mode", "creation_time",
             "last_error", "error_count", "last_stderr_line", "_skip_semaphore_release",
             "yt_stderr_thread", "yt_stderr_stop", "_removing",
-            # Neue Felder für Lesethread pro Prozess
             "read_queue", "read_thread", "read_stop", "read_buffer"
         )
         def __init__(self,
@@ -7877,11 +8003,10 @@ class FFmpegManager:
             self.yt_stderr_thread: Optional[threading.Thread] = None
             self.yt_stderr_stop: Optional[threading.Event] = None
             self._removing = False
-            # Neue Attribute für dedizierten Lesethread
             self.read_queue: Optional[queue.Queue] = None
             self.read_thread: Optional[threading.Thread] = None
             self.read_stop: Optional[threading.Event] = None
-            self.read_buffer: bytes = b""  # Puffer für übrig gebliebene Bytes
+            self.read_buffer: bytes = b""
 
     # -------------------------------------------------------------------------
     #  Konstruktor
@@ -7935,18 +8060,19 @@ class FFmpegManager:
         }
         self._stats_lock = threading.RLock()
 
-        # Cache für Live‑Erkennung
-        self._live_detection_cache: Dict[str, Dict[str, Any]] = {}
+        # Cache für Live‑Erkennung (LRU)
+        self._live_detection_cache = self._LRUCache(maxsize=100)
         self._pid_tracking: Dict[int, Dict[str, Any]] = {}
 
-        # Periodische Bereinigung
+        # Periodische Bereinigung (mit kontrollierbarem Stop-Event)
         self._cleanup_stop_event = threading.Event()
         self._cleanup_thread = threading.Thread(
             target=self._cleanup_worker,
-            daemon=True,
+            daemon=False,
             name="FFmpegManagerCleanup"
         )
         self._cleanup_thread.start()
+        log_debug("ffmpeg", "Cleanup thread started")
 
         # psutil initialisieren
         self._psutil = None
@@ -7963,10 +8089,22 @@ class FFmpegManager:
         self._disposed = False
         atexit.register(self._atexit_cleanup)
 
+        # Dynamische Blockgröße basierend auf der Datenrate
+        self._update_block_size()
+
         logger.info(
             f"✅ FFmpegManager initialized (Platform: {SYSTEM}, "
             f"max_processes={max_processes}, process_timeout={process_timeout}s)"
         )
+
+    def _update_block_size(self) -> None:
+        """Passt die Leseblockgröße an die erwartete Datenrate an."""
+        # Ziel: ca. 0.1 Sekunden Audio pro Block
+        if self.config and self.config.BYTES_PER_SECOND:
+            self.READ_BLOCK_SIZE = max(4096, int(self.config.BYTES_PER_SECOND * 0.1))
+            self.READ_BLOCK_SIZE = min(self.READ_BLOCK_SIZE, 32768)
+        else:
+            self.READ_BLOCK_SIZE = 8192
 
     def _atexit_cleanup(self) -> None:
         """Notfall‑Cleanup, falls dispose nicht aufgerufen wurde."""
@@ -8343,8 +8481,13 @@ class FFmpegManager:
             process = pinfo.process
             read_queue = pinfo.read_queue
             if read_queue is None:
-                # Fallback: Lesethread wurde nicht gestartet (sollte nicht vorkommen)
                 log_debug("ffmpeg", f"read_audio_data: no read_queue for {process_id}")
+                return None
+
+            # Prüfe, ob der Lesethread noch lebt
+            if pinfo.read_thread and not pinfo.read_thread.is_alive():
+                logger.warning(f"⚠️ read_audio_data: read thread for {process_id} is dead")
+                self._remove_process(process_id)
                 return None
 
         # Dynamischer Timeout – wie bisher
@@ -8557,7 +8700,6 @@ class FFmpegManager:
                     pinfo.current_read_future.cancel()
                     if DEBUG_LEVEL >= 3:
                         log_debug("ffmpeg", f"Canceled read future for {pinfo.process_id}")
-                # Lesethreads können nicht "abgebrochen" werden, aber wir setzen stop
                 if pinfo.read_stop:
                     pinfo.read_stop.set()
 
@@ -8600,7 +8742,7 @@ class FFmpegManager:
             stats["active_processes"] = len([p for p in self._processes.values()
                                              if p.process.poll() is None])
             stats["total_processes"] = len(self._processes)
-            stats["live_detection_cache_size"] = len(self._live_detection_cache)
+            stats["live_detection_cache_size"] = len(self._live_detection_cache._cache)
             stats["semaphore_value"] = self._active_slots
 
             process_reads = 0
@@ -8657,17 +8799,31 @@ class FFmpegManager:
             return sum(1 for pinfo in self._processes.values() if pinfo.process.poll() is None)
 
     def dispose(self) -> None:
+        """Schließt alle Ressourcen und beendet den Cleanup-Thread."""
         logger.info("🧹 Shutting down FFmpeg Manager...")
         self._global_shutdown = True
+
+        # Cleanup-Thread beenden
+        log_debug("ffmpeg", "Setting cleanup_stop_event")
         self._cleanup_stop_event.set()
-        self.kill_all_streams()
         if self._cleanup_thread.is_alive():
+            log_debug("ffmpeg", "Waiting for cleanup thread to terminate (timeout=2.0s)")
             self._cleanup_thread.join(timeout=2.0)
             if self._cleanup_thread.is_alive():
                 logger.warning("⚠️ Cleanup thread did not stop within 2 seconds")
+            else:
+                log_debug("ffmpeg", "Cleanup thread terminated")
+        else:
+            log_debug("ffmpeg", "Cleanup thread not alive")
+
+        # Alle Streams killen
+        self.kill_all_streams()
+
+        # Caches leeren
         self._live_detection_cache.clear()
         self._pid_tracking.clear()
         self._processes.clear()
+
         self._disposed = True
         gc.collect()
         logger.info("✅ FFmpeg Manager disposed")
@@ -8842,12 +8998,11 @@ class FFmpegManager:
 
     def _check_youtube_live_by_metadata(self, url: str) -> bool:
         cache_key = f"live_meta_{hashlib.md5(url.encode()).hexdigest()[:16]}"
-        with self._lock:
-            if cache_key in self._live_detection_cache:
-                cached = self._live_detection_cache[cache_key]
-                if time.time() - cached["timestamp"] < 300:
-                    log_debug("ffmpeg", f"Metadata check (cached): {url[:50]} is_live={cached['is_live']}")
-                    return cached["is_live"]
+        cached = self._live_detection_cache.get(cache_key)
+        if cached is not None:
+            if time.time() - cached["timestamp"] < 300:
+                log_debug("ffmpeg", f"Metadata check (cached): {url[:50]} is_live={cached['is_live']}")
+                return cached["is_live"]
 
         try:
             import json
@@ -8863,12 +9018,11 @@ class FFmpegManager:
             if proc.returncode == 0 and proc.stdout:
                 data = json.loads(proc.stdout)
                 is_live = data.get("is_live", False)
-                with self._lock:
-                    self._live_detection_cache[cache_key] = {
-                        "is_live": is_live,
-                        "timestamp": time.time(),
-                        "url": url[:50]
-                    }
+                self._live_detection_cache.put(cache_key, {
+                    "is_live": is_live,
+                    "timestamp": time.time(),
+                    "url": url[:50]
+                })
                 log_debug("ffmpeg", f"Metadata check: {url[:50]} is_live={is_live}")
                 return is_live
         except Exception as e:
@@ -8981,11 +9135,10 @@ class FFmpegManager:
 
     def _detect_stream_type(self, url: str) -> Tuple[bool, str]:
         cache_key = hashlib.md5(url.encode()).hexdigest()[:16]
-        with self._lock:
-            if cache_key in self._live_detection_cache:
-                cached = self._live_detection_cache[cache_key]
-                if time.time() - cached["timestamp"] < 300:
-                    return cached["is_live"], cached["platform"]
+        cached = self._live_detection_cache.get(cache_key)
+        if cached is not None:
+            if time.time() - cached["timestamp"] < 300:
+                return cached["is_live"], cached["platform"]
 
         is_live = False
         platform = "unknown"
@@ -9035,17 +9188,12 @@ class FFmpegManager:
             else:
                 platform = "HTTP Stream"
 
-            with self._lock:
-                self._live_detection_cache[cache_key] = {
-                    "is_live": is_live,
-                    "platform": platform,
-                    "timestamp": time.time(),
-                    "url": url[:50],
-                }
-                if len(self._live_detection_cache) > 100:
-                    oldest = min(self._live_detection_cache.items(),
-                                 key=lambda x: x[1]["timestamp"])[0]
-                    del self._live_detection_cache[oldest]
+            self._live_detection_cache.put(cache_key, {
+                "is_live": is_live,
+                "platform": platform,
+                "timestamp": time.time(),
+                "url": url[:50],
+            })
             log_debug("ffmpeg", f"detect_stream_type: url={url[:50]}, is_live={is_live}, platform={platform}")
             return is_live, platform
 
@@ -9240,28 +9388,29 @@ class FFmpegManager:
         logger.debug(f"[FFmpegManager] Reader thread started for {pinfo.process_id}")
 
     def _stop_read_thread(self, pinfo: "_ProcessInfo") -> None:
-        """Stoppt den Lesethread (setzt Event, schließt Pipe) und wartet auf Thread-Ende."""
+        """
+        Stoppt den Lesethread (setzt Event, schließt Pipe) und wartet auf Thread-Ende.
+        Optimiert: Pipe wird zuerst geschlossen, um blockierenden read() abzubrechen.
+        """
         logger.debug(f"[FFmpegManager] _stop_read_thread: {pinfo.process_id}")
 
-        # 1. Stop-Event setzen
-        if pinfo.read_stop:
-            pinfo.read_stop.set()
-            logger.debug(f"[FFmpegManager] read_stop event set for {pinfo.process_id}")
-
-        # 2. Kurze Pause, damit der Thread das Event bemerken und aus read() aussteigen kann
-        time.sleep(0.2)
-
-        # 3. Pipe schließen, um blockierenden read() zu beenden (falls noch blockiert)
+        # 1. Pipe schließen, um blockierenden read() zu beenden (wichtig: zuerst!)
         if pinfo.process and pinfo.process.stdout and not pinfo.process.stdout.closed:
             try:
                 pinfo.process.stdout.close()
                 logger.debug(f"[FFmpegManager] Closed stdout for {pinfo.process_id} in stop_read_thread")
             except Exception as e:
                 logger.debug(f"[FFmpegManager] Error closing stdout for {pinfo.process_id}: {e}")
-                
-        time.sleep(0.05) 
 
-        # 4. Warten auf den Thread (falls vorhanden und noch aktiv)
+        # 2. Stop-Event setzen (optional, da der Thread auch die Pipe-Schließung erkennt)
+        if pinfo.read_stop:
+            pinfo.read_stop.set()
+            logger.debug(f"[FFmpegManager] read_stop event set for {pinfo.process_id}")
+
+        # Kurze Pause, damit der Thread die Pipe-Schließung bemerkt
+        time.sleep(0.05)
+
+        # 3. Warten auf den Thread (falls vorhanden und noch aktiv)
         if pinfo.read_thread and pinfo.read_thread.is_alive():
             logger.debug(f"[FFmpegManager] Joining read_thread for {pinfo.process_id}...")
             pinfo.read_thread.join(timeout=2.0)
@@ -9270,7 +9419,7 @@ class FFmpegManager:
             else:
                 logger.debug(f"[FFmpegManager] read_thread joined for {pinfo.process_id}")
 
-        # 5. Referenzen löschen
+        # 4. Referenzen löschen
         pinfo.read_thread = None
         pinfo.read_queue = None
         pinfo.read_stop = None
@@ -9279,6 +9428,8 @@ class FFmpegManager:
         logger.debug(f"[FFmpegManager] _stop_read_thread done for {pinfo.process_id}")
 
     def _start_stderr_thread(self, pinfo: "_ProcessInfo") -> None:
+        rate_limiter = self._RateLimiter(max_messages=10, period=60.0)
+
         def stderr_worker() -> None:
             process = pinfo.process
             stop = pinfo.stop_stderr
@@ -9323,26 +9474,30 @@ class FFmpegManager:
                             continue
                         else:
                             if reconnect_counter > 0:
+                                if rate_limiter.allow():
+                                    logger.debug(
+                                        f"FFmpeg stderr ({pinfo.process_id}): "
+                                        f"{reconnect_counter+1} reconnect messages suppressed, last: {last_line}"
+                                    )
+                            reconnect_counter = 0
+                            last_reconnect_time = now
+                            if rate_limiter.allow():
+                                logger.debug(f"FFmpeg stderr ({pinfo.process_id}): {line}")
+                            last_line = line
+                        continue
+                    else:
+                        if reconnect_counter > 0:
+                            if rate_limiter.allow():
                                 logger.debug(
                                     f"FFmpeg stderr ({pinfo.process_id}): "
                                     f"{reconnect_counter+1} reconnect messages suppressed, last: {last_line}"
                                 )
                             reconnect_counter = 0
-                            last_reconnect_time = now
-                            logger.debug(f"FFmpeg stderr ({pinfo.process_id}): {line}")
-                            last_line = line
-                        continue
-                    else:
-                        if reconnect_counter > 0:
-                            logger.debug(
-                                f"FFmpeg stderr ({pinfo.process_id}): "
-                                f"{reconnect_counter+1} reconnect messages suppressed, last: {last_line}"
-                            )
-                            reconnect_counter = 0
                             last_reconnect_time = 0.0
                         if DEBUG_LEVEL >= 3:
-                            logger.debug(f"FFmpeg stderr ({pinfo.process_id}): {line}")
-                        elif not is_ignored:
+                            if rate_limiter.allow():
+                                logger.debug(f"FFmpeg stderr ({pinfo.process_id}): {line}")
+                        elif not is_ignored and rate_limiter.allow():
                             logger.debug(f"FFmpeg stderr ({pinfo.process_id}): {line}")
 
                     if "Error" in line or "error" in line:
@@ -9356,10 +9511,11 @@ class FFmpegManager:
                     break
 
             if reconnect_counter > 0:
-                logger.debug(
-                    f"FFmpeg stderr ({pinfo.process_id}): "
-                    f"{reconnect_counter+1} reconnect messages suppressed, last: {last_line}"
-                )
+                if rate_limiter.allow():
+                    logger.debug(
+                        f"FFmpeg stderr ({pinfo.process_id}): "
+                        f"{reconnect_counter+1} reconnect messages suppressed, last: {last_line}"
+                    )
             logger.debug(f"stderr thread stopped for {pinfo.process_id}")
 
         thread = threading.Thread(target=stderr_worker, daemon=True,
@@ -9431,7 +9587,6 @@ class FFmpegManager:
                     self._stats["process_terminations_kill"] += 1
                 elif mode == "failed":
                     self._stats["process_terminations_failed"] += 1
-                # "exception" wird nicht gezählt, da bereits geloggt
 
         return PlatformUtils.terminate_process(
             proc,
@@ -9606,9 +9761,16 @@ class FFmpegManager:
                 logger.info(f"✅ Stale process {pid} removed")
 
     def _cleanup_worker(self) -> None:
+        """
+        Periodische Bereinigung von toten Prozessen.
+        Wartet auf das Stop-Event oder das Intervall.
+        """
+        log_debug("ffmpeg", "Cleanup worker thread started")
         while not self._cleanup_stop_event.is_set():
             if self._cleanup_stop_event.wait(self.CLEANUP_INTERVAL):
+                log_debug("ffmpeg", "Cleanup worker: stop event received, exiting")
                 break
+            log_debug("ffmpeg", "Cleanup worker: performing periodic cleanup")
             try:
                 self.cleanup_stale_processes()
                 # _read_times zurücksetzen, wenn alle Prozesse lange inaktiv waren
@@ -9619,7 +9781,8 @@ class FFmpegManager:
                     self._read_times.clear()
                     log_debug("ffmpeg", "Cleared _read_times due to inactivity")
             except Exception as e:
-                logger.warning(f"Fehler in cleanup worker: {e}")
+                logger.warning(f"Fehler in cleanup worker: {e}", exc_info=True)
+        log_debug("ffmpeg", "Cleanup worker thread terminated")
 
     def refresh_and_restart(self,
                             process_id: str,
@@ -9634,84 +9797,98 @@ class FFmpegManager:
         with self._stats_lock:
             self._stats["reconnect_attempts"] += 1
 
-        for attempt in range(1, max_attempts + 1):
-            logger.info(f"  🔁 Refresh attempt {attempt}/{max_attempts}")
+        # Slot für die Dauer des Refresh reservieren (nicht freigeben)
+        with self._lock:
+            if process_id not in self._processes:
+                logger.warning(f"Process {process_id} not found, cannot refresh")
+                return None
+            pinfo = self._processes[process_id]
+            # Markieren, dass der Slot nicht freigegeben werden soll
+            pinfo._skip_semaphore_release = True
 
-            # Alten Prozess normal stoppen (Semaphore wird freigegeben)
-            if self.is_active(process_id):
-                logger.info("  🛑 Stopping existing process")
-                self.stop_stream(process_id)
-                # Kurze Wartezeit, damit der Prozess wirklich terminiert
-                time.sleep(0.2)
+        try:
+            for attempt in range(1, max_attempts + 1):
+                logger.info(f"  🔁 Refresh attempt {attempt}/{max_attempts}")
 
-            is_live, platform = self._detect_stream_type(video_url)
-            is_youtube = "youtube.com" in video_url.lower() or "youtu.be" in video_url.lower()
-            if is_youtube and not is_live:
-                is_live = self._check_youtube_live_by_metadata(video_url)
-            use_pipe = (is_youtube and is_live) or (is_live and platform in self.PIPE_PREFERRED_PLATFORMS)
+                # Alten Prozess normal stoppen (Freigabe unterdrückt durch Flag)
+                if self.is_active(process_id):
+                    logger.info("  🛑 Stopping existing process")
+                    self.stop_stream(process_id)
+                    # Kurze Wartezeit, damit der Prozess wirklich terminiert
+                    time.sleep(0.2)
 
-            if not use_pipe:
-                logger.info("  🎵 Attempting to extract new audio URL...")
-                new_url = self._extract_audio_url(video_url, force_refresh=is_live, timeout=30.0)
-                if not new_url:
+                is_live, platform = self._detect_stream_type(video_url)
+                is_youtube = "youtube.com" in video_url.lower() or "youtu.be" in video_url.lower()
+                if is_youtube and not is_live:
+                    is_live = self._check_youtube_live_by_metadata(video_url)
+                use_pipe = (is_youtube and is_live) or (is_live and platform in self.PIPE_PREFERRED_PLATFORMS)
+
+                if not use_pipe:
+                    logger.info("  🎵 Attempting to extract new audio URL...")
+                    new_url = self._extract_audio_url(video_url, force_refresh=is_live, timeout=30.0)
+                    if not new_url:
+                        wait = min(self.REFRESH_RETRY_DELAY_MAX,
+                                   self.REFRESH_RETRY_DELAY_BASE * (2 ** (attempt - 1)))
+                        logger.warning(f"  ❌ Refresh attempt {attempt} failed (no new URL). Retry in {wait:.1f}s")
+                        time.sleep(wait)
+                        continue
+                    logger.info(f"  ✅ New audio URL obtained: {new_url[:100]}...")
+                    audio_url = new_url
+                    force_refresh = is_live
+                else:
+                    audio_url = None
+                    force_refresh = True
+                    logger.info("  🎥 Livestream: skip audio URL extraction, will use yt-dlp")
+
+                seek_seconds = None
+
+                logger.info("  🚀 Starting new FFmpeg process...")
+                try:
+                    new_process = self.start_stream(
+                        video_url=video_url,
+                        output_queue=None,
+                        process_id=process_id,
+                        force_refresh_audio_url=force_refresh,
+                        audio_url=audio_url,
+                        seek_seconds=seek_seconds,
+                        detected_language=detected_language,
+                    )
+                except Exception as e:
+                    logger.error(f"  ❌ Exception in start_stream: {e}", exc_info=True)
+                    new_process = None
+
+                if new_process is not None:
+                    logger.info(f"  ✅ New FFmpeg process started (PID: {new_process.pid})")
+                    logger.info("  🔍 Testing new process for audio data...")
+                    for test_attempt in range(3):
+                        time.sleep(1.5)
+                        test_data = self.read_audio_data(process_id, 1024)
+                        if test_data is not None and len(test_data) > 0:
+                            logger.info(f"  ✅ Data received after {test_attempt+1} attempt(s). Refresh successful.")
+                            with self._stats_lock:
+                                self._stats["reconnect_success"] += 1
+                            return new_process
+                        else:
+                            logger.debug(f"  ⏳ Test attempt {test_attempt+1}: no data yet")
+                    logger.warning("  ⚠️ New process started but no data after 3 attempts, retrying...")
+                    self.stop_stream(process_id)
+                    continue
+                else:
                     wait = min(self.REFRESH_RETRY_DELAY_MAX,
                                self.REFRESH_RETRY_DELAY_BASE * (2 ** (attempt - 1)))
-                    logger.warning(f"  ❌ Refresh attempt {attempt} failed (no new URL). Retry in {wait:.1f}s")
+                    logger.warning(f"  ❌ Refresh attempt {attempt} failed (start_stream returned None). Retry in {wait:.1f}s")
                     time.sleep(wait)
-                    continue
-                logger.info(f"  ✅ New audio URL obtained: {new_url[:100]}...")
-                audio_url = new_url
-                force_refresh = is_live
-            else:
-                audio_url = None
-                force_refresh = True
-                logger.info("  🎥 Livestream: skip audio URL extraction, will use yt-dlp")
 
-            # Seek-Position kann hier nicht mehr berechnet werden, da alter Prozess weg ist.
-            # Optional: Letzte Position speichern, aber lassen wir der Einfachheit halber weg.
-            seek_seconds = None
+            with self._stats_lock:
+                self._stats["reconnect_failures"] += 1
+            logger.error(f"❌ Failed to refresh and restart after {max_attempts} attempts")
+            return None
 
-            logger.info("  🚀 Starting new FFmpeg process...")
-            try:
-                new_process = self.start_stream(
-                    video_url=video_url,
-                    output_queue=None,
-                    process_id=process_id,
-                    force_refresh_audio_url=force_refresh,
-                    audio_url=audio_url,
-                    seek_seconds=seek_seconds,
-                    detected_language=detected_language,
-                )
-            except Exception as e:
-                logger.error(f"  ❌ Exception in start_stream: {e}", exc_info=True)
-                new_process = None
-
-            if new_process is not None:
-                logger.info(f"  ✅ New FFmpeg process started (PID: {new_process.pid})")
-                logger.info("  🔍 Testing new process for audio data...")
-                for test_attempt in range(3):
-                    time.sleep(1.5)
-                    test_data = self.read_audio_data(process_id, 1024)
-                    if test_data is not None and len(test_data) > 0:
-                        logger.info(f"  ✅ Data received after {test_attempt+1} attempt(s). Refresh successful.")
-                        with self._stats_lock:
-                            self._stats["reconnect_success"] += 1
-                        return new_process
-                    else:
-                        logger.debug(f"  ⏳ Test attempt {test_attempt+1}: no data yet")
-                logger.warning("  ⚠️ New process started but no data after 3 attempts, retrying...")
-                self.stop_stream(process_id)
-                continue
-            else:
-                wait = min(self.REFRESH_RETRY_DELAY_MAX,
-                           self.REFRESH_RETRY_DELAY_BASE * (2 ** (attempt - 1)))
-                logger.warning(f"  ❌ Refresh attempt {attempt} failed (start_stream returned None). Retry in {wait:.1f}s")
-                time.sleep(wait)
-
-        with self._stats_lock:
-            self._stats["reconnect_failures"] += 1
-        logger.error(f"❌ Failed to refresh and restart after {max_attempts} attempts")
-        return None
+        finally:
+            # Flag zurücksetzen, damit der Slot beim nächsten normalen Stop freigegeben wird
+            with self._lock:
+                if process_id in self._processes:
+                    self._processes[process_id]._skip_semaphore_release = False
 
 
 class StreamInfoExtractor:
@@ -11026,7 +11203,7 @@ class LanguageDetector:
             # Daten liegen als Bytes im nativen Format vor (hier 16-bit PCM)
             return data
 
-    def _amplify_audio(self, audio_bytes: bytes, gain: float = 2.0) -> Optional[bytes]:
+    def _amplify_audio(self, audio_bytes: bytes, gain: float = 2.0) -> bytes:
         """
         Verstärkt die Amplitude des Audiosignals (Gain-Faktor) und gibt die verstärkten
         Bytes zurück. Verwendet numpy, falls verfügbar, ansonsten struct mit expliziter
@@ -11037,13 +11214,13 @@ class LanguageDetector:
             gain: Verstärkungsfaktor (1.0 = keine Änderung).
 
         Returns:
-            Verstärkte Audiodaten oder None bei Fehler.
+            Verstärkte Audiodaten oder bei Fehler die originalen Audiodaten.
         """
-        if not audio_bytes:
-            return None
+        if not audio_bytes or gain == 1.0:
+            return audio_bytes
 
+        np = self._np  # Eigene numpy-Instanz aus AudioEnhancer
         try:
-            np = self.transcription_engine._np
             if np is not None:
                 # Mit numpy: in float konvertieren, verstärken, clippen, zurück
                 audio = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
@@ -11051,16 +11228,17 @@ class LanguageDetector:
                 np.clip(audio, -32767, 32767, out=audio)
                 return audio.astype(np.int16).tobytes()
             else:
-                # Fallback ohne numpy: struct mit explizit little-endian
-                # < = little-endian, h = signed short
+                # Fallback mit struct
                 num_samples = len(audio_bytes) // 2
-                samples = struct.unpack(f'<{num_samples}h', audio_bytes)
+                fmt = f'<{num_samples}h'
+                samples = struct.unpack(fmt, audio_bytes)
                 amplified = [int(max(-32768, min(32767, s * gain))) for s in samples]
-                return struct.pack(f'<{num_samples}h', *amplified)
+                return struct.pack(fmt, *amplified)
         except Exception as e:
-            if self._debug:
+            if self._debug or DEBUG_LEVEL >= 1:
                 logger.debug(f"Fehler bei Audio-Verstärkung: {e}")
-            return None
+            # Bei Fehler originale Daten zurückgeben, um den Betrieb nicht zu unterbrechen
+            return audio_bytes
 
 
 class OllamaSummarizer:
@@ -12000,6 +12178,7 @@ class StatusBar:
     - Eine Fortschrittsanzeige (Progressbar) mit Prozentwert.
     - Ein Label mit Systeminformationen (CPU, RAM, VRAM, Modell).
     - Buttons für Exit, TTS, Hilfe, VAD-Fallback und Live-Modus.
+    - Im Demo‑Modus zusätzlich einen roten Hinweis.
 
     Die Statusleiste ist dynamisch und reagiert auf Zustandsänderungen der GUI.
     Sie verwendet das aktuelle Theme und bietet Tooltips für alle Buttons.
@@ -12008,18 +12187,21 @@ class StatusBar:
         gui (DragonWhispererGUI): Referenz auf die Haupt-GUI.
         root (tk.Tk): Das Tkinter-Hauptfenster.
         frame (tk.Frame): Das Rahmen-Widget der Statusleiste.
+        demo_mode (bool): True, wenn Whisper nicht verfügbar ist (Demo‑Modus).
     """
 
-    def __init__(self, parent: tk.Frame, gui: "DragonWhispererGUI") -> None:
+    def __init__(self, parent: tk.Frame, gui: "DragonWhispererGUI", demo_mode: bool = False) -> None:
         """
         Initialisiert die Statusleiste.
 
         Args:
             parent: Das übergeordnete Widget (normalerweise das Hauptfenster).
             gui: Referenz auf die Haupt-GUI (für Zugriff auf Controller, Einstellungen etc.).
+            demo_mode: Ob die Anwendung im Demo‑Modus läuft (Whisper fehlt).
         """
         self.gui = gui
         self.root = gui.root
+        self.demo_mode = demo_mode
         self.frame = tk.Frame(parent, bg=gui.current_theme.BG_SECONDARY, height=36)
         self.frame.grid_propagate(True)
 
@@ -12084,7 +12266,7 @@ class StatusBar:
             ToolTip(btn, tooltip)
 
         # Installations-Button (nur im Demo-Modus oder wenn Übersetzer fehlt)
-        if getattr(self.gui, "demo_mode", False) or not TRANSLATOR_AVAILABLE:
+        if self.demo_mode or not TRANSLATOR_AVAILABLE:
             install_btn = tk.Button(
                 parent,
                 text="📦",
@@ -12101,6 +12283,20 @@ class StatusBar:
             )
             install_btn.grid(row=0, column=len(quick_actions) + 1, padx=1, sticky="w")
             ToolTip(install_btn, "Fehlende Pakete installieren")
+
+        # Demo‑Modus-Hinweis (roter Balken)
+        if self.demo_mode:
+            demo_label = tk.Label(
+                parent,
+                text="⚠️ DEMO-MODUS",
+                bg=self.gui.current_theme.BG_TERTIARY,
+                fg="red",
+                font=("Segoe UI", 8, "bold"),
+                padx=5,
+                pady=2,
+            )
+            demo_label.grid(row=0, column=len(quick_actions) + 2, padx=5, sticky="w")
+            ToolTip(demo_label, "Keine Whisper-Bibliothek verfügbar – nur Platzhalter-Transkriptionen")
 
     def _create_center_panel(self, parent: tk.Frame) -> None:
         """
@@ -12138,6 +12334,7 @@ class StatusBar:
         self.gui.system_info_label.pack(side="left", fill="x", expand=True)
 
     def _create_right_buttons(self, parent: tk.Frame) -> None:
+        """Erstellt die rechten Buttons der Statusleiste (Exit, TTS, Hilfe, VAD, Live-Modus)."""
         # Exit-Button
         self.gui.exit_button = tk.Button(
             parent,
@@ -17625,7 +17822,7 @@ class DragonWhispererGUI:
 
         self.app_context = AppContext()
         self.current_theme = self.app_context.theme
-        self.demo_mode = not WHISPER_AVAILABLE
+        self.demo_mode = not WHISPER_AVAILABLE                     # === DEMO‑MODE ===
         self.layout_mode = getattr(self.settings, "layout_mode", "vertical")
         self.current_language = getattr(self.settings, "default_language", "de")
         self._translation_reset_counter = 0
@@ -17638,12 +17835,17 @@ class DragonWhispererGUI:
         except (tk.TclError, RuntimeError) as e:
             raise RuntimeError(f"Tkinter Fehler: {e}")
 
+        # === DEMO‑MODE: Fenstertitel anpassen ===
+        if self.demo_mode:
+            self.root.title("🐉 Dragon Whisperer (DEMO MODE)")
+        else:
+            self.root.title("🐉 Dragon Whisperer")
+
         # Queues (müssen vor Layout‑Manager existieren)
         self.gui_queue: queue.Queue = queue.Queue(maxsize=200)
         self._text_update_queue: queue.Queue = queue.Queue(maxsize=150)
-
+    
         self._batch_update_interval = 150
-        #self._last_gui_update_time = 0.0
         self._processing_lock = threading.Lock()
 
         # Timer für verzögertes Speichern (Entprellung)
@@ -17675,8 +17877,11 @@ class DragonWhispererGUI:
             self.layout.setup_gui()
             self._setup_callbacks()
             self.vad_fallback_enabled = tk.BooleanVar(value=self.advanced_settings.vad_fallback_enabled)
-            self.status_bar = StatusBar(self.root, self)
+
+            # === DEMO‑MODE: StatusBar erhält demo_mode Flag ===
+            self.status_bar = StatusBar(self.root, self, demo_mode=self.demo_mode)
             self.status_bar.frame.grid(row=4, column=0, sticky="ew", pady=(2, 0))
+
             self._update_vad_fallback_button()
             self._update_live_mode_button()
             self._start_gui_updaters()
@@ -17693,7 +17898,6 @@ class DragonWhispererGUI:
                 self.root.after(200, set_initial_url)
 
             self.root.deiconify()
-            self.root.title("🐉 Dragon Whisperer")
         except Exception as e:
             logger.exception(f"❌ GUI Setup Fehler: {e}")
             self._show_error_and_exit(f"GUI konnte nicht erstellt werden: {e}")
@@ -19935,7 +20139,9 @@ class DragonWhispererGUI:
         logger.info("✅ atexit-Handler registriert")
 
     def _cleanup_resources(self, emergency: bool = False) -> None:
-        """Bereinigt alle Ressourcen vor dem Programmende."""
+        """
+        Bereinigt alle Ressourcen vor dem Programmende.
+        """
         if getattr(self, '_cleanup_done', False):
             logger.debug("Cleanup already done, skipping")
             return
@@ -19969,16 +20175,18 @@ class DragonWhispererGUI:
                             self.controller._set_state(WhisperController.State.STOPPING)
                     logger.debug("Controller: Zustand auf STOPPING gesetzt")
 
-                    # Controller-internen Stop-Thread joinen
+                    # Controller-internen Stop-Thread joinen (nur wenn kein Daemon)
                     if hasattr(self.controller, '_stop_thread') and self.controller._stop_thread:
-                        if self.controller._stop_thread.is_alive():
-                            logger.debug("Controller: Joining stop_worker thread...")
-                            self.controller._stop_thread.join(timeout=2.0)
+                        if not getattr(self.controller._stop_thread, 'daemon', False):
                             if self.controller._stop_thread.is_alive():
-                                logger.warning("stop_worker thread did not terminate within timeout")
-                            else:
-                                logger.debug("stop_worker thread joined")
-                        self.controller._stop_thread = None
+                                logger.debug("Controller: Joining stop_worker thread...")
+                                self.controller._stop_thread.join(timeout=2.0)
+                                if self.controller._stop_thread.is_alive():
+                                    logger.warning("stop_worker thread did not terminate within timeout")
+                            self.controller._stop_thread = None
+                        else:
+                            logger.debug("Controller: stop_worker is daemon, skipping join")
+                            self.controller._stop_thread = None
                 except Exception as e:
                     logger.warning(f"⚠️ Fehler beim Stoppen des Controllers: {e}")
 
@@ -20287,6 +20495,14 @@ class WhisperController:
         return self.state == WhisperController.State.STOPPING
 
     def start_processing(self) -> None:
+        """
+        Startet die Verarbeitung asynchron.
+
+        - Prüft den aktuellen Zustand (nur IDLE erlaubt)
+        - Validiert die Eingaben (URL darf nicht leer sein)
+        - Startet einen dedizierten Thread für die eigentliche Verarbeitung
+        - Setzt bei Fehlern den Zustand korrekt zurück
+        """
         with self._state_lock:
             if self._state != WhisperController.State.IDLE:
                 self.event_bus.emit("info", f"⚠️ Bereits im Zustand {self._state.name}")
@@ -20298,11 +20514,16 @@ class WhisperController:
             self._handle_error("GUI nicht verfügbar")
             return
 
-        # Werte aus der GUI auslesen (thread-sicher, da Hauptthread)
+        # Werte aus der GUI auslesen (Hauptthread)
         url = gui.url_entry.get().strip()
         model_name = gui.model_var.get()
         src_lang_name = gui.src_lang_var.get()
         target_lang_name = gui.lang_var.get()
+
+        # Frühe Validierung – vermeidet unnötigen Thread-Start
+        if not url:
+            self._handle_error("Keine URL eingegeben")
+            return
 
         def start_target() -> None:
             try:
@@ -20313,11 +20534,17 @@ class WhisperController:
                 logger.error(f"❌ Start Processing Error: {e}", exc_info=True)
                 self._handle_error(f"Start fehlgeschlagen: {str(e)[:50]}")
             finally:
+                # Thread-Referenz freigeben und ggf. Zustand zurücksetzen
                 with self._state_lock:
                     if self._processing_thread == threading.current_thread():
                         self._processing_thread = None
+                    # Falls nach Fehler noch STARTING – auf IDLE setzen
+                    if self._state == WhisperController.State.STARTING:
+                        self._set_state(WhisperController.State.IDLE)
 
-        thread = threading.Thread(target=start_target, daemon=True, name="ControllerStarter")
+        # Thread mit aussagekräftigem Namen starten
+        thread_name = f"ControllerStarter-{int(time.time())}"
+        thread = threading.Thread(target=start_target, daemon=True, name=thread_name)
         with self._state_lock:
             self._processing_thread = thread
         thread.start()
@@ -20529,6 +20756,7 @@ class WhisperController:
     ) -> None:
         """
         Interne Methode zum Starten der Verarbeitung im Controller-Thread.
+        Läuft in einem eigenen Thread und führt die eigentliche Verarbeitung durch.
         """
         if not self._wait_for_state_not_stopping(timeout=self._STOP_WAIT_TIMEOUT):
             self._handle_error("Stop process did not finish in time")
@@ -20541,11 +20769,14 @@ class WhisperController:
             self._handle_error("GUI nicht verfügbar")
             return
 
-        # URL validieren (ohne GUI-Zugriff)
+        # URL validieren (ersetzt die bisherige rudimentäre Prüfung)
         url = self._validate_url(url)
         if url is None:
             self._set_state(WhisperController.State.IDLE)
             return
+
+        if DEBUG_LEVEL >= 1:
+            logger.debug(f"Validated URL: {url}")
 
         self.event_bus.emit("info", "🔍 Analysiere Stream...")
         self._extract_stream_info(gui, url)
@@ -20565,40 +20796,71 @@ class WhisperController:
 
         with self._state_lock:
             if self._state != WhisperController.State.STARTING:
-                logger.info("Start abgebrochen – Zustand nicht mehr STARTING")
+                if DEBUG_LEVEL >= 1:
+                    logger.info("Start abgebrochen – Zustand nicht mehr STARTING")
                 return
             self._set_state(WhisperController.State.PROCESSING)
 
         self.event_bus.emit("processing_state_changed", True)
 
         if IS_LINUX and hasattr(gui, "performance_optimizer"):
+            if DEBUG_LEVEL >= 1:
+                logger.debug("Applying Linux performance optimizations...")
             gui.performance_optimizer.optimize_for_processing()
 
         self.event_bus.emit("info", "🚀 Starte Transkription...")
         self._run_audio_processor(gui, url)
 
     def _validate_url(self, url: str) -> Optional[str]:
+        """
+        Validiert und bereinigt die eingegebene URL.
+        Nutzt PlatformUtils.validate_url für gründliche Prüfung.
+        Gibt die bereinigte URL zurück oder None bei Fehler.
+        Im Fehlerfall wird eine Meldung über den Event‑Bus gesendet.
+        Bei aktiviertem Debug werden zusätzliche Informationen geloggt.
+        """
         if not url:
-            self.event_bus.emit("info", "❌ Bitte URL eingeben")
+            if DEBUG_LEVEL >= 1:
+                logger.debug("URL validation failed: empty URL")
+            self.event_bus.emit("info", "❌ Bitte eine URL eingeben")
             return None
 
-        try:
-            url = PlatformUtils.sanitize_url(url)
-            if url.startswith("file://"):
-                ok, real_path = PlatformUtils.validate_file_path(url)
-                if not ok:
-                    self.event_bus.emit("info", f"❌ {real_path}")
-                    return None
-                if not os.path.exists(real_path):
-                    self.event_bus.emit("info", "❌ Datei nicht gefunden")
-                    return None
-            else:
-                if not url.startswith(("http://", "https://")):
-                    url = "https://" + url
-                    self.event_bus.emit("update_url", url)
-        except Exception as e:
-            self.event_bus.emit("info", f"❌ Ungültige URL: {e}")
+        original_url = url
+        url = PlatformUtils.sanitize_url(url)
+
+        if DEBUG_LEVEL >= 1:
+            logger.debug(f"Validating URL: {original_url} -> {url}")
+
+        valid, msg = PlatformUtils.validate_url(url)
+        if not valid:
+            if DEBUG_LEVEL >= 1:
+                logger.debug(f"URL validation failed: {msg}")
+            self.event_bus.emit("info", f"❌ Ungültige URL: {msg}")
             return None
+
+        # Zusätzliche Prüfungen für file://
+        if url.startswith("file://"):
+            ok, real_path = PlatformUtils.validate_file_path(url)
+            if not ok:
+                if DEBUG_LEVEL >= 1:
+                    logger.debug(f"File validation failed: {real_path}")
+                self.event_bus.emit("info", f"❌ {real_path}")
+                return None
+            if not os.path.exists(real_path):
+                if DEBUG_LEVEL >= 1:
+                    logger.debug(f"File does not exist: {real_path}")
+                self.event_bus.emit("info", "❌ Datei nicht gefunden")
+                return None
+            if DEBUG_LEVEL >= 1:
+                logger.debug(f"Valid file URL: {url} -> {real_path}")
+
+        # Für dvb:// könnte man hier zusätzliche Parameter prüfen, wird bereits in validate_url gemacht
+        if url.startswith("dvb://") or url.startswith("dvb-s://"):
+            if DEBUG_LEVEL >= 1:
+                logger.debug(f"DVB URL validated: {url}")
+
+        if DEBUG_LEVEL >= 1:
+            logger.debug(f"URL validated successfully: {url}")
 
         return url
 
@@ -20641,16 +20903,26 @@ class WhisperController:
         return False
 
     def _load_model(self, gui, model_name: str) -> bool:
+        """
+        Lädt das Whisper‑Modell über die Transkriptions‑Engine.
+        Gibt True zurück, wenn erfolgreich, sonst False.
+        Bei Dummy‑Engine wird eine Warnung über den Event‑Bus ausgegeben.
+        """
         try:
             if not hasattr(gui, "transcription_engine"):
                 return False
 
             result = gui.transcription_engine.load_model(model_name, set_active=True)
             if result is not None:
+                # Nach erfolgreichem Laden prüfen, ob es sich um eine Dummy-Engine handelt
+                if not gui.transcription_engine.is_functional():
+                    self.event_bus.emit("info", "⚠️ Dummy-Modus aktiv – Transkriptionen sind Platzhalter")
                 return True
 
             logger.info("🔄 Versuche base model...")
             result = gui.transcription_engine.load_model("base", set_active=True)
+            if result is not None and not gui.transcription_engine.is_functional():
+                self.event_bus.emit("info", "⚠️ Dummy-Modus aktiv – Transkriptionen sind Platzhalter")
             return result is not None
         except Exception as e:
             logger.warning(f"⚠️ Model Load Error: {e}")
@@ -20765,7 +21037,11 @@ class WhisperController:
                 if hasattr(gui, "audio_processor"):
                     gui.audio_processor.stop_processing(wait=False)
                 if hasattr(gui, "ffmpeg_manager"):
-                    gui.ffmpeg_manager.stop_all_streams()
+                    # Bei Shutdown sofort killen, sonst normal stoppen
+                    if self._shutdown_event.is_set():
+                        gui.ffmpeg_manager.kill_all_streams()
+                    else:
+                        gui.ffmpeg_manager.stop_all_streams()
         except Exception as e:
             logger.warning(f"⚠️ Audio Stop Fehler: {e}")
         finally:
@@ -21209,7 +21485,11 @@ class AudioProcessor:
         self._queue_drop_counter = 0
         self._last_queue_log_time = 0.0
         self._queue_log_interval = 10.0  # Sekunden
-        # ==================================================================
+
+        # === NEU: Eigene numpy-Referenz für sicheren Zugriff ===
+        self._np = None
+        self._scipy_signal = None
+        # ==========================================================
 
         logger.info("✅ AudioProcessor initialized (optimized):")
         logger.info(f"   Config Type: {self._get_config_type()}")
@@ -21413,6 +21693,9 @@ class AudioProcessor:
         except queue.Full:
             with self._stats_lock:
                 self._queue_drop_counter += 1
+                # Warnung mit Rate‑Limiting, nur alle 10 Drops
+                if self._queue_drop_counter % 10 == 0:
+                    logger.warning(f"⚠️ Transkriptions-Queue voll – Chunk verworfen (Total: {self._queue_drop_counter})")
             if error_callback:
                 error_callback("⚠️ Transkriptions-Queue voll – Chunk verworfen")
             if logger.isEnabledFor(logging.DEBUG) and DEBUG_LEVEL >= 3:
@@ -21705,6 +21988,13 @@ class AudioProcessor:
 
     def _update_chunk_size(self) -> None:
         self.chunk_size = int(self.config.CHUNK_DURATION * self.config.BYTES_PER_SECOND)
+
+    # === NEU: Lazy loading für numpy und scipy ===
+    def _load_modules(self) -> None:
+        if self._np is None and NUMPY_AVAILABLE:
+            self._np = FastLazyLoader.load("numpy")
+        if self._scipy_signal is None and SCIPY_AVAILABLE:
+            self._scipy_signal = FastLazyLoader.load("scipy.signal")
 
     def set_expected_duration(self, duration: Optional[float]) -> None:
         self._expected_duration = duration
@@ -22336,15 +22626,19 @@ class AudioProcessor:
         else:
             logger.info("Stream processing stopped by user.")
 
+    # =========================================================================
+    #  VERBESSERTE _is_silent (eigene numpy-Referenz und Fallback)
+    # =========================================================================
     def _is_silent(self, audio_data: bytes, threshold: float = 0.001) -> bool:
         if len(audio_data) < 160:
             return False
         if audio_data.count(b'\x00') == len(audio_data):
             return True
-        if (self.transcription_engine is not None and
-            hasattr(self.transcription_engine, '_np') and
-            self.transcription_engine._np is not None):
-            np = self.transcription_engine._np
+
+        # Eigene numpy-Referenz laden und nutzen
+        self._load_modules()
+        np = self._np
+        if np is not None:
             try:
                 audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
                 rms = np.sqrt(np.mean(audio_np ** 2))
@@ -22352,7 +22646,15 @@ class AudioProcessor:
                 return rms < threshold or max_amp < 100
             except Exception:
                 pass
-        return False
+
+        # Fallback ohne numpy
+        try:
+            import math
+            samples = struct.unpack(f'<{len(audio_data)//2}h', audio_data)
+            rms = math.sqrt(sum(s*s for s in samples) / len(samples))
+            return rms < threshold
+        except Exception:
+            return False
 
     def _update_adaptive_chunk(self) -> None:
         if self.subtitle_mode:
