@@ -281,11 +281,9 @@ LANGUAGE_CODE_MAPPING = {
     "zh-cn": "zh",   # vereinfachtes Chinesisch (China) -> Chinesisch
     "tl": "fil",     # Tagalog -> Filipino (Whisper erwartet 'fil')
     "ht": "ht",      # Haitianisch (Whisper kennt 'ht')
-    # Weitere, falls nötig
 }
 
 SUPPORTED_LANGUAGES = BASE_LANGUAGES.copy()
-# Für die Sortierung nach Namen verwenden wir weiterhin die Basis
 SORTED_LANGUAGES = sorted(
     ((name, code) for code, name in BASE_LANGUAGES.items()),
     key=lambda x: x[0]
@@ -816,7 +814,7 @@ class ConfigDefaults:
     BYTES_PER_SAMPLE: int = 2
 
     # -------------------------------------------------------------------------
-    # Allgemeine Konfiguration (wird u. a. von AdvancedSettings verwendet)
+    # Allgemeine Konfiguration
     # -------------------------------------------------------------------------
     DEFAULT_BEAM_SIZE: int = 10
     DEFAULT_TEMPERATURE: float = 0.0
@@ -921,11 +919,11 @@ class ConfigDefaults:
     # -------------------------------------------------------------------------
     MAX_CACHE_SIZE_MB: int = 100
     CACHE_ENABLED: bool = True
-    TRANSCRIPTION_CACHE_SIZE: int = 500          # erhöht von 200
+    TRANSCRIPTION_CACHE_SIZE: int = 500
     TRANSCRIPTION_CACHE_TTL: int = 300
-    TRANSLATION_CACHE_SIZE: int = 1000           # erhöht von 500
+    TRANSLATION_CACHE_SIZE: int = 1000
     TRANSLATION_CACHE_TTL: int = 3600
-    AUDIO_CACHE_SIZE: int = 256                  # erhöht von 128
+    AUDIO_CACHE_SIZE: int = 256
     AUDIO_CACHE_TTL: int = 1800
 
     # -------------------------------------------------------------------------
@@ -1048,7 +1046,7 @@ class Config(ConfigDefaults):
         default_factory=lambda: ConfigDefaults.PLATFORM_CONFIG.copy()
     )
 
-    AUDIO_ENHANCEMENT_ENABLED: bool = False          # überschreibt ConfigDefaults.TRUE
+    AUDIO_ENHANCEMENT_ENABLED: bool = False
     MIN_RMS_THRESHOLD: float = ConfigDefaults.MIN_RMS_THRESHOLD
     TARGET_RMS: float = ConfigDefaults.TARGET_RMS
     MAX_GAIN: float = ConfigDefaults.MAX_GAIN
@@ -1180,7 +1178,7 @@ class Config(ConfigDefaults):
             "large": 6,
             "large-v2": 6,
             "large-v3": 6,
-            "large-v3-turbo": 5,   # neues Modell
+            "large-v3-turbo": 5,
         }
         return model_durations.get(model_size.lower(), self._base_chunk_duration)
 
@@ -8576,7 +8574,18 @@ class FFmpegManager:
                 return False
             pinfo = self._processes[process_id]
             pinfo.stopping = True
-            logger.debug(f"[FFmpegManager] stop_stream: {process_id} stopping set")
+            log_debug("ffmpeg", f"stop_stream: {process_id} stopping set")
+
+            # Sentinel in die Queue legen, um blockierenden get() zu beenden
+            if pinfo.read_queue is not None:
+                try:
+                    pinfo.read_queue.put_nowait(None)
+                    log_debug("ffmpeg", f"Sentinel in read_queue for {process_id}")
+                except queue.Full:
+                    # Queue voll – Thread blockiert nicht, aber trotzdem loggen
+                    log_debug("ffmpeg", f"read_queue full for {process_id} – cannot insert sentinel")
+            else:
+                log_debug("ffmpeg", f"read_queue is None for {process_id} – skipping sentinel")
 
             # Pipes früh schließen, bevor Threads gestoppt werden
             if pinfo.process:
@@ -8585,9 +8594,9 @@ class FFmpegManager:
                     if pipe and not pipe.closed:
                         try:
                             pipe.close()
-                            logger.debug(f"[FFmpegManager] Pipe {pipe_name} closed for {process_id}")
+                            log_debug("ffmpeg", f"Pipe {pipe_name} closed for {process_id}")
                         except Exception as e:
-                            logger.warning(f"[FFmpegManager] Error closing pipe {pipe_name} for {process_id}: {e}")
+                            logger.warning(f"Error closing pipe {pipe_name} for {process_id}: {e}")
 
             self._stop_read_thread(pinfo)
             self._stop_stderr_thread(pinfo)
@@ -8597,17 +8606,17 @@ class FFmpegManager:
                 yt_stop = getattr(pinfo, 'yt_stderr_stop', None)
                 if yt_stop:
                     yt_stop.set()
-                    logger.debug(f"[FFmpegManager] yt_stop event set for {process_id}")
+                    log_debug("ffmpeg", f"yt_stop event set for {process_id}")
                 try:
                     if pinfo.yt_process and pinfo.yt_process.stderr and not pinfo.yt_process.stderr.closed:
                         pinfo.yt_process.stderr.close()
-                        logger.debug(f"[FFmpegManager] Closed yt stderr for {process_id}")
+                        log_debug("ffmpeg", f"Closed yt stderr for {process_id}")
                 except Exception as e:
-                    logger.warning(f"[FFmpegManager] Error closing yt stderr for {process_id}: {e}")
+                    logger.warning(f"Error closing yt stderr for {process_id}: {e}")
                 # Kein join – Thread ist Daemon
                 pinfo.yt_stderr_thread = None
                 pinfo.yt_stderr_stop = None
-                logger.debug(f"[FFmpegManager] yt_stderr thread cleared for {process_id}")
+                log_debug("ffmpeg", f"yt_stderr thread cleared for {process_id}")
 
         return self._remove_process(process_id)
 
@@ -13752,53 +13761,19 @@ class StatisticsDialog(BaseDialog):
 
 class SummarizeDialog(BaseDialog):
     """
-    Dialog zur Zusammenfassung von Texten mit Ollama.
-
-    Diese Klasse erstellt einen modalen Dialog, in dem der Benutzer ein Ollama-Modell
-    auswählen, die Temperatur einstellen und optional einen Videotitel als Kontext
-    einbeziehen kann. Der Text wird in einer Zusammenfassung ausgegeben, die kopiert,
-    gespeichert oder übersetzt werden kann.
-
-    Features:
-        - Unterstützt große Texte durch automatische Aufteilung in Chunks
-        - Asynchrone Verarbeitung mit Thread-Pool und Abbruchmöglichkeit
-        - Sprachauswahl für die Zusammenfassung (Deutsch, Englisch, Spanisch, Koreanisch, Chinesisch)
-        - Integration des Videotitels als Kontext (falls verfügbar)
-        - Zusammenfassung kann kopiert, als Datei gespeichert oder übersetzt werden
-        - Fortschrittsanzeige und Statusmeldungen
-        - Saubere Ressourcenfreigabe beim Schließen
-
-    Attributes:
-        text (str): Der zu zusammenfassende Text.
-        gui (DragonWhispererGUI): Referenz auf die Haupt-GUI für Zugriff auf Einstellungen.
-        stream_title (Optional[str]): Titel des aktuellen Streams (falls vorhanden).
-        summarizer (OllamaSummarizer): Die Ollama-Instanz für die Zusammenfassung.
-        _request_cancel (threading.Event): Event zum Abbrechen der Verarbeitung.
-        _destroyed (bool): Flag, ob der Dialog bereits zerstört wurde (für thread-sichere GUI-Updates).
+    Dialog zur Zusammenfassung von Texten mit Ollama (thread‑sicher).
     """
 
     def __init__(self, parent: Any, text: str, gui_ref: Any) -> None:
-        """
-        Initialisiert den Zusammenfassungs-Dialog.
-
-        Args:
-            parent: Das Eltern-Widget (normalerweise das Hauptfenster).
-            text: Der zu zusammenfassende Text.
-            gui_ref: Referenz auf die Haupt-GUI (für Einstellungen und Stream-Titel).
-        """
         self.text = text
         self.gui = gui_ref
         self.stream_title = None
 
-        # 1. Versuch: current_stream_info (während aktiver Verarbeitung)
+        # Versuche, den Stream‑Titel zu ermitteln
         if self.gui and hasattr(self.gui, 'current_stream_info') and self.gui.current_stream_info:
             self.stream_title = self.gui.current_stream_info.title
-
-        # 2. Versuch: last_stream_title (nach Ende des Streams)
         if not self.stream_title and self.gui and hasattr(self.gui, 'last_stream_title') and self.gui.last_stream_title:
             self.stream_title = self.gui.last_stream_title
-
-        # 3. Versuch: Text aus dem GUI‑Label extrahieren (falls vorhanden)
         if not self.stream_title and hasattr(self.gui, 'stream_title_label'):
             try:
                 label_text = self.gui.stream_title_label.cget("text")
@@ -13806,8 +13781,6 @@ class SummarizeDialog(BaseDialog):
                     self.stream_title = label_text[2:].strip()
             except Exception:
                 pass
-
-        # 4. Fallback: leeren String setzen, falls gar nichts gefunden wurde
         if not self.stream_title:
             self.stream_title = ""
 
@@ -13819,20 +13792,24 @@ class SummarizeDialog(BaseDialog):
             cache_manager=self.gui.app_context.cache_manager
         )
 
-        # Temporär gespeicherte Einstellungen (werden beim Schließen zurückgeschrieben)
         self.saved_temp = self.gui.advanced_settings.summarize_temperature
         self.saved_model = self.gui.advanced_settings.summarize_model
 
-        # Status-Variablen für die chunkweise Verarbeitung
+        # Thread‑sichere Datenstrukturen
+        self._lock = threading.RLock()
         self._chunk_results: List[str] = []
         self._chunks: List[str] = []
         self._current_chunk = 0
         self._prompt = ""
         self._temp = 0.1
+        self.full_summary = ""
         self._destroyed = False
 
         super().__init__(parent, "Zusammenfassung mit Ollama", width=750, height=650, modal=True)
 
+    # -------------------------------------------------------------------------
+    # UI-Aufbau
+    # -------------------------------------------------------------------------
     def build_ui(self) -> None:
         """Erstellt die Benutzeroberfläche des Dialogs."""
         # Prüfen, ob Ollama erreichbar ist
@@ -14033,11 +14010,8 @@ class SummarizeDialog(BaseDialog):
         )
         self.status_label.pack(pady=5)
 
-        # Interne Variablen für die Verarbeitung
-        self.full_summary = ""
-
     # -------------------------------------------------------------------------
-    # Interne Hilfsmethoden
+    # Hilfsmethoden
     # -------------------------------------------------------------------------
     def _set_default_prompt(self) -> None:
         """Setzt den Standard-Prompt basierend auf der ausgewählten Sprache und dem Videotitel."""
@@ -14102,16 +14076,7 @@ class SummarizeDialog(BaseDialog):
         self.prompt_text.insert("1.0", full_prompt)
 
     def _split_text(self, text: str, max_words: int = 2000) -> List[str]:
-        """
-        Teilt einen langen Text in mehrere Chunks auf, basierend auf der Wortanzahl.
-
-        Args:
-            text: Der zu teilende Text.
-            max_words: Maximale Anzahl von Wörtern pro Chunk.
-
-        Returns:
-            Liste von Text-Chunks.
-        """
+        """Zerlegt einen langen Text in mehrere Chunks, basierend auf der Wortanzahl."""
         words = text.split()
         if len(words) <= max_words:
             return [text]
@@ -14129,55 +14094,70 @@ class SummarizeDialog(BaseDialog):
             chunks.append(" ".join(chunk))
         return chunks
 
+    # -------------------------------------------------------------------------
+    # Chunk‑Verarbeitung (thread‑safe)
+    # -------------------------------------------------------------------------
     def _process_next_chunk(self, retry_count: int = 0) -> None:
         """
-        Verarbeitet den nächsten Text-Chunk (für große Texte).
-
-        Args:
-            retry_count: Anzahl bisheriger Wiederholungsversuche.
+        Verarbeitet den nächsten Text‑Chunk (für große Texte).
+        Wird im Hauptthread über `after` aufgerufen.
         """
-        if self._destroyed or self._request_cancel.is_set():
-            self._create_final_summary()
+        if self._destroyed:
             return
 
-        if self._current_chunk >= len(self._chunks):
-            self._create_final_summary()
-            return
+        with self._lock:
+            if self._request_cancel.is_set():
+                self._safe_after(0, self._create_final_summary)
+                return
 
-        chunk_text = self._chunks[self._current_chunk]
+            if self._current_chunk >= len(self._chunks):
+                self._safe_after(0, self._create_final_summary)
+                return
+
+            chunk_text = self._chunks[self._current_chunk]
+
+        log_debug("summarize", f"Verarbeite Chunk {self._current_chunk+1}/{len(self._chunks)} (Versuch {retry_count+1})")
+
         self.status_label.config(
             text=f"⏳ Verarbeite Abschnitt {self._current_chunk+1}/{len(self._chunks)}... (Versuch {retry_count+1})"
         )
 
         def on_chunk_complete():
-            if self.summarizer.last_result:
-                self._chunk_results.append(self.summarizer.last_result)
-            else:
-                self._chunk_results.append("")
-            self._current_chunk += 1
+            with self._lock:
+                if self.summarizer.last_result:
+                    self._chunk_results.append(self.summarizer.last_result)
+                    log_debug("summarize", f"Chunk {self._current_chunk+1} erfolgreich: {len(self.summarizer.last_result)} Zeichen")
+                else:
+                    self._chunk_results.append("")
+                    log_debug("summarize", f"Chunk {self._current_chunk+1} lieferte leeres Ergebnis")
+                self._current_chunk += 1
             self._safe_after(100, lambda: self._process_next_chunk(0))
 
         def on_chunk_error(error: str):
             if retry_count < 3:
                 delay_ms = 1000 * (2 ** retry_count)
+                log_debug("summarize", f"Chunk {self._current_chunk+1} fehlgeschlagen (Versuch {retry_count+1}): {error}, Wiederholung in {delay_ms//1000}s")
                 self.status_label.config(
                     text=f"⏳ Fehler, Wiederholung in {delay_ms//1000}s... (Versuch {retry_count+2}/4)"
                 )
                 self._safe_after(delay_ms, lambda: self._process_next_chunk(retry_count + 1))
             else:
                 error_msg = f"[Fehler in Abschnitt {self._current_chunk+1} nach 3 Versuchen: {error}]"
-                self._chunk_results.append(error_msg)
+                with self._lock:
+                    self._chunk_results.append(error_msg)
+                log_debug("summarize", f"Chunk {self._current_chunk+1} endgültig fehlgeschlagen: {error}")
                 self.status_label.config(
                     text=f"❌ Abschnitt {self._current_chunk+1} fehlgeschlagen – fahre mit nächstem fort"
                 )
-                self._current_chunk += 1
+                with self._lock:
+                    self._current_chunk += 1
                 self._safe_after(100, lambda: self._process_next_chunk(0))
 
         self.summarizer.summarize(
             chunk_text,
             self._prompt,
             self._temp,
-            callback=lambda chunk: None,  # bei Chunks keine Einzelausgaben, nur Gesamtergebnis
+            callback=lambda chunk: None,
             error_callback=on_chunk_error,
             complete_callback=on_chunk_complete,
             cancel_event=self._request_cancel,
@@ -14185,20 +14165,28 @@ class SummarizeDialog(BaseDialog):
 
     def _create_final_summary(self) -> None:
         """
-        Erstellt aus den einzelnen Chunk-Ergebnissen eine finale Zusammenfassung.
+        Erstellt aus den einzelnen Chunk‑Ergebnissen eine finale Zusammenfassung.
+        Läuft im Hauptthread.
         """
-        if not self._chunk_results:
-            self.status_label.config(text="❌ Keine Teilzusammenfassungen vorhanden.")
-            self._reset_ui()
+        if self._destroyed:
             return
 
-        valid_chunks = [res for res in self._chunk_results if res and not res.startswith("[Fehler")]
-        if not valid_chunks:
-            self.status_label.config(text="❌ Keine gültigen Teilzusammenfassungen.")
-            self._reset_ui()
-            return
+        with self._lock:
+            if not self._chunk_results:
+                self.status_label.config(text="❌ Keine Teilzusammenfassungen vorhanden.")
+                self._reset_ui()
+                return
 
-        combined = "\n\n".join(valid_chunks)
+            valid_chunks = [res for res in self._chunk_results if res and not res.startswith("[Fehler")]
+            if not valid_chunks:
+                self.status_label.config(text="❌ Keine gültigen Teilzusammenfassungen.")
+                self._reset_ui()
+                return
+
+            combined = "\n\n".join(valid_chunks)
+
+        log_debug("summarize", f"Erstelle finale Zusammenfassung aus {len(valid_chunks)} Teilen ({len(combined)} Zeichen)")
+
         target_lang = self.summary_lang_var.get()
         final_prompt = (f"Fasse die folgenden Teilzusammenfassungen zu einer kohärenten Gesamtzusammenfassung in {target_lang} zusammen. "
                         f"Antworte ausschließlich auf {target_lang}.\n\n{combined}")
@@ -14208,8 +14196,7 @@ class SummarizeDialog(BaseDialog):
         def on_final_complete():
             if self._destroyed:
                 return
-            if self.dialog and self.dialog.winfo_exists():
-                self._safe_after(0, self._reset_ui)
+            self._safe_after(0, self._reset_ui)
 
         self.summarizer.summarize(
             combined,
@@ -14222,44 +14209,40 @@ class SummarizeDialog(BaseDialog):
         )
 
     def _reset_ui(self) -> None:
-        """
-        Setzt die UI nach Abschluss oder Abbruch zurück (Buttons aktivieren, Status löschen).
-        """
-        if self._destroyed:
+        """Setzt die UI nach Abschluss oder Abbruch zurück."""
+        if self._destroyed or not self.dialog.winfo_exists():
             return
         try:
-            if self.dialog and self.dialog.winfo_exists():
-                self.summarize_btn.config(state="normal", text="🤖 Zusammenfassen")
-                self.cancel_btn.config(state="disabled")
-                self.copy_btn.config(state="normal" if self.full_summary else "disabled")
-                self.save_btn.config(state="normal" if self.full_summary else "disabled")
-                self.translate_btn.config(state="normal" if self.full_summary else "disabled")
-                self.status_label.config(text="✅ Zusammenfassung abgeschlossen")
+            self.summarize_btn.config(state="normal", text="🤖 Zusammenfassen")
+            self.cancel_btn.config(state="disabled")
+            with self._lock:
+                has_summary = bool(self.full_summary)
+            self.copy_btn.config(state="normal" if has_summary else "disabled")
+            self.save_btn.config(state="normal" if has_summary else "disabled")
+            self.translate_btn.config(state="normal" if has_summary else "disabled")
+            self.status_label.config(text="✅ Zusammenfassung abgeschlossen")
 
-                # Optional: Blacklist-Prüfung und Sprachvalidierung
-                if self.full_summary and hasattr(self.gui, "advanced_settings"):
-                    blacklist = getattr(self.gui.advanced_settings, "blacklist", [])
-                    found = []
-                    for phrase in blacklist:
-                        if phrase and phrase.lower() in self.full_summary.lower():
-                            found.append(phrase)
-                    if found:
-                        logger.warning(f"Zusammenfassung enthält Blacklist-Phrasen: {found}")
-                        self.status_label.config(
-                            text=f"⚠️ Warnung: Blacklist-Phrasen gefunden: {', '.join(found[:2])}"
-                        )
+            # Blacklist‑Prüfung (nur lesend, kein Lock nötig für self.full_summary, da bereits unter Lock)
+            if has_summary and hasattr(self.gui, "advanced_settings"):
+                blacklist = getattr(self.gui.advanced_settings, "blacklist", [])
+                with self._lock:
+                    full = self.full_summary
+                found = [phrase for phrase in blacklist if phrase and phrase.lower() in full.lower()]
+                if found:
+                    log_debug("summarize", f"Blacklist-Phrasen in Zusammenfassung gefunden: {found}")
+                    self.status_label.config(
+                        text=f"⚠️ Warnung: Blacklist-Phrasen gefunden: {', '.join(found[:2])}"
+                    )
         except tk.TclError:
             pass
 
     # -------------------------------------------------------------------------
-    # Öffentliche Callback-Methoden (werden von OllamaSummarizer aufgerufen)
+    # Öffentliche Callback-Methoden (werden von OllamaSummarizer im Worker‑Thread aufgerufen)
     # -------------------------------------------------------------------------
     def on_chunk(self, chunk: str) -> None:
         """
         Wird bei jedem eingehenden Teil der Zusammenfassung aufgerufen.
-
-        Args:
-            chunk: Ein Teilstring der Antwort.
+        Läuft im Worker‑Thread des OllamaSummarizers.
         """
         if self._destroyed:
             return
@@ -14269,9 +14252,9 @@ class SummarizeDialog(BaseDialog):
                 return
             try:
                 if self.dialog and self.dialog.winfo_exists():
-                    if hasattr(self, "summary_text") and self.summary_text.winfo_exists():
-                        self.summary_text.insert("end", chunk)
-                        self.summary_text.see("end")
+                    self.summary_text.insert("end", chunk)
+                    self.summary_text.see("end")
+                    with self._lock:
                         self.full_summary += chunk
             except tk.TclError:
                 pass
@@ -14281,40 +14264,38 @@ class SummarizeDialog(BaseDialog):
     def on_error(self, error: str) -> None:
         """
         Wird bei einem Fehler während der Zusammenfassung aufgerufen.
-
-        Args:
-            error: Fehlermeldung.
+        Läuft im Worker‑Thread.
         """
         if self._destroyed:
             return
+
+        log_debug("summarize", f"Fehler in Ollama: {error}")
 
         def update():
             if self._destroyed:
                 return
             try:
                 if self.dialog and self.dialog.winfo_exists():
-                    if hasattr(self, "summary_text") and self.summary_text.winfo_exists():
-                        self.summary_text.delete("1.0", "end")
-                        self.summary_text.insert("1.0", f"Fehler: {error}")
-                    self._reset_ui()
-                    if hasattr(self, "status_label") and self.status_label.winfo_exists():
-                        self.status_label.config(text="❌ Fehler")
+                    self.summary_text.delete("1.0", "end")
+                    self.summary_text.insert("1.0", f"Fehler: {error}")
+                self._reset_ui()
+                self.status_label.config(text="❌ Fehler")
             except tk.TclError:
                 pass
 
         self._safe_after(0, update)
 
     # -------------------------------------------------------------------------
-    # Benutzeraktionen
+    # Benutzeraktionen (werden im Hauptthread ausgeführt)
     # -------------------------------------------------------------------------
     def start_summarize(self) -> None:
         """Startet die Zusammenfassung."""
         if self._destroyed:
             return
 
-        # Erneute Prüfung der Server‑Verfügbarkeit, falls zwischenzeitlich Probleme auftraten
         if not self.summarizer.is_server_reachable():
             self.status_label.config(text="❌ Ollama-Server nicht erreichbar. Bitte starte 'ollama serve'.")
+            log_debug("summarize", "Ollama-Server nicht erreichbar")
             return
 
         model = self.model_var.get().strip()
@@ -14324,6 +14305,7 @@ class SummarizeDialog(BaseDialog):
 
         if not self.summarizer.is_model_available(model):
             self.status_label.config(text=f"❌ Modell '{model}' nicht auf Server gefunden.")
+            log_debug("summarize", f"Modell {model} nicht verfügbar")
             return
 
         # Konfiguration aktualisieren
@@ -14335,7 +14317,8 @@ class SummarizeDialog(BaseDialog):
         self._prompt = self.prompt_text.get("1.0", "end-1c").strip()
         self._temp = self.temp_var.get()
 
-        # Text aufteilen, falls zu lang
+        log_debug("summarize", f"Starte Zusammenfassung: Modell={model}, Temp={self._temp}, Sprache={target_lang}, Prompt-Länge={len(self._prompt)}")
+
         word_count = len(self.text.split())
         if word_count > 2000:
             self.status_label.config(text="⏳ Text wird in Abschnitte zerlegt...")
@@ -14345,13 +14328,16 @@ class SummarizeDialog(BaseDialog):
             self.save_btn.config(state="disabled")
             self.translate_btn.config(state="disabled")
             self._request_cancel.clear()
-            self.full_summary = ""
+            with self._lock:
+                self.full_summary = ""
             self.summary_text.delete("1.0", "end")
             chunks = self._split_text(self.text, max_words=2000)
             self.status_label.config(text=f"⏳ Verarbeite {len(chunks)} Abschnitte...")
-            self._chunks = chunks
-            self._chunk_results = []
-            self._current_chunk = 0
+            log_debug("summarize", f"Text aufgeteilt in {len(chunks)} Chunks")
+            with self._lock:
+                self._chunks = chunks
+                self._chunk_results = []
+                self._current_chunk = 0
             self._process_next_chunk()
         else:
             self.summarize_btn.config(state="disabled", text="⏳ Warte...")
@@ -14361,14 +14347,15 @@ class SummarizeDialog(BaseDialog):
             self.translate_btn.config(state="disabled")
             self.status_label.config(text="Sende Anfrage an Ollama...")
             self.summary_text.delete("1.0", "end")
-            self.full_summary = ""
+            with self._lock:
+                self.full_summary = ""
             self._request_cancel.clear()
 
             def on_complete() -> None:
                 if self._destroyed:
                     return
-                if self.dialog and self.dialog.winfo_exists():
-                    self._safe_after(0, self._reset_ui)
+                log_debug("summarize", "Zusammenfassung abgeschlossen")
+                self._safe_after(0, self._reset_ui)
 
             self.summarizer.summarize(
                 self.text,
@@ -14382,7 +14369,9 @@ class SummarizeDialog(BaseDialog):
 
     def cancel_request(self) -> None:
         """Bricht die laufende Zusammenfassung ab."""
-        self._request_cancel.set()
+        with self._lock:
+            self._request_cancel.set()
+        log_debug("summarize", "Abbruch angefordert")
         self.status_label.config(text="⏹️ Abbruch eingeleitet...")
         self.cancel_btn.config(state="disabled")
         self._safe_after(500, self._reset_ui)
@@ -14391,20 +14380,23 @@ class SummarizeDialog(BaseDialog):
         """Kopiert die Zusammenfassung in die Zwischenablage."""
         if self._destroyed:
             return
+        with self._lock:
+            summary = self.full_summary
+        if not summary:
+            self.status_label.config(text="⚠️ Keine Zusammenfassung zum Kopieren")
+            return
         try:
-            if self.dialog and self.dialog.winfo_exists():
-                if self.full_summary:
-                    self.dialog.clipboard_clear()
-                    self.dialog.clipboard_append(self.full_summary)
-                    self.status_label.config(text="✅ In Zwischenablage kopiert")
-                else:
-                    self.status_label.config(text="⚠️ Keine Zusammenfassung vorhanden")
+            self.dialog.clipboard_clear()
+            self.dialog.clipboard_append(summary)
+            self.status_label.config(text="✅ In Zwischenablage kopiert")
         except tk.TclError:
             pass
 
     def save_summary(self) -> None:
         """Speichert die Zusammenfassung als Textdatei."""
-        if not self.full_summary:
+        with self._lock:
+            summary = self.full_summary
+        if not summary:
             self.status_label.config(text="⚠️ Keine Zusammenfassung zum Speichern")
             return
         from tkinter import filedialog
@@ -14416,14 +14408,16 @@ class SummarizeDialog(BaseDialog):
         if filename:
             try:
                 with open(filename, "w", encoding="utf-8") as f:
-                    f.write(self.full_summary)
+                    f.write(summary)
                 self.status_label.config(text=f"💾 Gespeichert: {os.path.basename(filename)}")
             except Exception as e:
                 self.status_label.config(text=f"❌ Fehler beim Speichern: {e}")
 
     def translate_summary(self) -> None:
         """Öffnet einen Übersetzungsdialog für die Zusammenfassung."""
-        if not self.full_summary:
+        with self._lock:
+            summary = self.full_summary
+        if not summary:
             self.status_label.config(text="⚠️ Keine Zusammenfassung zum Übersetzen")
             return
         if not hasattr(self.gui, "translation_engine"):
@@ -14433,7 +14427,7 @@ class SummarizeDialog(BaseDialog):
         if hasattr(engine, "is_functional") and not engine.is_functional():
             self.status_label.config(text="⚠️ Übersetzungs-Engine derzeit nicht verfügbar")
             return
-        TranslationDialog(self.dialog, engine, initial_text=self.full_summary)
+        TranslationDialog(self.dialog, engine, initial_text=summary)
 
     def close(self) -> None:
         """
@@ -14447,14 +14441,15 @@ class SummarizeDialog(BaseDialog):
             self.gui.advanced_settings.save_to_file()
 
         # Verarbeitung abbrechen
-        self._request_cancel.set()
+        with self._lock:
+            self._request_cancel.set()
+            self._destroyed = True
         if hasattr(self, 'summarizer'):
             try:
                 self.summarizer.dispose()
             except Exception:
                 pass
 
-        self._destroyed = True
         super().close()
 
 
@@ -19548,23 +19543,45 @@ class DragonWhispererGUI:
         """
         # Vorhandenen Timer abbrechen, wenn vorhanden und noch nicht abgelaufen
         if hasattr(self, '_save_settings_timer') and self._save_settings_timer is not None:
-            try:
-                self.root.after_cancel(self._save_settings_timer)
-            except ValueError:
-                # Timer ist bereits abgelaufen oder wurde anderweitig ungültig
-                pass
-        # Neuen Timer starten
-        self._save_settings_timer = self.root.after(500, self._save_settings_impl)
+            if self.dialog and self.dialog.winfo_exists():
+                try:
+                    self.dialog.after_cancel(self._save_settings_timer)
+                    if DEBUG_LEVEL >= 1:
+                        log_debug("settings", "Previous save timer cancelled")
+                except (ValueError, tk.TclError) as e:
+                    if DEBUG_LEVEL >= 2:
+                        log_debug("settings", f"Could not cancel timer: {e}")
+            else:
+                if DEBUG_LEVEL >= 1:
+                    log_debug("settings", "Dialog does not exist, cancelling timer skipped")
+
+        # Neuen Timer starten (nur wenn Dialog existiert)
+        if self.dialog and self.dialog.winfo_exists():
+            self._save_settings_timer = self.dialog.after(500, self._save_settings_impl)
+            if DEBUG_LEVEL >= 2:
+                log_debug("settings", "New save timer scheduled")
+        else:
+            if DEBUG_LEVEL >= 1:
+                log_debug("settings", "Dialog does not exist, saving immediately")
+            self._save_settings_impl()
 
     def _save_settings_impl(self) -> None:
         """Führt das eigentliche Speichern der Einstellungen durch."""
         try:
+            if DEBUG_LEVEL >= 2:
+                log_debug("settings", "Saving settings...")
             self.advanced_settings.save_to_file()
             self.settings.save_to_file()
+            if DEBUG_LEVEL >= 2:
+                log_debug("settings", "Settings saved successfully")
         except Exception as e:
             logger.error(f"Fehler beim Speichern der Einstellungen: {e}")
+            if DEBUG_LEVEL >= 1:
+                log_debug("settings", f"Save error: {e}")
         finally:
             self._save_settings_timer = None
+            if DEBUG_LEVEL >= 2:
+                log_debug("settings", "Save timer cleared")
 
     def _update_vad_fallback_button(self):
         if hasattr(self, 'vad_fallback_btn') and self.vad_fallback_btn.winfo_exists():
@@ -20139,9 +20156,6 @@ class DragonWhispererGUI:
         logger.info("✅ atexit-Handler registriert")
 
     def _cleanup_resources(self, emergency: bool = False) -> None:
-        """
-        Bereinigt alle Ressourcen vor dem Programmende.
-        """
         if getattr(self, '_cleanup_done', False):
             logger.debug("Cleanup already done, skipping")
             return
@@ -20297,6 +20311,9 @@ class DragonWhispererGUI:
             self._shutdown_completed = True
             logger.info("✅ Ressourcenbereinigung abgeschlossen")
 
+        except Exception as e:
+            logger.exception(f"💥 Unerwarteter Fehler bei der Ressourcenbereinigung: {e}")
+            # Trotz Fehler weitermachen, um wenigstens den finally-Teil auszuführen
         finally:
             if force_exit_timer:
                 force_exit_timer.cancel()
@@ -21095,7 +21112,6 @@ class StreamHandler:
         """
         Haupt‑Stream‑Loop. Liest Audiodaten vom FFmpeg‑Prozess,
         übergibt sie an den AudioProcessor und führt bei Bedarf Reconnects durch.
-        Verbesserte Version mit robuster Fehlerbehandlung.
         """
         normal_ending = False
         platform_id, platform_name = self.stream_manager.detect_platform(original_video_url)
@@ -21109,7 +21125,6 @@ class StreamHandler:
         is_local_file = original_video_url.startswith("file://")
 
         while True:
-            # --- Aktuelle Referenzen holen (für den Fall, dass Manager ersetzt wurden) ---
             ap = self._get_ap()
             if ap is None:
                 logger.info("AudioProcessor nicht mehr verfügbar – beende StreamHandler.")
@@ -21121,7 +21136,7 @@ class StreamHandler:
                 break
 
             if not ap.is_processing() or ap.is_stop_requested():
-                logger.info("Processing stopped by user.")
+                log_debug("stream", f"Stop requested: is_processing={ap.is_processing()}, stop_requested={ap.is_stop_requested()}")
                 break
 
             if current_process.poll() is not None:
@@ -21152,7 +21167,7 @@ class StreamHandler:
                     error_callback("❌ Reconnect after inactivity failed")
                     break
 
-            # ----- Dateiende für lokale Dateien (mit reduzierter Toleranz) -----
+            # ----- Dateiende für lokale Dateien -----
             if is_local_file and ap._expected_duration is not None:
                 if ap._processed_seconds >= ap._expected_duration - 0.5:
                     logger.info(f"⏱️ Dateiende erreicht (processed={ap._processed_seconds:.1f}s >= expected={ap._expected_duration:.1f}s)")
@@ -21162,7 +21177,7 @@ class StreamHandler:
 
             # ----- Lesen der Audiodaten -----
             if ap.is_stop_requested() or not ap.is_processing():
-                logger.info("Stop detected before reading, breaking loop.")
+                log_debug("stream", "Stop detected before reading, breaking loop.")
                 break
 
             try:
@@ -21172,12 +21187,17 @@ class StreamHandler:
                 audio_data = None
 
             if ap.is_stop_requested() or not ap.is_processing():
-                logger.info("Stop detected after read, discarding chunk")
+                log_debug("stream", "Stop detected after read, discarding chunk")
                 break
 
             # ----- Verarbeitung des Leseergebnisses -----
             if audio_data is None:
-                # Timeout – keine Daten
+                # Keine Daten (Timeout oder Sentinel)
+                # Sofort prüfen, ob Stop angefordert wurde, um Schleife zu beenden
+                if ap.is_stop_requested():
+                    log_debug("stream", "Stop requested after receiving None, exiting loop")
+                    break
+
                 empty_reads += 1
                 if empty_reads >= self.MAX_EMPTY_READS:
                     logger.warning(f"⚠️ Too many consecutive timeouts ({empty_reads}), trying reconnect...")
@@ -21249,7 +21269,6 @@ class StreamHandler:
                     ap._total_bytes_processed += len(audio_data)
                     ap._processed_seconds = ap._total_bytes_processed / ap.config.BYTES_PER_SECOND
 
-                # ----- Verarbeitung der Audiodaten im AudioProcessor (mit Fehlerbehandlung) -----
                 try:
                     ap._process_audio_data(
                         audio_data,
@@ -21258,7 +21277,6 @@ class StreamHandler:
                         info_callback,
                         error_callback,
                     )
-                    # Erfolg – Fehlerzähler zurücksetzen
                     processing_errors = 0
                 except Exception as e:
                     processing_errors += 1
@@ -21473,7 +21491,7 @@ class AudioProcessor:
         self._translation_semaphore = threading.Semaphore(8)
 
         # ========== Asynchrone Transkriptions-Queue & Dispatcher ==========
-        queue_maxsize = getattr(self.settings, 'transcription_queue_size', 100)
+        queue_maxsize = getattr(self.settings, 'transcription_queue_size', 200)
         self._raw_audio_queue: queue.Queue = queue.Queue(maxsize=queue_maxsize)
         self._dispatcher_thread: Optional[threading.Thread] = None
         self._dispatcher_shutdown = threading.Event()
@@ -21484,7 +21502,7 @@ class AudioProcessor:
         self._queue_dequeue_counter = 0
         self._queue_drop_counter = 0
         self._last_queue_log_time = 0.0
-        self._queue_log_interval = 10.0  # Sekunden
+        self._queue_log_interval = 10.0
 
         # === NEU: Eigene numpy-Referenz für sicheren Zugriff ===
         self._np = None
@@ -21547,10 +21565,18 @@ class AudioProcessor:
             except queue.Empty:
                 continue
             except Exception as e:
+                # Bei unerwarteten Exceptions (z.B. geschlossene Queue) abbrechen
                 logger.error(f"Dispatcher-Fehler beim Holen aus Queue: {e}")
+                if DEBUG_LEVEL >= 3:
+                    log_debug("dispatcher", f"Exception details: {type(e).__name__}: {e}")
+                # Prüfen, ob der Fehler schwerwiegend ist oder Shutdown aktiv
+                if isinstance(e, (RuntimeError, OSError, ValueError)) or self._dispatcher_shutdown.is_set():
+                    logger.warning("Dispatcher: Schwerwiegender Fehler, beende Schleife")
+                    break
+                # Sonst weitermachen (z.B. temporäre Netzwerkfehler – hier unwahrscheinlich)
                 continue
 
-            if item is None:   # Sentinel
+            if item is None:
                 logger.debug("Dispatcher: Sentinel empfangen, beende")
                 break
 
@@ -21670,6 +21696,8 @@ class AudioProcessor:
         with self._last_confidence_lock:
             last_conf = self.last_confidence
         apply_enhancement = (last_conf < 0.3)
+        log_debug("enhance", f"last_conf={last_conf:.3f}, apply={apply_enhancement}")
+
         if apply_enhancement:
             try:
                 with self._noisereduce_lock:
@@ -21677,6 +21705,7 @@ class AudioProcessor:
                         audio_data, last_conf, self._noisereduce_counter
                     )
                     self._noisereduce_counter = (self._noisereduce_counter + 1) % 10000
+                log_debug("enhance", "Audio enhancement applied successfully")
             except Exception as e:
                 logger.warning(f"⚠️ Audio enhancement failed: {e}")
                 enhanced_audio = audio_data
@@ -21690,6 +21719,8 @@ class AudioProcessor:
             )
             with self._stats_lock:
                 self._queue_enqueue_counter += 1
+            qsize = self._raw_audio_queue.qsize()
+            log_debug("queue", f"Chunk enqueued, queue size={qsize}")
         except queue.Full:
             with self._stats_lock:
                 self._queue_drop_counter += 1
@@ -21700,6 +21731,9 @@ class AudioProcessor:
                 error_callback("⚠️ Transkriptions-Queue voll – Chunk verworfen")
             if logger.isEnabledFor(logging.DEBUG) and DEBUG_LEVEL >= 3:
                 log_debug("queue", f"Queue full, dropped chunk (total drops: {self._queue_drop_counter})")
+            # Auch bei jedem Drop debug log, falls gewünscht – hier nur bei >=3
+            elif logger.isEnabledFor(logging.DEBUG):
+                log_debug("queue", f"Queue full (drop #{self._queue_drop_counter})")
 
         # Statistik für Chunk (weiterhin)
         with self._stats_lock:
@@ -21709,6 +21743,8 @@ class AudioProcessor:
 
         if self._chunk_counter % 50 == 0:
             info_callback(f"📊 {self._chunk_counter} chunks processed...")
+            if logger.isEnabledFor(logging.DEBUG):
+                log_debug("stats", f"Chunks={self._chunk_counter}, bytes={self._total_bytes_processed}, sec={self._processed_seconds:.2f}")
 
     # =========================================================================
     #  TRANSCRIPTIONS-HELPER (asynchrone Varianten)
@@ -22317,13 +22353,12 @@ class AudioProcessor:
             if hasattr(self, '_processing_thread') and self._processing_thread is not None:
                 if self._processing_thread.is_alive():
                     logger.debug("AudioProcessor: Waiting for processing thread to finish...")
-                    self._processing_thread.join(timeout=2.0)
-                    if self._processing_thread.is_alive():
+                    self._processing_thread.join(timeout=0.1)
+                    if self._processing_thread.is_alive() and DEBUG_LEVEL >= 2:
                         logger.warning("AudioProcessor: Processing thread did not terminate within timeout")
                     else:
                         logger.debug("AudioProcessor: Processing thread joined")
                 self._processing_thread = None
-
             self._cleanup_done = True
 
             # Executors sauber herunterfahren (mit Wartezeit)
@@ -24416,7 +24451,7 @@ class AdvancedSettings:
     # =========================================================================
     # Erweiterte Pfade (für Dateizugriff)
     # =========================================================================
-    allowed_dirs: List[str] = field(default_factory=list)   # zusätzliche erlaubte Verzeichnisse
+    allowed_dirs: List[str] = field(default_factory=list)
 
     # =========================================================================
     # Interna (nicht direkt speicherbar)
@@ -24445,6 +24480,11 @@ class AdvancedSettings:
         if hasattr(self, 'config') and self.config is not None:
             self.config.CHUNK_DURATION = value
 
+        # Auto‑TTS
+        #auto_tts_transcript: bool = False
+        #auto_tts_translation: bool = False
+        #auto_tts_delay_ms: int = 1500
+
     # -------------------------------------------------------------------------
     # Initialisierung
     # -------------------------------------------------------------------------
@@ -24453,6 +24493,7 @@ class AdvancedSettings:
         self.chunk_duration = self.config.CHUNK_DURATION
         self._apply_mode_overrides()
         logger.info("🔊 Settings initialized (dataclass)")
+        
 
     def _recreate_config(self) -> None:
         if self.config_type == "realtime":
@@ -25152,7 +25193,7 @@ def setup_platform_environment() -> None:
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Erweiterte Unit‑Tests (mit mehr Abdeckung und Mocking)
+# Erweiterte Unit‑Tests
 # -----------------------------------------------------------------------------
 def run_tests() -> int:
     """Führt alle internen Unit‑Tests aus und gibt 0 bei Erfolg, sonst 1 zurück."""
@@ -25160,7 +25201,7 @@ def run_tests() -> int:
     from unittest.mock import MagicMock, patch
 
     # -------------------------------------------------------------------------
-    # TestPlatformUtils (bestehend, bleibt unverändert)
+    # TestPlatformUtils
     # -------------------------------------------------------------------------
     class TestPlatformUtils(unittest.TestCase):
         def test_validate_url_http(self):
@@ -25179,7 +25220,7 @@ def run_tests() -> int:
             self.assertIn("existiert nicht", path)
 
     # -------------------------------------------------------------------------
-    # TestStreamManager (bestehend, bleibt unverändert)
+    # TestStreamManager
     # -------------------------------------------------------------------------
     class TestStreamManager(unittest.TestCase):
         def setUp(self):
@@ -25198,7 +25239,7 @@ def run_tests() -> int:
             self.assertEqual(result[0], "local")
 
     # -------------------------------------------------------------------------
-    # TestAudioEnhancer (bestehend)
+    # TestAudioEnhancer
     # -------------------------------------------------------------------------
     class TestAudioEnhancer(unittest.TestCase):
         def setUp(self):
@@ -25215,7 +25256,7 @@ def run_tests() -> int:
             self.assertFalse(result)
 
     # -------------------------------------------------------------------------
-    # TestTranscriptionEngine (erweitert)
+    # TestTranscriptionEngine
     # -------------------------------------------------------------------------
     class TestTranscriptionEngine(unittest.TestCase):
         def setUp(self):
@@ -25234,17 +25275,17 @@ def run_tests() -> int:
             self.assertTrue(self.engine.is_valid_segment("Hello world", 0.8))
             self.assertFalse(self.engine.is_valid_segment("", 0.8))
             self.assertFalse(self.engine.is_valid_segment("   ", 0.8))
-            self.assertFalse(self.engine.is_valid_segment("123", 0.8))  # keine Buchstaben
+            self.assertFalse(self.engine.is_valid_segment("123", 0.8))
 
         def test_validate_audio_data(self):
             # Dummy‑Audio (1 Sekunde Stille)
-            dummy = b'\x00' * (16000 * 2)  # 1 Sekunde, 16bit
+            dummy = b'\x00' * (16000 * 2)
             valid, msg = self.engine.validate_audio_data(dummy)
-            self.assertFalse(valid)  # zu leise
+            self.assertFalse(valid)
             self.assertIn("silent", msg)
 
     # -------------------------------------------------------------------------
-    # TestConfig (bestehend)
+    # TestConfig
     # -------------------------------------------------------------------------
     class TestConfig(unittest.TestCase):
         def test_calculate_optimal_chunk_duration(self):
@@ -25432,7 +25473,6 @@ def _print_welcome(debug_level: int, quiet: bool) -> None:
         print(f"Platform: {SYSTEM} {'ARM' if IS_ARM else 'x86'}")
         print(f"Python: {sys.version.split()[0]}")
         print(f"Working Dir: {os.getcwd()}")
-        # Model wird später geladen
         print("Model: (wird beim Start geladen)")
         print("=" * 50 + "\n")
 
@@ -25465,7 +25505,6 @@ def _handle_headless_mode(args: argparse.Namespace) -> int:
         else:
             logger.warning(f"⚠️ Unknown model '{args.model}', using default")
     if args.language:
-        # Sprache als Code oder Name? Wir nehmen an, es ist ein ISO‑Code
         if args.language in SUPPORTED_LANGUAGES:
             settings.default_language = args.language
             logger.info(f"Language override: {args.language}")
@@ -25706,8 +25745,6 @@ def main() -> int:
         return 2
 
     finally:
-        # Dieser finally-Block wird nach os._exit nicht mehr ausgeführt.
-        # Er dient nur als Fallback, falls os._exit nicht erreicht wird.
         logger.debug("🧹 Final minimal cleanup...")
         if app is not None:
             try:
@@ -25731,7 +25768,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # Wechsle in das Verzeichnis der Skriptdatei (wenn möglich)
     try:
         if "__file__" in globals():
             script_dir = os.path.dirname(os.path.abspath(__file__))
