@@ -1314,6 +1314,31 @@ def get_config(config_type: str = "default") -> Config:
 # 11. HILFSKLASSEN (FastLazyLoader, PlatformStderrFilter, PlatformUtils, DummyQueue, SimplePerformanceTracker, OptimizedThreadPoolExecutor, TTLCache, LRUCache, CacheManager, DebugFilter, AppContext, log_exception, MemoryManager, Decorators)
 # =============================================================================
 class FastLazyLoader:
+    """
+    Thread‑sicherer Lazy‑Loader für Module mit Caching und Verfügbarkeitsprüfung.
+
+    Features:
+        - Lädt Module nur bei Bedarf (lazy).
+        - Cached geladene Module für schnellen Wiederzugriff.
+        - Verfügbarkeits‑Cache mit TTL (Standard 60 s).
+        - Optionale Metriken (Loads, Cache‑Treffer, Fehler).
+        - Automatische Bereinigung abgelaufener Verfügbarkeitseinträge.
+        - Bei Importfehlern wird ein Mock‑Modul zurückgegeben, das bei Zugriff eine Warnung ausgibt.
+        - Ausführliche Debug‑Logs bei `DEBUG_LEVEL >= 3`.
+
+    Attribute (Klassenvariablen):
+        _loaded_modules (Dict[str, Any]): Cache geladener Module.
+        _module_locks (Dict[str, threading.Lock]): Locks pro Modul.
+        _global_lock (threading.Lock): Lock für globale Zustände.
+        _availability_cache (Dict[str, Tuple[bool, float]]): Cache für Verfügbarkeit mit Zeitstempel.
+        _availability_cache_ttl (float): Lebensdauer der Cache‑Einträge (Sekunden).
+        _metrics_enabled (bool): Ob Metriken gesammelt werden.
+        _metrics (Dict[str, Any]): Metrik‑Zähler.
+        _metrics_lock (threading.RLock): Lock für Metriken.
+        _cache_lock (threading.RLock): Lock für Availability‑Cache.
+        _logger (logging.Logger): Interner Logger (zur Laufzeit gesetzt).
+    """
+
     _loaded_modules: Dict[str, Any] = {}
     _module_locks: Dict[str, threading.Lock] = {}
     _global_lock = threading.Lock()
@@ -1327,32 +1352,84 @@ class FastLazyLoader:
         "cache_hits": 0,
         "availability_checks": 0,
     }
-    _metrics_lock = threading.Lock()
+    _metrics_lock = threading.RLock()
     _cache_lock = threading.RLock()
+    _logger = logging.getLogger("dragon")   # wird zur Laufzeit gesetzt
 
     @classmethod
-    def configure(cls, *, availability_cache_ttl: Optional[float] = None, enable_metrics: bool = False) -> None:
+    def configure(cls, *, availability_cache_ttl: Optional[float] = None,
+                  enable_metrics: bool = False) -> None:
+        """
+        Konfiguriert globale Parameter.
+
+        Args:
+            availability_cache_ttl: Lebensdauer der Verfügbarkeits‑Cache‑Einträge (Sekunden).
+            enable_metrics: Aktiviert das Sammeln von Metriken.
+        """
         if availability_cache_ttl is not None:
             cls._availability_cache_ttl = availability_cache_ttl
         cls._metrics_enabled = enable_metrics
+        cls._logger.debug(
+            f"FastLazyLoader configured: ttl={cls._availability_cache_ttl}s, metrics={enable_metrics}",
+            extra={"component": "loader"}
+        )
 
     @classmethod
     def _get_lock(cls, module_name: str) -> threading.Lock:
+        """Gibt ein Lock für das Modul zurück (erzeugt eines, falls nicht vorhanden)."""
         with cls._global_lock:
             if module_name not in cls._module_locks:
                 cls._module_locks[module_name] = threading.Lock()
             return cls._module_locks[module_name]
 
     @classmethod
+    def _cleanup_availability_cache(cls) -> None:
+        """Entfernt abgelaufene Einträge aus dem Verfügbarkeits‑Cache."""
+        now = time.time()
+        with cls._cache_lock:
+            expired = [k for k, (_, ts) in cls._availability_cache.items()
+                       if now - ts > cls._availability_cache_ttl]
+            for k in expired:
+                del cls._availability_cache[k]
+                if cls._metrics_enabled:
+                    cls._logger.debug(f"Removed expired availability entry for {k}",
+                                      extra={"component": "loader"})
+
+    @classmethod
     def load(cls, module_name: str, import_paths: Union[str, List[str], None] = None) -> Any:
+        """
+        Lädt ein Modul (lazy) und gibt es zurück.
+
+        Falls das Modul bereits geladen ist, wird das gecachte Objekt zurückgegeben.
+        Bei einem Importfehler wird ein Mock‑Modul zurückgegeben, das bei jedem
+        Attributzugriff eine ImportError‑Exception wirft. Die Verfügbarkeit kann
+        mit `is_available` vorab geprüft werden.
+
+        Args:
+            module_name: Name des Moduls (z.B. 'numpy').
+            import_paths: Alternativer Import‑Pfad oder Liste von Pfaden.
+                          Wird versucht, das Modul unter diesen Namen zu importieren.
+
+        Returns:
+            Das geladene Modul oder ein Mock‑Objekt, das bei Zugriff eine Exception wirft.
+
+        Raises:
+            Keine. Fehler werden intern behandelt und geloggt.
+        """
+        # Cache‑Treffer
         if module_name in cls._loaded_modules:
             if cls._metrics_enabled:
                 with cls._metrics_lock:
                     cls._metrics["cache_hits"] += 1
-            return cls._loaded_modules[module_name]
+            mod = cls._loaded_modules[module_name]
+            if getattr(mod, "_is_mock", False) and cls._logger.isEnabledFor(logging.DEBUG):
+                cls._logger.debug(f"Returning mock module for {module_name} (cached)",
+                                  extra={"component": "loader"})
+            return mod
 
         lock = cls._get_lock(module_name)
         with lock:
+            # Double‑check nach Lock
             if module_name in cls._loaded_modules:
                 if cls._metrics_enabled:
                     with cls._metrics_lock:
@@ -1370,6 +1447,7 @@ class FastLazyLoader:
             else:
                 paths = import_paths
 
+            # Spezielle Handler für Module mit komplexer Initialisierung
             special_handlers = {
                 "torch": cls._load_torch,
                 "faster_whisper": cls._load_faster_whisper,
@@ -1385,9 +1463,12 @@ class FastLazyLoader:
                     if cls._metrics_enabled:
                         with cls._metrics_lock:
                             cls._metrics["load_success"] += 1
+                    cls._logger.debug(f"Loaded {module_name} via special handler",
+                                      extra={"component": "loader"})
                     return module
                 except ImportError as e:
-                    logger.warning(f"⚠️ Special handler for {module_name} failed: {e}")
+                    cls._logger.debug(f"Special handler for {module_name} failed: {e}",
+                                      extra={"component": "loader"})
 
             last_error = None
             for path in paths:
@@ -1397,25 +1478,36 @@ class FastLazyLoader:
                     if cls._metrics_enabled:
                         with cls._metrics_lock:
                             cls._metrics["load_success"] += 1
+                    cls._logger.debug(f"Loaded {module_name} from {path}",
+                                      extra={"component": "loader"})
                     return module
                 except ImportError as e:
                     last_error = e
                     continue
 
-            logger.warning(f"⚠️ Module {module_name} not available (tried paths: {paths}): {last_error}")
+            # Import fehlgeschlagen → Mock‑Modul zurückgeben
+            cls._logger.debug(f"Module {module_name} not available: {last_error}",
+                              extra={"component": "loader"})
             if cls._metrics_enabled:
                 with cls._metrics_lock:
                     cls._metrics["load_failures"] += 1
 
             class MockModule:
                 _is_mock = True
-                def __init__(self, name: str):
-                    self.__name__ = name
+                __name__ = module_name
+
                 def __getattr__(self, name: str) -> Any:
-                    def mock_method(*args: Any, **kwargs: Any) -> Any:
-                        raise ImportError(f"Module {self.__name__} not available")
-                    return mock_method
-            mock = MockModule(module_name)
+                    if not hasattr(self, "_warned"):
+                        self._warned = True
+                        logger = logging.getLogger("dragon")
+                        logger.warning(
+                            f"⚠️ Zugriff auf Mock-Modul '{module_name}' – "
+                            f"die eigentliche Bibliothek ist nicht installiert. "
+                            f"Funktionen werden fehlschlagen."
+                        )
+                    raise ImportError(f"Module {module_name} not available")
+
+            mock = MockModule()
             cls._loaded_modules[module_name] = mock
             return mock
 
@@ -1451,19 +1543,31 @@ class FastLazyLoader:
 
     @classmethod
     def is_available(cls, module_name: str, use_cache: bool = True) -> bool:
+        """
+        Prüft, ob ein Modul verfügbar ist (durch Suchpfad).
+
+        Args:
+            module_name: Name des Moduls.
+            use_cache: Wenn True, wird ein Cache mit TTL verwendet.
+
+        Returns:
+            True, wenn das Modul importiert werden kann, sonst False.
+        """
         if cls._metrics_enabled:
             with cls._metrics_lock:
                 cls._metrics["availability_checks"] += 1
 
+        # Bereits geladene Module (auch Mock) gelten als verfügbar, wenn sie kein Mock sind
         if module_name in cls._loaded_modules:
             mod = cls._loaded_modules[module_name]
             return not getattr(mod, "_is_mock", False)
 
         if use_cache:
-            now = time.time()
+            cls._cleanup_availability_cache()  # Periodische Bereinigung
             with cls._cache_lock:
                 cached = cls._availability_cache.get(module_name)
-                if cached and (now - cached[1] < cls._availability_cache_ttl):
+                if cached:
+                    # Zeitstempel bereits in _cleanup_availability_cache geprüft
                     return cached[0]
 
         spec = importlib.util.find_spec(module_name)
@@ -1473,30 +1577,66 @@ class FastLazyLoader:
             with cls._cache_lock:
                 cls._availability_cache[module_name] = (available, time.time())
 
+        cls._logger.debug(f"Availability check for {module_name}: {available}",
+                          extra={"component": "loader"})
         return available
 
     @classmethod
-    def clear_cache(cls) -> None:
+    def clear_cache(cls, module_name: Optional[str] = None) -> None:
+        """
+        Leert den Modul‑Cache und den Verfügbarkeits‑Cache.
+
+        Args:
+            module_name: Wenn angegeben, wird nur dieses Modul aus dem Cache entfernt.
+                         Sonst wird der gesamte Cache geleert.
+        """
         with cls._global_lock:
-            cls._loaded_modules.clear()
-            cls._module_locks.clear()
-            cls._availability_cache.clear()
-            if cls._metrics_enabled:
-                with cls._metrics_lock:
-                    cls._metrics = {
-                        "load_attempts": 0,
-                        "load_success": 0,
-                        "load_failures": 0,
-                        "cache_hits": 0,
-                        "availability_checks": 0,
-                    }
+            if module_name is None:
+                cls._loaded_modules.clear()
+                cls._module_locks.clear()
+                cls._availability_cache.clear()
+                if cls._metrics_enabled:
+                    with cls._metrics_lock:
+                        cls._metrics = {
+                            "load_attempts": 0,
+                            "load_success": 0,
+                            "load_failures": 0,
+                            "cache_hits": 0,
+                            "availability_checks": 0,
+                        }
+                cls._logger.debug("All caches cleared", extra={"component": "loader"})
+            else:
+                if module_name in cls._loaded_modules:
+                    del cls._loaded_modules[module_name]
+                if module_name in cls._module_locks:
+                    del cls._module_locks[module_name]
+                with cls._cache_lock:
+                    if module_name in cls._availability_cache:
+                        del cls._availability_cache[module_name]
+                cls._logger.debug(f"Cache cleared for module {module_name}",
+                                  extra={"component": "loader"})
 
     @classmethod
     def get_metrics(cls) -> Dict[str, Any]:
+        """Gibt die gesammelten Metriken zurück (leeres Dict, wenn Metriken deaktiviert)."""
         if not cls._metrics_enabled:
             return {}
         with cls._metrics_lock:
             return cls._metrics.copy()
+
+    @classmethod
+    def reset_metrics(cls) -> None:
+        """Setzt die Metriken zurück (nur wenn Metriken aktiviert)."""
+        if cls._metrics_enabled:
+            with cls._metrics_lock:
+                cls._metrics = {
+                    "load_attempts": 0,
+                    "load_success": 0,
+                    "load_failures": 0,
+                    "cache_hits": 0,
+                    "availability_checks": 0,
+                }
+            cls._logger.debug("Metrics reset", extra={"component": "loader"})
 
 
 class GPUStats:
@@ -1601,13 +1741,18 @@ class PlatformUtils:
     """
     Plattformunabhängige Hilfsfunktionen für Dragon Whisperer.
 
-    Kümmert sich um Umgebungsvariablen, Konsolen‑Setup, Prozessverwaltung,
-    URL‑ und Pfad‑Validierung sowie Terminal‑Einstellungen.
-    Alle öffentlichen Methoden sind thread‑sicher.
+    Bietet:
+        - Plattform‑Erkennung, Umgebungs‑Setup, Pfad‑ und URL‑Validierung.
+        - Verwaltung erlaubter Verzeichnisse für Dateizugriff.
+        - Prozess‑Terminierung mit psutil‑Fallback.
+        - Detaillierte Debug‑Logs bei DEBUG_LEVEL >= 3.
+        - Thread‑sichere Operationen über Klassen‑Locks.
+
+    Alle öffentlichen Methoden sind als Klassenmethoden ausgeführt und thread‑sicher.
     """
 
     # =========================================================================
-    #  Klassenattribute
+    #  Klassenattribute (thread‑sichere Zustandsvariablen)
     # =========================================================================
     _environment_setup_done = False
     _environment_setup_lock = threading.RLock()
@@ -1618,18 +1763,13 @@ class PlatformUtils:
     _terminal_settings_saved = False
     _original_stty_settings: Optional[str] = None
     _terminal_lock = threading.Lock()
-
-    # Neue Attribute für getrennte Basis‑ und Benutzerverzeichnisse
     _base_dirs: Optional[List[Path]] = None
     _user_dirs: List[Path] = []
     _allowed_dirs_lock = threading.RLock()
-
-    # Für Tests überschreibbare Pfade
     _test_home: Optional[Path] = None
     _test_cwd: Optional[Path] = None
-
-    # Debug‑Komponente
     _DEBUG_COMPONENT = "platform"
+    _logger = logging.getLogger("dragon")   # wird zur Laufzeit gesetzt
 
     # -------------------------------------------------------------------------
     #  Öffentliche Methoden
@@ -1639,10 +1779,11 @@ class PlatformUtils:
         """
         Setzt die Liste der zusätzlich erlaubten Benutzerverzeichnisse.
         Die Basisverzeichnisse (Home, aktuelles Verzeichnis, /tmp) bleiben immer erlaubt.
-        """
-        logger = logging.getLogger("dragon")
-        logger.debug(f"Set user dirs: {dirs}", extra={"component": cls._DEBUG_COMPONENT})
 
+        Args:
+            dirs: Liste von Verzeichnispfaden (als String).
+        """
+        cls._logger.debug(f"Setting user dirs: {dirs}", extra={"component": cls._DEBUG_COMPONENT})
         with cls._allowed_dirs_lock:
             resolved = []
             for d in dirs:
@@ -1652,22 +1793,27 @@ class PlatformUtils:
                     p = Path(d).resolve()
                     if p.exists():
                         resolved.append(p)
-                        logger.debug(f"  → Resolved: {p}", extra={"component": cls._DEBUG_COMPONENT})
+                        cls._logger.debug(f"  → Resolved: {p}", extra={"component": cls._DEBUG_COMPONENT})
                     else:
-                        logger.debug(f"  → Skipped (does not exist): {d}", extra={"component": cls._DEBUG_COMPONENT})
+                        cls._logger.debug(f"  → Skipped (does not exist): {d}", extra={"component": cls._DEBUG_COMPONENT})
                 except Exception as e:
-                    logger.debug(f"  → Skipped (invalid path): {d} – {e}", extra={"component": cls._DEBUG_COMPONENT})
+                    cls._logger.debug(f"  → Skipped (invalid path): {d} – {e}", extra={"component": cls._DEBUG_COMPONENT})
             cls._user_dirs = resolved
-            logger.debug(f"Final user dirs: {[str(p) for p in resolved]}", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug(f"Final user dirs: {[str(p) for p in resolved]}", extra={"component": cls._DEBUG_COMPONENT})
 
     @classmethod
     def get_platform_config_dir(cls) -> Path:
-        """Gibt das plattformspezifische Konfigurationsverzeichnis zurück (ohne es zu erstellen)."""
+        """
+        Gibt das plattformspezifische Konfigurationsverzeichnis zurück (ohne es zu erstellen).
+
+        Returns:
+            Path zum Konfigurationsverzeichnis.
+        """
         if IS_WINDOWS:
             appdata = os.environ.get("APPDATA")
             if not appdata:
                 appdata = str(Path.home() / "AppData" / "Roaming")
-                logging.getLogger("dragon").debug(
+                cls._logger.debug(
                     "APPDATA not set, fallback to: %s", appdata,
                     extra={"component": cls._DEBUG_COMPONENT}
                 )
@@ -1676,19 +1822,20 @@ class PlatformUtils:
             config_dir = Path.home() / "Library" / "Application Support" / "DragonWhisperer"
         else:
             config_dir = Path.home() / ".config" / "dragonwhisperer"
-        logging.getLogger("dragon").debug(
-            f"Config directory: {config_dir}", extra={"component": cls._DEBUG_COMPONENT}
-        )
+        cls._logger.debug(f"Config directory: {config_dir}", extra={"component": cls._DEBUG_COMPONENT})
         return config_dir
 
     @classmethod
     def ensure_platform_config_dir(cls) -> Path:
-        """Stellt sicher, dass das Konfigurationsverzeichnis existiert, und gibt es zurück."""
+        """
+        Stellt sicher, dass das Konfigurationsverzeichnis existiert, und gibt es zurück.
+
+        Returns:
+            Path zum Konfigurationsverzeichnis (wird bei Bedarf erstellt).
+        """
         config_dir = cls.get_platform_config_dir()
         config_dir.mkdir(parents=True, exist_ok=True)
-        logging.getLogger("dragon").debug(
-            f"Ensured config directory exists: {config_dir}", extra={"component": cls._DEBUG_COMPONENT}
-        )
+        cls._logger.debug(f"Ensured config directory exists: {config_dir}", extra={"component": cls._DEBUG_COMPONENT})
         return config_dir
 
     @classmethod
@@ -1696,36 +1843,41 @@ class PlatformUtils:
         """
         Beendet einen Prozess und alle seine Kindprozesse.
         Verwendet psutil, falls vorhanden, ansonsten plattformspezifische Befehle.
+
+        Args:
+            pid: Prozess‑ID des Elternprozesses.
+
+        Returns:
+            True, wenn der Prozessbaum erfolgreich beendet wurde, sonst False.
         """
-        logger = logging.getLogger("dragon")
-        logger.debug(f"Killing process tree for PID {pid}", extra={"component": cls._DEBUG_COMPONENT})
+        cls._logger.debug(f"Killing process tree for PID {pid}", extra={"component": cls._DEBUG_COMPONENT})
 
         try:
             import psutil
             parent = psutil.Process(pid)
             children = parent.children(recursive=True)
-            logger.debug(f"  Found {len(children)} child processes", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug(f"  Found {len(children)} child processes", extra={"component": cls._DEBUG_COMPONENT})
             for child in children:
                 try:
                     child.terminate()
-                    logger.debug(f"    Terminated child {child.pid}", extra={"component": cls._DEBUG_COMPONENT})
+                    cls._logger.debug(f"    Terminated child {child.pid}", extra={"component": cls._DEBUG_COMPONENT})
                 except psutil.NoSuchProcess:
                     pass
             gone, alive = psutil.wait_procs(children, timeout=2.0)
             for child in alive:
                 try:
                     child.kill()
-                    logger.debug(f"    Killed child {child.pid}", extra={"component": cls._DEBUG_COMPONENT})
+                    cls._logger.debug(f"    Killed child {child.pid}", extra={"component": cls._DEBUG_COMPONENT})
                 except psutil.NoSuchProcess:
                     pass
             parent.terminate()
             parent.wait(timeout=2.0)
-            logger.debug(f"  Terminated parent {pid}", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug(f"  Terminated parent {pid}", extra={"component": cls._DEBUG_COMPONENT})
             return True
         except ImportError:
-            logger.debug("  psutil not available, using fallback", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug("  psutil not available, using fallback", extra={"component": cls._DEBUG_COMPONENT})
         except Exception as e:
-            logger.debug(f"  psutil error: {e}", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug(f"  psutil error: {e}", extra={"component": cls._DEBUG_COMPONENT})
 
         try:
             if IS_WINDOWS:
@@ -1736,12 +1888,12 @@ class PlatformUtils:
                     check=False,
                     creationflags=subprocess.CREATE_NO_WINDOW,
                 )
-                logger.debug(f"  Used taskkill for PID {pid}", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug(f"  Used taskkill for PID {pid}", extra={"component": cls._DEBUG_COMPONENT})
                 return True
             else:
                 try:
                     os.killpg(os.getpgid(pid), py_signal.SIGKILL)
-                    logger.debug(f"  Used killpg for PID {pid}", extra={"component": cls._DEBUG_COMPONENT})
+                    cls._logger.debug(f"  Used killpg for PID {pid}", extra={"component": cls._DEBUG_COMPONENT})
                 except (ProcessLookupError, PermissionError):
                     subprocess.run(
                         ["pkill", "-9", "-P", str(pid)],
@@ -1749,91 +1901,98 @@ class PlatformUtils:
                         timeout=5,
                         check=False,
                     )
-                    logger.debug(f"  Used pkill for PID {pid}", extra={"component": cls._DEBUG_COMPONENT})
+                    cls._logger.debug(f"  Used pkill for PID {pid}", extra={"component": cls._DEBUG_COMPONENT})
                 return True
         except subprocess.TimeoutExpired:
-            logger.debug(f"  Timeout killing process tree {pid}", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug(f"  Timeout killing process tree {pid}", extra={"component": cls._DEBUG_COMPONENT})
         except (OSError, subprocess.CalledProcessError) as e:
-            logger.debug(f"  Error killing process tree {pid}: {e}", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug(f"  Error killing process tree {pid}: {e}", extra={"component": cls._DEBUG_COMPONENT})
         except Exception as e:
-            logger.debug(f"  Unexpected error killing process tree {pid}: {e}", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug(f"  Unexpected error killing process tree {pid}: {e}", extra={"component": cls._DEBUG_COMPONENT})
         return False
 
     @classmethod
     def check_platform_dependencies(cls) -> bool:
-        """Prüft, ob alle kritischen Abhängigkeiten vorhanden sind. Wirft RuntimeError bei Fehlern."""
+        """
+        Prüft, ob alle kritischen Abhängigkeiten vorhanden sind.
+        Wirft RuntimeError bei Fehlern mit ausführlicher Fehlermeldung.
+
+        Returns:
+            True, wenn alle kritischen Abhängigkeiten gefunden wurden.
+
+        Raises:
+            RuntimeError: Wenn eine kritische Abhängigkeit fehlt (ffmpeg, yt-dlp, tkinter, numpy).
+        """
         with cls._dependencies_lock:
             if cls._dependencies_checked:
-                logging.getLogger("dragon").debug(
-                    "Dependencies already checked, skipping", extra={"component": cls._DEBUG_COMPONENT}
-                )
+                cls._logger.debug("Dependencies already checked, skipping",
+                                  extra={"component": cls._DEBUG_COMPONENT})
                 return True
 
             missing_critical: List[str] = []
             missing_optional: List[str] = []
             issues: List[str] = []
 
-            logger = logging.getLogger("dragon")
-            logger.info("🔍 Checking platform dependencies...")
-            logger.debug("Starting dependency check", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.info("🔍 Checking platform dependencies...")
+            cls._logger.debug("Starting dependency check", extra={"component": cls._DEBUG_COMPONENT})
 
             ffmpeg_found = cls.get_ffmpeg_path() is not None
             if not ffmpeg_found:
                 missing_critical.append("ffmpeg")
                 issues.append("FFmpeg not found in PATH or standard locations")
-                logger.debug("  ✗ ffmpeg missing", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("  ✗ ffmpeg missing", extra={"component": cls._DEBUG_COMPONENT})
             else:
-                logger.debug("  ✓ ffmpeg found", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("  ✓ ffmpeg found", extra={"component": cls._DEBUG_COMPONENT})
 
             ytdlp_found = shutil.which("yt-dlp") is not None
             if not ytdlp_found:
                 missing_critical.append("yt-dlp")
                 issues.append("yt-dlp not found in PATH")
-                logger.debug("  ✗ yt-dlp missing", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("  ✗ yt-dlp missing", extra={"component": cls._DEBUG_COMPONENT})
             else:
-                logger.debug("  ✓ yt-dlp found", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("  ✓ yt-dlp found", extra={"component": cls._DEBUG_COMPONENT})
 
             if not GUI_AVAILABLE:
                 missing_critical.append("tkinter")
                 issues.append("Tkinter not available – required for GUI")
-                logger.debug("  ✗ tkinter missing", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("  ✗ tkinter missing", extra={"component": cls._DEBUG_COMPONENT})
             else:
-                logger.debug("  ✓ tkinter available", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("  ✓ tkinter available", extra={"component": cls._DEBUG_COMPONENT})
 
             if not NUMPY_AVAILABLE:
                 missing_critical.append("numpy")
                 issues.append("numpy not available – required for audio processing and Whisper")
-                logger.debug("  ✗ numpy missing", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("  ✗ numpy missing", extra={"component": cls._DEBUG_COMPONENT})
             else:
-                logger.debug("  ✓ numpy available", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("  ✓ numpy available", extra={"component": cls._DEBUG_COMPONENT})
 
             if not WHISPER_AVAILABLE:
                 missing_optional.append("whisper (faster-whisper/openai-whisper)")
-                logger.warning("⚠️ Kein Whisper-Backend verfügbar. Starte im Demo-Modus.")
-                logger.debug("  ⚠ whisper backend missing", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.warning("⚠️ Kein Whisper-Backend verfügbar. Starte im Demo-Modus.")
+                cls._logger.debug("  ⚠ whisper backend missing", extra={"component": cls._DEBUG_COMPONENT})
             else:
-                logger.debug("  ✓ whisper backend available", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("  ✓ whisper backend available", extra={"component": cls._DEBUG_COMPONENT})
 
             if not TRANSLATOR_AVAILABLE:
                 missing_optional.append("deep-translator")
                 issues.append("deep-translator not available (translation will be limited)")
-                logger.debug("  ✗ deep-translator missing", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("  ✗ deep-translator missing", extra={"component": cls._DEBUG_COMPONENT})
             else:
-                logger.debug("  ✓ deep-translator available", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("  ✓ deep-translator available", extra={"component": cls._DEBUG_COMPONENT})
 
             if not TORCH_AVAILABLE:
                 missing_optional.append("torch")
                 issues.append("PyTorch not available (optional for GPU acceleration)")
-                logger.debug("  ✗ torch missing", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("  ✗ torch missing", extra={"component": cls._DEBUG_COMPONENT})
             else:
-                logger.debug("  ✓ torch available", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("  ✓ torch available", extra={"component": cls._DEBUG_COMPONENT})
 
             if not FastLazyLoader.is_available("psutil"):
                 missing_optional.append("psutil")
                 issues.append("psutil not available (system monitoring limited)")
-                logger.debug("  ✗ psutil missing", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("  ✗ psutil missing", extra={"component": cls._DEBUG_COMPONENT})
             else:
-                logger.debug("  ✓ psutil available", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("  ✓ psutil available", extra={"component": cls._DEBUG_COMPONENT})
 
             if missing_critical:
                 error_msg = f"❌ Fehlende kritische Abhängigkeiten: {', '.join(missing_critical)}\n\n"
@@ -1862,16 +2021,17 @@ class PlatformUtils:
                 raise RuntimeError(error_msg)
 
             if missing_optional:
-                logger.warning(f"⚠️ Optionale Pakete fehlen: {', '.join(missing_optional)}")
-                logger.debug(f"Missing optional packages: {missing_optional}", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.warning(f"⚠️ Optionale Pakete fehlen: {', '.join(missing_optional)}")
+                cls._logger.debug(f"Missing optional packages: {missing_optional}",
+                                  extra={"component": cls._DEBUG_COMPONENT})
             if issues:
                 for issue in issues:
-                    logger.warning(f"⚠️ {issue}")
-                    logger.debug(f"  Issue: {issue}", extra={"component": cls._DEBUG_COMPONENT})
+                    cls._logger.warning(f"⚠️ {issue}")
+                    cls._logger.debug(f"  Issue: {issue}", extra={"component": cls._DEBUG_COMPONENT})
 
-            logger.info("✅ Alle kritischen Abhängigkeiten gefunden")
+            cls._logger.info("✅ Alle kritischen Abhängigkeiten gefunden")
             cls._dependencies_checked = True
-            logger.debug("Dependency check completed", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug("Dependency check completed", extra={"component": cls._DEBUG_COMPONENT})
             return True
 
     @classmethod
@@ -1879,58 +2039,54 @@ class PlatformUtils:
         """Richtet plattformspezifische Umgebungsvariablen und Konsolen ein."""
         with cls._environment_setup_lock:
             if cls._environment_setup_done:
-                logging.getLogger("dragon").debug(
-                    "Environment already set up", extra={"component": cls._DEBUG_COMPONENT}
-                )
+                cls._logger.debug("Environment already set up", extra={"component": cls._DEBUG_COMPONENT})
                 return
 
-            logger = logging.getLogger("dragon")
-            logger.info("🔧 Setting up platform environment...")
-            logger.debug("Starting environment setup", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.info("🔧 Setting up platform environment...")
+            cls._logger.debug("Starting environment setup", extra={"component": cls._DEBUG_COMPONENT})
 
             cls._save_terminal_settings()
             atexit.register(cls._restore_terminal_settings)
 
             if IS_WINDOWS:
                 cls._setup_windows_console()
-                logger.debug("Windows console setup completed", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("Windows console setup completed", extra={"component": cls._DEBUG_COMPONENT})
             elif IS_MACOS:
                 cls._setup_macos_temp_dir()
-                logger.debug("macOS temp dir setup completed", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("macOS temp dir setup completed", extra={"component": cls._DEBUG_COMPONENT})
             else:
-                logger.debug("Linux: no extra setup needed", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("Linux: no extra setup needed", extra={"component": cls._DEBUG_COMPONENT})
 
             cls._environment_setup_done = True
-            logger.info("✅ Platform environment setup complete")
-            logger.debug("Environment setup finished", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.info("✅ Platform environment setup complete")
+            cls._logger.debug("Environment setup finished", extra={"component": cls._DEBUG_COMPONENT})
 
     @classmethod
     def get_ffmpeg_path(cls) -> Optional[str]:
-        """Ermittelt den Pfad zur FFmpeg‑Executable (cached, thread‑sicher)."""
+        """
+        Ermittelt den Pfad zur FFmpeg‑Executable (cached, thread‑sicher).
+
+        Returns:
+            Pfad zur FFmpeg‑Executable oder None, wenn nicht gefunden.
+        """
         with cls._ffmpeg_path_lock:
             if cls._ffmpeg_path is not None:
-                logging.getLogger("dragon").debug(
-                    f"FFmpeg path from cache: {cls._ffmpeg_path}",
-                    extra={"component": cls._DEBUG_COMPONENT}
-                )
+                cls._logger.debug(f"FFmpeg path from cache: {cls._ffmpeg_path}",
+                                  extra={"component": cls._DEBUG_COMPONENT})
                 return cls._ffmpeg_path
 
             env_path = os.environ.get('FFMPEG_PATH')
             if env_path and os.path.exists(env_path):
                 cls._ffmpeg_path = env_path
-                logging.getLogger("dragon").debug(
-                    f"FFmpeg from FFMPEG_PATH env: {env_path}",
-                    extra={"component": cls._DEBUG_COMPONENT}
-                )
+                cls._logger.debug(f"FFmpeg from FFMPEG_PATH env: {env_path}",
+                                  extra={"component": cls._DEBUG_COMPONENT})
                 return cls._ffmpeg_path
 
             ffmpeg_path = shutil.which("ffmpeg")
             if ffmpeg_path:
                 cls._ffmpeg_path = ffmpeg_path
-                logging.getLogger("dragon").debug(
-                    f"FFmpeg found in PATH: {ffmpeg_path}",
-                    extra={"component": cls._DEBUG_COMPONENT}
-                )
+                cls._logger.debug(f"FFmpeg found in PATH: {ffmpeg_path}",
+                                  extra={"component": cls._DEBUG_COMPONENT})
                 return cls._ffmpeg_path
 
             # Plattformspezifische Fallback‑Pfade
@@ -1955,21 +2111,22 @@ class PlatformUtils:
             for path in paths:
                 if os.path.exists(path):
                     cls._ffmpeg_path = path
-                    logging.getLogger("dragon").debug(
-                        f"FFmpeg found at fallback path: {path}",
-                        extra={"component": cls._DEBUG_COMPONENT}
-                    )
+                    cls._logger.debug(f"FFmpeg found at fallback path: {path}",
+                                      extra={"component": cls._DEBUG_COMPONENT})
                     return cls._ffmpeg_path
 
-            logging.getLogger("dragon").debug(
-                "FFmpeg not found anywhere", extra={"component": cls._DEBUG_COMPONENT}
-            )
+            cls._logger.debug("FFmpeg not found anywhere", extra={"component": cls._DEBUG_COMPONENT})
             cls._ffmpeg_path = None
             return None
 
     @classmethod
     def get_platform_info(cls) -> Dict[str, Any]:
-        """Liefert ein Dictionary mit detaillierten Plattforminformationen."""
+        """
+        Liefert ein Dictionary mit detaillierten Plattforminformationen.
+
+        Returns:
+            Dictionary mit System‑, Python‑ und Umgebungsinformationen.
+        """
         info: Dict[str, Any] = {
             "system": SYSTEM,
             "is_windows": IS_WINDOWS,
@@ -1992,8 +2149,7 @@ class PlatformUtils:
             info["cpu_count"] = None
             info["memory_total_gb"] = None
         except Exception as e:
-            logger = logging.getLogger("dragon")
-            logger.error(f"Fehler beim Abrufen der Systeminformationen: {e}")
+            cls._logger.error(f"Fehler beim Abrufen der Systeminformationen: {e}")
             info["cpu_count"] = None
             info["memory_total_gb"] = None
 
@@ -2003,23 +2159,25 @@ class PlatformUtils:
     def print_platform_info(cls) -> None:
         """Gibt die Plattforminformationen im Log aus."""
         info = cls.get_platform_info()
-        logger = logging.getLogger("dragon")
-        logger.info("\n" + "=" * 60)
-        logger.info("🐉 PLATFORM INFORMATION")
-        logger.info("=" * 60)
+        cls._logger.info("\n" + "=" * 60)
+        cls._logger.info("🐉 PLATFORM INFORMATION")
+        cls._logger.info("=" * 60)
         for key, value in info.items():
             if key not in ["environment_setup", "dependencies_checked"]:
-                logger.info(f"{key:25} {value}")
-        logger.info("-" * 60)
-        logger.info(f"{'Environment Setup':25} {'✅' if info['environment_setup'] else '❌'}")
-        logger.info(f"{'Dependencies Checked':25} {'✅' if info['dependencies_checked'] else '❌'}")
-        logger.info("=" * 60)
+                cls._logger.info(f"{key:25} {value}")
+        cls._logger.info("-" * 60)
+        cls._logger.info(f"{'Environment Setup':25} {'✅' if info['environment_setup'] else '❌'}")
+        cls._logger.info(f"{'Dependencies Checked':25} {'✅' if info['dependencies_checked'] else '❌'}")
+        cls._logger.info("=" * 60)
 
     @classmethod
     def get_debug_info(cls) -> Dict[str, Any]:
         """
         Liefert detaillierte Debug‑Informationen über den internen Zustand.
         Nützlich für die Fehlersuche mit --debug=3.
+
+        Returns:
+            Dictionary mit internen Zustandsvariablen.
         """
         with cls._allowed_dirs_lock:
             user_dirs = [str(p) for p in cls._user_dirs]
@@ -2041,22 +2199,24 @@ class PlatformUtils:
         """
         Überschreibt das Home‑Verzeichnis für Tests.
         Nur zu Testzwecken verwenden.
+
+        Args:
+            path: Neuer Pfad oder None zum Zurücksetzen.
         """
         cls._test_home = path
-        logging.getLogger("dragon").debug(
-            f"Test home set to: {path}", extra={"component": cls._DEBUG_COMPONENT}
-        )
+        cls._logger.debug(f"Test home set to: {path}", extra={"component": cls._DEBUG_COMPONENT})
 
     @classmethod
     def set_test_cwd(cls, path: Optional[Path]) -> None:
         """
         Überschreibt das aktuelle Arbeitsverzeichnis für Tests.
         Nur zu Testzwecken verwenden.
+
+        Args:
+            path: Neuer Pfad oder None zum Zurücksetzen.
         """
         cls._test_cwd = path
-        logging.getLogger("dragon").debug(
-            f"Test cwd set to: {path}", extra={"component": cls._DEBUG_COMPONENT}
-        )
+        cls._logger.debug(f"Test cwd set to: {path}", extra={"component": cls._DEBUG_COMPONENT})
 
     @classmethod
     def sanitize_url(cls, url: str) -> str:
@@ -2067,14 +2227,18 @@ class PlatformUtils:
     def validate_file_path(cls, file_url: str, allowed_dirs: Optional[List[str]] = None) -> Tuple[bool, str]:
         """
         Validiert eine file://‑URL.
-        Gibt (True, absoluter Pfad) oder (False, Fehlermeldung) zurück.
-        Wenn allowed_dirs übergeben wird, werden diese zusätzlich zu den Standard‑Verzeichnissen erlaubt.
+
+        Args:
+            file_url: Die URL im Format file://...
+            allowed_dirs: Zusätzlich erlaubte Verzeichnisse (optional).
+
+        Returns:
+            (True, absoluter Pfad) oder (False, Fehlermeldung).
         """
-        logger = logging.getLogger("dragon")
-        logger.debug(f"Validating file URL: {file_url}", extra={"component": cls._DEBUG_COMPONENT})
+        cls._logger.debug(f"Validating file URL: {file_url}", extra={"component": cls._DEBUG_COMPONENT})
 
         if not file_url.startswith("file://"):
-            logger.debug("Not a file:// URL", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug("Not a file:// URL", extra={"component": cls._DEBUG_COMPONENT})
             return False, "Keine file://-URL"
 
         try:
@@ -2088,20 +2252,20 @@ class PlatformUtils:
                 path_part = os.path.normpath(path_part)
 
         except Exception as e:
-            logger.debug(f"Failed to extract path: {e}", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug(f"Failed to extract path: {e}", extra={"component": cls._DEBUG_COMPONENT})
             return False, f"Pfad kann nicht extrahiert werden: {e}"
 
         try:
             real_path = Path(path_part).resolve()
         except Exception as e:
-            logger.debug(f"Failed to resolve path: {e}", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug(f"Failed to resolve path: {e}", extra={"component": cls._DEBUG_COMPONENT})
             return False, f"Pfad kann nicht normalisiert werden: {e}"
 
         if not real_path.exists():
-            logger.debug(f"File does not exist: {real_path}", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug(f"File does not exist: {real_path}", extra={"component": cls._DEBUG_COMPONENT})
             return False, f"Datei existiert nicht: {real_path}"
         if not real_path.is_file():
-            logger.debug(f"Not a file: {real_path}", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug(f"Not a file: {real_path}", extra={"component": cls._DEBUG_COMPONENT})
             return False, "Keine gültige Datei (möglicherweise ein Verzeichnis)"
 
         # Erlaubte Verzeichnisse ermitteln
@@ -2115,21 +2279,21 @@ class PlatformUtils:
                     if p.exists():
                         allowed_bases.append(p)
                 except Exception as e:
-                    logger.debug(f"Invalid allowed dir: {d} – {e}", extra={"component": cls._DEBUG_COMPONENT})
+                    cls._logger.debug(f"Invalid allowed dir: {d} – {e}", extra={"component": cls._DEBUG_COMPONENT})
 
         if not allowed_bases:
-            logger.debug("No allowed directories defined", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug("No allowed directories defined", extra={"component": cls._DEBUG_COMPONENT})
             return False, "Keine erlaubten Verzeichnisse definiert"
 
         for base in allowed_bases:
             try:
                 real_path.relative_to(base)
-                logger.debug(f"File allowed under base: {base}", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug(f"File allowed under base: {base}", extra={"component": cls._DEBUG_COMPONENT})
                 return True, str(real_path)
             except ValueError:
                 continue
 
-        logger.debug(
+        cls._logger.debug(
             f"File outside allowed directories: {real_path} – Allowed: {allowed_bases}",
             extra={"component": cls._DEBUG_COMPONENT}
         )
@@ -2137,13 +2301,20 @@ class PlatformUtils:
 
     @classmethod
     def validate_url(cls, url: str) -> Tuple[bool, str]:
-        """Validiert eine beliebige URL (http, https, file, dvb, ...)."""
+        """
+        Validiert eine beliebige URL (http, https, file, dvb, ...).
+
+        Args:
+            url: Die zu validierende URL.
+
+        Returns:
+            (True, "ok") oder (False, Fehlermeldung).
+        """
         if not url:
             return False, "URL is empty"
 
         url = cls.sanitize_url(url)
-        logger = logging.getLogger("dragon")
-        logger.debug(f"Validating URL: {url}", extra={"component": cls._DEBUG_COMPONENT})
+        cls._logger.debug(f"Validating URL: {url}", extra={"component": cls._DEBUG_COMPONENT})
 
         if url.startswith(("dvb://", "dvb-s://")):
             return cls._validate_dvb_url(url)
@@ -2151,30 +2322,27 @@ class PlatformUtils:
             return cls.validate_file_path(url)
 
         if not url.startswith(("http://", "https://")):
-            logger.debug(f"Unsupported scheme: {url[:50]}", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug(f"Unsupported scheme: {url[:50]}", extra={"component": cls._DEBUG_COMPONENT})
             return False, f"Nicht unterstütztes URL-Schema: {url[:50]}"
 
         try:
             parsed = urllib.parse.urlparse(url)
             if not parsed.netloc:
-                logger.debug("No network location in URL", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug("No network location in URL", extra={"component": cls._DEBUG_COMPONENT})
                 return False, "Keine Netzwerkadresse in URL"
 
             allowed_chars = r"a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%"
             components = parsed.path + parsed.query + parsed.fragment + parsed.params
             if not re.match(f"^[{allowed_chars}]*$", components):
-                logger.debug(f"Invalid characters: {components[:50]}", extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug(f"Invalid characters: {components[:50]}", extra={"component": cls._DEBUG_COMPONENT})
                 return False, f"URL enthält nicht erlaubte Zeichen: {components[:50]}"
 
-            logger.debug("URL valid", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug("URL valid", extra={"component": cls._DEBUG_COMPONENT})
             return True, "ok"
         except Exception as e:
-            logger.debug(f"URL parsing failed: {e}", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug(f"URL parsing failed: {e}", extra={"component": cls._DEBUG_COMPONENT})
             return False, f"URL-Parsing fehlgeschlagen: {e}"
 
-    # =========================================================================
-    #  NEUE ZENTRALE PROZESS-TERMINIERUNG
-    # =========================================================================
     @staticmethod
     def terminate_process(
         proc: subprocess.Popen,
@@ -2189,18 +2357,20 @@ class PlatformUtils:
     ) -> bool:
         """
         Beendet einen Prozess und alle seine Kindprozesse robust.
-        Gibt True zurück, wenn der Prozess erfolgreich beendet wurde.
 
         Args:
-            proc: Der zu beendende subprocess.Popen
-            child_terminate_timeout: Timeout für Kindprozesse (terminate)
-            child_kill_wait: Wartezeit nach kill für Kindprozesse
-            parent_terminate_timeout: Timeout für Elternprozess (terminate)
-            parent_kill_wait: Wartezeit nach kill für Elternprozess
-            fallback_terminate_timeout: Timeout für Fallback (ohne psutil)
-            fallback_kill_wait: Wartezeit nach kill im Fallback
+            proc: Der zu beendende subprocess.Popen.
+            child_terminate_timeout: Timeout für Kindprozesse (terminate).
+            child_kill_wait: Wartezeit nach kill für Kindprozesse.
+            parent_terminate_timeout: Timeout für Elternprozess (terminate).
+            parent_kill_wait: Wartezeit nach kill für Elternprozess.
+            fallback_terminate_timeout: Timeout für Fallback (ohne psutil).
+            fallback_kill_wait: Wartezeit nach kill im Fallback.
             stats_callback: Optionaler Callback, der den Erfolgsmodus erhält:
-                            "psutil", "psutil_kill", "terminate", "kill", "failed", "exception"
+                            "psutil", "psutil_kill", "terminate", "kill", "failed", "exception".
+
+        Returns:
+            True, wenn der Prozess erfolgreich beendet wurde, sonst False.
         """
         if proc.poll() is not None:
             return True
@@ -2216,14 +2386,12 @@ class PlatformUtils:
                 parent = psutil.Process(pid)
                 children = parent.children(recursive=True)
 
-                # Kindprozesse terminieren
                 for child in children:
                     try:
                         child.terminate()
                     except psutil.NoSuchProcess:
                         pass
 
-                # Auf Kindprozesse warten
                 gone, alive = psutil.wait_procs(children, timeout=child_terminate_timeout)
                 for p in alive:
                     try:
@@ -2231,7 +2399,6 @@ class PlatformUtils:
                     except psutil.NoSuchProcess:
                         pass
 
-                # Elternprozess terminieren
                 parent.terminate()
                 try:
                     parent.wait(timeout=parent_terminate_timeout)
@@ -2240,7 +2407,6 @@ class PlatformUtils:
                         stats_callback("psutil")
                     return True
                 except psutil.TimeoutExpired:
-                    # Elternprozess killen
                     parent.kill()
                     try:
                         parent.wait(timeout=parent_kill_wait)
@@ -2277,7 +2443,6 @@ class PlatformUtils:
                         stats_callback("kill")
                     return True
                 except subprocess.TimeoutExpired:
-                    # Letzter Versuch: kurz warten und dann poll
                     time.sleep(0.5)
                     if proc.poll() is None:
                         logger.warning(f"⚠️ Prozess {pid} konnte nicht beendet werden")
@@ -2295,9 +2460,9 @@ class PlatformUtils:
                 stats_callback("exception")
             return False
 
-    # =========================================================================
+    # -------------------------------------------------------------------------
     #  Private Hilfsmethoden
-    # =========================================================================
+    # -------------------------------------------------------------------------
     @classmethod
     def _get_base_dirs(cls) -> List[Path]:
         """Liefert die immer erlaubten Basisverzeichnisse (Home, CWD, tmp, Cache)."""
@@ -2311,9 +2476,8 @@ class PlatformUtils:
                 cache_dir = cls._get_home() / ".cache" / "dragonwhisperer"
                 if cache_dir.exists():
                     cls._base_dirs.append(cache_dir.resolve())
-                logger = logging.getLogger("dragon")
-                logger.debug(f"Base dirs: {[str(p) for p in cls._base_dirs]}",
-                             extra={"component": cls._DEBUG_COMPONENT})
+                cls._logger.debug(f"Base dirs: {[str(p) for p in cls._base_dirs]}",
+                                   extra={"component": cls._DEBUG_COMPONENT})
             return cls._base_dirs
 
     @classmethod
@@ -2340,18 +2504,18 @@ class PlatformUtils:
     @classmethod
     def _validate_dvb_url(cls, url: str) -> Tuple[bool, str]:
         """Validiert eine DVB‑URL (dvb:// oder dvb-s://)."""
-        logger = logging.getLogger("dragon")
         params_part = url[8:] if url.startswith("dvb-s://") else url[6:]
         allowed = r"a-zA-Z0-9=&\-_.+"
         if not re.match(f"^[{allowed}]*$", params_part):
-            logger.debug(f"Invalid DVB parameters: {params_part[:50]}", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug(f"Invalid DVB parameters: {params_part[:50]}",
+                              extra={"component": cls._DEBUG_COMPONENT})
             return False, f"DVB-Parameter enthalten ungültige Zeichen: {params_part[:50]}"
 
         if 'frequency=' not in params_part:
-            logger.debug("Missing 'frequency' in DVB URL", extra={"component": cls._DEBUG_COMPONENT})
+            cls._logger.debug("Missing 'frequency' in DVB URL", extra={"component": cls._DEBUG_COMPONENT})
             return False, "DVB-URL muss 'frequency=' enthalten"
 
-        logger.debug("DVB URL valid", extra={"component": cls._DEBUG_COMPONENT})
+        cls._logger.debug("DVB URL valid", extra={"component": cls._DEBUG_COMPONENT})
         return True, "ok"
 
     @classmethod
@@ -2359,7 +2523,6 @@ class PlatformUtils:
         """Aktiviert UTF‑8 und virtuelle Terminal‑Sequenzen unter Windows."""
         try:
             import ctypes
-
             kernel32 = ctypes.windll.kernel32
             kernel32.SetConsoleOutputCP(65001)
             kernel32.SetConsoleCP(65001)
@@ -2372,13 +2535,10 @@ class PlatformUtils:
                 ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
                 new_mode = mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING
                 kernel32.SetConsoleMode(handle, new_mode)
-                logging.getLogger("dragon").debug(
-                    "Windows console: UTF-8 and VT processing enabled",
-                    extra={"component": cls._DEBUG_COMPONENT}
-                )
+                cls._logger.debug("Windows console: UTF-8 and VT processing enabled",
+                                  extra={"component": cls._DEBUG_COMPONENT})
         except Exception as e:
-            logger = logging.getLogger("dragon")
-            logger.warning(f"⚠️ Windows console setup failed: {e}")
+            cls._logger.warning(f"⚠️ Windows console setup failed: {e}")
 
     @classmethod
     def _setup_macos_temp_dir(cls):
@@ -2386,13 +2546,10 @@ class PlatformUtils:
         temp_dir = Path(tempfile.gettempdir()) / "dragonwhisperer"
         try:
             temp_dir.mkdir(exist_ok=True)
-            logging.getLogger("dragon").debug(
-                f"macOS temp dir ensured: {temp_dir}",
-                extra={"component": cls._DEBUG_COMPONENT}
-            )
+            cls._logger.debug(f"macOS temp dir ensured: {temp_dir}",
+                              extra={"component": cls._DEBUG_COMPONENT})
         except (OSError, PermissionError) as e:
-            logger = logging.getLogger("dragon")
-            logger.warning(f"⚠️ macOS temp dir creation failed: {e}")
+            cls._logger.warning(f"⚠️ macOS temp dir creation failed: {e}")
 
     @classmethod
     def _save_terminal_settings(cls):
@@ -2407,14 +2564,10 @@ class PlatformUtils:
                 if result.returncode == 0 and result.stdout:
                     cls._original_stty_settings = result.stdout.strip()
                     cls._terminal_settings_saved = True
-                    logging.getLogger("dragon").debug(
-                        "Terminal settings saved",
-                        extra={"component": cls._DEBUG_COMPONENT}
-                    )
+                    cls._logger.debug("Terminal settings saved", extra={"component": cls._DEBUG_COMPONENT})
             except (subprocess.TimeoutExpired, OSError):
                 if DEBUG_LEVEL >= 2:
-                    logger = logging.getLogger("dragon")
-                    logger.debug("stty -g failed")
+                    cls._logger.debug("stty -g failed")
 
     @classmethod
     def _restore_terminal_settings(cls):
@@ -2424,10 +2577,7 @@ class PlatformUtils:
         with cls._terminal_lock:
             try:
                 subprocess.run(["stty", cls._original_stty_settings], check=False, timeout=2)
-                logging.getLogger("dragon").debug(
-                    "Terminal settings restored",
-                    extra={"component": cls._DEBUG_COMPONENT}
-                )
+                cls._logger.debug("Terminal settings restored", extra={"component": cls._DEBUG_COMPONENT})
             except Exception:
                 pass
 
@@ -4886,6 +5036,9 @@ class ArgosTranslateEngine(BaseCachedTranslationEngine):
         """
         Lädt oder installiert den argos-Übersetzer für die angegebene Zielsprache.
         Gibt den Translator (von 'en' nach target_lang) zurück oder None bei Fehler.
+
+        Bei fehlendem Sprachpaket wird ein Download mit bis zu 3 Wiederholungsversuchen
+        durchgeführt (exponentielle Backoff). Die Methode ist thread‑sicher.
         """
         if self._disabled:
             return None
@@ -4913,14 +5066,30 @@ class ArgosTranslateEngine(BaseCachedTranslationEngine):
                     if not matching_packages:
                         logger.warning(f"⚠️ Kein argos-Paket für Zielsprache '{target_lang}' verfügbar")
                         return None
+
                     pkg = matching_packages[0]
                     logger.info(f"📦 Installiere argos-Paket: {pkg} ...")
-                    try:
-                        package.install_from_path(pkg.download())
-                        logger.info(f"✅ argos-Paket für {target_lang} installiert")
-                    except Exception as e:
-                        logger.error(f"❌ Installation fehlgeschlagen: {e}")
-                        return None
+
+                    # Download mit Wiederholungsversuchen (max. 3)
+                    max_attempts = 3
+                    last_exception = None
+                    for attempt in range(1, max_attempts + 1):
+                        try:
+                            package.install_from_path(pkg.download())
+                            logger.info(f"✅ argos-Paket für {target_lang} installiert")
+                            break
+                        except Exception as e:
+                            last_exception = e
+                            if attempt < max_attempts:
+                                wait = 2 ** (attempt - 1)  # 1, 2, 4 Sekunden
+                                logger.warning(
+                                    f"⚠️ Download fehlgeschlagen (Versuch {attempt}/{max_attempts}): {e}. "
+                                    f"Nächster Versuch in {wait}s"
+                                )
+                                time.sleep(wait)
+                            else:
+                                logger.error(f"❌ Installation nach {max_attempts} Versuchen fehlgeschlagen: {last_exception}")
+                                return None
 
                     translate.load_installed_languages()
                     installed_languages = translate.get_installed_languages()
@@ -5360,7 +5529,7 @@ class TranscriptionEngine:
         "forced_language", "_last_detected_language", "_torch", "_np",
         "_scipy_signal", "_last_confidence_threshold", "_confidence_lock",
         "_audio_enhancer", "_cache_manager", "_model_locks", "_model_locks_lock",
-        "_reloading", "_vad_fallback_enabled", "_debug", "_state_lock"
+        "_reloading", "_model_load_stop_event", "_vad_fallback_enabled", "_debug", "_state_lock"
     )
 
     def __init__(
@@ -5399,6 +5568,8 @@ class TranscriptionEngine:
 
         self._model_locks: Dict[str, threading.Lock] = {}
         self._model_locks_lock = threading.Lock()
+        self._model_load_stop_event = threading.Event()
+        self._reloading = False
 
     # -------------------------------------------------------------------------
     #  Öffentliche Methoden
@@ -5443,12 +5614,30 @@ class TranscriptionEngine:
         return self._load_model_with_checks(model_size, backend, cache_key, set_active)
 
     def reload_model(self, model_size: str) -> bool:
+        """
+        Lädt ein neues Whisper-Modell im Hintergrund asynchron.
+
+        Diese Methode startet einen Thread, der das Modell lädt und bei Erfolg
+        das aktive Modell ersetzt. Während des Ladens kann über `is_model_loading()`
+        abgefragt werden, ob der Vorgang noch läuft. Die Methode kehrt sofort zurück.
+
+        Der Fortschritt kann über das Event `_model_load_stop_event` überwacht werden,
+        das im Worker-Thread nach Abschluss gesetzt wird.
+
+        Args:
+            model_size: Name des zu ladenden Modells (z.B. 'large-v3').
+
+        Returns:
+            True, wenn der Ladevorgang gestartet wurde, sonst False.
+            False kann bedeuten, dass bereits ein Ladevorgang läuft.
+        """
         with self._lock:
             if self._reloading:
                 if self._debug:
-                    logger.debug("⚠️ Model reloading already in progress")
+                    logger.debug("Model reload already in progress, skipping")
                 return False
             self._reloading = True
+            self._model_load_stop_event.clear()
 
         def _load_in_background():
             try:
@@ -5484,6 +5673,7 @@ class TranscriptionEngine:
             finally:
                 with self._lock:
                     self._reloading = False
+                    self._model_load_stop_event.set()
                 if self.device == "cuda" and self._torch is not None:
                     try:
                         self._torch.cuda.empty_cache()
@@ -5708,16 +5898,50 @@ class TranscriptionEngine:
                 pass
 
     def dispose(self) -> None:
+        """
+        Gibt alle Ressourcen der TranscriptionEngine frei.
+        Wartet auf einen eventuell laufenden Modell‑Lade‑Thread,
+        leert alle Caches, entlädt Modelle und bereinigt den GPU‑Speicher.
+        """
         logger.info("🧹 Transcription Engine Dispose...")
         self._disposing = True
+
+        # ===== 1. Auf Modell‑Lade‑Thread warten (falls aktiv) =====
+        with self._lock:
+            reloading = self._reloading
+        if reloading:
+            log_debug("transcribe", "Waiting for background model loading to finish...")
+            if self._model_load_stop_event.wait(timeout=5.0):
+                log_debug("transcribe", "Background model loading finished")
+            else:
+                logger.warning("Background model loading did not finish within timeout")
+                log_debug("transcribe", "Background model loading timed out")
+
+        # ===== 2. Caches und Modell‑Cache leeren =====
         with self._lock:
             self._cache.clear()
             self._last_transcription_text = ""
+            # Modelle aus Cache entladen (Kopie der Items, um Modifikation während Iteration zu vermeiden)
             for (size, backend), model in list(self._model_cache.items()):
                 self._unload_model(model)
             self._model_cache.clear()
+            log_debug("transcribe", "Caches cleared, models unloaded")
+
+        # ===== 3. Aktives Modell entfernen =====
         self._force_model_cleanup()
+        log_debug("transcribe", "Active model cleaned up")
+
+        # ===== 4. GPU‑Speicher bereinigen =====
+        if self.device == "cuda" and self._torch is not None:
+            try:
+                self._torch.cuda.empty_cache()
+                log_debug("transcribe", "GPU cache cleared")
+            except Exception as e:
+                log_debug("transcribe", f"Failed to clear GPU cache: {e}")
+
+        # ===== 5. Garbage Collection =====
         gc.collect()
+        log_debug("transcribe", "Garbage collection triggered")
         logger.info("✅ Transcription Engine disposed")
 
     # -------------------------------------------------------------------------
@@ -8685,11 +8909,31 @@ class FFmpegManager:
         return audio_data
 
     def stop_stream(self, process_id: str) -> bool:
+        """
+        Stoppt einen laufenden Stream und gibt alle zugehörigen Ressourcen frei.
+
+        Diese Methode setzt das Stop‑Flag, schließt Pipes, stoppt die Lese‑ und
+        Stderr‑Threads und entfernt den Prozess aus der Registry. Sie ist
+        thread‑sicher und vermeidet Race Conditions mit parallel laufenden
+        `_remove_process`‑Aufrufen durch Prüfung des `_removing`‑Flags.
+
+        Args:
+            process_id: Eindeutige Kennung des zu stoppenden Streams.
+
+        Returns:
+            True, wenn der Stream gefunden und gestoppt wurde, sonst False.
+        """
         with self._lock:
             if process_id not in self._processes:
                 logger.debug(f"[FFmpegManager] stop_stream: {process_id} not found")
                 return False
             pinfo = self._processes[process_id]
+
+            # Vermeide doppelte Stopps, wenn der Prozess bereits entfernt wird
+            if pinfo._removing:
+                logger.debug(f"stop_stream: process {process_id} already being removed, skipping")
+                return False
+
             pinfo.stopping = True
             log_debug("ffmpeg", f"stop_stream: {process_id} stopping set")
 
@@ -8699,10 +8943,7 @@ class FFmpegManager:
                     pinfo.read_queue.put_nowait(None)
                     log_debug("ffmpeg", f"Sentinel in read_queue for {process_id}")
                 except queue.Full:
-                    # Queue voll – Thread blockiert nicht, aber trotzdem loggen
                     log_debug("ffmpeg", f"read_queue full for {process_id} – cannot insert sentinel")
-            else:
-                log_debug("ffmpeg", f"read_queue is None for {process_id} – skipping sentinel")
 
             # Pipes früh schließen, bevor Threads gestoppt werden
             if pinfo.process:
@@ -11444,8 +11685,9 @@ class OllamaSummarizer:
         - Streaming-Antworten mit Callbacks für Teil- und Fehler-Ergebnisse
         - Abbruch einer laufenden Anfrage über ein Cancel-Event
         - Caching der verfügbaren Modelle (TTL-gesteuert)
-        - Thread-sicherer Zugriff über interne Locks
+        - Thread‑sicherer Zugriff über interne Locks
         - Unterstützung für benutzerdefinierte System-Prompts
+        - Sauberes Thread‑Management und Ressourcenfreigabe
 
     Attributes:
         parent (Any): Referenz auf das aufrufende Objekt (für Callbacks).
@@ -11463,6 +11705,8 @@ class OllamaSummarizer:
         _models_cache_time (float): Zeitstempel des Caches.
         _stop_event (threading.Event): Internes Stop-Event (für stop-Methode).
         last_result (Optional[str]): Letzte vollständige Antwort (für spätere Verwendung).
+        _active_threads (List[threading.Thread]): Liste aller aktiven summarize-Threads.
+        _threads_lock (threading.RLock): Lock für Thread‑Liste.
     """
 
     def __init__(
@@ -11505,6 +11749,10 @@ class OllamaSummarizer:
         self._stop_event = threading.Event()
 
         self.last_result: Optional[str] = None
+
+        # Thread‑Management
+        self._active_threads: List[threading.Thread] = []
+        self._threads_lock = threading.RLock()
 
     # -------------------------------------------------------------------------
     # Private Hilfsmethoden
@@ -11711,8 +11959,15 @@ class OllamaSummarizer:
                 error_callback("Ollama nicht erreichbar (läuft der Server?)")
             except Exception as e:
                 error_callback(f"Fehler: {str(e)}")
+            finally:
+                # Thread aus der Liste entfernen
+                with self._threads_lock:
+                    if threading.current_thread() in self._active_threads:
+                        self._active_threads.remove(threading.current_thread())
 
         thread = threading.Thread(target=worker, daemon=True, name=f"Ollama-{self.model[:10]}")
+        with self._threads_lock:
+            self._active_threads.append(thread)
         thread.start()
 
     def correct_transcript(
@@ -11770,18 +12025,34 @@ class OllamaSummarizer:
     def dispose(self) -> None:
         """
         Gibt Ressourcen frei (schließt die HTTP-Session).
-        Sollte beim Beenden des Dialogs aufgerufen werden.
+        Stoppt laufende Anfragen und wartet auf alle aktiven Threads.
+        Sollte beim Beenden des Dialogs oder beim Shutdown aufgerufen werden.
         """
+        # 1. Stop‑Event setzen, um laufende Summarize‑Anfragen abzubrechen
         self.stop()
+
+        # 2. Auf alle noch aktiven Threads warten (max. 1 Sekunde pro Thread)
+        with self._threads_lock:
+            for t in self._active_threads:
+                if t.is_alive():
+                    t.join(timeout=1.0)
+            self._active_threads.clear()
+        log_debug("ollama", "All summarize threads terminated")
+
+        # 3. HTTP‑Session schließen
         if self._session:
             try:
                 self._session.close()
-            except Exception:
-                pass
+            except Exception as e:
+                log_debug("ollama", f"Error closing session: {e}")
             self._session = None
+
+        # 4. Caches leeren
         with self._lock:
             self._models_cache = []
             self._models_cache_time = 0.0
+
+        log_debug("ollama", "OllamaSummarizer disposed")
 
 
 class QueueManager:
@@ -13754,17 +14025,27 @@ class DarkMessageBox:
                 self.dialog = dialog
                 self.progress = progress
                 self._message_label = message_label
+
             def close(self) -> None:
+                """
+                Schließt den Fortschrittsdialog sicher.
+                Prüft vor der Zerstörung, ob das Fenster noch existiert,
+                und fängt mögliche TclErrors ab.
+                """
                 if self.dialog and self.dialog.winfo_exists():
                     try:
                         if self.progress:
                             self.progress.stop()
                         self.dialog.destroy()
-                    except Exception:
+                    except tk.TclError:
+                        # Dialog wurde bereits zerstört – ignorieren
                         pass
+                    except Exception as e:
+                        logger.warning(f"Fehler beim Schließen des Progress-Dialogs: {e}")
                 self.dialog = None
                 self.progress = None
                 self._message_label = None
+
             def update_message(self, new_message: str) -> None:
                 if self.dialog and self.dialog.winfo_exists() and self._message_label:
                     try:
@@ -16517,7 +16798,7 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         ).grid(row=1, column=2, sticky="w", pady=1)
         try:
-            filter_profiles = list(Config.FILTER_PROFILES.keys())
+            filter_profiles = list(self.gui.advanced_settings.config.FILTER_PROFILES.keys())
         except Exception:
             filter_profiles = ["transcription", "realtime", "noisy", "podcast", "music"]
             log_debug("settings", "Could not get FILTER_PROFILES from Config, using fallback list")
@@ -19105,23 +19386,48 @@ class DragonWhispererGUI:
     def _test_engine_functionality(self, engine: BaseTranslationEngine) -> bool:
         """
         Führt einen Schnelltest der Übersetzungs-Engine durch.
-        Der Test übersetzt einen kurzen Satz von Englisch in die Zielsprache.
+        Der Test übersetzt einen kurzen Satz von einer geeigneten Quellsprache
+        in die Zielsprache der Engine.
         Bei Erfolg wird True zurückgegeben, bei Fehlern False.
+
         Args:
             engine: Die zu testende Engine.
+
         Returns:
             True, wenn die Engine eine sinnvolle Übersetzung liefert, sonst False.
         """
-        try:
-            test_text = "Hello world"
-            result = engine.translate_text(test_text, source_lang="en")
-            if result and result.translated and result.translated.strip():
-                # Einfache Plausibilität: Übersetzung sollte nicht identisch sein
-                if result.translated.strip().lower() != test_text.lower():
-                    log_debug("engine", f"Engine-Test erfolgreich: '{test_text}' -> '{result.translated[:50]}'")
-                    return True
-            log_debug("engine", "Engine-Test fehlgeschlagen: leere oder identische Übersetzung")
+        # Zielsprache ermitteln (falls vorhanden)
+        target_lang = getattr(engine, "default_target_lang", None)
+        if target_lang is None:
+            log_debug("engine", "Engine-Test übersprungen: keine Zielsprache ermittelbar")
             return False
+
+        # Testtext und Quellsprache basierend auf Zielsprache wählen
+        if target_lang == "en":
+            # Wenn Zielsprache Englisch, von Deutsch übersetzen
+            test_text = "Guten Tag"
+            source_lang = "de"
+        else:
+            # Sonst von Englisch übersetzen (üblich)
+            test_text = "Hello world"
+            source_lang = "en"
+
+        try:
+            result = engine.translate_text(test_text, source_lang=source_lang)
+            if result and result.translated and result.translated.strip():
+                translated = result.translated.strip().lower()
+                original_lower = test_text.lower()
+                # Übersetzung sollte nicht identisch sein (außer wenn Quelle == Ziel)
+                # In unserem Fall sind Quelle und Ziel unterschiedlich, also sollte es nicht identisch sein
+                if translated != original_lower:
+                    log_debug("engine", f"Engine-Test erfolgreich: '{test_text}' ({source_lang}) -> '{result.translated[:50]}' ({target_lang})")
+                    return True
+                else:
+                    log_debug("engine", f"Engine-Test fehlgeschlagen: Übersetzung identisch mit Original (target={target_lang})")
+                    return False
+            else:
+                log_debug("engine", "Engine-Test fehlgeschlagen: leere Übersetzung")
+                return False
         except Exception as e:
             log_debug("engine", f"Engine-Test Exception: {e}")
             return False
@@ -24147,10 +24453,20 @@ class AudioProcessor:
         Führt die Aufräumarbeiten nach dem Ende des Streams durch.
         Wartet darauf, dass alle verbleibenden Audio-Chunks verarbeitet sind,
         bevor der finished_callback aufgerufen wird.
+
+        Verbesserungen:
+            - Prüft, ob der Executor noch läuft, bevor der letzte Chunk verarbeitet wird.
+            - Wartet sauber auf das Ende der Audio‑Queue und der Transkriptions‑Tasks.
+            - Vermeidet Race Conditions mit parallel laufendem Shutdown.
+
+        Args:
+            normal_ending: Ob der Stream normal (nicht durch Fehler) beendet wurde.
+            error_occurred: Ob ein Fehler während der Verarbeitung aufgetreten ist.
+            callbacks: Dictionary mit den Callbacks (transcription, translation, info, error, finished).
         """
         log_debug("processor", f"_cleanup_after_stream: normal_ending={normal_ending}, error_occurred={error_occurred}")
 
-        # 1. Ausstehende Sätze übersetzen
+        # 1. Ausstehende Sätze übersetzen (letzte Satzenden)
         with self._sentence_lock:
             if self._sentence_parts:
                 sentence = " ".join(self._sentence_parts).strip()
@@ -24169,14 +24485,23 @@ class AudioProcessor:
                 self._sentence_parts.clear()
                 self._sentence_segments.clear()
 
-        # 2. Letzte Audiodaten im Puffer verarbeiten
+        # 2. Letzte Audiodaten im Puffer verarbeiten (falls Executor noch läuft)
         trans_cb = callbacks.get("transcription")
         transl_cb = callbacks.get("translation")
-        try:
-            self._flush_audio_buffer(trans_cb, transl_cb)
-            log_debug("processor", "Audio buffer flushed")
-        except Exception as e:
-            logger.error(f"Fehler beim Flushen des letzten Chunks: {e}", exc_info=True)
+        # Prüfen, ob der Executor noch nicht heruntergefahren wurde
+        executor_alive = (
+            hasattr(self, "_transcription_executor")
+            and self._transcription_executor is not None
+            and not getattr(self._transcription_executor, "_shutdown", False)
+        )
+        if executor_alive:
+            try:
+                self._flush_audio_buffer(trans_cb, transl_cb)
+                log_debug("processor", "Audio buffer flushed")
+            except Exception as e:
+                logger.error(f"Fehler beim Flushen des letzten Chunks: {e}", exc_info=True)
+        else:
+            log_debug("processor", "Executor already shut down, skipping final chunk")
 
         # 3. FFmpeg-Stream stoppen (wenn noch aktiv)
         if self._current_stream_id and self.ffmpeg_manager:
@@ -26108,11 +26433,14 @@ if IS_LINUX and PSUTIL_AVAILABLE:
                 self.restore_normal_mode()
             except Exception as e:
                 logger.warning(f"⚠️ restore_normal_mode fehlgeschlagen: {e}")
+
             if self._monitoring_thread and self._monitoring_thread.is_alive():
                 logger.debug("Joining LinuxPerfMon thread...")
                 self._monitoring_thread.join(timeout=2.0)
                 if self._monitoring_thread.is_alive():
                     logger.warning("LinuxPerfMon thread did not terminate within timeout")
+                self._monitoring_thread = None
+
             self._original_settings.clear()
             gc.collect()
             logger.info("✅ Linux-Performance-Optimierer entsorgt")
