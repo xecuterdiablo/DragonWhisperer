@@ -6551,6 +6551,8 @@ class TranscriptionEngine:
         "_nvml_initialized",
     )
 
+    _global_load_semaphore = threading.Semaphore(1)
+
     def __init__(
         self,
         settings: Optional["AdvancedSettings"] = None,
@@ -6625,6 +6627,29 @@ class TranscriptionEngine:
                 "vad",
                 f"VAD-Fallback in TranscriptionEngine {'aktiviert' if enabled else 'deaktiviert'}",
             )
+
+    def _set_gpu_acceleration(self, enabled: bool) -> None:
+        """
+        Setzt die GPU‑Beschleunigung in den Einstellungen und benachrichtigt die GUI.
+
+        Args:
+            enabled: True für GPU (CUDA/MPS), False für CPU
+        """
+        if hasattr(self, "settings") and self.settings is not None:
+            old = self.settings.gpu_acceleration
+            if old == enabled:
+                return
+            self.settings.gpu_acceleration = enabled
+            # Einstellungen optional speichern (asynchron, um GUI nicht zu blockieren)
+            try:
+                self.settings.save_to_file()
+            except Exception as e:
+                logger.warning(f"Konnte GPU-Einstellung nicht speichern: {e}")
+
+            # Event‑Bus benachrichtigen (falls vorhanden)
+            if hasattr(self, "event_bus") and self.event_bus:
+                self.event_bus.emit("gpu_status_changed", enabled)
+                log_debug("gpu", f"GPU acceleration changed to {enabled} via EventBus")
 
     def load_model(
         self, model_size: str, set_active: bool = False
@@ -7883,15 +7908,19 @@ class TranscriptionEngine:
         return False
 
     def _fallback_to_cpu(self) -> None:
+        """Schaltet auf CPU um und aktualisiert die Einstellungen."""
         logger.warning("⚠️ Schalte wegen OOM auf CPU um")
         log_debug("oom", "Falling back to CPU due to OOM")
         with self._model_usage_lock:
             self.device = "cpu"
             self.compute_type = "int8"
+        # GPU‑Beschleunigung in den Einstellungen deaktivieren
+        self._set_gpu_acceleration(False)
         current = self.model_size or "medium"
         self.load_model(current, set_active=True)
 
     def _handle_cuda_oom(self) -> None:
+        """Behandelt CUDA Out‑of‑Memory und schaltet ggf. auf CPU um."""
         if self.device == "cpu":
             logger.warning("⚠️ Bereits auf CPU, kann OOM nicht beheben.")
             log_debug("oom", "Already on CPU, cannot recover from OOM")
@@ -7907,7 +7936,7 @@ class TranscriptionEngine:
                 free_gb = self._get_free_gpu_memory()
                 if free_gb is not None and free_gb > 1.0:
                     logger.info(
-                        f"✅ Nach Cache-Leerung: {free_gb:.1f} GB frei – versuche weiter mit gleichem Modell"
+                        f"✅ Nach Cache‑Leerung: {free_gb:.1f} GB frei – versuche weiter mit gleichem Modell"
                     )
                     log_debug("oom", f"Cache cleared, free VRAM now {free_gb:.1f} GB")
                     return
@@ -7915,6 +7944,8 @@ class TranscriptionEngine:
             if self._try_smaller_model_iterative():
                 return
 
+            # Fallback auf CPU – hier wird _fallback_to_cpu aufgerufen,
+            # das wiederum _set_gpu_acceleration(False) auslöst.
             self._fallback_to_cpu()
 
         except Exception as e:
@@ -10254,7 +10285,7 @@ class FFmpegManager:
         self._process_semaphore = threading.Semaphore(max_processes)
         self._process_semaphore_max = max_processes
         self._active_slots = 0
-        self._slot_lock = threading.RLock()
+        # self._slot_lock = threading.RLock()
 
         # Statistik
         self._stats = {
@@ -11522,14 +11553,14 @@ class FFmpegManager:
     def _acquire_slot(self) -> bool:
         """Versucht, einen Slot zu belegen. Gibt True bei Erfolg zurück."""
         if self._process_semaphore.acquire(blocking=False):
-            with self._slot_lock:
+            with self._lock:
                 self._active_slots += 1
             return True
         return False
 
     def _release_slot(self) -> None:
         """Gibt einen Slot frei, wenn einer belegt war."""
-        with self._slot_lock:
+        with self._lock:
             if self._active_slots > 0:
                 self._active_slots -= 1
             else:
@@ -11537,7 +11568,7 @@ class FFmpegManager:
                     "ffmpeg",
                     f"Attempted to release slot, but no active slots (current={self._active_slots})",
                 )
-                return
+
         self._process_semaphore.release()
 
     @contextmanager
@@ -11618,7 +11649,7 @@ class FFmpegManager:
         seek_seconds: Optional[float],
         detected_language: Optional[str],
     ) -> Optional[subprocess.Popen]:
-        """Startet den Pipe‑Zweig (yt‑dlp + FFmpeg) als Fallback."""
+        """Startet den Pipe‑Zweig (yt‑dlp + FFmpeg) als Fallback (optimiert)."""
         logger.info("  🎥 Pipe‑Fallback: Verwende yt‑dlp als Datenquelle")
         yt_cmd = [
             "yt-dlp",
@@ -11706,22 +11737,56 @@ class FFmpegManager:
             self.resource_manager.register_process(process)
             self.resource_manager.register_process(yt_process)
 
-        # Warte maximal 5 Sekunden, bis der Prozess läuft
-        for _ in range(5):
-            time.sleep(1.0)
-            if process.poll() is None:
+        # ========== OPTIMIERUNG: Erhöhte Wartezeit von 5 auf 10 Sekunden ==========
+        max_wait = 10.0  # Sekunden
+        interval = 1.0
+        waited = 0.0
+        process_ready = False
+        if DEBUG_LEVEL >= 3:
+            log_debug("pipe", f"Waiting up to {max_wait}s for FFmpeg pipe to become ready...")
+        while waited < max_wait:
+            if process.poll() is not None:
+                if DEBUG_LEVEL >= 3:
+                    log_debug("pipe", f"FFmpeg died early after {waited:.1f}s (exit {process.poll()})")
                 break
+            # Nach 2 Sekunden kann man optimistisch sein
+            if waited >= 2.0 and process.poll() is None:
+                if DEBUG_LEVEL >= 3:
+                    log_debug("pipe", f"FFmpeg still alive after {waited:.1f}s, assuming ready")
+                process_ready = True
+                break
+            time.sleep(interval)
+            waited += interval
         else:
+            # Timeout erreicht – Prozess läuft noch? Dann trotzdem als Erfolg werten.
+            if process.poll() is None:
+                process_ready = True
+                if DEBUG_LEVEL >= 3:
+                    log_debug("pipe", f"FFmpeg still alive after {max_wait}s timeout, assuming ready")
+            else:
+                process_ready = False
+                if DEBUG_LEVEL >= 3:
+                    log_debug("pipe", f"FFmpeg dead after {max_wait}s timeout (exit {process.poll()})")
+
+        if not process_ready or process.poll() is not None:
             stderr_hint = self._read_stderr(process)
             yt_stderr = ""
             if yt_process.poll() is not None:
                 yt_stderr = self._read_stderr(yt_process)
             logger.error(
-                f"❌ FFmpeg in pipe did not become ready after 5s. Exit code: {process.poll()}, "
+                f"❌ FFmpeg in pipe did not become ready after {max_wait}s. "
+                f"Exit code: {process.poll() if process.poll() is not None else 'N/A'}, "
                 f"FFmpeg stderr: {stderr_hint[:200]}, yt‑dlp stderr: {yt_stderr[:200]}"
             )
+            # Aufräumen
+            try:
+                process.terminate()
+                yt_process.terminate()
+            except Exception:
+                pass
             return None
 
+        logger.info(f"  ✅ Pipe mode ready after {waited:.1f}s")
         return process
 
     def _check_youtube_live_by_metadata(self, url: str) -> bool:
@@ -23561,7 +23626,9 @@ class DragonWhispererGUI:
             self.root.withdraw()
         except (tk.TclError, RuntimeError) as e:
             raise RuntimeError(f"Tkinter Fehler: {e}")
-        self.event_bus.set_scheduler(lambda delay, cb, *args: self.root.after(delay, cb, *args))
+        self.event_bus.set_scheduler(
+            lambda delay, cb, *args: self.root.after(delay, cb, *args)
+        )
 
         self.auto_tts_transcript_var = tk.BooleanVar(
             value=self.advanced_settings.auto_tts_transcript
@@ -23605,6 +23672,7 @@ class DragonWhispererGUI:
         # Achtung: self.event_bus wurde bereits aus AppContext geholt, kein neuer EventBus!
         # (EventBus wird bereits im AppContext erstellt)
         self._register_event_bus_subscriptions()
+        self.event_bus.subscribe("gpu_status_changed", self._on_gpu_status_changed)
 
         try:
             self.controller = WhisperController(gui_ref=self, event_bus=self.event_bus)
@@ -24647,53 +24715,15 @@ class DragonWhispererGUI:
         self._safe_gui_update(reset, important=True)
 
     @gui_operation_decorator
-    def _on_model_changed(self, data: dict) -> None:
-        """
-        Aktualisiert die ComboBox und Statusleiste beim Modellwechsel.
-        Wird über den Event-Bus aufgerufen, wenn die TranscriptionEngine das Modell wechselt.
-        """
-        actual = data.get("actual")
-        requested = data.get("requested")
-        backend = data.get("backend", "unknown")
-        fallback = data.get("fallback_occurred", False)
+    def _on_gpu_status_changed(self, enabled: bool) -> None:
+        """Aktualisiert die GUI, wenn sich der GPU-Status ändert (z. B. nach OOM-Fallback)."""
 
-        if not actual:
-            if DEBUG_LEVEL >= 3:
-                log_debug("gui", "_on_model_changed: Kein 'actual' im Event")
-            return
+        def update():
+            self.update_status(
+                f"GPU acceleration {'enabled' if enabled else 'disabled (CPU fallback)'}"
+            )
 
-        def update() -> None:
-            try:
-                if not hasattr(self, "model_var"):
-                    if DEBUG_LEVEL >= 1:
-                        logger.warning("_on_model_changed: model_var nicht verfügbar")
-                    return
-
-                current = self.model_var.get()
-                if current != actual:
-                    self.model_var.set(actual)
-                    if fallback and requested and requested != actual:
-                        self.update_status(
-                            f"⚠️ {requested} nicht verfügbar – verwende {actual}"
-                        )
-                        logger.warning(
-                            f"Modell-Fallback in GUI: {requested} → {actual} ({backend})"
-                        )
-                    else:
-                        self.update_status(f"✅ Modell geladen: {actual}")
-                        logger.info(f"GUI aktualisiert auf Modell {actual} ({backend})")
-                elif DEBUG_LEVEL >= 3:
-                    log_debug("gui", f"Modell bereits auf {actual}, keine Änderung")
-            except tk.TclError:
-                # Widget existiert nicht mehr – ignorieren
-                pass
-            except Exception as e:
-                logger.error(f"Fehler in _on_model_changed: {e}", exc_info=True)
-
-        self._safe_gui_update(update, important=True)
-
-        if DEBUG_LEVEL >= 3:
-            log_debug("gui", f"_on_model_changed: {data}")
+        self._safe_gui_update(update)
 
     @gui_operation_decorator
     def update_progress(self, data: dict) -> None:
@@ -27051,9 +27081,6 @@ class DragonWhispererGUI:
         Daemon‑Threads werden ignoriert (sie werden beim Prozessende abgeräumt).
         Versucht, vorhandene Stop‑Events zu setzen, und joint Nicht‑Daemon‑Threads mit Timeout.
         """
-        import sys
-        import traceback
-
         logger.debug("🔍 Force cleanup of remaining threads...")
         main_thread = threading.main_thread()
         remaining = [t for t in threading.enumerate() if t is not main_thread]
@@ -27065,46 +27092,41 @@ class DragonWhispererGUI:
         logger.debug(f"  Found {len(remaining)} remaining threads:")
 
         for thread in remaining:
-            log_debug("shutdown", f"  • {thread.name} (alive={thread.is_alive()}, daemon={thread.daemon})")
-
-            # Ziel-Funktion ermitteln (falls vorhanden)
-            if hasattr(thread, '_target') and thread._target:
-                target_name = getattr(thread._target, '__name__', str(thread._target))
-                log_debug("shutdown", f"      target: {target_name}")
-
-            # Stacktrace ausgeben (nur für Debugging)
-            try:
-                if thread.ident and thread.is_alive():
-                    frame = sys._current_frames().get(thread.ident)
-                    if frame:
-                        stack = traceback.format_stack(frame)
-                        stack_preview = ''.join(stack[:3]).strip()
-                        if stack_preview:
-                            log_debug("shutdown", f"      stack (first 3 lines):\n{stack_preview}")
-            except Exception as e:
-                log_debug("shutdown", f"      stack error: {e}")
+            log_debug(
+                "shutdown",
+                f"  • {thread.name} (alive={thread.is_alive()}, daemon={thread.daemon})",
+            )
 
             # Sicheres Setzen des Stop‑Events (falls vorhanden)
-            stop_event = getattr(thread, '_stop_event', None)
-            if stop_event and callable(getattr(stop_event, 'set', None)):
+            stop_event = getattr(thread, "_stop_event", None)
+            if stop_event and callable(getattr(stop_event, "set", None)):
                 log_debug("shutdown", f"      setting _stop_event for {thread.name}")
                 stop_event.set()
             else:
-                shutdown_event = getattr(thread, '_shutdown_event', None)
-                if shutdown_event and callable(getattr(shutdown_event, 'set', None)):
-                    log_debug("shutdown", f"      setting _shutdown_event for {thread.name}")
+                shutdown_event = getattr(thread, "_shutdown_event", None)
+                if shutdown_event and callable(getattr(shutdown_event, "set", None)):
+                    log_debug(
+                        "shutdown", f"      setting _shutdown_event for {thread.name}"
+                    )
                     shutdown_event.set()
 
             # Bei Nicht‑Daemon‑Threads: join mit kurzem Timeout
             if not thread.daemon:
-                log_debug("shutdown", f"      joining non-daemon thread {thread.name} (timeout=1.0)")
+                log_debug(
+                    "shutdown",
+                    f"      joining non-daemon thread {thread.name} (timeout=1.0)",
+                )
                 thread.join(timeout=1.0)
                 if thread.is_alive():
                     logger.warning(f"Thread {thread.name} still alive after join")
                 else:
-                    log_debug("shutdown", f"      thread {thread.name} joined successfully")
+                    log_debug(
+                        "shutdown", f"      thread {thread.name} joined successfully"
+                    )
             else:
-                log_debug("shutdown", f"      skipping join for daemon thread {thread.name}")
+                log_debug(
+                    "shutdown", f"      skipping join for daemon thread {thread.name}"
+                )
 
         logger.debug("  Force cleanup completed.")
 
@@ -27948,7 +27970,9 @@ class WhisperController:
                 log_debug("controller", f"  → {name}: cannot join itself, skipping")
                 return
 
-            log_debug("controller", f"  → Joining {name} thread (timeout={timeout}s)...")
+            log_debug(
+                "controller", f"  → Joining {name} thread (timeout={timeout}s)..."
+            )
             thread.join(timeout=timeout)
             if thread.is_alive():
                 logger.warning(f"{name} thread did not terminate within {timeout}s")
@@ -28623,7 +28647,7 @@ class StreamHandler:
 
             try:
                 audio_data = ffmpeg.read_audio_data(
-                    process_id, ap.config.CHUNK_SIZE_BYTES
+                    process_id, ap.settings.config.CHUNK_SIZE_BYTES
                 )
             except Exception as e:
                 logger.error(f"Fehler beim Lesen der Audiodaten: {e}", exc_info=True)
@@ -28727,7 +28751,7 @@ class StreamHandler:
                     ap._chunk_counter += 1
                     ap._total_bytes_processed += len(audio_data)
                     ap._processed_seconds = (
-                        ap._total_bytes_processed / ap.config.BYTES_PER_SECOND
+                        ap._total_bytes_processed / ap.settings.config.BYTES_PER_SECOND
                     )
 
                 try:
@@ -28831,13 +28855,9 @@ class AudioProcessor:
         self.ffmpeg_manager = ffmpeg_manager
         self.settings = settings or AdvancedSettings()
         self.use_browser_cookies = use_browser_cookies
-        self.config = self.settings.config
-        self.sample_rate = self.config.SAMPLE_RATE
-        self.channels = self.config.CHANNELS
-        self.audio_format = self.config.AUDIO_FORMAT
-        self.chunk_size = self.config.CHUNK_SIZE_BYTES
-        self.overlap_size = self.config.OVERLAP_SIZE_BYTES
-        self._max_buffer_bytes = self.MAX_BUFFER_SECONDS * self.config.BYTES_PER_SECOND
+
+        # Keine eigene config-Referenz mehr – alle Zugriffe über self.settings.config
+        self._update_derived_attributes()
 
         # Engines (werden später gesetzt) – werden durch Properties geschützt
         self._transcription_engine: Optional["TranscriptionEngine"] = None
@@ -28865,16 +28885,16 @@ class AudioProcessor:
         # Duplikatschutz
         self._last_transcription_text = ""
         self._recent_transcriptions: Deque[str] = deque(
-            maxlen=self.config.RECENT_TRANSCRIPTIONS_SIZE
+            maxlen=self.settings.config.RECENT_TRANSCRIPTIONS_SIZE
         )
         self._duplicate_lock = threading.RLock()
 
         # Untertitel
         self._timed_transcriptions: Deque["TranscriptionResult"] = deque(
-            maxlen=self.config.SUBTITLE_BUFFER_SIZE
+            maxlen=self.settings.config.SUBTITLE_BUFFER_SIZE
         )
         self._timed_translations: Deque["TranslationResult"] = deque(
-            maxlen=self.config.SUBTITLE_BUFFER_SIZE
+            maxlen=self.settings.config.SUBTITLE_BUFFER_SIZE
         )
         self._subtitle_lock = threading.RLock()
         self.subtitle_mode = False
@@ -28883,7 +28903,7 @@ class AudioProcessor:
         self._word_count_history: Deque[float] = deque(maxlen=10)
         self._word_count_lock = threading.RLock()
         self._smoothed_word_count: Optional[float] = None
-        self._last_chunk_duration = self.config.CHUNK_DURATION
+        self._last_chunk_duration = self.settings.config.CHUNK_DURATION
         self._chunk_stable_counter = 0
 
         # Performance‑Messung
@@ -28909,7 +28929,7 @@ class AudioProcessor:
         self._audio_chunks: deque = deque()
         self._audio_total_bytes = 0
         self._max_buffer_chunks = (
-            self._max_buffer_bytes // self.config.MIN_CHUNK_BYTES + 10
+            self._max_buffer_bytes // self.settings.config.MIN_CHUNK_BYTES + 10
         )
         self._buffer_lock = threading.RLock()
         self._last_buffer_flush = time.time()
@@ -28958,10 +28978,10 @@ class AudioProcessor:
         self._last_progress_update = 0.0
         self._expected_duration: Optional[float] = None
         self._finished_callback: Optional[Callable] = None
-        self._min_chunk_duration = self.config.MIN_CHUNK_DURATION
+        self._min_chunk_duration = self.settings.config.MIN_CHUNK_DURATION
 
         # Audio‑Enhancement
-        self._audio_enhancer = AudioEnhancer(self.config, self.settings)
+        self._audio_enhancer = AudioEnhancer(self.settings.config, self.settings)
 
         # StreamManager
         if stream_manager is not None:
@@ -29019,15 +29039,20 @@ class AudioProcessor:
         self._pending_tasks_lock = threading.RLock()
         self._tasks_done_event = threading.Event()
 
+        # Event‑Bus für Konfigurationsänderungen (optional, aber empfohlen)
+        self._event_bus = getattr(self.controller_ref, "event_bus", None)
+        if self._event_bus:
+            self._event_bus.subscribe("config_changed", self._on_config_changed)
+
         logger.info("✅ AudioProcessor initialized (optimized):")
         logger.info(f"   Config Type: {self._get_config_type()}")
         logger.info(
-            f"   Chunk: {self.config.CHUNK_DURATION}s / {self.chunk_size:,} bytes"
+            f"   Chunk: {self.settings.config.CHUNK_DURATION}s / {self.chunk_size:,} bytes"
         )
         logger.info(f"   Sample Rate: {self.sample_rate} Hz")
         logger.info(f"   Channels: {self.channels}")
         logger.info(f"   Overlap: {self.overlap_size:,} bytes")
-        logger.info(f"   Bytes/sec: {self.config.BYTES_PER_SECOND:,}")
+        logger.info(f"   Bytes/sec: {self.settings.config.BYTES_PER_SECOND:,}")
         logger.info(
             f"   Max Buffer: {self._max_buffer_bytes:,} bytes ({self.MAX_BUFFER_SECONDS}s)"
         )
@@ -29035,6 +29060,59 @@ class AudioProcessor:
             f"   Transcribe Workers: {transcribe_workers}, Translate Workers: {translate_workers}"
         )
         logger.info(f"   Async Queue maxsize: {queue_maxsize}")
+
+    # -------------------------------------------------------------------------
+    #  Hilfsmethoden für dynamische Konfiguration
+    # -------------------------------------------------------------------------
+    def _update_derived_attributes(self) -> None:
+        """Berechnet alle von der Config abhängigen Attribute neu."""
+        cfg = self.settings.config
+        self.sample_rate = cfg.SAMPLE_RATE
+        self.channels = cfg.CHANNELS
+        self.audio_format = cfg.AUDIO_FORMAT
+        self.chunk_size = cfg.CHUNK_SIZE_BYTES
+        self.overlap_size = cfg.OVERLAP_SIZE_BYTES
+        self._max_buffer_bytes = self.MAX_BUFFER_SECONDS * cfg.BYTES_PER_SECOND
+        self._max_buffer_chunks = self._max_buffer_bytes // cfg.MIN_CHUNK_BYTES + 10
+        self._min_chunk_duration = cfg.MIN_CHUNK_DURATION
+
+    def _on_config_changed(self, data: Any) -> None:
+        """
+        Wird aufgerufen, wenn sich die Konfiguration (z. B. der Typ) geändert hat.
+        Aktualisiert alle abhängigen Attribute und Puffer und benachrichtigt den Event-Bus.
+        """
+        log_debug("processor", "Config changed – updating derived attributes")
+        old_chunk_duration = self.settings.config.CHUNK_DURATION
+        self._update_derived_attributes()
+
+        # Falls die Chunk-Dauer sich geändert hat, auch den Puffer anpassen
+        if self.settings.config.CHUNK_DURATION != old_chunk_duration:
+            self._update_chunk_size()
+            with self._buffer_lock:
+                self._audio_chunks.clear()
+                self._audio_total_bytes = 0
+            logger.info(
+                f"Chunk duration changed to {self.settings.config.CHUNK_DURATION}s"
+            )
+
+        # AudioEnhancer hat eigene config-Referenz – wir müssen ihn nicht neu erstellen,
+        # da er nur die Config für Berechnungen nutzt (die ist shared).
+
+        # Event‑Bus benachrichtigen (falls vorhanden)
+        if self._event_bus is not None:
+            try:
+                self._event_bus.emit(
+                    "config_changed",
+                    {
+                        "config_type": getattr(self.settings, "config_type", "unknown"),
+                        "chunk_duration": self.settings.config.CHUNK_DURATION,
+                        "sample_rate": self.settings.config.SAMPLE_RATE,
+                        "channels": self.settings.config.CHANNELS,
+                        "bytes_per_second": self.settings.config.BYTES_PER_SECOND,
+                    },
+                )
+            except Exception as e:
+                log_debug("processor", f"Failed to emit config_changed event: {e}")
 
     # =========================================================================
     #  Properties für thread‑sicheren Zugriff auf Engines
@@ -29247,18 +29325,17 @@ class AudioProcessor:
         translation_callback: TranslationCallback,
         error_callback: ErrorCallback,
     ) -> None:
-        """Wird von einem Worker‑Thread des Executors aufgerufen. Führt Transkription aus."""
-        # Zähler für ausstehende Tasks wird erst im try‑Block erhöht, um Race Condition zu vermeiden
-        try:
-            with self._pending_tasks_lock:
-                self._pending_tasks += 1
-                self._tasks_done_event.clear()
-                if DEBUG_LEVEL >= 3:
-                    log_debug(
-                        "transcribe",
-                        f"Pending tasks increased to {self._pending_tasks}",
-                    )
+        """
+        Wird von einem Worker‑Thread des Executors aufgerufen. Führt Transkription aus.
 
+        Die Methode erhöht den `_pending_tasks`-Zähler erst, nachdem alle Vorprüfungen
+        bestanden wurden. Dadurch wird verhindert, dass der Zähler bei vorzeitigem
+        Return inkorrekt bleibt.
+        """
+        task_started = False
+
+        try:
+            # ========== 1. Vorprüfungen (bevor der Zähler erhöht wird) ==========
             # Abbruch, wenn Stop angefordert wurde (manueller Stop, nicht normales Ende)
             if self._stop_event.is_set():
                 log_debug("transcribe", "Stop event set, skipping chunk")
@@ -29272,8 +29349,19 @@ class AudioProcessor:
                 log_debug("transcribe", "Transcription engine not set, skipping chunk")
                 return
 
+            # ========== 2. Jetzt kann der Task als gestartet gelten ==========
+            with self._pending_tasks_lock:
+                self._pending_tasks += 1
+                self._tasks_done_event.clear()
+                task_started = True
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "transcribe",
+                        f"Pending tasks increased to {self._pending_tasks}",
+                    )
+
             start_time = time.perf_counter()
-            chunk_duration = len(audio_data) / self.config.BYTES_PER_SECOND
+            chunk_duration = len(audio_data) / self.settings.config.BYTES_PER_SECOND
 
             log_debug(
                 "transcribe",
@@ -29314,7 +29402,7 @@ class AudioProcessor:
                         # Duplikatprüfung (nur im normalen Modus; bei Untertiteln deaktivieren wir sie meist)
                         if (
                             self.settings.enable_duplicate_check
-                            and self.config.DUPLICATE_CHECK_ENABLED
+                            and self.settings.config.DUPLICATE_CHECK_ENABLED
                             and not self.subtitle_mode
                         ):
                             with self._duplicate_lock:
@@ -29339,7 +29427,7 @@ class AudioProcessor:
                             )
                             continue
 
-                        if self.config.ENABLE_TIMED_TRANSCRIPTIONS:
+                        if self.settings.config.ENABLE_TIMED_TRANSCRIPTIONS:
                             with self._subtitle_lock:
                                 self._timed_transcriptions.append(segment)
 
@@ -29385,7 +29473,7 @@ class AudioProcessor:
                     # Duplikatprüfung
                     if (
                         self.settings.enable_duplicate_check
-                        and self.config.DUPLICATE_CHECK_ENABLED
+                        and self.settings.config.DUPLICATE_CHECK_ENABLED
                     ):
                         with self._duplicate_lock:
                             if self._audio_enhancer.is_duplicate(
@@ -29455,17 +29543,19 @@ class AudioProcessor:
                 )
 
         finally:
-            with self._pending_tasks_lock:
-                self._pending_tasks -= 1
-                if DEBUG_LEVEL >= 3:
-                    log_debug(
-                        "transcribe",
-                        f"Pending tasks decreased to {self._pending_tasks}",
-                    )
-                if self._pending_tasks == 0:
-                    self._tasks_done_event.set()
+            # Nur dekrementieren, wenn der Task tatsächlich gestartet wurde
+            if task_started:
+                with self._pending_tasks_lock:
+                    self._pending_tasks -= 1
                     if DEBUG_LEVEL >= 3:
-                        log_debug("transcribe", "Tasks done event set")
+                        log_debug(
+                            "transcribe",
+                            f"Pending tasks decreased to {self._pending_tasks}",
+                        )
+                    if self._pending_tasks == 0:
+                        self._tasks_done_event.set()
+                        if DEBUG_LEVEL >= 3:
+                            log_debug("transcribe", "Tasks done event set")
 
     # =========================================================================
     #  PRODUCER: Wird vom StreamHandler aufgerufen (schnell, nicht-blockierend)
@@ -29502,33 +29592,40 @@ class AudioProcessor:
         else:
             enhanced_audio = audio_data
 
-        # In Queue legen (non‑blocking)
+        # ========== OPTIMIERUNG: Blockierendes Put mit Timeout (Backpressure) ==========
         try:
-            self._raw_audio_queue.put_nowait(
+            # Versuche, den Chunk für maximal 0,5 Sekunden in die Queue zu legen
+            self._raw_audio_queue.put(
                 (
                     enhanced_audio,
                     transcription_callback,
                     translation_callback,
                     error_callback,
-                )
+                ),
+                block=True,
+                timeout=0.5,
             )
             with self._stats_lock:
                 self._queue_enqueue_counter += 1
             qsize = self._raw_audio_queue.qsize()
-            log_debug("queue", f"Chunk enqueued, queue size={qsize}")
+            if DEBUG_LEVEL >= 3:
+                log_debug("queue", f"Chunk enqueued (blocking), queue size={qsize}")
+            else:
+                log_debug("queue", f"Chunk enqueued, queue size={qsize}")
         except queue.Full:
+            # Nach 0,5s immer noch voll – dann verwerfen (sollte selten vorkommen)
             with self._stats_lock:
                 self._queue_drop_counter += 1
                 if self._queue_drop_counter % 10 == 0:
                     logger.warning(
-                        f"⚠️ Transkriptions-Queue voll – Chunk verworfen (Total: {self._queue_drop_counter})"
+                        f"⚠️ Transkriptions-Queue voll nach Timeout – Chunk verworfen (Total: {self._queue_drop_counter})"
                     )
             if error_callback:
                 error_callback("⚠️ Transkriptions-Queue voll – Chunk verworfen")
-            if logger.isEnabledFor(logging.DEBUG) and DEBUG_LEVEL >= 3:
+            if DEBUG_LEVEL >= 3:
                 log_debug(
                     "queue",
-                    f"Queue full, dropped chunk (total drops: {self._queue_drop_counter})",
+                    f"Queue full after 0.5s timeout, dropped chunk (total drops: {self._queue_drop_counter})",
                 )
             elif logger.isEnabledFor(logging.DEBUG):
                 log_debug("queue", f"Queue full (drop #{self._queue_drop_counter})")
@@ -29538,7 +29635,7 @@ class AudioProcessor:
             self._chunk_counter += 1
             self._total_bytes_processed += len(audio_data)
             self._processed_seconds = (
-                self._total_bytes_processed / self.config.BYTES_PER_SECOND
+                self._total_bytes_processed / self.settings.config.BYTES_PER_SECOND
             )
 
         if self._chunk_counter % 50 == 0:
@@ -29553,11 +29650,12 @@ class AudioProcessor:
     #  ÖFFENTLICHE METHODEN
     # =========================================================================
     def _get_config_type(self) -> str:
-        if isinstance(self.config, RealtimeConfig):
+        cfg = self.settings.config
+        if isinstance(cfg, RealtimeConfig):
             return "realtime"
-        elif isinstance(self.config, HighAccuracyConfig):
+        elif isinstance(cfg, HighAccuracyConfig):
             return "high_accuracy"
-        elif isinstance(self.config, YouTubeOptimizedConfig):
+        elif isinstance(cfg, YouTubeOptimizedConfig):
             return "youtube"
         return "default"
 
@@ -29581,7 +29679,9 @@ class AudioProcessor:
             return None
 
     def _update_chunk_size(self) -> None:
-        self.chunk_size = int(self.config.CHUNK_DURATION * self.config.BYTES_PER_SECOND)
+        self.chunk_size = int(
+            self.settings.config.CHUNK_DURATION * self.settings.config.BYTES_PER_SECOND
+        )
 
     def _load_modules(self) -> None:
         if self._np is None and NUMPY_AVAILABLE:
@@ -29750,7 +29850,7 @@ class AudioProcessor:
             self._word_count_history.clear()
             self._smoothed_word_count = None
 
-        self._last_chunk_duration = self.config.CHUNK_DURATION
+        self._last_chunk_duration = self.settings.config.CHUNK_DURATION
         self._chunk_stable_counter = 0
 
         self._start_dispatcher()
@@ -29945,7 +30045,7 @@ class AudioProcessor:
             return
         log_debug("shutdown", f"Shutting down {name} executor...")
         executor.shutdown(wait=False, cancel_futures=True)
-        worker_threads = getattr(executor, '_threads', [])
+        worker_threads = getattr(executor, "_threads", [])
         if not worker_threads:
             log_debug("shutdown", f"  → {name}: no worker threads found")
             return
@@ -29954,7 +30054,9 @@ class AudioProcessor:
             remaining = max(0.1, end_time - time.time())
             t.join(timeout=remaining)
             if t.is_alive():
-                logger.warning(f"{name} worker thread {t.name} still alive after {timeout}s – setting daemon=True")
+                logger.warning(
+                    f"{name} worker thread {t.name} still alive after {timeout}s – setting daemon=True"
+                )
                 t.daemon = True
             else:
                 log_debug("shutdown", f"  → {name} worker thread {t.name} terminated")
@@ -30010,7 +30112,10 @@ class AudioProcessor:
             self._dispatcher_thread = None
 
             # ========== 4. Auf den Processing-Thread warten ==========
-            if hasattr(self, "_processing_thread") and self._processing_thread is not None:
+            if (
+                hasattr(self, "_processing_thread")
+                and self._processing_thread is not None
+            ):
                 if self._processing_thread.is_alive():
                     log_debug("shutdown", "Waiting for processing thread...")
                     self._processing_thread.join(timeout=3.0)
@@ -30021,8 +30126,12 @@ class AudioProcessor:
                 self._processing_thread = None
 
             # ========== 5. Executoren mit Timeout herunterfahren ==========
-            self._shutdown_executor_safe(self._transcription_executor, "Transcription", timeout=5.0)
-            self._shutdown_executor_safe(self._translation_executor, "Translation", timeout=5.0)
+            self._shutdown_executor_safe(
+                self._transcription_executor, "Transcription", timeout=5.0
+            )
+            self._shutdown_executor_safe(
+                self._translation_executor, "Translation", timeout=5.0
+            )
 
             # ========== 6. PluginManager entsorgen ==========
             if self.plugin_manager is not None:
@@ -30089,7 +30198,11 @@ class AudioProcessor:
 
         with self._stats_lock:
             self._consecutive_errors += 1
-            if fatal or self._consecutive_errors >= self.config.MAX_CONSECUTIVE_ERRORS:
+            if (
+                fatal
+                or self._consecutive_errors
+                >= self.settings.config.MAX_CONSECUTIVE_ERRORS
+            ):
                 logger.critical(
                     f"🚨 Too many consecutive errors ({self._consecutive_errors}), stopping processing."
                 )
@@ -30121,7 +30234,7 @@ class AudioProcessor:
 
     def _get_audio_chunk_for_processing(self) -> Optional[bytes]:
         with self._buffer_lock:
-            if self._audio_total_bytes < self.config.MIN_CHUNK_BYTES:
+            if self._audio_total_bytes < self.settings.config.MIN_CHUNK_BYTES:
                 if self._audio_chunks and time.time() - self._last_buffer_flush > 5.0:
                     pass
                 else:
@@ -30129,7 +30242,7 @@ class AudioProcessor:
 
             chunks = []
             size = 0
-            while self._audio_chunks and size < self.config.MIN_CHUNK_BYTES:
+            while self._audio_chunks and size < self.settings.config.MIN_CHUNK_BYTES:
                 chunk = self._audio_chunks.popleft()
                 chunks.append(chunk)
                 size += len(chunk)
@@ -30474,24 +30587,30 @@ class AudioProcessor:
                 )
             smoothed = self._smoothed_word_count
 
-        new_duration = self.config.CHUNK_DURATION
+        new_duration = self.settings.config.CHUNK_DURATION
         low_thresh = self.settings.adaptive_chunk_low_words
         high_thresh = self.settings.adaptive_chunk_high_words
-        min_dur = self.config.MIN_CHUNK_DURATION
-        max_dur = self.config.MAX_CHUNK_DURATION
+        min_dur = self.settings.config.MIN_CHUNK_DURATION
+        max_dur = self.settings.config.MAX_CHUNK_DURATION
 
-        if last_realtime > 1.5 and self.config.CHUNK_DURATION > min_dur + 0.5:
-            new_duration = max(min_dur, self.config.CHUNK_DURATION - 1)
+        if last_realtime > 1.5 and self.settings.config.CHUNK_DURATION > min_dur + 0.5:
+            new_duration = max(min_dur, self.settings.config.CHUNK_DURATION - 1)
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
                     f"Adaptive: Realtime-Faktor {last_realtime:.2f} > 1.5, reduziere Chunk"
                 )
-        elif smoothed < low_thresh and self.config.CHUNK_DURATION > min_dur + 0.5:
-            new_duration = max(min_dur, self.config.CHUNK_DURATION - 1)
-        elif smoothed > high_thresh and self.config.CHUNK_DURATION < max_dur - 0.5:
-            new_duration = min(max_dur, self.config.CHUNK_DURATION + 1)
+        elif (
+            smoothed < low_thresh
+            and self.settings.config.CHUNK_DURATION > min_dur + 0.5
+        ):
+            new_duration = max(min_dur, self.settings.config.CHUNK_DURATION - 1)
+        elif (
+            smoothed > high_thresh
+            and self.settings.config.CHUNK_DURATION < max_dur - 0.5
+        ):
+            new_duration = min(max_dur, self.settings.config.CHUNK_DURATION + 1)
 
-        if new_duration != self.config.CHUNK_DURATION:
+        if new_duration != self.settings.config.CHUNK_DURATION:
             if new_duration != self._last_chunk_duration:
                 self._chunk_stable_counter += 1
             else:
@@ -30499,10 +30618,10 @@ class AudioProcessor:
 
             if self._chunk_stable_counter >= Config.ADAPTIVE_CHUNK_STABLE_THRESHOLD:
                 logger.info(
-                    f"{'📈' if new_duration > self.config.CHUNK_DURATION else '📉'} Adaptive Chunk-Dauer: "
-                    f"{self.config.CHUNK_DURATION:.1f}s → {new_duration:.1f}s (avg_words={smoothed:.1f}, realtime={last_realtime:.2f})"
+                    f"{'📈' if new_duration > self.settings.config.CHUNK_DURATION else '📉'} Adaptive Chunk-Dauer: "
+                    f"{self.settings.config.CHUNK_DURATION:.1f}s → {new_duration:.1f}s (avg_words={smoothed:.1f}, realtime={last_realtime:.2f})"
                 )
-                self.config.CHUNK_DURATION = new_duration
+                self.settings.config.CHUNK_DURATION = new_duration
                 self._update_chunk_size()
                 self._chunk_stable_counter = 0
             self._last_chunk_duration = new_duration
@@ -30657,7 +30776,7 @@ class AudioProcessor:
             log_debug("audio", "_flush_audio_buffer: Puffer war leer nach dem Leeren")
             return
 
-        duration = len(remaining) / self.config.BYTES_PER_SECOND
+        duration = len(remaining) / self.settings.config.BYTES_PER_SECOND
         log_debug(
             "audio",
             f"_flush_audio_buffer: {chunk_count} Chunks mit insgesamt {total_bytes} Bytes ({duration:.2f}s) werden verarbeitet",
@@ -30752,7 +30871,7 @@ class AudioProcessor:
             timeout = (
                 Config.YOUTUBE_STREAM_TEST_TIMEOUT
                 if is_youtube
-                else self.config.STREAM_TIMEOUT
+                else self.settings.config.STREAM_TIMEOUT
             )
             test_cmd = [
                 "ffmpeg",
@@ -30984,6 +31103,16 @@ class AudioProcessor:
         start: Optional[float] = None,
         end: Optional[float] = None,
     ) -> None:
+        """
+        Übersetzt einen Text asynchron mit begrenzter Warteschlange (Backpressure).
+
+        Args:
+            text: Der zu übersetzende Text.
+            source_lang: Quellsprache (ISO-Code oder 'auto').
+            translation_callback: Callback für das Übersetzungsergebnis.
+            start: Optionaler Startzeitstempel (für Untertitel).
+            end: Optionaler Endzeitstempel (für Untertitel).
+        """
         if not self._translation_enabled.is_set():
             log_debug("translate", "Translation disabled – skipping")
             return
@@ -31004,8 +31133,10 @@ class AudioProcessor:
             )
             return
 
-        if not self._translation_semaphore.acquire(blocking=False):
-            log_debug("translate", "Translation semaphore full – discarding request")
+        # ========== OPTIMIERUNG: Blockierendes Acquire mit Timeout (Backpressure) ==========
+        acquired = self._translation_semaphore.acquire(blocking=True, timeout=5.0)
+        if not acquired:
+            log_debug("translate", "Translation semaphore timeout – discarding request")
             return
 
         if self._stop_event.is_set():
@@ -31098,7 +31229,10 @@ class AudioProcessor:
                 if translation:
                     translation.start = start
                     translation.end = end
-                    if self.subtitle_mode and self.config.ENABLE_TIMED_TRANSLATIONS:
+                    if (
+                        self.subtitle_mode
+                        and self.settings.config.ENABLE_TIMED_TRANSLATIONS
+                    ):
                         with self._subtitle_lock:
                             self._timed_translations.append(translation)
                     translation_callback(translation)
@@ -33409,20 +33543,61 @@ class AdvancedSettings:
     # Hilfsmethoden
     # -------------------------------------------------------------------------
     def set_config_type(self, config_type: str) -> bool:
+        """
+        Ändert den Konfigurationstyp und benachrichtigt alle Abonnenten (z. B. AudioProcessor).
+
+        Args:
+            config_type: Einer von 'default', 'realtime', 'high_accuracy', 'youtube'
+
+        Returns:
+            True bei Erfolg, sonst False
+        """
         if config_type == self.config_type:
             return True
+
         if config_type not in ("default", "realtime", "high_accuracy", "youtube"):
             logger.warning(f"⚠️ Ungültiger config_type '{config_type}'")
             return False
+
         old_type = self.config_type
-        self.config_type = config_type
         old_chunk = self.chunk_duration
+
+        # Konfiguration wechseln
+        self.config_type = config_type
         self._recreate_config()
         self.chunk_duration = old_chunk
         self._apply_mode_overrides()
+
         logger.info(
-            f"🔄 Config type geändert: {old_type} → {config_type}, neue CHUNK_DURATION: {self.config.CHUNK_DURATION}s"
+            f"🔄 Config type geändert: {old_type} → {config_type}, "
+            f"neue CHUNK_DURATION: {self.config.CHUNK_DURATION}s"
         )
+
+        # ========== NEU: Event-Bus benachrichtigen ==========
+        try:
+            # AppContext ist ein Singleton – über dieses holen wir den Event-Bus
+            from . import AppContext  # oder den korrekten Import-Pfad anpassen
+
+            event_bus = AppContext().event_bus
+            if event_bus:
+                event_bus.emit(
+                    "config_changed",
+                    {
+                        "config_type": config_type,
+                        "old_type": old_type,
+                        "chunk_duration": self.chunk_duration,
+                        "sample_rate": self.config.SAMPLE_RATE,
+                        "channels": self.config.CHANNELS,
+                        "bytes_per_second": self.config.BYTES_PER_SECOND,
+                    },
+                )
+                log_debug("settings", f"Sent config_changed event for {config_type}")
+            else:
+                logger.debug("Event-Bus nicht verfügbar – Überspringe Benachrichtigung")
+        except Exception as e:
+            logger.warning(f"Konnte config_changed Event nicht senden: {e}")
+        # ====================================================
+
         return True
 
     def get_audio_filter(
