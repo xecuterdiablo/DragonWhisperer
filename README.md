@@ -47,6 +47,9 @@ RAM: 16 GB (für medium/large)
 GPU: ≥ 6 GB VRAM  
 
 🔧 Abhängigkeiten
+Python:
+sudo apt-get -y install python-is-python3 // sudo pacman -S python
+
 
 **Systemweit**  
 - ffmpeg (im PATH oder in Standardpfaden)  
