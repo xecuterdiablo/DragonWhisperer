@@ -101,15 +101,13 @@ Für ROCm oder MPS folge der offiziellen PyTorch‑Dokumentation.
         macOS: ~/Library/Application Support/DragonWhisperer/
 
     Repository klonen (oder Skript direkt herunterladen)
-    bash
 
     git clone https://github.com/xecuterdiablo/DragonWhisperer.git
     cd DragonWhisperer
 
     Abhängigkeiten installieren (siehe oben)
 
-    Skript starten
-    bash
+    Skript im Terminal starten
 
     python Dragon_Whisperer.py
 
