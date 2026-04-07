@@ -108,7 +108,7 @@ Für ROCm oder MPS folge der offiziellen PyTorch‑Dokumentation.
     Skript starten
     bash
 
-    python dragon_whisperer.py
+    python Dragon_Whisperer.py
 
     URL eingeben – z.B. https://www.youtube.com/watch?v=... oder eine lokale Datei mit file:///pfad/datei.mp4
 
