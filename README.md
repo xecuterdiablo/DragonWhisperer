@@ -101,7 +101,6 @@ Für ROCm oder MPS folge der offiziellen PyTorch‑Dokumentation.
     bash
 
     git clone https://github.com/xecuterdiablo/DragonWhisperer.git
-    git clone https://github.com/xecuterdiablo/DragonWhisperer/blob/main/Dragon_Whisperer.py
     cd DragonWhisperer
 
     Abhängigkeiten installieren (siehe oben)
