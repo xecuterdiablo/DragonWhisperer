@@ -67,12 +67,10 @@ Die meisten Pakete werden automatisch erkannt; fehlende erzeugen eine klare Fehl
 pip install faster-whisper   # Empfohlen (schneller, weniger RAM)
 
 Oder alternativ:
-bash
 
 pip install openai-whisper   # Falls faster-whisper nicht verfügbar
 
 Basis‑Abhängigkeiten:
-bash
 
 pip install torch numpy scipy deep-translator psutil requests
 
