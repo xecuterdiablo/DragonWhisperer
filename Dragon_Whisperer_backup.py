@@ -6446,6 +6446,7 @@ class TranscriptionEngine:
     **GPU-Acceleration-Einstellung:**
     - Kann zur Laufzeit über `set_gpu_acceleration()` umgeschaltet werden.
     - Bei Deaktivierung wird erzwungen auf CPU ausgewichen (VRAM bleibt frei).
+    - Modell wird synchron neu geladen – sofort wirksam.
     """
 
     MODEL_SIZE_ORDER = [
@@ -6495,11 +6496,7 @@ class TranscriptionEngine:
     ) -> None:
         """
         Initialisiert die TranscriptionEngine mit optimierten Einstellungen.
-
-        Args:
-            settings: Erweiterte Einstellungen (optional)
-            cache_manager: Cache-Manager für Transkriptionen (optional)
-            event_bus: Event-Bus für GUI-Kommunikation (optional)
+        Die GPU‑Acceleration-Einstellung aus `settings` wird beachtet.
         """
         self.settings = settings or AdvancedSettings()
         self.config = self.settings.config
@@ -6527,7 +6524,11 @@ class TranscriptionEngine:
         self._audio_enhancer = AudioEnhancer(self.config, self.settings)
         self._reloading = False
         self._vad_fallback_enabled = True
-        # Device-Erkennung (beachtet gpu_acceleration)
+
+        # Debug: Ausgabe der aktuellen GPU-Einstellung aus den geladenen Settings
+        log_debug("engine", f"Initializing TranscriptionEngine: gpu_acceleration={self.settings.gpu_acceleration}")
+
+        # Device-Erkennung (beachtet self.settings.gpu_acceleration)
         self.device, self.compute_type = self._detect_optimal_device()
         self._debug = logger.isEnabledFor(logging.DEBUG)
 
@@ -6554,32 +6555,52 @@ class TranscriptionEngine:
     def set_gpu_acceleration(self, enabled: bool) -> None:
         """
         Aktiviert oder deaktiviert die GPU-Beschleunigung zur Laufzeit.
-        Bei Änderung wird das aktuelle Modell neu geladen.
+        Bei Änderung wird das Modell synchron neu geladen.
         """
+        log_debug("gpu", f"set_gpu_acceleration called with enabled={enabled}")
+
         if not hasattr(self, "settings") or self.settings is None:
+            log_debug("gpu", "settings not available, aborting")
             return
-        old = self.settings.gpu_acceleration
-        if old == enabled:
-            return
+
+        # Einstellung speichern
         self.settings.gpu_acceleration = enabled
         try:
             self.settings.save_to_file()
+            log_debug("gpu", "Settings saved to disk")
         except Exception as e:
             logger.warning(f"Konnte GPU-Einstellung nicht speichern: {e}")
+            log_debug("gpu", f"Failed to save settings: {e}")
+
+        # Alte Gerätekonfiguration merken
+        old_device = self.device
+        old_compute = self.compute_type
+        log_debug("gpu", f"Old device={old_device}, compute_type={old_compute}")
 
         # Gerät neu ermitteln (unter Beachtung der neuen Einstellung)
         self._refresh_device()
+        new_device = self.device
+        new_compute = self.compute_type
+        log_debug("gpu", f"New device={new_device}, compute_type={new_compute}")
 
-        # Aktuelles Modell neu laden (damit es auf dem neuen Device läuft)
-        current_model = self.get_current_model()
-        if current_model and current_model != "None" and not self._disposing:
-            logger.info(f"🔄 GPU acceleration changed to {enabled} – reloading model {current_model}...")
-            self.reload_model(current_model)
+        # Wenn sich das Device oder der Compute-Typ geändert hat, Modell synchron neu laden
+        if old_device != new_device or old_compute != new_compute:
+            current_model = self.get_current_model()
+            if current_model and current_model != "None" and not self._disposing:
+                logger.info(f"🔄 Device changed from {old_device} to {new_device} – reloading model {current_model} synchronously...")
+                log_debug("gpu", f"Calling reload_model_sync({current_model})")
+                self._reload_model_sync(current_model)
+            else:
+                log_debug("gpu", "No model to reload (model is None or disposing)")
+        else:
+            log_debug("gpu", "Device unchanged, no reload needed")
 
         # Event-Bus benachrichtigen (für GUI)
         if self.event_bus:
             self.event_bus.emit("gpu_status_changed", enabled)
-            log_debug("gpu", f"GPU acceleration changed to {enabled} via EventBus")
+            log_debug("gpu", f"Emitted gpu_status_changed event with value {enabled}")
+        else:
+            log_debug("gpu", "No event bus available")
 
     def _refresh_device(self) -> None:
         """Ermittelt Device und Compute-Typ neu (unter Beachtung der aktuellen gpu_acceleration-Einstellung)."""
@@ -6593,9 +6614,18 @@ class TranscriptionEngine:
             if self._debug:
                 log_debug("device", f"Refreshed device: {self.device}, compute_type={self.compute_type}")
 
-    def _set_gpu_acceleration(self, enabled: bool) -> None:
-        """(Alias für set_gpu_acceleration – für Kompatibilität mit vorhandenem Code)"""
-        self.set_gpu_acceleration(enabled)
+    def _reload_model_sync(self, model_size: str) -> bool:
+        """Lädt ein Modell synchron (wartet auf Abschluss)."""
+        with self._lock:
+            if self._reloading:
+                logger.warning("Model reload already in progress, waiting...")
+                self._model_load_stop_event.wait(timeout=30.0)
+                if self._reloading:
+                    logger.error("Timeout waiting for background reload")
+                    return False
+        # Synchrones Laden (ohne Thread)
+        result = self.load_model(model_size, set_active=True)
+        return result is not None
 
     def load_model(self, model_size: str, set_active: bool = False) -> Optional[Tuple[Any, str]]:
         self._requested_model = model_size
