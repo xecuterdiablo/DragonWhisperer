@@ -48,7 +48,8 @@ GPU: ≥ 6 GB VRAM
 
 🔧 Abhängigkeiten
 Python:
-sudo apt-get -y install python-is-python3 // sudo pacman -S python
+
+- ** Python**: sudo apt-get -y install python-is-python3 // sudo pacman -S python
 
 
 **Systemweit**  
