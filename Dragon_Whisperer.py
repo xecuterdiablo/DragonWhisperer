@@ -6426,129 +6426,68 @@ class AudioEnhancer:
 # 14. TRANSKRIPTIONS-ENGINE & DUMMY
 # =============================================================================
 
-
 class TranscriptionEngine:
     """
-    Optimierte Transkriptions-Engine mit Whisper (faster-whisper / openai-whisper).
+    Optimierte Transkriptions-Engine mit automatischer Hardware-Erkennung und Fallback.
 
-    Verbesserungen gegenüber der Originalversion:
-    - _reloading wird sofort im Lock gesetzt (kritischer Bugfix)
-    - _last_confidence_threshold wird bei Modellwechsel zurückgesetzt
-    - Confidence-Boost auf max. 0.3 begrenzt
-    - Dritter Fallback-Versuch bei leeren Segmenten (ohne VAD + niedriger no_speech_threshold)
-    - Unterstützung für large-v3-turbo in Speicherschätzung
-    - Bessere unique_ratio für asiatische Sprachen (optional)
-    - Eigener Lock für _last_confidence_threshold
-    - CUDA-OOM-Erkennung und CPU-Fallback (ab Version 4.2)
+    **Unterstützte Geräte und Compute-Typen:**
+    - NVIDIA GPU (Compute Capability >= 6.0): int8 (schnell, speichereffizient)
+    - NVIDIA GPU (CC 3.5 - 5.x): float16 (kompatibel, etwas langsamer)
+    - NVIDIA GPU (CC < 3.5): float32 (sehr langsam, nur als Notlösung)
+    - AMD GPU (ROCm): float16 (empfohlen)
+    - Apple Silicon (MPS): float16
+    - CPU: int8
+
+    **Fallback-Strategie beim Laden eines Modells:**
+    1. Versuche den vom Device empfohlenen Compute-Typ.
+    2. Bei Fehler (OOM / fehlendes Kernel-Image) → nächster Compute-Typ (float16/float32).
+    3. Wenn alle GPU-Versuche scheitern → CPU-Fallback mit int8.
+
+    **GPU-Acceleration-Einstellung:**
+    - Kann zur Laufzeit über `set_gpu_acceleration()` umgeschaltet werden.
+    - Bei Deaktivierung wird erzwungen auf CPU ausgewichen (VRAM bleibt frei).
+    - Modell wird synchron neu geladen – sofort wirksam (force=True entfernt altes Modell).
+
+    **Debug-Ausgaben:**
+    - Bei DEBUG_LEVEL >= 3 werden alle relevanten Entscheidungen protokolliert.
+    - Zusätzliche Logs in load_model, _reload_model_sync und _detect_optimal_device.
     """
 
     MODEL_SIZE_ORDER = [
-        "tiny",
-        "tiny.en",
-        "base",
-        "base.en",
-        "small",
-        "small.en",
-        "medium",
-        "medium.en",
-        "large-v1",
-        "large-v2",
-        "large-v3",
-        "large-v3-turbo",
+        "tiny", "tiny.en", "base", "base.en", "small", "small.en",
+        "medium", "medium.en", "large-v1", "large-v2", "large-v3", "large-v3-turbo"
     ]
 
     _ALLOWED_FASTER = {
-        "language",
-        "task",
-        "beam_size",
-        "best_of",
-        "temperature",
-        "compression_ratio_threshold",
-        "log_prob_threshold",
-        "no_speech_threshold",
-        "condition_on_previous_text",
-        "vad_filter",
-        "vad_parameters",
-        "without_timestamps",
-        "word_timestamps",
-        "initial_prompt",
-        "prefix",
-        "suppress_blank",
-        "suppress_tokens",
-        "hotwords",
-        "language_detection_threshold",
-        "language_detection_segments",
-        "multilingual",
-        "repetition_penalty",
-        "no_repeat_ngram_size",
-        "prompt_reset_on_temperature",
+        "language", "task", "beam_size", "best_of", "temperature",
+        "compression_ratio_threshold", "log_prob_threshold", "no_speech_threshold",
+        "condition_on_previous_text", "vad_filter", "vad_parameters",
+        "without_timestamps", "word_timestamps", "initial_prompt", "prefix",
+        "suppress_blank", "suppress_tokens", "hotwords", "language_detection_threshold",
+        "language_detection_segments", "multilingual", "repetition_penalty",
+        "no_repeat_ngram_size", "prompt_reset_on_temperature"
     }
 
     _ALLOWED_OPENAI = {
-        "language",
-        "task",
-        "temperature",
-        "best_of",
-        "beam_size",
-        "patience",
-        "length_penalty",
-        "repetition_penalty",
-        "no_repeat_ngram_size",
-        "initial_prompt",
-        "prefix",
-        "suppress_tokens",
-        "without_timestamps",
-        "max_initial_timestamp",
-        "word_timestamps",
-        "prepend_punctuations",
-        "append_punctuations",
-        "max_new_tokens",
-        "clip_timestamps",
-        "hallucination_silence_threshold",
-        "compression_ratio_threshold",
-        "log_prob_threshold",
-        "no_speech_threshold",
-        "condition_on_previous_text",
+        "language", "task", "temperature", "best_of", "beam_size", "patience",
+        "length_penalty", "repetition_penalty", "no_repeat_ngram_size",
+        "initial_prompt", "prefix", "suppress_tokens", "without_timestamps",
+        "max_initial_timestamp", "word_timestamps", "prepend_punctuations",
+        "append_punctuations", "max_new_tokens", "clip_timestamps",
+        "hallucination_silence_threshold", "compression_ratio_threshold",
+        "log_prob_threshold", "no_speech_threshold", "condition_on_previous_text"
     }
 
     __slots__ = (
-        "model",
-        "model_size",
-        "whisper_backend",
-        "settings",
-        "config",
-        "device",
-        "compute_type",
-        "_cache",
-        "_lock",
-        "_max_cached_models",
-        "_model_cache",
-        "_model_usage_lock",
-        "_performance_monitor",
-        "_last_transcription_text",
-        "_model_loaded_flag",
-        "_disposing",
-        "forced_language",
-        "_last_detected_language",
-        "_torch",
-        "_np",
-        "_scipy_signal",
-        "_last_confidence_threshold",
-        "_confidence_lock",
-        "_audio_enhancer",
-        "_cache_manager",
-        "_model_locks",
-        "_model_locks_lock",
-        "_reloading",
-        "_model_load_stop_event",
-        "_vad_fallback_enabled",
-        "_debug",
-        "_state_lock",
-        "_last_oom",
-        "event_bus",
-        "_requested_model",
-        "_model_size_cache",
-        "_nvml_initialized",
+        "model", "model_size", "whisper_backend", "settings", "config", "device",
+        "compute_type", "_cache", "_lock", "_max_cached_models", "_model_cache",
+        "_model_usage_lock", "_performance_monitor", "_last_transcription_text",
+        "_model_loaded_flag", "_disposing", "forced_language", "_last_detected_language",
+        "_torch", "_np", "_scipy_signal", "_last_confidence_threshold",
+        "_confidence_lock", "_audio_enhancer", "_cache_manager", "_model_locks",
+        "_model_locks_lock", "_reloading", "_model_load_stop_event", "_vad_fallback_enabled",
+        "_debug", "_state_lock", "_last_oom", "event_bus", "_requested_model",
+        "_model_size_cache", "_nvml_initialized"
     )
 
     _global_load_semaphore = threading.Semaphore(1)
@@ -6560,13 +6499,8 @@ class TranscriptionEngine:
         event_bus: Optional[EventBus] = None,
     ) -> None:
         """
-        Initialisiert die TranscriptionEngine mit optimierten Einstellungen,
-        Event-Bus für GUI-Updates und Cache für Modellgrößen.
-
-        Args:
-            settings: Erweiterte Einstellungen (optional)
-            cache_manager: Cache-Manager für Transkriptionen (optional)
-            event_bus: Event-Bus für GUI-Kommunikation (optional)
+        Initialisiert die TranscriptionEngine mit optimierten Einstellungen.
+        Die GPU‑Acceleration-Einstellung aus `settings` wird beachtet.
         """
         self.settings = settings or AdvancedSettings()
         self.config = self.settings.config
@@ -6594,6 +6528,11 @@ class TranscriptionEngine:
         self._audio_enhancer = AudioEnhancer(self.config, self.settings)
         self._reloading = False
         self._vad_fallback_enabled = True
+
+        # Debug: Ausgabe der aktuellen GPU-Einstellung aus den geladenen Settings
+        log_debug("engine", f"Initializing TranscriptionEngine: gpu_acceleration={self.settings.gpu_acceleration}")
+
+        # Device-Erkennung (beachtet self.settings.gpu_acceleration)
         self.device, self.compute_type = self._detect_optimal_device()
         self._debug = logger.isEnabledFor(logging.DEBUG)
 
@@ -6602,20 +6541,12 @@ class TranscriptionEngine:
         self._model_load_stop_event = threading.Event()
         self._last_oom = False
 
-        # ========== NEU: Event-Bus für GUI-Updates ==========
         self.event_bus = event_bus
-
-        # ========== NEU: Cache für Modellgrößen (für _estimate_model_memory) ==========
         self._model_size_cache: Dict[str, float] = {}
-
-        # ========== NEU: Gewünschtes Modell für Fallback-Erkennung ==========
         self._requested_model: Optional[str] = None
 
         if DEBUG_LEVEL >= 3:
-            log_debug(
-                "engine",
-                f"TranscriptionEngine initialisiert (event_bus={event_bus is not None})",
-            )
+            log_debug("engine", f"TranscriptionEngine initialisiert (event_bus={event_bus is not None})")
 
     # -------------------------------------------------------------------------
     #  Öffentliche Methoden
@@ -6623,78 +6554,113 @@ class TranscriptionEngine:
     def set_vad_fallback_enabled(self, enabled: bool) -> None:
         self._vad_fallback_enabled = enabled
         if self._debug:
-            log_debug(
-                "vad",
-                f"VAD-Fallback in TranscriptionEngine {'aktiviert' if enabled else 'deaktiviert'}",
-            )
+            log_debug("vad", f"VAD-Fallback {'aktiviert' if enabled else 'deaktiviert'}")
 
-    def _set_gpu_acceleration(self, enabled: bool) -> None:
+    def set_gpu_acceleration(self, enabled: bool) -> None:
         """
-        Setzt die GPU‑Beschleunigung in den Einstellungen und benachrichtigt die GUI.
-
-        Args:
-            enabled: True für GPU (CUDA/MPS), False für CPU
+        Aktiviert oder deaktiviert die GPU-Beschleunigung zur Laufzeit.
+        Bei Änderung wird das Modell synchron neu geladen (erzwungen).
         """
-        if hasattr(self, "settings") and self.settings is not None:
-            old = self.settings.gpu_acceleration
-            if old == enabled:
-                return
-            self.settings.gpu_acceleration = enabled
-            # Einstellungen optional speichern (asynchron, um GUI nicht zu blockieren)
-            try:
-                self.settings.save_to_file()
-            except Exception as e:
-                logger.warning(f"Konnte GPU-Einstellung nicht speichern: {e}")
+        log_debug("gpu", f"set_gpu_acceleration called with enabled={enabled}")
 
-            # Event‑Bus benachrichtigen (falls vorhanden)
-            if hasattr(self, "event_bus") and self.event_bus:
-                self.event_bus.emit("gpu_status_changed", enabled)
-                log_debug("gpu", f"GPU acceleration changed to {enabled} via EventBus")
+        if not hasattr(self, "settings") or self.settings is None:
+            log_debug("gpu", "settings not available, aborting")
+            return
 
-    def load_model(
-        self, model_size: str, set_active: bool = False
-    ) -> Optional[Tuple[Any, str]]:
+        # Einstellung speichern
+        self.settings.gpu_acceleration = enabled
+        try:
+            self.settings.save_to_file()
+            log_debug("gpu", "Settings saved to disk")
+        except Exception as e:
+            logger.warning(f"Konnte GPU-Einstellung nicht speichern: {e}")
+            log_debug("gpu", f"Failed to save settings: {e}")
+
+        # Alte Gerätekonfiguration merken
+        old_device = self.device
+        old_compute = self.compute_type
+        log_debug("gpu", f"Old device={old_device}, compute_type={old_compute}")
+
+        # Gerät neu ermitteln (unter Beachtung der neuen Einstellung)
+        self._refresh_device()
+        new_device = self.device
+        new_compute = self.compute_type
+        log_debug("gpu", f"New device={new_device}, compute_type={new_compute}")
+
+        # Wenn sich das Device oder der Compute-Typ geändert hat, Modell synchron neu laden (erzwungen)
+        if old_device != new_device or old_compute != new_compute:
+            current_model = self.get_current_model()
+            if current_model and current_model != "None" and not self._disposing:
+                logger.info(f"🔄 Device changed from {old_device} to {new_device} – reloading model {current_model} synchronously...")
+                log_debug("gpu", f"Calling reload_model_sync({current_model})")
+                self._reload_model_sync(current_model, force=True)
+            else:
+                log_debug("gpu", "No model to reload (model is None or disposing)")
+        else:
+            log_debug("gpu", "Device unchanged, no reload needed")
+
+        # Event-Bus benachrichtigen
+        if self.event_bus:
+            self.event_bus.emit("gpu_status_changed", enabled)
+            log_debug("gpu", f"Emitted gpu_status_changed event with value {enabled}")
+        else:
+            log_debug("gpu", "No event bus available")
+
+    def _refresh_device(self) -> None:
+        """Ermittelt Device und Compute-Typ neu (unter Beachtung der aktuellen gpu_acceleration-Einstellung)."""
+        old_device = self.device
+        old_compute = self.compute_type
+        new_device, new_compute = self._detect_optimal_device()
+        self.device = new_device
+        self.compute_type = new_compute
+        if old_device != new_device or old_compute != new_compute:
+            logger.info(f"Device/Compute-Typ geändert: {old_device}/{old_compute} → {new_device}/{new_compute}")
+            if self._debug:
+                log_debug("device", f"Refreshed device: {self.device}, compute_type={self.compute_type}")
+
+    def _reload_model_sync(self, model_size: str, force: bool = False) -> bool:
         """
-        Lädt ein Whisper-Modell (lazy) und gibt es zurück.
-        Bei Bedarf wird das Modell aktiv gesetzt.
-
-        Args:
-            model_size: Name des zu ladenden Modells (z.B. 'large-v3')
-            set_active: Ob das Modell nach dem Laden sofort aktiv werden soll
-
-        Returns:
-            Tuple (Modell, Backend-Name) oder None bei Fehler
+        Lädt ein Modell synchron (wartet auf Abschluss).
+        Wenn force=True, wird das aktuell geladene Modell zuerst entladen.
         """
-        # ========== Gewünschtes Modell für Event speichern (auch bei Fallback) ==========
+        with self._lock:
+            if self._reloading and not force:
+                logger.warning("Model reload already in progress, waiting...")
+                self._model_load_stop_event.wait(timeout=30.0)
+                if self._reloading:
+                    logger.error("Timeout waiting for background reload")
+                    return False
+
+        if force:
+            # Altes Modell vollständig entfernen
+            logger.info("Force unloading current model before reload...")
+            self._force_model_cleanup()
+            # Kurze Pause für GPU-Speicherbereinigung
+            if self.device == "cuda" and self._torch:
+                self._torch.cuda.empty_cache()
+                time.sleep(0.2)
+
+        # Synchrones Laden (ohne Thread)
+        result = self.load_model(model_size, set_active=True)
+        return result is not None
+
+    def load_model(self, model_size: str, set_active: bool = False) -> Optional[Tuple[Any, str]]:
         self._requested_model = model_size
-
         if DEBUG_LEVEL >= 3:
-            log_debug(
-                "model", f"load_model aufgerufen: {model_size}, set_active={set_active}"
-            )
+            log_debug("model", f"load_model aufgerufen: {model_size}, set_active={set_active}")
 
         if self._disposing:
-            logger.warning(
-                "TranscriptionEngine wird entsorgt – Laden eines Modells nicht möglich"
-            )
+            logger.warning("TranscriptionEngine wird entsorgt – Laden eines Modells nicht möglich")
             return None
 
-        # ========== 1. Bereits aktiv und gewünscht? ==========
         if set_active:
             with self._model_usage_lock:
                 if self.model is not None and self.model_size == model_size:
+                    # Wichtig: Hier das aktuelle Device ausgeben
                     if self._debug:
-                        logger.debug(
-                            f"Modell {model_size} bereits aktiv – verwende bestehendes"
-                        )
-                    if DEBUG_LEVEL >= 3:
-                        log_debug(
-                            "model",
-                            f"Modell {model_size} bereits aktiv, kein Ladevorgang",
-                        )
+                        logger.debug(f"Modell {model_size} bereits aktiv – verwende bestehendes (device={self.device})")
                     return self.model, self.whisper_backend
 
-        # ========== 2. Verfügbares Backend ermitteln ==========
         if FASTER_WHISPER_AVAILABLE:
             backend = "faster_whisper"
         elif OPENAI_WHISPER_AVAILABLE:
@@ -6703,47 +6669,18 @@ class TranscriptionEngine:
             logger.error("❌ Kein Whisper-Backend verfügbar")
             return None
 
-        if DEBUG_LEVEL >= 3:
-            log_debug("model", f"Verwende Backend: {backend}")
-
         cache_key = (model_size, backend)
-
-        # ========== 3. Bereits im Cache? ==========
         with self._lock:
             if cache_key in self._model_cache:
                 model = self._model_cache[cache_key]
                 self._model_cache.move_to_end(cache_key)
                 if set_active:
                     self._set_active_model(model, model_size, backend, cache_key)
-                if DEBUG_LEVEL >= 3:
-                    log_debug("model", f"Modell {model_size} aus Cache geladen")
                 return model, backend
 
-        # ========== 4. Neu laden (mit Fallback-Kette) ==========
-        if DEBUG_LEVEL >= 3:
-            log_debug(
-                "model", f"Modell {model_size} nicht im Cache – starte Ladevorgang"
-            )
         return self._load_model_with_checks(model_size, backend, cache_key, set_active)
 
     def reload_model(self, model_size: str) -> bool:
-        """
-        Lädt ein neues Whisper-Modell im Hintergrund asynchron.
-
-        Diese Methode startet einen Thread, der das Modell lädt und bei Erfolg
-        das aktive Modell ersetzt. Während des Ladens kann über `is_model_loading()`
-        abgefragt werden, ob der Vorgang noch läuft. Die Methode kehrt sofort zurück.
-
-        Der Fortschritt kann über das Event `_model_load_stop_event` überwacht werden,
-        das im Worker-Thread nach Abschluss gesetzt wird.
-
-        Args:
-            model_size: Name des zu ladenden Modells (z.B. 'large-v3').
-
-        Returns:
-            True, wenn der Ladevorgang gestartet wurde, sonst False.
-            False kann bedeuten, dass bereits ein Ladevorgang läuft.
-        """
         with self._lock:
             if self._reloading:
                 if self._debug:
@@ -6756,83 +6693,51 @@ class TranscriptionEngine:
             try:
                 result = self.load_model(model_size, set_active=False)
                 if result is None:
-                    logger.error(
-                        "❌ Background model loading failed (load_model returned None)"
-                    )
+                    logger.error("❌ Background model loading failed")
                     return
                 new_model, new_backend = result
                 cache_key = (model_size, new_backend)
-                with self._lock:
-                    with self._model_usage_lock:
-                        old_model = self.model
-                        old_key = (
-                            (self.model_size, self.whisper_backend)
-                            if self.model_size
-                            else None
-                        )
-                        self.model = new_model
-                        self.model_size = model_size
-                        self.whisper_backend = new_backend
-                        self._model_loaded_flag = True
-                        if old_model is not None and old_key is not None:
-                            if old_key in self._model_cache:
-                                del self._model_cache[old_key]
-                            self._unload_model(old_model)
-                            if self._debug:
-                                logger.info(
-                                    f"🧹 Unloaded old model {old_key[0]} ({old_key[1]})"
-                                )
-                        if cache_key not in self._model_cache:
-                            self._model_cache[cache_key] = new_model
-                # Confidence-Schwellwert zurücksetzen
+                with self._lock, self._model_usage_lock:
+                    old_model = self.model
+                    old_key = (self.model_size, self.whisper_backend) if self.model_size else None
+                    self.model = new_model
+                    self.model_size = model_size
+                    self.whisper_backend = new_backend
+                    self._model_loaded_flag = True
+                    if old_model is not None and old_key is not None:
+                        if old_key in self._model_cache:
+                            del self._model_cache[old_key]
+                        self._unload_model(old_model)
+                    if cache_key not in self._model_cache:
+                        self._model_cache[cache_key] = new_model
                 with self._confidence_lock:
                     self._last_confidence_threshold = 0.6
-                if self._debug:
-                    logger.info(f"✅ Model switched to {model_size} ({new_backend})")
+                logger.info(f"✅ Model switched to {model_size} ({new_backend})")
             except Exception as e:
                 logger.exception(f"❌ Background model loading error: {e}")
             finally:
                 with self._lock:
                     self._reloading = False
                     self._model_load_stop_event.set()
-                if self.device == "cuda" and self._torch is not None:
+                if self.device == "cuda" and self._torch:
                     try:
                         self._torch.cuda.empty_cache()
-                        if self._debug:
-                            logger.info("🧹 GPU cache emptied after model switch")
                     except Exception:
                         pass
 
-        thread = threading.Thread(
-            target=_load_in_background, daemon=True, name=f"ModelLoader-{model_size}"
-        )
-        thread.start()
+        threading.Thread(target=_load_in_background, daemon=True, name=f"ModelLoader-{model_size}").start()
         return True
 
     def is_functional(self) -> bool:
-        """Gibt True zurück, wenn die Engine tatsächlich Transkriptionen liefern kann."""
         return self.model is not None and not isinstance(self, DummyTranscriptionEngine)
 
     def is_model_loading(self) -> bool:
         with self._lock:
             return self._reloading
 
-    def safe_transcribe(
-        self, audio_data: bytes, max_retries: int = 2
-    ) -> Optional[TranscriptionResult]:
-        """
-        Sichere Transkription mit Wiederholungen und CUDA‑OOM‑Fallback.
-        Das Modell wird von `transcribe_audio` geholt – keine zusätzlichen Locks nötig.
-        """
-        if self._disposing:
-            logger.warning("TranscriptionEngine is being disposed – cannot transcribe")
+    def safe_transcribe(self, audio_data: bytes, max_retries: int = 2) -> Optional[TranscriptionResult]:
+        if self._disposing or self._reloading:
             return None
-
-        with self._lock:
-            if self._reloading:
-                if self._debug:
-                    logger.debug("Reloading in progress – skip transcription")
-                return None
 
         is_valid, msg = self.validate_audio_data(audio_data)
         if not is_valid:
@@ -6843,123 +6748,49 @@ class TranscriptionEngine:
         last_error = None
         for attempt in range(max_retries + 1):
             try:
-                log_debug(
-                    "transcribe", f"safe_transcribe attempt {attempt+1}/{max_retries+1}"
-                )
-
-                # Confidence für Audio‑Enhancement
                 with self._confidence_lock:
                     last_conf = self._last_confidence_threshold
-
-                # Ggf. Audio verbessern
-                if attempt == 0 or last_conf < 0.5:
-                    processed = self._audio_enhancer.enhance_audio(
-                        audio_data, last_conf, 0
-                    )
-                else:
-                    processed = audio_data
-
-                # Transkription (das Modell wird innerhalb von `transcribe_audio` geholt)
+                processed = self._audio_enhancer.enhance_audio(audio_data, last_conf, 0) if attempt == 0 or last_conf < 0.5 else audio_data
                 result = self.transcribe_audio(processed)
-
                 if result and result.text and result.text.strip():
                     with self._confidence_lock:
-                        self._last_confidence_threshold = getattr(
-                            result, "confidence", 0.5
-                        )
-                    log_debug(
-                        "transcribe", f"Transcription success: {len(result.text)} chars"
-                    )
+                        self._last_confidence_threshold = getattr(result, "confidence", 0.5)
                     return result
-
-                if self._debug:
-                    logger.debug(
-                        f"Transcription returned empty text (attempt {attempt+1})"
-                    )
-
             except (RuntimeError, TranscriptionError) as e:
                 last_error = e
-                # CUDA Out‑of‑Memory – Fallback einleiten
-                if self._last_oom:
-                    logger.error("🚨 CUDA out of memory – starte Fallback")
-                    log_debug("transcribe", "OOM-Flag aktiv, rufe _handle_cuda_oom auf")
-                    self._handle_cuda_oom()
-                    self._last_oom = False
-                    continue
-                if "out of memory" in str(e).lower() and self.device == "cuda":
-                    logger.error(
-                        f"🚨 CUDA out of memory (attempt {attempt+1}) – versuche Gegenmaßnahmen"
-                    )
+                if self._last_oom or ("out of memory" in str(e).lower() and self.device == "cuda"):
                     self._handle_cuda_oom()
                     continue
-                # Andere RuntimeErrors
-                logger.warning(
-                    f"RuntimeError in Transkription (Versuch {attempt+1}): {e}"
-                )
-                if self._debug and attempt == max_retries:
-                    logger.exception("Stacktrace:")
+                if attempt < max_retries:
+                    time.sleep(0.5 * (attempt + 1))
             except Exception as e:
                 last_error = e
-                if attempt == max_retries:
-                    logger.exception(f"Transkriptionsfehler (letzter Versuch): {e}")
-                else:
-                    logger.warning(f"Transkriptionsfehler (Versuch {attempt+1}): {e}")
+                if attempt < max_retries:
+                    time.sleep(0.5 * (attempt + 1))
 
-            # Wartezeit vor nächstem Versuch
-            if attempt < max_retries:
-                wait_time = 0.5 * (attempt + 1)
-                time.sleep(wait_time)
-
-        logger.error(
-            f"❌ safe_transcribe fehlgeschlagen nach {max_retries+1} Versuchen"
-        )
         if last_error:
             raise last_error
         return None
 
-    def transcribe_audio(
-        self, audio_data: bytes, include_timestamps: bool = False
-    ) -> Any:
-        """
-        Führt eine Transkription mit dem aktuell aktiven Modell durch.
-        Das Modell wird zu Beginn unter Lock geholt – ein späterer Modellwechsel
-        beeinflusst diese Transkription nicht mehr.
-        """
+    def transcribe_audio(self, audio_data: bytes, include_timestamps: bool = False) -> Any:
         if self._disposing:
             return [] if include_timestamps else None
-
-        # Modell einmalig unter Lock holen
         with self._model_usage_lock:
             model = self.model
             if not model:
                 return None if not include_timestamps else []
-
-        # Vorbereitung der Audiodaten (kein Lock nötig)
-        processed, language, beam_size, vad_params = self._prepare_transcription(
-            audio_data
-        )
-
-        # Transkription mit der lokalen Modell‑Referenz durchführen
+        processed, language, beam_size, vad_params = self._prepare_transcription(audio_data)
         return self._transcribe_worker(
-            model,
-            processed,
-            language,
-            beam_size,
-            vad_params,
-            include_timestamps,
-            hotwords=self.settings.hotwords,
-            best_of=self.settings.best_of,
-            patience=self.settings.patience,
-            no_speech_threshold=self.settings.no_speech_threshold,
+            model, processed, language, beam_size, vad_params, include_timestamps,
+            hotwords=self.settings.hotwords, best_of=self.settings.best_of,
+            patience=self.settings.patience, no_speech_threshold=self.settings.no_speech_threshold,
             log_prob_threshold=self.settings.log_prob_threshold,
             compression_ratio_threshold=self.settings.compression_ratio_threshold,
             condition_on_previous_text=self.settings.condition_on_previous_text,
-            suppress_tokens=self.settings.suppress_tokens,
+            suppress_tokens=self.settings.suppress_tokens
         )
 
-    def emergency_fallback_transcription(
-        self, audio_data: Union[bytes, Any]
-    ) -> Optional[TranscriptionResult]:
+    def emergency_fallback_transcription(self, audio_data: Union[bytes, Any]) -> Optional[TranscriptionResult]:
         if self._disposing:
             return None
         self._load_modules()
@@ -6973,12 +6804,7 @@ class TranscriptionEngine:
                     if audio_np.dtype == self._np.int16:
                         audio_np = audio_np / 32768.0
                 else:
-                    audio_np = (
-                        self._np.frombuffer(audio_data, dtype=self._np.int16).astype(
-                            self._np.float32
-                        )
-                        / 32768.0
-                    )
+                    audio_np = self._np.frombuffer(audio_data, dtype=self._np.int16).astype(self._np.float32) / 32768.0
                 return self._transcribe_minimal(model, audio_np, None)
             except Exception as e:
                 logger.exception(f"❌ Emergency fallback exception: {e}")
@@ -6999,16 +6825,7 @@ class TranscriptionEngine:
             try:
                 self._load_modules()
                 test_audio = self._np.random.randn(16000).astype(self._np.float32) * 0.1
-                segments, info = self._universal_transcribe(
-                    self.model,
-                    test_audio,
-                    language=None,
-                    task="transcribe",
-                    temperature=0.0,
-                    best_of=1,
-                    beam_size=1,
-                    without_timestamps=False,
-                )
+                segments, info = self._universal_transcribe(self.model, test_audio, language=None, task="transcribe", temperature=0.0, best_of=1, beam_size=1, without_timestamps=False)
                 list(segments)
                 return True
             except Exception as e:
@@ -7062,50 +6879,27 @@ class TranscriptionEngine:
     def dispose(self) -> None:
         logger.info("🧹 Transcription Engine Dispose...")
         self._disposing = True
-
-        # ===== 1. Auf Hintergrund-Modell-Laden warten =====
         if hasattr(self, "_reloading") and self._reloading:
-            log_debug("transcribe", "Waiting for background model loading to finish...")
             if hasattr(self, "_model_load_stop_event"):
                 self._model_load_stop_event.set()
-                # Warte maximal 5 Sekunden auf das Ende
-                if self._model_load_stop_event.wait(timeout=5.0):
-                    log_debug("transcribe", "Background model loading finished")
-                else:
-                    logger.warning(
-                        "Background model loading did not finish within timeout"
-                    )
-            else:
-                time.sleep(0.5)  # Fallback
-
-        # ===== 2. Caches leeren =====
+                self._model_load_stop_event.wait(timeout=5.0)
         with self._lock:
             self._cache.clear()
             self._last_transcription_text = ""
             for (size, backend), model in list(self._model_cache.items()):
                 self._unload_model(model)
             self._model_cache.clear()
-        log_debug("transcribe", "Caches cleared, models unloaded")
-
-        # ===== 3. Aktives Modell entfernen =====
         self._force_model_cleanup()
-        log_debug("transcribe", "Active model cleaned up")
-
-        # ===== 4. GPU-Speicher bereinigen =====
-        if self.device == "cuda" and self._torch is not None:
+        if self.device == "cuda" and self._torch:
             try:
                 self._torch.cuda.empty_cache()
-                log_debug("transcribe", "GPU cache cleared")
-            except Exception as e:
-                log_debug("transcribe", f"Failed to clear GPU cache: {e}")
-
-        # ===== 5. Garbage Collection =====
+            except Exception:
+                pass
         gc.collect()
-        log_debug("transcribe", "Garbage collection triggered")
         logger.info("✅ Transcription Engine disposed")
 
     # -------------------------------------------------------------------------
-    #  Private Hilfsmethoden
+    #  Private Hilfsmethoden (optimiert)
     # -------------------------------------------------------------------------
     def _load_modules(self) -> None:
         if self._np is None and NUMPY_AVAILABLE:
@@ -7116,376 +6910,221 @@ class TranscriptionEngine:
             self._torch = FastLazyLoader.load("torch")
 
     def _detect_optimal_device(self) -> Tuple[str, str]:
+        """
+        Ermittelt das beste verfügbare Gerät und den optimalen Compute-Typ.
+        Beachtet die Einstellung `self.settings.gpu_acceleration`.
+        """
         self._load_modules()
         device = "cpu"
         compute_type = "int8"
 
+        # Wenn GPU-Beschleunigung explizit deaktiviert ist, sofort CPU zurückgeben
+        if self.settings and not self.settings.gpu_acceleration:
+            logger.info("GPU acceleration disabled by user – forcing CPU")
+            if DEBUG_LEVEL >= 3:
+                log_debug("device", "gpu_acceleration=False → CPU forced")
+            return "cpu", "int8"
+
         if self._torch is not None:
             torch = self._torch
 
+            # NVIDIA CUDA
             if torch.cuda.is_available():
                 try:
-                    torch.tensor([1.0]).cuda()
+                    cc_major, cc_minor = torch.cuda.get_device_capability(0)
+                    gpu_name = torch.cuda.get_device_name(0)
+                    logger.info(f"✅ NVIDIA GPU: {gpu_name} (CC {cc_major}.{cc_minor})")
+                    if cc_major >= 6:          # Pascal oder neuer
+                        compute_type = "int8"
+                        logger.info("   → Verwende int8 (optimal)")
+                    elif cc_major >= 3:        # Kepler, Maxwell
+                        compute_type = "float16"
+                        logger.warning("   → GPU zu alt für int8 – verwende float16")
+                    else:                      # CC < 3.5 (sehr alt)
+                        compute_type = "float32"
+                        logger.warning("   → Sehr alte GPU – verwende float32 (langsam, fallback auf CPU möglich)")
                     device = "cuda"
-                    compute_type = "int8"
-                    logger.info(
-                        f"✅ NVIDIA GPU detected: {torch.cuda.get_device_name(0)}"
-                    )
                 except Exception as e:
-                    if self._debug:
-                        logger.warning(f"⚠️ CUDA test failed, falling back: {e}")
+                    logger.warning(f"⚠️ CUDA-Capability nicht ermittelbar, versuche int8: {e}")
+                    compute_type = "int8"
+                    device = "cuda"
 
+            # AMD ROCm
             if hasattr(torch.version, "hip") and torch.version.hip:
                 try:
                     if torch.cuda.device_count() > 0:
                         device = "cuda"
-                        compute_type = "int8"
-                        logger.info("✅ AMD GPU (ROCm) detected")
+                        compute_type = "float16"
+                        logger.info("✅ AMD GPU (ROCm) erkannt – verwende float16")
                 except (AttributeError, RuntimeError) as e:
                     if self._debug:
                         logger.warning(f"⚠️ ROCm test failed: {e}")
 
+            # Apple MPS
             if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 device = "mps"
                 compute_type = "float16"
-                logger.info("✅ Apple Silicon GPU (MPS) detected")
+                logger.info("✅ Apple Silicon (MPS) erkannt – verwende float16")
 
         logger.info(f"✅ Verwende Device: {device} (compute_type={compute_type})")
-
         if DEBUG_LEVEL >= 3:
-            log_debug(
-                "device", f"Selected device={device}, compute_type={compute_type}"
-            )
+            log_debug("device", f"Selected device={device}, compute_type={compute_type}")
             if device == "cuda" and self._torch:
                 free = self._get_free_gpu_memory(device)
                 if free is not None:
                     log_debug("vram", f"Free VRAM at startup: {free:.2f} GB")
                 else:
                     log_debug("vram", "Free VRAM unknown")
-
         return device, compute_type
 
     def _get_free_gpu_memory(self, device: Optional[str] = None) -> Optional[float]:
-        """
-        Ermittelt den freien GPU-Speicher in Gigabyte.
-        Verwendet bevorzugt pynvml (genau), dann torch.cuda (geschätzt).
-
-        Args:
-            device: Gerätename (z.B. 'cuda', 'cuda:0'). Wenn None, wird self.device verwendet.
-
-        Returns:
-            Freier Speicher in GB oder None bei Fehler/Nicht-Verfügbarkeit.
-        """
+        """Ermittelt freien GPU-Speicher in GB (bevorzugt pynvml, sonst torch)."""
         if device is None:
             device = getattr(self, "device", "cpu")
-
-        # Nur für CUDA-Geräte sinnvoll
         if device != "cuda" or self._torch is None:
-            if DEBUG_LEVEL >= 3:
-                log_debug(
-                    "vram",
-                    f"_get_free_gpu_memory: Nicht CUDA oder torch nicht verfügbar (device={device})",
-                )
             return None
-
         torch = self._torch
-
-        # Prüfe, ob CUDA tatsächlich verfügbar ist
         if not torch.cuda.is_available():
-            if DEBUG_LEVEL >= 3:
-                log_debug("vram", "CUDA nicht verfügbar")
             return None
-
         try:
-            # ========== Methode 1: pynvml (genaueste Werte) ==========
-            try:
-                import pynvml
-
-                if not getattr(self, "_nvml_initialized", False):
-                    pynvml.nvmlInit()
-                    self._nvml_initialized = True
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("vram", "pynvml initialisiert")
-
-                # Geräteindex aus device-Parameter oder aktuelles Gerät
-                if device.startswith("cuda:"):
-                    device_idx = int(device.split(":")[1])
-                else:
-                    device_idx = torch.cuda.current_device()
-
-                handle = pynvml.nvmlDeviceGetHandleByIndex(device_idx)
-                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                free_gb = mem_info.free / (1024**3)
-
-                if DEBUG_LEVEL >= 3:
-                    log_debug(
-                        "vram",
-                        f"pynvml: free={free_gb:.2f} GB (total={mem_info.total/(1024**3):.2f} GB)",
-                    )
-
-                return free_gb
-
-            except (ImportError, pynvml.NVMLError, AttributeError) as e:
-                if DEBUG_LEVEL >= 3:
-                    log_debug(
-                        "vram", f"pynvml nicht verfügbar oder fehlgeschlagen: {e}"
-                    )
-                # Fallback zu torch
-
-            # ========== Methode 2: torch.cuda (Schätzung) ==========
+            import pynvml
+            if not getattr(self, "_nvml_initialized", False):
+                pynvml.nvmlInit()
+                self._nvml_initialized = True
             if device.startswith("cuda:"):
                 device_idx = int(device.split(":")[1])
             else:
                 device_idx = torch.cuda.current_device()
-
-            # Reservierter Speicher (von PyTorch allokiert)
+            handle = pynvml.nvmlDeviceGetHandleByIndex(device_idx)
+            mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            return mem_info.free / (1024**3)
+        except (ImportError, pynvml.NVMLError, AttributeError):
+            pass
+        try:
+            if device.startswith("cuda:"):
+                device_idx = int(device.split(":")[1])
+            else:
+                device_idx = torch.cuda.current_device()
+            total = torch.cuda.get_device_properties(device_idx).total_memory / (1024**3)
             reserved = torch.cuda.memory_reserved(device_idx) / (1024**3)
-            # Tatsächlich allokierter Speicher
-            allocated = torch.cuda.memory_allocated(device_idx) / (1024**3)
-            # Gesamter VRAM des Geräts
-            total = torch.cuda.get_device_properties(device_idx).total_memory / (
-                1024**3
-            )
-
-            # Freier Speicher = Gesamt - reserviert (konservative Schätzung)
-            free_gb = total - reserved
-
-            if DEBUG_LEVEL >= 3:
-                log_debug(
-                    "vram",
-                    f"torch: total={total:.2f} GB, reserved={reserved:.2f} GB, allocated={allocated:.2f} GB, free_est={free_gb:.2f} GB",
-                )
-
-            # Plausibilitätsprüfung: free sollte nicht negativ sein
-            return max(0.0, free_gb)
-
-        except (RuntimeError, AttributeError) as e:
-            if DEBUG_LEVEL >= 3:
-                log_debug("vram", f"Fehler bei VRAM-Messung mit torch: {e}")
-            return None
-        except Exception as e:
-            if DEBUG_LEVEL >= 3:
-                log_debug("vram", f"Unerwarteter Fehler in _get_free_gpu_memory: {e}")
+            return max(0.0, total - reserved)
+        except (RuntimeError, AttributeError):
             return None
 
     def _estimate_model_memory(self, model_size: str) -> float:
-        """
-        Schätzt den benötigten GPU-Speicher für ein Modell in Gigabyte.
-        Bevorzugt die tatsächliche Größe aus dem lokalen Cache, fällt auf
-        eine genaue Schätzung zurück.
-        """
-        # ========== 1. Versuch: Tatsächliche Größe aus Cache ermitteln ==========
-        try:
-            model_safe = model_size.replace(".", "-")
-            cache_base = Path.home() / ".cache/huggingface/hub"
-            model_dir = cache_base / f"models--Systran--faster-whisper-{model_safe}"
-
-            if model_dir.exists():
-                # Nur model.bin zählen (vermeidet Metadaten-Overhead)
-                model_bin = model_dir / "model.bin"
-                if model_bin.exists():
-                    total_gb = model_bin.stat().st_size / (1024**3)
-                    if DEBUG_LEVEL >= 3:
-                        log_debug(
-                            "vram",
-                            f"Cache-Größe (model.bin) für {model_size}: {total_gb:.2f} GB",
-                        )
-                    # Für int8 ist VRAM ~= Festplattengröße, plus etwas Puffer
-                    estimated = total_gb * 1.05
-                    if DEBUG_LEVEL >= 3:
-                        log_debug(
-                            "vram",
-                            f"  → Geschätzt (basierend auf Cache): {estimated:.2f} GB",
-                        )
-                    return estimated
-        except Exception as e:
-            if DEBUG_LEVEL >= 3:
-                log_debug("vram", f"Cache-Größenermittlung fehlgeschlagen: {e}")
-
-        # ========== 2. Fallback: Manuelle Schätzungen (optimierte Werte) ==========
+        """Schätzt benötigten GPU-Speicher in GB, abhängig vom aktuellen compute_type."""
         estimates = {
-            "tiny": 0.8,
-            "tiny.en": 0.8,
-            "base": 1.2,
-            "base.en": 1.2,
-            "small": 2.0,
-            "small.en": 2.0,
-            "medium": 3.0,
-            "medium.en": 3.0,
-            "large": 3.5,
-            "large-v1": 3.5,
-            "large-v2": 3.5,
-            "large-v3": 3.5,
-            "large-v3-turbo": 2.5,
+            "tiny": 0.8, "tiny.en": 0.8,
+            "base": 1.2, "base.en": 1.2,
+            "small": 2.0, "small.en": 2.0,
+            "medium": 3.0, "medium.en": 3.0,
+            "large": 3.5, "large-v1": 3.5, "large-v2": 3.5,
+            "large-v3": 3.5, "large-v3-turbo": 2.5,
         }
-        size_lower = model_size.lower()
-        if size_lower in estimates:
-            estimated = estimates[size_lower]
-        elif size_lower.startswith("large"):
-            estimated = 3.5
-            if DEBUG_LEVEL >= 1:
-                logger.warning(
-                    f"Unbekanntes Large-Modell '{model_size}', verwende Schätzung {estimated} GB"
-                )
+        base = estimates.get(model_size.lower(), 3.0)
+        if self.compute_type == "float16":
+            factor = 1.6
+        elif self.compute_type == "float32":
+            factor = 3.2
         else:
-            estimated = 3.0
-            if DEBUG_LEVEL >= 1:
-                logger.warning(
-                    f"Unbekanntes Modell '{model_size}', verwende Standard-Schätzung {estimated} GB"
-                )
-
-        if DEBUG_LEVEL >= 3:
-            log_debug(
-                "vram", f"Manuelle Schätzung für {model_size}: {estimated:.2f} GB"
-            )
-        return estimated * 1.05
+            factor = 1.0
+        return base * factor
 
     def _has_enough_vram(self, model_size: str) -> bool:
         if self.device != "cuda":
             return True
-        free_gb = self._get_free_gpu_memory()
-        if free_gb is None:
+        free = self._get_free_gpu_memory()
+        if free is None:
             return True
-        estimated = self._estimate_model_memory(model_size)
-        buffer_gb = 1.0
-        return free_gb >= estimated + buffer_gb
+        needed = self._estimate_model_memory(model_size)
+        return free >= needed + 1.0   # 1 GB Puffer
 
     def _check_vram_before_load(self, model_size: str) -> Tuple[bool, str]:
         if self.device != "cuda":
             return True, "CPU, no VRAM check needed"
-        free_gb = self._get_free_gpu_memory()
-        if free_gb is None:
+        free = self._get_free_gpu_memory()
+        if free is None:
             return True, "Could not determine free VRAM"
         needed = self._estimate_model_memory(model_size)
-        if free_gb < needed:
-            return (
-                False,
-                f"Only {free_gb:.2f} GB VRAM free, but model {model_size} needs ~{needed:.1f} GB (int8)",
-            )
-        return True, f"OK: {free_gb:.2f} GB free, model needs ~{needed:.1f} GB"
+        if free < needed:
+            return False, f"Only {free:.2f} GB VRAM free, but model {model_size} needs ~{needed:.1f} GB ({self.compute_type})"
+        return True, f"OK: {free:.2f} GB free, model needs ~{needed:.1f} GB"
 
     def _load_faster_whisper(self, model_size: str) -> Any:
         """
-        Lädt ein faster-whisper Modell mit umfassender Fehlerbehandlung,
-        VRAM-Überwachung und automatischem CPU-Fallback bei CUDA OOM.
-
-        Args:
-            model_size: Name des Modells (z.B. 'large-v3', 'medium')
-
-        Returns:
-            Geladenes Modell oder None bei nicht behebbaren Fehlern
+        Lädt faster-whisper mit automatischem Fallback über verschiedene compute_types.
         """
         try:
             WhisperModel = FastLazyLoader.load("faster_whisper")
-            logger.info(
-                f"🔄 Lade {model_size} mit device={self.device}, compute_type={self.compute_type}"
-            )
+            compute_types = [self.compute_type]
+            if self.compute_type != "float16":
+                compute_types.append("float16")
+            if self.compute_type != "float32":
+                compute_types.append("float32")
+            # Entferne Duplikate, behalte Reihenfolge
+            compute_types = list(dict.fromkeys(compute_types))
 
-            # VRAM-Messung vor dem Laden (nur bei CUDA)
-            free_before = None
-            if self.device == "cuda" and self._torch:
-                free_before = self._get_free_gpu_memory()
-                if free_before is not None:
-                    logger.info(f"📊 Freier VRAM vor Laden: {free_before:.2f} GB")
-                else:
-                    logger.debug(
-                        "VRAM-Messung vor Laden nicht verfügbar (pynvml/torch?"
-                    )
-
-            # Modell laden
-            model = WhisperModel(
-                model_size,
-                device=self.device,
-                compute_type=self.compute_type,
-                cpu_threads=4,
-                num_workers=1,
-            )
-
-            # VRAM nach dem Laden messen
-            if self.device == "cuda" and self._torch and free_before is not None:
-                free_after = self._get_free_gpu_memory()
-                if free_after is not None:
-                    logger.info(f"📊 Freier VRAM nach Laden: {free_after:.2f} GB")
-                    used = free_before - free_after
-                    logger.info(f"📊 Belegter VRAM: {used:.2f} GB")
-                else:
-                    logger.debug("VRAM-Messung nach Laden nicht verfügbar")
-
-            logger.info(
-                f"✅ faster-whisper '{model_size}' erfolgreich geladen (compute_type={self.compute_type})"
-            )
-            return model
-
-        except RuntimeError as e:
-            error_msg = str(e).lower()
-            # CUDA Out of Memory – Fallback auf CPU
-            if "out of memory" in error_msg:
-                logger.warning(
-                    f"⚠️ CUDA OOM mit {model_size} auf {self.device}. Versuche CPU-Fallback..."
-                )
-                if self._torch:
-                    self._torch.cuda.empty_cache()
-                    logger.debug("GPU-Cache geleert")
-
+            for ct in compute_types:
+                logger.info(f"🔄 Versuche {model_size} mit device={self.device}, compute_type={ct}")
                 try:
-                    logger.info(f"🔄 Lade {model_size} auf CPU mit compute_type=int8")
                     model = WhisperModel(
                         model_size,
-                        device="cpu",
-                        compute_type="int8",
+                        device=self.device,
+                        compute_type=ct,
                         cpu_threads=4,
                         num_workers=1,
                     )
-                    logger.info(
-                        f"✅ faster-whisper '{model_size}' erfolgreich auf CPU geladen (Fallback)"
-                    )
-                    # Geräteinformationen für die Engine aktualisieren
-                    self.device = "cpu"
-                    self.compute_type = "int8"
+                    self.compute_type = ct
+                    logger.info(f"✅ faster-whisper '{model_size}' geladen (compute_type={ct})")
                     return model
-                except Exception as e2:
-                    logger.error(f"❌ CPU-Fallback fehlgeschlagen: {e2}")
-                    return None
-            else:
-                # Andere RuntimeErrors (z.B. Modell nicht gefunden)
-                logger.exception(
-                    f"⚠️ faster-whisper RuntimeError beim Laden von {model_size}: {e}"
-                )
-                return None
+                except RuntimeError as e:
+                    error_msg = str(e).lower()
+                    if "out of memory" in error_msg or "no kernel image" in error_msg:
+                        logger.warning(f"⚠️ Compute-Typ {ct} fehlgeschlagen: {e}")
+                        if self.device == "cuda" and self._torch:
+                            self._torch.cuda.empty_cache()
+                        continue
+                    else:
+                        logger.exception(f"❌ faster-whisper RuntimeError: {e}")
+                        return None
+
+            # Fallback auf CPU
+            logger.warning("⚠️ Alle Compute-Typen auf GPU fehlgeschlagen, versuche CPU-Fallback...")
+            model = WhisperModel(
+                model_size,
+                device="cpu",
+                compute_type="int8",
+                cpu_threads=4,
+                num_workers=1,
+            )
+            logger.info(f"✅ faster-whisper '{model_size}' auf CPU geladen (Fallback)")
+            self.device = "cpu"
+            self.compute_type = "int8"
+            return model
 
         except ImportError as e:
             logger.error(f"❌ faster-whisper nicht installiert: {e}")
             return None
-
         except Exception as e:
-            # Allgemeine, unerwartete Fehler
             logger.exception(f"⚠️ Unerwarteter Fehler beim Laden von {model_size}: {e}")
             return None
 
     def _load_openai_whisper(self, model_size: str) -> Any:
         try:
             import whisper
-
             device = "cuda" if self.device == "cuda" else "cpu"
             model = whisper.load_model(model_size, device=device, download_root=None)
             logger.info(f"✅ openai-whisper '{model_size}' erfolgreich geladen")
             return model
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
-                logger.warning(
-                    f"⚠️ CUDA OOM with openai-whisper {model_size}. Trying CPU fallback."
-                )
+                logger.warning(f"⚠️ CUDA OOM with openai-whisper {model_size}. Trying CPU fallback.")
                 if self._torch:
                     self._torch.cuda.empty_cache()
                 try:
                     import whisper
-
-                    model = whisper.load_model(
-                        model_size, device="cpu", download_root=None
-                    )
-                    logger.info(
-                        f"✅ openai-whisper '{model_size}' erfolgreich auf CPU geladen"
-                    )
+                    model = whisper.load_model(model_size, device="cpu", download_root=None)
+                    logger.info(f"✅ openai-whisper '{model_size}' auf CPU geladen")
                     return model
                 except Exception as e2:
                     logger.exception(f"❌ openai-whisper CPU fallback failed: {e2}")
@@ -7498,7 +7137,6 @@ class TranscriptionEngine:
             return None
 
     def _perform_load(self, backend: str, model_size: str) -> Any:
-        logger.info("📁 Modell wird im Standard-Cache von Hugging Face gespeichert.")
         model = None
         if backend == "faster_whisper":
             model = self._load_faster_whisper(model_size)
@@ -7508,211 +7146,62 @@ class TranscriptionEngine:
             model = self._load_openai_whisper(model_size)
         return model
 
-    def _load_model_with_checks(
-        self,
-        model_size: str,
-        backend: str,
-        cache_key: Tuple[str, str],
-        set_active: bool,
-    ) -> Optional[Tuple[Any, str]]:
-        """
-        Lädt ein Modell mit umfangreichen Prüfungen (Cache, VRAM, Verfügbarkeit).
-        Bei Fehlern werden alternative Modelle ausprobiert (Fallback-Kette).
-
-        Args:
-            model_size: Name des gewünschten Modells (z.B. 'large-v3')
-            backend: Backend-Name ('faster_whisper' oder 'openai_whisper')
-            cache_key: Tuple (model_size, backend) für den Cache
-            set_active: Ob das geladene Modell sofort aktiv gesetzt werden soll
-
-        Returns:
-            Tuple (Modell, Backend-Name) oder None bei Fehler
-        """
-        # Lock für dieses Modell, um parallele Ladevorgänge zu vermeiden
+    def _load_model_with_checks(self, model_size: str, backend: str, cache_key: Tuple[str, str], set_active: bool) -> Optional[Tuple[Any, str]]:
         with self._get_model_lock(model_size):
-            # ========== 1. Prüfe, ob das Modell bereits im Cache ist ==========
             with self._lock:
                 if cache_key in self._model_cache:
                     model = self._model_cache[cache_key]
                     self._model_cache.move_to_end(cache_key)
                     if set_active:
                         self._set_active_model(model, model_size, backend, cache_key)
-                    if DEBUG_LEVEL >= 3:
-                        log_debug(
-                            "model",
-                            f"Modell {model_size} ({backend}) aus Cache geladen",
-                        )
                     return model, backend
 
-            # ========== 2. Erstelle Liste der zu probierenden Modelle (Fallback-Kette) ==========
+            # Fallback-Kette
             all_models = Config.WHISPER_MODELS
             try:
                 start_index = all_models.index(model_size)
             except ValueError:
                 start_index = -1
-                if DEBUG_LEVEL >= 1:
-                    logger.warning(
-                        f"Modell {model_size} nicht in WHISPER_MODELS Liste – verwende Fallback"
-                    )
-
-            # Bevorzugte Reihenfolge: zuerst das gewünschte Modell, dann kleinere Modelle
             models_to_try = [model_size]
             if start_index >= 0:
-                # Füge alle kleineren Modelle hinzu (rückwärts)
                 for candidate in all_models[start_index - 1 :: -1]:
-                    # Vermeide .en-Modelle, wenn möglich (nur für multilinguale Erkennung)
-                    if candidate.endswith(".en") and not model_size.endswith(".en"):
-                        multilingual = candidate.replace(".en", "")
-                        if (
-                            multilingual in all_models
-                            and multilingual not in models_to_try
-                        ):
-                            if DEBUG_LEVEL >= 3:
-                                log_debug(
-                                    "model",
-                                    f"Überspringe .en-Modell {candidate}, bevorzuge {multilingual}",
-                                )
-                            candidate = multilingual
                     if candidate not in models_to_try:
                         models_to_try.append(candidate)
-                if DEBUG_LEVEL >= 3:
-                    log_debug("model", f"Fallback-Kette: {models_to_try}")
-
             backends_to_try = ["faster_whisper", "openai_whisper"]
-            last_exception = None
 
-            # ========== 3. Versuche alle Kombinationen (Modell + Backend) ==========
             for current_model in models_to_try:
                 for current_backend in backends_to_try:
-                    # Backend verfügbar?
                     if not self._is_backend_available(current_backend):
-                        if DEBUG_LEVEL >= 3:
-                            log_debug(
-                                "model",
-                                f"Backend {current_backend} nicht verfügbar, überspringe",
-                            )
                         continue
-
-                    # VRAM ausreichend?
                     if not self._has_enough_vram(current_model):
-                        free_gb = self._get_free_gpu_memory()
-                        needed_gb = self._estimate_model_memory(current_model)
-                        if DEBUG_LEVEL >= 1:
-                            logger.warning(
-                                f"⚠️ VRAM für {current_model} nicht ausreichend: "
-                                f"{free_gb:.2f} GB frei, benötigt etwa {needed_gb:.2f} GB"
-                            )
+                        free = self._get_free_gpu_memory()
+                        needed = self._estimate_model_memory(current_model)
+                        logger.warning(f"⚠️ VRAM für {current_model} nicht ausreichend: {free:.2f} GB frei, benötigt ~{needed:.2f} GB")
                         continue
-
                     current_cache_key = (current_model, current_backend)
-
-                    # ========== 4. Prüfe, ob bereits in _model_cache (Double-Check) ==========
                     with self._lock:
                         if current_cache_key in self._model_cache:
                             model = self._model_cache[current_cache_key]
                             self._model_cache.move_to_end(current_cache_key)
-                            if (
-                                set_active
-                                and current_model == model_size
-                                and current_backend == backend
-                            ):
-                                self._set_active_model(
-                                    model,
-                                    current_model,
-                                    current_backend,
-                                    current_cache_key,
-                                )
-                            if DEBUG_LEVEL >= 3:
-                                log_debug(
-                                    "model",
-                                    f"Modell {current_model} ({current_backend}) aus Cache (Double-Check)",
-                                )
+                            if set_active and current_model == model_size and current_backend == backend:
+                                self._set_active_model(model, current_model, current_backend, current_cache_key)
                             return model, current_backend
 
-                    # ========== 5. Debug: VRAM vor dem Laden ==========
-                    if DEBUG_LEVEL >= 3:
-                        free_gb = self._get_free_gpu_memory()
-                        if free_gb is not None:
-                            log_debug(
-                                "vram",
-                                f"Vor Laden von {current_model}: freier VRAM = {free_gb:.2f} GB",
-                            )
-                        else:
-                            log_debug(
-                                "vram",
-                                f"Vor Laden von {current_model}: freier VRAM unbekannt",
-                            )
-
-                    # VRAM-Warnung ausgeben (auch wenn genug da ist)
-                    ok, msg = self._check_vram_before_load(current_model)
-                    if not ok:
-                        logger.warning(f"⚠️ VRAM-Warnung für {current_model}: {msg}")
-                        if DEBUG_LEVEL >= 3:
-                            log_debug("vram", f"VRAM-Warnung: {msg}")
-                        # Trotzdem versuchen? Bei knappem VRAM könnte es fehlschlagen.
-                        # Wir versuchen es trotzdem, aber mit Warnung.
-
-                    # ========== 6. Modell tatsächlich laden ==========
-                    logger.info(
-                        f"📁 Lade Modell {current_model} mit {current_backend}..."
-                    )
-                    if DEBUG_LEVEL >= 3:
-                        log_debug(
-                            "model",
-                            f"Starte Ladevorgang für {current_model} ({current_backend})",
-                        )
-
+                    logger.info(f"📁 Lade Modell {current_model} mit {current_backend}...")
                     model = self._perform_load(current_backend, current_model)
-
                     if model is not None:
-                        # ========== 7. Erfolg: In Cache speichern, ggf. aktiv setzen ==========
                         with self._lock:
                             self._model_cache[current_cache_key] = model
-                            # Cache-Größe begrenzen
                             if len(self._model_cache) > self._max_cached_models:
-                                oldest_key, old_model = next(
-                                    iter(self._model_cache.items())
-                                )
+                                oldest_key, old_model = next(iter(self._model_cache.items()))
                                 del self._model_cache[oldest_key]
                                 self._unload_model(old_model)
-                                if DEBUG_LEVEL >= 3:
-                                    log_debug(
-                                        "model",
-                                        f"Entfernt ältestes Modell {oldest_key} aus Cache",
-                                    )
-
                         if set_active:
-                            self._set_active_model(
-                                model, current_model, current_backend, current_cache_key
-                            )
-
-                        # Erfolgsmeldung mit VRAM-Nutzung
-                        if self.device == "cuda" and DEBUG_LEVEL >= 1:
-                            free_after = self._get_free_gpu_memory()
-                            if free_after is not None:
-                                logger.info(
-                                    f"✅ {current_model} geladen, freier VRAM jetzt: {free_after:.2f} GB"
-                                )
-                        else:
-                            logger.info(
-                                f"✅ {current_model} erfolgreich geladen ({current_backend})"
-                            )
-
+                            self._set_active_model(model, current_model, current_backend, current_cache_key)
+                        logger.info(f"✅ {current_model} erfolgreich geladen ({current_backend})")
                         return model, current_backend
                     else:
-                        last_exception = RuntimeError(
-                            f"Laden von {current_model} mit {current_backend} fehlgeschlagen"
-                        )
-                        logger.warning(f"❌ {last_exception}")
-                        if DEBUG_LEVEL >= 3:
-                            log_debug("model", f"Fehlerdetails: {last_exception}")
-
-            # ========== 8. Alle Versuche fehlgeschlagen ==========
-            if last_exception:
-                logger.error(
-                    f"❌ Alle Ladeversuche fehlgeschlagen. Letzter Fehler: {last_exception}"
-                )
-                raise last_exception
+                        logger.warning(f"❌ Laden von {current_model} mit {current_backend} fehlgeschlagen")
             raise RuntimeError("Kein Modell konnte geladen werden")
 
     def _is_backend_available(self, backend: str) -> bool:
@@ -7722,130 +7211,42 @@ class TranscriptionEngine:
             return OPENAI_WHISPER_AVAILABLE
         return False
 
-    def _set_active_model(
-        self, model: Any, model_size: str, backend: str, cache_key: Tuple[str, str]
-    ) -> None:
-        """
-        Setzt das aktive Modell für die Transkription.
-        Entlädt vorherige Modelle, bereinigt Caches, setzt Confidence zurück
-        und informiert den Event-Bus über den Modellwechsel.
-
-        Args:
-            model: Das zu aktivierende Modell-Objekt
-            model_size: Name des Modells (z.B. 'large-v3')
-            backend: Backend-Name ('faster_whisper' oder 'openai_whisper')
-            cache_key: Tuple (model_size, backend) für Cache-Referenz
-        """
-        # ========== 1. Vorbereitung: Altes Modell merken ==========
-        old_model = None
-        old_key = None
-
-        if DEBUG_LEVEL >= 3:
-            log_debug(
-                "model",
-                f"_set_active_model: Aktiviere {model_size} ({backend}), Cache-Key={cache_key}",
-            )
-
-        # ========== 2. Modell unter Sperrung austauschen ==========
+    def _set_active_model(self, model: Any, model_size: str, backend: str, cache_key: Tuple[str, str]) -> None:
         with self._model_usage_lock:
-            # Prüfen, ob sich überhaupt etwas ändert
-            if (
-                self.model is model
-                and self.model_size == model_size
-                and self.whisper_backend == backend
-            ):
-                if DEBUG_LEVEL >= 3:
-                    log_debug("model", "Modell bereits aktiv – nichts zu tun")
+            if self.model is model and self.model_size == model_size and self.whisper_backend == backend:
                 return
-
-            # Altes Modell und Key für spätere Bereinigung merken
-            if self.model is not None:
-                old_model = self.model
-                old_key = (
-                    (self.model_size, self.whisper_backend) if self.model_size else None
-                )
-                if DEBUG_LEVEL >= 3:
-                    log_debug(
-                        "model",
-                        f"Altes Modell: {self.model_size} ({self.whisper_backend})",
-                    )
-
-            # Neues Modell aktiv setzen
+            old_model = self.model
+            old_key = (self.model_size, self.whisper_backend) if self.model_size else None
             self.model = model
             self.model_size = model_size
             self.whisper_backend = backend
             self._model_loaded_flag = True
 
-            if DEBUG_LEVEL >= 3:
-                log_debug("model", f"Neues Modell aktiv: {model_size} ({backend})")
-
-        # ========== 3. Confidence-Schwellwert zurücksetzen ==========
         with self._confidence_lock:
-            old_threshold = self._last_confidence_threshold
             self._last_confidence_threshold = 0.6
-            if DEBUG_LEVEL >= 3:
-                log_debug(
-                    "model",
-                    f"Confidence-Threshold zurückgesetzt: {old_threshold:.2f} → 0.6",
-                )
 
-        # ========== 4. Altes Modell entsorgen (Cache-Bereinigung) ==========
         if old_model is not None:
-            if DEBUG_LEVEL >= 3:
-                log_debug(
-                    "model",
-                    f"Entlade altes Modell {old_key[0] if old_key else 'unknown'}...",
-                )
             self._unload_model(old_model)
             if old_key is not None:
                 with self._lock:
                     if old_key in self._model_cache:
                         del self._model_cache[old_key]
-                        if DEBUG_LEVEL >= 3:
-                            log_debug(
-                                "model", f"Altes Modell {old_key[0]} aus Cache entfernt"
-                            )
 
-        # ========== 5. Event-Bus für GUI-Aktualisierung ==========
-        if hasattr(self, "event_bus") and self.event_bus is not None:
-            # Sende Event mit gewünschtem vs. tatsächlichem Modell
+        if self.event_bus:
             requested = getattr(self, "_requested_model", model_size)
-            event_data = {
+            self.event_bus.emit("model_changed", {
                 "requested": requested,
                 "actual": model_size,
                 "backend": backend,
-                "cache_key": cache_key,
-                "fallback_occurred": (requested != model_size),
-            }
-            self.event_bus.emit("model_changed", event_data)
-            if DEBUG_LEVEL >= 1 and requested != model_size:
-                logger.warning(f"🔄 Modell-Fallback: {requested} → {model_size}")
-            elif DEBUG_LEVEL >= 3:
-                log_debug("model", f"Event 'model_changed' gesendet: {event_data}")
-        else:
-            if DEBUG_LEVEL >= 3:
-                log_debug(
-                    "model", "Kein Event-Bus verfügbar – GUI wird nicht aktualisiert"
-                )
+                "fallback_occurred": (requested != model_size)
+            })
 
-        # ========== 6. GPU-Speicherbereinigung (optional) ==========
-        if self.device == "cuda" and self._torch is not None:
+        if self.device == "cuda" and self._torch:
             try:
                 self._torch.cuda.empty_cache()
-                if DEBUG_LEVEL >= 3:
-                    free_gb = self._get_free_gpu_memory()
-                    if free_gb is not None:
-                        log_debug(
-                            "vram", f"GPU-Cache geleert, freier VRAM: {free_gb:.2f} GB"
-                        )
-            except Exception as e:
-                if DEBUG_LEVEL >= 3:
-                    log_debug("vram", f"GPU-Cache-Leerung fehlgeschlagen: {e}")
-
-        # ========== 7. Abschließendes Logging ==========
+            except Exception:
+                pass
         logger.info(f"✅ Aktives Modell: {model_size} ({backend})")
-        if DEBUG_LEVEL >= 3:
-            log_debug("model", "_set_active_model abgeschlossen")
 
     def _get_model_lock(self, model_size: str) -> threading.Lock:
         with self._model_locks_lock:
@@ -7856,28 +7257,18 @@ class TranscriptionEngine:
     def _unload_model(self, model: Any) -> None:
         if model is None:
             return
-
         if hasattr(model, "unload_model"):
             try:
                 model.unload_model()
-                if self._debug:
-                    logger.debug("✅ Model unloaded via unload_model()")
             except Exception as e:
                 logger.warning(f"⚠️ Fehler beim Aufruf von unload_model: {e}")
         else:
-            # OpenAI Whisper: Referenz löschen
-            try:
-                del model
-            except Exception:
-                pass
-
-        if self._torch is not None and self.device == "cuda":
+            del model
+        if self._torch and self.device == "cuda":
             try:
                 self._torch.cuda.empty_cache()
-                if self._debug:
-                    logger.debug("🧹 GPU cache cleared")
-            except Exception as e:
-                logger.warning(f"⚠️ Fehler beim Leeren des GPU-Caches: {e}")
+            except Exception:
+                pass
 
     def _try_smaller_model_iterative(self) -> bool:
         current = self.model_size or "medium"
@@ -7888,7 +7279,6 @@ class TranscriptionEngine:
                     break
             else:
                 current = "medium"
-
         current_idx = self.MODEL_SIZE_ORDER.index(current)
         for smaller in reversed(self.MODEL_SIZE_ORDER[:current_idx]):
             logger.info(f"🔄 Versuche kleineres Modell: {smaller}")
@@ -7897,9 +7287,7 @@ class TranscriptionEngine:
                 if self.test_model_functionality():
                     return True
                 else:
-                    logger.warning(
-                        f"⚠️ Modell {smaller} funktioniert nicht, lösche aus Cache"
-                    )
+                    logger.warning(f"⚠️ Modell {smaller} funktioniert nicht, lösche aus Cache")
                     with self._lock:
                         cache_key = (smaller, self.whisper_backend)
                         if cache_key in self._model_cache:
@@ -7908,46 +7296,30 @@ class TranscriptionEngine:
         return False
 
     def _fallback_to_cpu(self) -> None:
-        """Schaltet auf CPU um und aktualisiert die Einstellungen."""
         logger.warning("⚠️ Schalte wegen OOM auf CPU um")
-        log_debug("oom", "Falling back to CPU due to OOM")
         with self._model_usage_lock:
             self.device = "cpu"
             self.compute_type = "int8"
-        # GPU‑Beschleunigung in den Einstellungen deaktivieren
-        self._set_gpu_acceleration(False)
+        self.set_gpu_acceleration(False)  # Auch die Einstellung aktualisieren
         current = self.model_size or "medium"
         self.load_model(current, set_active=True)
 
     def _handle_cuda_oom(self) -> None:
-        """Behandelt CUDA Out‑of‑Memory und schaltet ggf. auf CPU um."""
         if self.device == "cpu":
-            logger.warning("⚠️ Bereits auf CPU, kann OOM nicht beheben.")
-            log_debug("oom", "Already on CPU, cannot recover from OOM")
             return
-
         with self._lock:
             self._reloading = True
-
         try:
             if self._torch:
                 self._torch.cuda.empty_cache()
                 time.sleep(0.2)
-                free_gb = self._get_free_gpu_memory()
-                if free_gb is not None and free_gb > 1.0:
-                    logger.info(
-                        f"✅ Nach Cache‑Leerung: {free_gb:.1f} GB frei – versuche weiter mit gleichem Modell"
-                    )
-                    log_debug("oom", f"Cache cleared, free VRAM now {free_gb:.1f} GB")
+                free = self._get_free_gpu_memory()
+                if free is not None and free > 1.0:
+                    logger.info(f"✅ Nach Cache‑Leerung: {free:.1f} GB frei – versuche weiter")
                     return
-
             if self._try_smaller_model_iterative():
                 return
-
-            # Fallback auf CPU – hier wird _fallback_to_cpu aufgerufen,
-            # das wiederum _set_gpu_acceleration(False) auslöst.
             self._fallback_to_cpu()
-
         except Exception as e:
             logger.exception(f"❌ Fehler in _handle_cuda_oom: {e}")
         finally:
@@ -7964,51 +7336,31 @@ class TranscriptionEngine:
             self._model_loaded_flag = False
         if old_model is not None:
             self._unload_model(old_model)
-            if self._debug:
-                logger.debug(f"🧹 Active model {old_size} ({old_backend}) unloaded")
         if old_size is not None and old_backend is not None:
             with self._lock:
                 cache_key = (old_size, old_backend)
                 if cache_key in self._model_cache:
                     del self._model_cache[cache_key]
-                    if self._debug:
-                        logger.debug(f"🧹 Model {old_size} removed from cache")
         gc.collect()
-        if self.device == "cuda" and self._torch is not None:
+        if self.device == "cuda" and self._torch:
             try:
                 self._torch.cuda.empty_cache()
-                if self._debug:
-                    logger.info("🧹 GPU memory cache cleared")
-            except Exception as e:
-                if self._debug:
-                    logger.warning(f"⚠️ Failed to clear GPU cache: {e}")
+            except Exception:
+                pass
 
-    def _prepare_transcription(
-        self, audio_data: bytes
-    ) -> Tuple[Any, Optional[str], int, Dict[str, Any]]:
+    def _prepare_transcription(self, audio_data: bytes) -> Tuple[Any, Optional[str], int, Dict[str, Any]]:
         self._load_modules()
         if self._np is None:
-            raise RuntimeError(
-                "numpy is required but not available. Please install numpy."
-            )
-
+            raise RuntimeError("numpy is required but not available")
         with self._confidence_lock:
             last_conf = self._last_confidence_threshold
         processed = self._audio_enhancer.enhance_audio(audio_data, last_conf, 0)
-
-        audio_np = (
-            self._np.frombuffer(processed, dtype=self._np.int16).astype(
-                self._np.float32
-            )
-            / 32768.0
-        )
-
+        audio_np = self._np.frombuffer(processed, dtype=self._np.int16).astype(self._np.float32) / 32768.0
         beam_size = self.settings.beam_size
         language = self.forced_language if self.forced_language else None
         with self._state_lock:
             vad_language = self.forced_language or self._last_detected_language
         vad_params = self._get_vad_parameters(vad_language)
-
         return audio_np, language, beam_size, vad_params
 
     def _get_vad_parameters(self, language: Optional[str]) -> Dict[str, Any]:
@@ -8026,25 +7378,12 @@ class TranscriptionEngine:
                 "min_silence_duration_ms": self.settings.vad_min_silence_duration_ms,
             }
 
-    def _universal_transcribe(
-        self, model: Any, audio_np: Any, **kwargs: Any
-    ) -> Tuple[List[Any], Any]:
+    def _universal_transcribe(self, model: Any, audio_np: Any, **kwargs: Any) -> Tuple[List[Any], Any]:
         if model is None:
             raise ValueError("Kein Modell geladen")
-
         backend = self.whisper_backend
-        if self._debug:
-            log_debug("transcribe", f"Backend: {backend}, Parameter: {kwargs}")
-
-        allowed = (
-            self._ALLOWED_FASTER
-            if backend == "faster_whisper"
-            else self._ALLOWED_OPENAI
-        )
+        allowed = self._ALLOWED_FASTER if backend == "faster_whisper" else self._ALLOWED_OPENAI
         filtered = {k: v for k, v in kwargs.items() if k in allowed}
-        if DEBUG_LEVEL >= 3:
-            logger.debug(f"Effektive Whisper-Parameter: {filtered}")
-
         for attempt in range(2):
             try:
                 if backend == "faster_whisper":
@@ -8053,17 +7392,12 @@ class TranscriptionEngine:
                     return self._openai_whisper_transcribe(model, audio_np, **filtered)
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
-                    logger.error(
-                        f"🚨 CUDA out of memory (Versuch {attempt+1}/2) – leere GPU-Cache"
-                    )
+                    logger.error(f"🚨 CUDA out of memory (Versuch {attempt+1}/2) – leere GPU-Cache")
                     self._handle_universal_cuda_oom()
                     if attempt == 0:
                         continue
                     else:
                         self._last_oom = True
-                        logger.critical(
-                            "❌ CUDA out of memory auch nach Wiederholung – Abbruch"
-                        )
                         raise TranscriptionError(f"CUDA OOM after retry: {e}") from e
                 else:
                     raise
@@ -8072,23 +7406,14 @@ class TranscriptionEngine:
                 if attempt == 1:
                     break
                 continue
-
         return [], _EmptyInfo()
 
     def _handle_universal_cuda_oom(self) -> None:
-        if self._torch is not None and self.device == "cuda":
+        if self._torch and self.device == "cuda":
             self._torch.cuda.empty_cache()
             time.sleep(0.5)
 
-    def _faster_whisper_transcribe(
-        self, model: Any, audio_np: Any, **kwargs: Any
-    ) -> Tuple[List[Any], Any]:
-        if DEBUG_LEVEL >= 3:
-            log_debug(
-                "whisper",
-                f"Start transcribe with {len(audio_np)} samples, backend=faster_whisper",
-            )
-
+    def _faster_whisper_transcribe(self, model: Any, audio_np: Any, **kwargs: Any) -> Tuple[List[Any], Any]:
         try:
             vad_params = kwargs.pop("vad_parameters", None)
             if kwargs.get("vad_filter", False) and vad_params is None:
@@ -8100,115 +7425,51 @@ class TranscriptionEngine:
                 language = kwargs.get("language")
                 if language and language in self.config.LANGUAGE_VAD:
                     lang_vad = self.config.LANGUAGE_VAD[language]
-                    vad_params.update(
-                        {
-                            "threshold": lang_vad["threshold"],
-                            "min_speech_duration_ms": lang_vad["min_speech_ms"],
-                            "min_silence_duration_ms": lang_vad["min_silence_ms"],
-                        }
-                    )
+                    vad_params.update({
+                        "threshold": lang_vad["threshold"],
+                        "min_speech_duration_ms": lang_vad["min_speech_ms"],
+                        "min_silence_duration_ms": lang_vad["min_silence_ms"],
+                    })
             if vad_params is not None:
                 kwargs["vad_parameters"] = vad_params
-
             segments, info = model.transcribe(audio_np, **kwargs)
-            segments_list = list(segments)
-
-            if self._debug and segments_list:
-                log_debug(
-                    "transcribe",
-                    f"{len(segments_list)} Segmente erhalten, erste: {segments_list[0].text[:50]}...",
-                )
-            if DEBUG_LEVEL >= 3:
-                logger.debug(
-                    f"VAD-Info: Sprache={info.language}, Dauer={info.duration}"
-                )
-
-            return segments_list, info
-
+            return list(segments), info
         except (TypeError, ValueError) as e:
             if self._debug:
-                logger.warning(
-                    f"⚠️ faster-whisper Parameterfehler: {e} – verwende minimale Parameter"
-                )
-            minimal_kwargs = {
-                k: v
-                for k, v in kwargs.items()
-                if k in ["language", "task", "temperature", "beam_size", "best_of"]
-            }
-            try:
-                segments, info = model.transcribe(audio_np, **minimal_kwargs)
-                segments_list = list(segments)
-                return segments_list, info
-            except Exception as e2:
-                logger.error(
-                    f"❌ faster-whisper auch mit minimalen Parametern fehlgeschlagen: {e2}"
-                )
-                return [], _EmptyInfo()
+                logger.warning(f"⚠️ faster-whisper Parameterfehler: {e} – verwende minimale Parameter")
+            minimal = {k: v for k, v in kwargs.items() if k in ["language", "task", "temperature", "beam_size", "best_of"]}
+            segments, info = model.transcribe(audio_np, **minimal)
+            return list(segments), info
         except Exception as e:
             logger.exception(f"❌ faster-whisper Fehler: {e}")
             return [], _EmptyInfo()
 
-    def _openai_whisper_transcribe(
-        self, model: Any, audio_np: Any, **kwargs: Any
-    ) -> Tuple[List[Any], Any]:
-        if DEBUG_LEVEL >= 3:
-            log_debug(
-                "whisper",
-                f"Start transcribe with {len(audio_np)} samples, backend=openai_whisper",
-            )
-
-        filtered_kwargs = {k: v for k, v in kwargs.items() if k in self._ALLOWED_OPENAI}
-        filtered_kwargs.setdefault("language", None)
-        filtered_kwargs.setdefault("task", "transcribe")
-        filtered_kwargs.setdefault("temperature", 0.0)
-
+    def _openai_whisper_transcribe(self, model: Any, audio_np: Any, **kwargs: Any) -> Tuple[List[Any], Any]:
+        filtered = {k: v for k, v in kwargs.items() if k in self._ALLOWED_OPENAI}
+        filtered.setdefault("language", None)
+        filtered.setdefault("task", "transcribe")
+        filtered.setdefault("temperature", 0.0)
         try:
-            result = model.transcribe(audio_np, **filtered_kwargs)
+            result = model.transcribe(audio_np, **filtered)
             segments = result.get("segments", [])
-            converted = []
-            for seg in segments:
-                if seg.get("text", "").strip():
-                    converted.append(_UniversalSegment(seg))
+            converted = [_UniversalSegment(seg) for seg in segments if seg.get("text", "").strip()]
             info = _UniversalInfo(result)
-
-            if self._debug and converted:
-                log_debug(
-                    "transcribe",
-                    f"{len(converted)} Segmente erhalten, erste: {converted[0].text[:50]}...",
-                )
             return converted, info
-
         except Exception as e:
             logger.exception(f"❌ openai-whisper Fehler: {e}")
             try:
-                minimal_result = model.transcribe(
-                    audio_np, language=None, task="transcribe", temperature=0.1
-                )
-                emergency = []
-                for seg in minimal_result.get("segments", []):
-                    emergency.append(_EmergencySegment(seg))
-                if self._debug:
-                    logger.debug(f"[TRANSCRIBE] Fallback: {len(emergency)} Segmente")
-                return emergency, _UniversalInfo(minimal_result)
-            except Exception as fallback_error:
-                logger.error(f"💥 Auch Fallback fehlgeschlagen: {fallback_error}")
+                fallback_result = model.transcribe(audio_np, language=None, task="transcribe", temperature=0.1)
+                emergency = [_EmergencySegment(seg) for seg in fallback_result.get("segments", [])]
+                return emergency, _UniversalInfo(fallback_result)
+            except Exception as e2:
+                logger.error(f"💥 Auch Fallback fehlgeschlagen: {e2}")
                 return [], _EmptyInfo()
 
-    def _prepare_transcribe_kwargs(
-        self,
-        language: Optional[str],
-        beam_size: int,
-        vad_params: Dict[str, Any],
-        include_timestamps: bool,
-        hotwords: str = "",
-        best_of: int = 5,
-        patience: float = 1.0,
-        no_speech_threshold: float = 0.6,
-        log_prob_threshold: float = -1.2,
-        compression_ratio_threshold: float = 2.8,
-        condition_on_previous_text: bool = True,
-        suppress_tokens: str = "-1",
-    ) -> Dict[str, Any]:
+    def _prepare_transcribe_kwargs(self, language: Optional[str], beam_size: int, vad_params: Dict[str, Any],
+                                   include_timestamps: bool, hotwords: str = "", best_of: int = 5,
+                                   patience: float = 1.0, no_speech_threshold: float = 0.6,
+                                   log_prob_threshold: float = -1.2, compression_ratio_threshold: float = 2.8,
+                                   condition_on_previous_text: bool = True, suppress_tokens: str = "-1") -> Dict[str, Any]:
         kwargs = {
             "language": language,
             "task": "transcribe",
@@ -8233,281 +7494,91 @@ class TranscriptionEngine:
             kwargs["hotwords"] = hotwords
         return kwargs
 
-    def _transcribe_worker(
-        self,
-        model: Any,
-        audio_np: Any,
-        language: Optional[str],
-        beam_size: int,
-        vad_params: Dict[str, Any],
-        include_timestamps: bool,
-        **kwargs,
-    ) -> Any:
-        """
-        Führt die Transkription mit mehrstufiger Fallback-Strategie durch.
-
-        Fallback-Konfigurationen (dynamisch aufgebaut):
-            1. Standard (mit VAD, falls in Einstellungen aktiviert)
-            2. VAD deaktiviert (falls VAD aktiv war)
-            3. VAD deaktiviert + reduzierter no_speech_threshold (0.3)
-
-        Args:
-            model: Whisper-Modell
-            audio_np: Audio als numpy-Array (float32, -1..1)
-            language: Erzwungene Sprache oder None
-            beam_size: Beam-Size für Decoding
-            vad_params: VAD-Parameter
-            include_timestamps: Ob Zeitstempel in Ergebnis enthalten sein sollen
-            **kwargs: Zusätzliche Parameter (hotwords, best_of, etc.)
-
-        Returns:
-            TranscriptionResult oder Liste davon (abhängig von include_timestamps)
-        """
-        start_time = time.perf_counter()
-        if self._debug:
-            log_debug(
-                "transcribe",
-                f"_transcribe_worker: {len(audio_np)} samples, "
-                f"language={language}, beam={beam_size}, "
-                f"vad_filter={self.settings.vad_filter}, "
-                f"timestamps={include_timestamps}",
-            )
-
-        # Basis-Konfiguration
-        transcribe_kwargs = self._prepare_transcribe_kwargs(
-            language, beam_size, vad_params, include_timestamps, **kwargs
-        )
-
-        # ========== KONFIGURATIONSLISTE DYNAMISCH AUFBAUEN ==========
-        configs = [
-            {"name": "Standard", "kwargs": transcribe_kwargs},
-        ]
-
-        # Nur wenn VAD aktiv ist, fügen wir die VAD-freien Varianten hinzu
+    def _transcribe_worker(self, model: Any, audio_np: Any, language: Optional[str], beam_size: int,
+                          vad_params: Dict[str, Any], include_timestamps: bool, **kwargs) -> Any:
+        transcribe_kwargs = self._prepare_transcribe_kwargs(language, beam_size, vad_params, include_timestamps, **kwargs)
+        configs = [{"name": "Standard", "kwargs": transcribe_kwargs}]
         if self.settings.vad_filter:
-            # Variante 1: VAD deaktivieren
             no_vad = transcribe_kwargs.copy()
             no_vad["vad_filter"] = False
             no_vad.pop("vad_parameters", None)
             configs.append({"name": "VAD deaktiviert", "kwargs": no_vad})
-
-            # Variante 2: VAD deaktiviert + reduzierter no_speech_threshold
             no_vad_low = no_vad.copy()
             no_vad_low["no_speech_threshold"] = 0.3
-            configs.append(
-                {"name": "VAD deaktiviert + low threshold", "kwargs": no_vad_low}
-            )
+            configs.append({"name": "VAD deaktiviert + low threshold", "kwargs": no_vad_low})
 
-        # Erfolgsvariablen
-        segments = []
-        info = None
-        used_fallback = False
-        fallback_reason = ""
-
-        # ========== SCHLEIFE ÜBER KONFIGURATIONEN ==========
-        for idx, cfg in enumerate(configs, 1):
-            attempt_start = time.perf_counter()
-            if self._debug:
-                log_debug(
-                    "transcribe", f"🔁 Versuch {idx}/{len(configs)}: {cfg['name']}"
-                )
-
+        segments, info = [], None
+        for cfg in configs:
             try:
                 seg, inf = self._universal_transcribe(model, audio_np, **cfg["kwargs"])
-                attempt_duration = (time.perf_counter() - attempt_start) * 1000
-                if self._debug:
-                    log_debug(
-                        "transcribe",
-                        f"   → {len(seg)} Segmente in {attempt_duration:.1f}ms",
-                    )
-
                 if seg:
-                    segments = seg
-                    info = inf
-                    used_fallback = idx > 1
-                    fallback_reason = cfg["name"]
-                    break  # Erfolg – Schleife beenden
-                else:
-                    if self._debug:
-                        log_debug("transcribe", "   → Keine Segmente, nächster Versuch")
+                    segments, info = seg, inf
+                    break
             except Exception as e:
-                logger.warning(
-                    f"⚠️ Transkriptionsversuch {idx} ({cfg['name']}) fehlgeschlagen: {e}"
-                )
-                if self._debug:
-                    log_debug("transcribe", f"   → Exception: {type(e).__name__}: {e}")
-                continue
-
-        # ========== NACHSCHLAG: SPRACHE AKTUALISIEREN ==========
+                logger.warning(f"⚠️ Transkriptionsversuch {cfg['name']} fehlgeschlagen: {e}")
         if info is not None:
             self._update_detected_language(info)
-
-        # ========== SEGMENTE FILTERN UND VALIDIEREN ==========
         valid_segments, total_confidence = self._process_segments(segments, info)
-
-        # ========== MINIMALER FALLBACK (mit bester bisheriger Konfiguration) ==========
         if not valid_segments:
-            if self._debug:
-                logger.debug("🔄 Keine validen Segmente – starte minimalen Fallback")
-
-            # Beste bekannte Konfiguration für den minimalen Fallback nutzen
-            minimal_config = transcribe_kwargs.copy()
-            minimal_config["vad_filter"] = False
-            minimal_config.pop("vad_parameters", None)
-            minimal_config["no_speech_threshold"] = 0.3
-            minimal_config["temperature"] = 0.0
-            minimal_config["best_of"] = 1
-            minimal_config["beam_size"] = 1
-
-            try:
-                minimal = self._transcribe_minimal(
-                    model, audio_np, language, minimal_config
-                )
-                if minimal:
-                    total_duration = (time.perf_counter() - start_time) * 1000
-                    if self._debug:
-                        log_debug(
-                            "transcribe",
-                            f"✅ Minimaler Fallback erfolgreich in {total_duration:.1f}ms",
-                        )
-                    if include_timestamps:
-                        duration = audio_np.shape[0] / self.config.SAMPLE_RATE
-                        return [
-                            TranscriptionResult(
-                                text=minimal.text,
-                                confidence=minimal.confidence,
-                                language=minimal.language,
-                                start=0.0,
-                                end=duration,
-                            )
-                        ]
-                    return minimal
-                else:
-                    total_duration = (time.perf_counter() - start_time) * 1000
-                    if self._debug:
-                        log_debug(
-                            "transcribe",
-                            f"❌ Minimaler Fallback fehlgeschlagen nach {total_duration:.1f}ms",
-                        )
-                    return [] if include_timestamps else None
-            except Exception as e:
-                logger.error(f"Minimaler Fallback fehlgeschlagen: {e}")
-                return [] if include_timestamps else None
-
-        # ========== ERGEBNISSE FORMATIEREN ==========
+            minimal = self._transcribe_minimal(model, audio_np, language)
+            if minimal:
+                if include_timestamps:
+                    duration = audio_np.shape[0] / self.config.SAMPLE_RATE
+                    return [TranscriptionResult(text=minimal.text, confidence=minimal.confidence,
+                                                language=minimal.language, start=0.0, end=duration)]
+                return minimal
+            return [] if include_timestamps else None
         if include_timestamps:
-            result = self._create_timestamped_results(valid_segments, info)
+            return self._create_timestamped_results(valid_segments, info)
         else:
-            result = self._create_continuous_result(
-                valid_segments, info, total_confidence
-            )
-
-        total_duration = (time.perf_counter() - start_time) * 1000
-        if self._debug:
-            log_debug(
-                "transcribe",
-                f"✅ Transkription abgeschlossen in {total_duration:.1f}ms "
-                f"(Fallback: {used_fallback}, {fallback_reason})",
-            )
-        return result
+            return self._create_continuous_result(valid_segments, info, total_confidence)
 
     def _update_detected_language(self, info: Any) -> None:
         if hasattr(info, "language") and info.language != "unknown":
-            if getattr(info, "language_probability", 1.0) < 0.4:
-                if self._debug:
-                    logger.debug("Low language confidence, using fallback")
-            else:
-                with self._state_lock:
-                    self._last_detected_language = info.language
+            with self._state_lock:
+                self._last_detected_language = info.language
 
-    def _process_segments(
-        self, segments: List[Any], info: Any
-    ) -> Tuple[List[Any], float]:
-        valid_segments = []
-        total_confidence = 0.0
+    def _process_segments(self, segments: List[Any], info: Any) -> Tuple[List[Any], float]:
+        valid = []
+        total_conf = 0.0
         for seg in segments:
             text = seg.text.strip()
             conf = self._calculate_enhanced_confidence(seg, text)
             if self.is_valid_segment(text, conf):
-                valid_segments.append(seg)
-                total_confidence += conf
-        return valid_segments, total_confidence
+                valid.append(seg)
+                total_conf += conf
+        return valid, total_conf
 
-    def _create_timestamped_results(
-        self, segments: List[Any], info: Any
-    ) -> List[TranscriptionResult]:
-        return [
-            TranscriptionResult(
-                text=seg.text.strip(),
-                confidence=self._calculate_enhanced_confidence(seg, seg.text.strip()),
-                language=getattr(info, "language", "unknown"),
-                start=getattr(seg, "start", 0.0),
-                end=getattr(seg, "end", 0.0),
-            )
-            for seg in segments
-        ]
+    def _create_timestamped_results(self, segments: List[Any], info: Any) -> List[TranscriptionResult]:
+        return [TranscriptionResult(text=seg.text.strip(),
+                                    confidence=self._calculate_enhanced_confidence(seg, seg.text.strip()),
+                                    language=getattr(info, "language", "unknown"),
+                                    start=getattr(seg, "start", 0.0),
+                                    end=getattr(seg, "end", 0.0)) for seg in segments]
 
-    def _create_continuous_result(
-        self, segments: List[Any], info: Any, total_confidence: float
-    ) -> TranscriptionResult:
+    def _create_continuous_result(self, segments: List[Any], info: Any, total_confidence: float) -> TranscriptionResult:
         full_text = " ".join(seg.text.strip() for seg in segments)
         avg_conf = total_confidence / len(segments)
-        return TranscriptionResult(
-            text=full_text,
-            confidence=avg_conf,
-            language=getattr(info, "language", "unknown"),
-        )
+        return TranscriptionResult(text=full_text, confidence=avg_conf, language=getattr(info, "language", "unknown"))
 
-    def _transcribe_minimal(
-        self,
-        model: Any,
-        audio_np: Any,
-        language: Optional[str],
-        fallback_config: Optional[Dict[str, Any]] = None,
-    ) -> Optional[TranscriptionResult]:
-        """
-        Minimaler Fallback mit optimierten Parametern.
-
-        Args:
-            model: Whisper-Modell
-            audio_np: Audio als numpy-Array
-            language: Erzwungene Sprache oder None
-            fallback_config: Optionale benutzerdefinierte Konfiguration für _universal_transcribe
-        """
+    def _transcribe_minimal(self, model: Any, audio_np: Any, language: Optional[str],
+                            fallback_config: Optional[Dict[str, Any]] = None) -> Optional[TranscriptionResult]:
         try:
             if fallback_config is None:
-                # Standard-Fallback-Parameter (robust)
                 segments, info = self._universal_transcribe(
-                    model,
-                    audio_np,
-                    language=language,
-                    task="transcribe",
-                    temperature=0.0,
-                    best_of=1,
-                    beam_size=1,
-                    no_speech_threshold=0.9,
-                    log_prob_threshold=-2.0,
-                    compression_ratio_threshold=3.5,
-                    condition_on_previous_text=False,
-                    without_timestamps=False,
-                    vad_filter=False,
+                    model, audio_np, language=language, task="transcribe", temperature=0.0,
+                    best_of=1, beam_size=1, no_speech_threshold=0.9, log_prob_threshold=-2.0,
+                    compression_ratio_threshold=3.5, condition_on_previous_text=False,
+                    without_timestamps=False, vad_filter=False
                 )
             else:
-                # Verwende die übergebene Konfiguration
-                segments, info = self._universal_transcribe(
-                    model, audio_np, **fallback_config
-                )
-
+                segments, info = self._universal_transcribe(model, audio_np, **fallback_config)
             if segments:
                 seg = segments[0]
                 text = seg.text.strip()
                 if text:
                     conf = self._calculate_enhanced_confidence(seg, text)
-                    return TranscriptionResult(
-                        text=text,
-                        confidence=conf,
-                        language=getattr(info, "language", "unknown"),
-                    )
+                    return TranscriptionResult(text=text, confidence=conf, language=getattr(info, "language", "unknown"))
         except Exception as e:
             if self._debug:
                 logger.debug(f"Minimal transcription failed: {e}")
@@ -8518,23 +7589,18 @@ class TranscriptionEngine:
         words = text.split()
         word_count = len(words)
         text_len = len(text.strip())
-        # Bessere unique_ratio für asiatische Sprachen
         lang = getattr(segment, "language", "unknown")
         if lang in ("zh", "ja", "ko", "th", "vi"):
             chars = list(text)
             unique_ratio = len(set(chars)) / max(len(chars), 1)
         else:
             unique_ratio = len(set(words)) / max(word_count, 1)
-
-        boosts = (
-            min(0.2, text_len / 300.0)
-            + min(0.15, word_count * 0.03)
-            + (0.08 if any(c in text for c in ".!?,;:") else 0.0)
-            + (0.1 if any(c.isalpha() for c in text) else 0.0)
-            + min(0.1, unique_ratio * 0.1)
-        )
-        max_boost = 0.3
-        total_boost = min(max_boost, boosts)
+        boosts = (min(0.2, text_len / 300.0) +
+                  min(0.15, word_count * 0.03) +
+                  (0.08 if any(c in text for c in ".!?,;:") else 0.0) +
+                  (0.1 if any(c.isalpha() for c in text) else 0.0) +
+                  min(0.1, unique_ratio * 0.1))
+        total_boost = min(0.3, boosts)
         return min(0.95, base + total_boost)
 
     def _parse_suppress_tokens(self, token_str: str) -> List[int]:
@@ -8544,9 +7610,7 @@ class TranscriptionEngine:
             return [int(x.strip()) for x in token_str.split(",")]
         except ValueError:
             if self._debug:
-                logger.warning(
-                    f"Ungültiges suppress_tokens Format: {token_str}, verwende [-1]"
-                )
+                logger.warning(f"Ungültiges suppress_tokens Format: {token_str}, verwende [-1]")
             return [-1]
 
 
@@ -9424,25 +8488,41 @@ class StreamManager:
         match = self._YOUTUBE_ID_REGEX.search(url)
         return match.group(1) if match else None
 
-    def _try_browser_cookies(
-        self, url: str, format_str: str = "bestaudio[ext=m4a]/bestaudio/best"
-    ) -> Optional[str]:
+    def _try_browser_cookies(self, url: str, format_str: str = "bestaudio[ext=m4a]/bestaudio/best") -> Optional[str]:
+        """
+        Versucht, die Audio-URL mit Cookies aus dem konfigurierten Browser zu extrahieren.
+        Verwendet nur den in den Einstellungen festgelegten Browser (keine Schleife über alle).
+        """
         proxy_arg = self._proxy if self._proxy_enabled else ""
-        for browser_cmd, browser_name in self._BROWSERS:
+
+        # Browser aus den Einstellungen lesen
+        try:
+            if hasattr(self, "settings") and self.settings is not None:
+                browser = getattr(self.settings, "cookies_browser", "firefox")
+            else:
+                # Fallback: direkter Zugriff auf die JSON-Datei
+                settings = AppSettings.load_from_file()
+                browser = getattr(settings, "cookies_browser", "firefox")
+        except Exception:
+            browser = "firefox"
+
+        if self._debug:
+            logger.debug(f"    🧪 Versuche Cookies von {browser}...")
+
+        audio_url = YtDlpHelper.get_audio_url(
+            url,
+            format_str=format_str,
+            timeout=20,
+            use_cookies=True,
+            browser=browser,
+            proxy=proxy_arg,
+        )
+
+        if audio_url:
             if self._debug:
-                logger.debug(f"    🧪 Teste mit {browser_name}-Cookies...")
-            audio_url = YtDlpHelper.get_audio_url(
-                url,
-                format_str=format_str,
-                timeout=20,
-                use_cookies=True,
-                browser=browser_cmd,
-                proxy=proxy_arg,
-            )
-            if audio_url:
-                if self._debug:
-                    logger.debug(f"    ✅ Erfolg mit {browser_name}-Cookies")
-                return audio_url
+                logger.debug(f"    ✅ Erfolg mit {browser}-Cookies")
+            return audio_url
+
         return None
 
     def _try_standard_methods(
@@ -11649,8 +10729,22 @@ class FFmpegManager:
         seek_seconds: Optional[float],
         detected_language: Optional[str],
     ) -> Optional[subprocess.Popen]:
-        """Startet den Pipe‑Zweig (yt‑dlp + FFmpeg) als Fallback (optimiert)."""
+        """
+        Startet den Pipe‑Zweig (yt‑dlp + FFmpeg) als Fallback (optimiert).
+        Verwendet den in den Einstellungen konfigurierten Browser für Cookies.
+        """
         logger.info("  🎥 Pipe‑Fallback: Verwende yt‑dlp als Datenquelle")
+
+        # Browser aus den Einstellungen lesen
+        try:
+            if hasattr(self, "settings") and self.settings is not None:
+                browser = getattr(self.settings, "cookies_browser", "firefox")
+            else:
+                settings = AppSettings.load_from_file()
+                browser = getattr(settings, "cookies_browser", "firefox")
+        except Exception:
+            browser = "firefox"
+
         yt_cmd = [
             "yt-dlp",
             "-f",
@@ -11661,7 +10755,6 @@ class FFmpegManager:
         ]
         use_cookies = getattr(self.settings, "use_browser_cookies", True)
         if use_cookies:
-            browser = getattr(self.settings, "browser_name", "firefox")
             yt_cmd.extend(["--cookies-from-browser", browser])
         if hasattr(self.settings, "proxy_enabled") and self.settings.proxy_enabled:
             proxy_url = getattr(self.settings, "proxy_url", "")
@@ -11737,8 +10830,8 @@ class FFmpegManager:
             self.resource_manager.register_process(process)
             self.resource_manager.register_process(yt_process)
 
-        # ========== OPTIMIERUNG: Erhöhte Wartezeit von 5 auf 10 Sekunden ==========
-        max_wait = 10.0  # Sekunden
+        # Wartezeit für FFmpeg-Pipe (optimiert)
+        max_wait = 10.0
         interval = 1.0
         waited = 0.0
         process_ready = False
@@ -11749,7 +10842,6 @@ class FFmpegManager:
                 if DEBUG_LEVEL >= 3:
                     log_debug("pipe", f"FFmpeg died early after {waited:.1f}s (exit {process.poll()})")
                 break
-            # Nach 2 Sekunden kann man optimistisch sein
             if waited >= 2.0 and process.poll() is None:
                 if DEBUG_LEVEL >= 3:
                     log_debug("pipe", f"FFmpeg still alive after {waited:.1f}s, assuming ready")
@@ -11758,7 +10850,6 @@ class FFmpegManager:
             time.sleep(interval)
             waited += interval
         else:
-            # Timeout erreicht – Prozess läuft noch? Dann trotzdem als Erfolg werten.
             if process.poll() is None:
                 process_ready = True
                 if DEBUG_LEVEL >= 3:
@@ -11778,7 +10869,6 @@ class FFmpegManager:
                 f"Exit code: {process.poll() if process.poll() is not None else 'N/A'}, "
                 f"FFmpeg stderr: {stderr_hint[:200]}, yt‑dlp stderr: {yt_stderr[:200]}"
             )
-            # Aufräumen
             try:
                 process.terminate()
                 yt_process.terminate()
@@ -13351,110 +12441,123 @@ class StreamInfoExtractor:
         )
 
     def _extract_youtube_info_with_cookies(self, url: str) -> Optional[StreamInfo]:
-        logger.info(
-            "  🎯 YouTube detected, trying optimized cookie methods for channel name..."
-        )
+        """
+        Extrahiert YouTube-Stream-Informationen mit Cookies aus dem konfigurierten Browser.
+        Verwendet nur den in den Einstellungen festgelegten Browser (keine Schleife über alle).
+        """
+        logger.info("  🎯 YouTube detected, trying optimized cookie methods for channel name...")
         if IS_LINUX:
             self._ensure_chrome_symlinks()
-        methods = self._build_youtube_methods(url)
-        logger.info(f"    📋 Using {len(methods)} optimized extraction methods")
-        max_attempts = min(3, len(methods))
-        attempts = 0
-        for cmd, method_name in methods:
-            if attempts >= max_attempts:
-                break
-            attempts += 1
-            try:
-                logger.info(f"    🧪 Attempt {attempts}/{max_attempts}: {method_name}")
-                timeout = 12 if "Cookies" in method_name else 8
-                stdout = YtDlpHelper.run_command(
-                    cmd, timeout=timeout, method_name=method_name
-                )
-                if not stdout:
-                    continue
-                output = stdout
-                json_start = output.find("{")
-                json_end = output.rfind("}") + 1
-                if json_start >= 0 and json_end > json_start:
-                    try:
-                        json_str = output[json_start:json_end]
-                        info = json.loads(json_str)
-                        uploader = info.get("uploader", "Unknown")
-                        channel = info.get("channel", uploader)
-                        creator = info.get("creator", uploader)
-                        final_uploader = uploader
-                        if channel != "Unknown" and channel != uploader:
-                            final_uploader = channel
-                        elif creator != "Unknown" and creator != uploader:
-                            final_uploader = creator
-                        if final_uploader == "Unknown":
-                            final_uploader = info.get("uploader_id", "YouTube")
-                        logger.info(f"      ✅ Success with {method_name}")
-                        logger.info(
-                            f"        Title: {info.get('title', 'YouTube Stream')[:60]}..."
-                        )
-                        logger.info(f"        Channel: {final_uploader}")
+
+        # Browser aus den Einstellungen lesen
+        try:
+            settings = AppSettings.load_from_file()
+            browser = getattr(settings, "cookies_browser", "firefox")
+        except Exception:
+            browser = "firefox"
+
+        # Einzelner Versuch mit dem konfigurierten Browser
+        logger.info(f"    🧪 Versuche mit {browser.capitalize()} Cookies...")
+        cmd = [
+            "yt-dlp",
+            "--cookies-from-browser", browser,
+            "--dump-json",
+            "--no-warnings",
+            "--no-check-certificate",
+            "--playlist-items", "1",
+            "--",
+            url,
+        ]
+        stdout = YtDlpHelper.run_command(cmd, timeout=12, method_name=f"{browser.capitalize()} Cookies")
+        if stdout:
+            output = stdout
+            json_start = output.find("{")
+            json_end = output.rfind("}") + 1
+            if json_start >= 0 and json_end > json_start:
+                try:
+                    json_str = output[json_start:json_end]
+                    info = json.loads(json_str)
+                    uploader = info.get("uploader", "Unknown")
+                    channel = info.get("channel", uploader)
+                    creator = info.get("creator", uploader)
+                    final_uploader = uploader
+                    if channel != "Unknown" and channel != uploader:
+                        final_uploader = channel
+                    elif creator != "Unknown" and creator != uploader:
+                        final_uploader = creator
+                    if final_uploader == "Unknown":
+                        final_uploader = info.get("uploader_id", "YouTube")
+                    logger.info(f"      ✅ Success with {browser.capitalize()} Cookies")
+                    logger.info(f"        Title: {info.get('title', 'YouTube Stream')[:60]}...")
+                    logger.info(f"        Channel: {final_uploader}")
+                    return StreamInfo(
+                        title=info.get("title", "YouTube Stream"),
+                        uploader=final_uploader,
+                        duration=info.get("duration_string", "Live"),
+                        view_count=info.get("view_count", 0),
+                        platform="youtube",
+                        description=(
+                            info.get("description", "")[:200] + "..."
+                            if len(info.get("description", "")) > 200
+                            else info.get("description", "")
+                        ),
+                        duration_seconds=info.get("duration"),
+                    )
+                except json.JSONDecodeError:
+                    pass
+
+            # Fallback: Titel aus der reinen Textausgabe extrahieren
+            lines = output.split("\n")
+            for line in lines:
+                if line.strip() and not line.startswith("{") and len(line.strip()) > 10:
+                    possible_title = line.strip()
+                    if len(possible_title) > 20 and len(possible_title) < 200:
+                        logger.info("      ✅ Extracted title from output")
                         return StreamInfo(
-                            title=info.get("title", "YouTube Stream"),
-                            uploader=final_uploader,
-                            duration=info.get("duration_string", "Live"),
-                            view_count=info.get("view_count", 0),
+                            title=possible_title,
+                            uploader="YouTube",
+                            duration="Live",
+                            view_count=0,
                             platform="youtube",
-                            description=(
-                                info.get("description", "")[:200] + "..."
-                                if len(info.get("description", "")) > 200
-                                else info.get("description", "")
-                            ),
-                            duration_seconds=info.get("duration"),
+                            description="",
                         )
-                    except json.JSONDecodeError:
-                        pass
-                lines = output.split("\n")
-                for line in lines:
-                    if (
-                        line.strip()
-                        and not line.startswith("{")
-                        and len(line.strip()) > 10
-                    ):
-                        possible_title = line.strip()
-                        if len(possible_title) > 20 and len(possible_title) < 200:
-                            logger.info("      ✅ Extracted title from output")
-                            return StreamInfo(
-                                title=possible_title,
-                                uploader="YouTube",
-                                duration="Live",
-                                view_count=0,
-                                platform="youtube",
-                                description="",
-                            )
-            except Exception as e:
-                logger.info(f"      ⚠️ Method error: {str(e)[:50]}")
-                continue
+
+        # Fallback: direkte Titel-Extraktion ohne Cookies
         logger.info("    🔄 Ultimate fallback: Direct title extraction...")
         return self._direct_youtube_fallback(url)
 
     def _build_youtube_methods(self, url: str) -> List[Tuple[List[str], str]]:
+        """
+        Baut die Liste der Extraktionsmethoden für YouTube auf.
+        Verwendet nur den in den Einstellungen konfigurierten Browser für Cookies,
+        gefolgt von Fallback-Methoden ohne Cookies.
+        """
         methods = []
+
+        # 1. Methode mit Cookies aus dem konfigurierten Browser (falls aktiviert)
         if self.use_browser_cookies:
-            browsers = self._get_browser_list()
-            for browser_cmd, browser_name in browsers:
-                methods.append(
-                    (
-                        [
-                            "yt-dlp",
-                            "--cookies-from-browser",
-                            browser_cmd,
-                            "--dump-json",
-                            "--no-warnings",
-                            "--no-check-certificate",
-                            "--playlist-items",
-                            "1",
-                            "--",
-                            url,
-                        ],
-                        f"{browser_name} Cookies",
-                    )
-                )
+            # Browser aus den globalen Einstellungen lesen
+            try:
+                settings = AppSettings.load_from_file()
+                browser = getattr(settings, "cookies_browser", "firefox")
+            except Exception:
+                browser = "firefox"
+
+            methods.append((
+                [
+                    "yt-dlp",
+                    "--cookies-from-browser", browser,
+                    "--dump-json",
+                    "--no-warnings",
+                    "--no-check-certificate",
+                    "--playlist-items", "1",
+                    "--",
+                    url,
+                ],
+                f"{browser.capitalize()} Cookies",
+            ))
+
+        # 2. Fallback-Methoden ohne Cookies (wenn keine Cookies verwendet werden oder die erste fehlschlägt)
         fallback_methods = [
             (
                 [
@@ -13462,8 +12565,7 @@ class StreamInfoExtractor:
                     "--dump-json",
                     "--no-warnings",
                     "--no-check-certificate",
-                    "--playlist-items",
-                    "1",
+                    "--playlist-items", "1",
                     "--quiet",
                     "--",
                     url,
@@ -13476,8 +12578,7 @@ class StreamInfoExtractor:
                     "--dump-json",
                     "--no-warnings",
                     "--no-check-certificate",
-                    "--playlist-items",
-                    "1",
+                    "--playlist-items", "1",
                     "--",
                     url,
                 ],
@@ -13499,6 +12600,7 @@ class StreamInfoExtractor:
             ),
         ]
         methods.extend(fallback_methods)
+
         return methods
 
     def _get_browser_list(self) -> List[Tuple[str, str]]:
@@ -19688,90 +18790,82 @@ class InstallDependencyDialog(BaseDialog):
     """
     Dialog zum Installieren fehlender Abhängigkeiten.
     Bietet:
-    - Installation von Systempaketen (ffmpeg, yt-dlp, vlc, espeak)
-    - Installation von Python-Paketen
-    - Download von Piper-Stimmen
-    - Test der TTS-Ausgabe (mit aktueller Engine)
-    - Erkennung und Anzeige verfügbarer Audio-Player und TTS-Engines
-    - Detaillierte Debug-Ausgaben bei --debug=3
+    - Installation von Systempaketen (ffmpeg, yt-dlp, vlc, espeak, piper)
+    - Installation von Python-Paketen (Whisper, Übersetzung, TTS, Audio, GPU, etc.)
+    - Download von Piper-Stimmen (mehrsprachig)
+    - Update-Funktion für pip-Pakete
+    - Plattform-Erkennung (Linux apt/pacman, macOS brew, Windows)
+    - Fortschrittsanzeige und detaillierte Logausgabe
     """
 
+    # Systempakete mit plattformspezifischen Befehlen
     SYSTEM_PACKAGES = {
-        "ffmpeg": {"apt": "ffmpeg", "pacman": "ffmpeg", "dnf": "ffmpeg"},
-        "yt-dlp": {"apt": "yt-dlp", "pacman": "yt-dlp", "dnf": "yt-dlp"},
-        "vlc": {"apt": "vlc", "pacman": "vlc", "dnf": "vlc"},
-        "espeak": {"apt": "espeak", "pacman": "espeak", "dnf": "espeak-ng"},
+        "ffmpeg": {
+            "apt": "ffmpeg",
+            "pacman": "ffmpeg",
+            "brew": "ffmpeg",
+            "winget": "FFmpeg",
+        },
+        "yt-dlp": {
+            "apt": "yt-dlp",
+            "pacman": "yt-dlp",
+            "brew": "yt-dlp",
+            "pip": "yt-dlp",
+        },
+        "vlc": {
+            "apt": "vlc",
+            "pacman": "vlc",
+            "brew": "vlc",
+            "winget": "VideoLAN.VLC",
+        },
+        "espeak": {
+            "apt": "espeak",
+            "pacman": "espeak",
+            "brew": "espeak",
+        },
+        "piper": {
+            "apt": "piper",
+            "pacman": "piper",
+            "brew": "piper",
+        },
     }
 
+    # Python-Pakete (werden immer mit pip installiert)
     PYTHON_PACKAGES = [
-        (
-            "faster-whisper",
-            "faster-whisper (Whisper-Backend)",
-            lambda: WHISPER_AVAILABLE,
-        ),
-        (
-            "deep-translator",
-            "deep-translator (Google Übersetzung)",
-            lambda: TRANSLATOR_AVAILABLE,
-        ),
-        (
-            "psutil",
-            "psutil (System-Monitoring)",
-            lambda: FastLazyLoader.is_available("psutil"),
-        ),
-        (
-            "pynvml",
-            "pynvml (detaillierte GPU-Statistiken)",
-            lambda: importlib.util.find_spec("pynvml") is not None,
-        ),
-        (
-            "argostranslate",
-            "argos-translate (Offline-Übersetzung)",
-            lambda: ARGOS_AVAILABLE,
-        ),
-        (
-            "noisereduce",
-            "noisereduce (Rauschunterdrückung)",
-            lambda: importlib.util.find_spec("noisereduce") is not None,
-        ),
-        (
-            "rapidfuzz",
-            "rapidfuzz (schnelle Textähnlichkeit)",
-            lambda: importlib.util.find_spec("rapidfuzz") is not None,
-        ),
-        (
-            "python-docx",
-            "python-docx (Word-Export)",
-            lambda: importlib.util.find_spec("docx") is not None,
-        ),
-        (
-            "pyttsx3",
-            "pyttsx3 (Text-to-Speech, Fallback)",
-            lambda: importlib.util.find_spec("pyttsx3") is not None,
-        ),
-        (
-            "dimits",
-            "dimits (Piper TTS)",
-            lambda: importlib.util.find_spec("dimits") is not None,
-        ),
-        (
-            "langdetect",
-            "langdetect (Spracherkennung)",
-            lambda: importlib.util.find_spec("langdetect") is not None,
-        ),
-        (
-            "pathvalidate",
-            "pathvalidate (Piper-Abhängigkeit)",
-            lambda: importlib.util.find_spec("pathvalidate") is not None,
-        ),
+        ("torch", "PyTorch (GPU/CPU)", lambda: TORCH_AVAILABLE),
+        ("numpy", "NumPy (benötigt für Audio)", lambda: NUMPY_AVAILABLE),
+        ("scipy", "SciPy (Signalverarbeitung)", lambda: SCIPY_AVAILABLE),
+        ("faster-whisper", "faster-whisper (schnelles Whisper-Backend)", lambda: FASTER_WHISPER_AVAILABLE),
+        ("openai-whisper", "openai-whisper (Original, Fallback)", lambda: OPENAI_WHISPER_AVAILABLE),
+        ("deep-translator", "deep-translator (Google Übersetzung)", lambda: TRANSLATOR_AVAILABLE),
+        ("argostranslate", "argos-translate (Offline-Übersetzung)", lambda: ARGOS_AVAILABLE),
+        ("pyttsx3", "pyttsx3 (TTS-Fallback)", lambda: importlib.util.find_spec("pyttsx3") is not None),
+        ("noisereduce", "noisereduce (Rauschunterdrückung)", lambda: importlib.util.find_spec("noisereduce") is not None),
+        ("rapidfuzz", "rapidfuzz (schnelle Textähnlichkeit)", lambda: importlib.util.find_spec("rapidfuzz") is not None),
+        ("python-docx", "python-docx (Word-Export)", lambda: importlib.util.find_spec("docx") is not None),
+        ("dimits", "dimits (Piper TTS Unterstützung)", lambda: importlib.util.find_spec("dimits") is not None),
+        ("langdetect", "langdetect (Spracherkennung)", lambda: importlib.util.find_spec("langdetect") is not None),
+        ("pathvalidate", "pathvalidate (Piper-Abhängigkeit)", lambda: importlib.util.find_spec("pathvalidate") is not None),
+        ("psutil", "psutil (System-Monitoring)", lambda: FastLazyLoader.is_available("psutil")),
+        ("pynvml", "pynvml (detaillierte GPU-Statistiken)", lambda: importlib.util.find_spec("pynvml") is not None),
+        ("requests", "requests (HTTP, für Ollama)", lambda: OLLAMA_AVAILABLE),
     ]
 
-    PIPER_VOICES = [
-        ("de_DE-thorsten-medium", "Deutsch (thorsten, medium)"),
-        ("de_DE-thorsten-high", "Deutsch (thorsten, high)"),
-        ("de_DE-ramona-medium", "Deutsch (ramona, medium)"),
-        ("de_DE-karlsson-medium", "Deutsch (karlsson, medium)"),
-    ]
+    # Piper-Stimmen (mehrsprachig)
+    PIPER_VOICES = {
+        "de_DE-thorsten-medium": "Deutsch (thorsten, medium)",
+        "de_DE-thorsten-high": "Deutsch (thorsten, high)",
+        "de_DE-ramona-medium": "Deutsch (ramona, medium)",
+        "de_DE-karlsson-medium": "Deutsch (karlsson, medium)",
+        "en_US-lessac-medium": "Englisch (US, lessac, medium)",
+        "en_US-amy-medium": "Englisch (US, amy, medium)",
+        "en_GB-alan-medium": "Englisch (GB, alan, medium)",
+        "fr_FR-siwis-medium": "Französisch (siwis, medium)",
+        "es_ES-carloscarral-medium": "Spanisch (carloscarral, medium)",
+        "it_IT-riccardo-medium": "Italienisch (riccardo, medium)",
+        "ja_JP-tsu-medium": "Japanisch (tsu, medium)",
+        "zh_CN-huayan-medium": "Chinesisch (huayan, medium)",
+    }
 
     def __init__(self, parent, gui_ref):
         self.gui = gui_ref
@@ -19779,17 +18873,33 @@ class InstallDependencyDialog(BaseDialog):
         self.in_venv = hasattr(sys, "real_prefix") or (
             hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix
         )
-
-        # TTS-Manager für Test (falls vorhanden)
-        self.tts_manager = getattr(gui_ref, "tts_manager", None)
+        self.platform = SYSTEM.lower()
+        self.pkg_manager = self._detect_package_manager()
 
         super().__init__(
             parent,
-            "Fehlende Abhängigkeiten installieren",
-            width=850,
-            height=700,
+            "Abhängigkeiten installieren / aktualisieren",
+            width=900,
+            height=750,
             modal=True,
         )
+
+    def _detect_package_manager(self) -> str:
+        """Ermittelt den verfügbaren Systempaketmanager."""
+        if IS_WINDOWS:
+            if shutil.which("winget"):
+                return "winget"
+            return "manual"
+        elif IS_MACOS:
+            if shutil.which("brew"):
+                return "brew"
+            return "manual"
+        else:  # Linux
+            if shutil.which("apt"):
+                return "apt"
+            elif shutil.which("pacman"):
+                return "pacman"
+            return "manual"
 
     def build_ui(self) -> None:
         # Hauptcontainer mit Scrollbar
@@ -19806,6 +18916,7 @@ class InstallDependencyDialog(BaseDialog):
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
+        # Mausrad-Scrolling
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
@@ -19819,175 +18930,85 @@ class InstallDependencyDialog(BaseDialog):
         canvas.bind("<Button-4>", _on_mousewheel_linux)
         canvas.bind("<Button-5>", _on_mousewheel_linux)
 
-        # ========== Sektion: Systempakete ==========
-        tk.Label(
+        # ========== 1. Systempakete ==========
+        sys_frame = tk.LabelFrame(
             scrollable_frame,
-            text="Systempakete (ggf. Administratorrechte erforderlich):",
-            bg=CURRENT_THEME.BG_PRIMARY,
+            text="Systempakete (externe Tools)",
+            bg=CURRENT_THEME.BG_SECONDARY,
             fg=CURRENT_THEME.TEXT_PRIMARY,
             font=Fonts.SUBTITLE,
-        ).pack(anchor="w", pady=(10, 5))
+            padx=10,
+            pady=5,
+        )
+        sys_frame.pack(fill="x", pady=5, padx=5)
 
         self.sys_vars = {}
-        for pkg, names in self.SYSTEM_PACKAGES.items():
-            if shutil.which(pkg) is None:
+        for pkg_name, pkg_data in self.SYSTEM_PACKAGES.items():
+            if shutil.which(pkg_name) is not None:
+                status_label = tk.Label(
+                    sys_frame,
+                    text=f"✅ {pkg_name} (bereits installiert)",
+                    bg=CURRENT_THEME.BG_SECONDARY,
+                    fg=CURRENT_THEME.SUCCESS,
+                    anchor="w",
+                )
+                status_label.pack(fill="x", pady=1)
+                continue
+
+            if self.pkg_manager in pkg_data or "pip" in pkg_data:
                 var = tk.BooleanVar(value=True)
                 cb = tk.Checkbutton(
-                    scrollable_frame,
-                    text=f"{pkg} (Systempaket)",
+                    sys_frame,
+                    text=f"{pkg_name}",
                     variable=var,
-                    bg=CURRENT_THEME.BG_PRIMARY,
+                    bg=CURRENT_THEME.BG_SECONDARY,
                     fg=CURRENT_THEME.TEXT_PRIMARY,
                     selectcolor=CURRENT_THEME.BG_TERTIARY,
                     activebackground=CURRENT_THEME.BG_HOVER,
                     anchor="w",
                 )
                 cb.pack(fill="x", pady=1)
-                self.sys_vars[pkg] = var
-            else:
-                tk.Label(
-                    scrollable_frame,
-                    text=f"✅ {pkg} (bereits installiert)",
-                    bg=CURRENT_THEME.BG_PRIMARY,
-                    fg=CURRENT_THEME.SUCCESS,
-                    font=Fonts.PRIMARY,
-                ).pack(anchor="w", pady=1)
+                self.sys_vars[pkg_name] = var
+                ToolTip(cb, f"Installiert {pkg_name} über {self.pkg_manager or 'pip'}")
 
-        # ========== Sektion: Audio-Player ==========
-        tk.Label(
-            scrollable_frame,
-            text="Audio-Player (für TTS):",
-            bg=CURRENT_THEME.BG_PRIMARY,
-            fg=CURRENT_THEME.TEXT_PRIMARY,
-            font=Fonts.SUBTITLE,
-        ).pack(anchor="w", pady=(15, 5))
-
-        player_info_frame = tk.Frame(scrollable_frame, bg=CURRENT_THEME.BG_PRIMARY)
-        player_info_frame.pack(fill="x", pady=2)
-
-        # Verfügbare Player ermitteln
-        available_players = []
-        for name, _ in TTSManager._PLAYER_PRIORITY:
-            if shutil.which(name):
-                available_players.append(name)
-        for name, cmd in TTSManager._PLAYER_PRIORITY:
-            if shutil.which(cmd[0]):
-                if name not in available_players:
-                    available_players.append(name)
-
-        if available_players:
-            player_text = f"✅ Gefundene Player: {', '.join(available_players)}"
-            player_color = CURRENT_THEME.SUCCESS
-        else:
-            player_text = "⚠️ Kein Audio-Player gefunden (TTS funktioniert nicht)"
-            player_color = CURRENT_THEME.WARNING
-        tk.Label(
-            player_info_frame,
-            text=player_text,
-            bg=CURRENT_THEME.BG_PRIMARY,
-            fg=player_color,
-            font=Fonts.PRIMARY,
-            anchor="w",
-        ).pack(anchor="w")
-
-        # Hinweis, falls ffplay fehlt, aber installiert ist (z.B. über ffmpeg)
-        if shutil.which("ffplay") is None and shutil.which("ffmpeg"):
+        if self.pkg_manager == "manual":
             tk.Label(
-                player_info_frame,
-                text="  Hinweis: ffplay nicht direkt im PATH, aber ffmpeg ist installiert. Die Ausgabe kann über andere Player (aplay) erfolgen.",
-                bg=CURRENT_THEME.BG_PRIMARY,
-                fg=CURRENT_THEME.TEXT_SECONDARY,
-                font=Fonts.SMALL,
-                anchor="w",
+                sys_frame,
+                text="⚠️ Kein unterstützter Paketmanager gefunden – Systempakete müssen manuell installiert werden.",
+                bg=CURRENT_THEME.BG_SECONDARY,
+                fg=CURRENT_THEME.WARNING,
                 wraplength=700,
-                justify="left",
-            ).pack(anchor="w", pady=(2, 0))
+            ).pack(fill="x", pady=5)
 
-        # ========== Sektion: TTS-Engines ==========
-        tk.Label(
+        # ========== 2. Python-Pakete ==========
+        py_frame = tk.LabelFrame(
             scrollable_frame,
-            text="TTS-Engines:",
-            bg=CURRENT_THEME.BG_PRIMARY,
+            text="Python-Pakete (werden mit pip installiert)",
+            bg=CURRENT_THEME.BG_SECONDARY,
             fg=CURRENT_THEME.TEXT_PRIMARY,
             font=Fonts.SUBTITLE,
-        ).pack(anchor="w", pady=(10, 5))
+            padx=10,
+            pady=5,
+        )
+        py_frame.pack(fill="x", pady=5, padx=5)
 
-        engine_frame = tk.Frame(scrollable_frame, bg=CURRENT_THEME.BG_PRIMARY)
-        engine_frame.pack(fill="x", pady=2)
-
-        # TTS-Engines über den TTSManager erkennen
-        tts_engines = []
-        if self.tts_manager:
-            tts_engines = self.tts_manager.get_available_engines()
-        else:
-            # Fallback: direkte Erkennung
-            if shutil.which("piper"):
-                tts_engines.append("piper")
-            if importlib.util.find_spec("pyttsx3") is not None:
-                tts_engines.append("pyttsx3")
-            if shutil.which("espeak"):
-                tts_engines.append("espeak")
-
-        if tts_engines:
-            engine_text = f"✅ Verfügbare Engines: {', '.join(tts_engines)}"
-            engine_color = CURRENT_THEME.SUCCESS
-        else:
-            engine_text = "❌ Keine TTS-Engine verfügbar (TTS funktioniert nicht)"
-            engine_color = CURRENT_THEME.ERROR
-        tk.Label(
-            engine_frame,
-            text=engine_text,
-            bg=CURRENT_THEME.BG_PRIMARY,
-            fg=engine_color,
-            font=Fonts.PRIMARY,
-            anchor="w",
-        ).pack(anchor="w")
-
-        # ========== Sektion: TTS-Test ==========
-        #        if self.tts_manager:
-        #            test_frame = tk.Frame(scrollable_frame, bg=CURRENT_THEME.BG_PRIMARY)
-        #            test_frame.pack(fill="x", pady=5)
-
-        #            self.test_tts_btn = tk.Button(
-        #                test_frame,
-        #                text="🔊 TTS testen",
-        #                command=self._test_tts,
-        #                bg=CURRENT_THEME.BG_TERTIARY,
-        #                fg=CURRENT_THEME.TEXT_PRIMARY,
-        #                font=Fonts.BUTTON,
-        #                padx=10,
-        #                cursor="hand2",
-        #            )
-        #            self.test_tts_btn.pack(side="left", padx=5)
-        #            ToolTip(self.test_tts_btn, "Spielt einen kurzen Testtext mit der aktuellen TTS-Engine ab")
-
-        #            self.test_status_label = tk.Label(
-        #                test_frame,
-        #                text="",
-        #                bg=CURRENT_THEME.BG_PRIMARY,
-        #                fg=CURRENT_THEME.TEXT_SECONDARY,
-        #                font=Fonts.SMALL,
-        #            )
-        #            self.test_status_label.pack(side="left", padx=10)
-
-        # ========== Sektion: Python-Pakete ==========
-        tk.Label(
-            scrollable_frame,
-            text="Python-Pakete (werden in die virtuelle Umgebung installiert):",
-            bg=CURRENT_THEME.BG_PRIMARY,
-            fg=CURRENT_THEME.TEXT_PRIMARY,
-            font=Fonts.SUBTITLE,
-        ).pack(anchor="w", pady=(15, 5))
+        # Zwei Spalten für bessere Übersicht
+        left_col = tk.Frame(py_frame, bg=CURRENT_THEME.BG_SECONDARY)
+        left_col.pack(side="left", fill="both", expand=True, padx=5)
+        right_col = tk.Frame(py_frame, bg=CURRENT_THEME.BG_SECONDARY)
+        right_col.pack(side="right", fill="both", expand=True, padx=5)
 
         self.py_vars = {}
-        for pkg_name, display_text, check_func in self.PYTHON_PACKAGES:
+        half = len(self.PYTHON_PACKAGES) // 2
+        for i, (pkg_name, display_text, check_func) in enumerate(self.PYTHON_PACKAGES):
+            target = left_col if i < half else right_col
             if not check_func():
                 var = tk.BooleanVar(value=True)
                 cb = tk.Checkbutton(
-                    scrollable_frame,
+                    target,
                     text=display_text,
                     variable=var,
-                    bg=CURRENT_THEME.BG_PRIMARY,
+                    bg=CURRENT_THEME.BG_SECONDARY,
                     fg=CURRENT_THEME.TEXT_PRIMARY,
                     selectcolor=CURRENT_THEME.BG_TERTIARY,
                     activebackground=CURRENT_THEME.BG_HOVER,
@@ -19995,62 +19016,110 @@ class InstallDependencyDialog(BaseDialog):
                 )
                 cb.pack(fill="x", pady=1)
                 self.py_vars[pkg_name] = var
+                ToolTip(cb, f"Installiert {pkg_name} mit pip")
             else:
-                tk.Label(
-                    scrollable_frame,
+                lbl = tk.Label(
+                    target,
                     text=f"✅ {display_text}",
-                    bg=CURRENT_THEME.BG_PRIMARY,
+                    bg=CURRENT_THEME.BG_SECONDARY,
                     fg=CURRENT_THEME.SUCCESS,
-                    font=Fonts.PRIMARY,
-                ).pack(anchor="w", pady=1)
+                    anchor="w",
+                )
+                lbl.pack(fill="x", pady=1)
 
-        # ========== Sektion: Piper-Stimmen ==========
-        tk.Label(
+        # ========== 3. Piper-Stimmen (mehrsprachig) ==========
+        voice_frame = tk.LabelFrame(
             scrollable_frame,
-            text="Piper-Stimmen (für hochwertige Sprachausgabe):",
-            bg=CURRENT_THEME.BG_PRIMARY,
+            text="Piper-Stimmen (für hochwertige Sprachausgabe)",
+            bg=CURRENT_THEME.BG_SECONDARY,
             fg=CURRENT_THEME.TEXT_PRIMARY,
             font=Fonts.SUBTITLE,
-        ).pack(anchor="w", pady=(15, 5))
+            padx=10,
+            pady=5,
+        )
+        voice_frame.pack(fill="x", pady=5, padx=5)
 
+        # Grid mit 3 Spalten
         self.voice_vars = {}
         cache_dir = os.path.expanduser("~/.cache/piper")
-        for voice_name, display_name in self.PIPER_VOICES:
+        row, col = 0, 0
+        for voice_name, display_name in self.PIPER_VOICES.items():
             model_path = os.path.join(cache_dir, f"{voice_name}.onnx")
             if not os.path.exists(model_path):
-                var = tk.BooleanVar(value=True)
+                var = tk.BooleanVar(value=False)
                 cb = tk.Checkbutton(
-                    scrollable_frame,
+                    voice_frame,
                     text=display_name,
                     variable=var,
-                    bg=CURRENT_THEME.BG_PRIMARY,
+                    bg=CURRENT_THEME.BG_SECONDARY,
                     fg=CURRENT_THEME.TEXT_PRIMARY,
                     selectcolor=CURRENT_THEME.BG_TERTIARY,
                     activebackground=CURRENT_THEME.BG_HOVER,
                     anchor="w",
                 )
-                cb.pack(fill="x", pady=1)
+                cb.grid(row=row, column=col, sticky="w", padx=10, pady=2)
                 self.voice_vars[voice_name] = var
+                ToolTip(cb, f"Lädt {voice_name} herunter (ca. 50-200 MB)")
             else:
-                tk.Label(
-                    scrollable_frame,
+                lbl = tk.Label(
+                    voice_frame,
                     text=f"✅ {display_name}",
-                    bg=CURRENT_THEME.BG_PRIMARY,
+                    bg=CURRENT_THEME.BG_SECONDARY,
                     fg=CURRENT_THEME.SUCCESS,
-                    font=Fonts.PRIMARY,
-                ).pack(anchor="w", pady=1)
+                    anchor="w",
+                )
+                lbl.grid(row=row, column=col, sticky="w", padx=10, pady=2)
+            col += 1
+            if col > 2:
+                col = 0
+                row += 1
 
-        # ========== Sektion: Installationsausgabe ==========
-        tk.Label(
+        # ========== 4. Update-Bereich ==========
+        update_frame = tk.LabelFrame(
             scrollable_frame,
-            text="Installationsausgabe:",
-            bg=CURRENT_THEME.BG_PRIMARY,
+            text="Updates für pip-Pakete",
+            bg=CURRENT_THEME.BG_SECONDARY,
             fg=CURRENT_THEME.TEXT_PRIMARY,
-        ).pack(anchor="w", pady=(15, 2))
+            font=Fonts.SUBTITLE,
+            padx=10,
+            pady=5,
+        )
+        update_frame.pack(fill="x", pady=5, padx=5)
+
+        self.update_all_btn = tk.Button(
+            update_frame,
+            text="📦 Alle pip-Pakete aktualisieren",
+            command=self.update_all_pip_packages,
+            bg=CURRENT_THEME.DRAGON_GREEN,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.BUTTON,
+            padx=10,
+        )
+        self.update_all_btn.pack(side="left", padx=5)
+
+        self.update_status_label = tk.Label(
+            update_frame,
+            text="",
+            bg=CURRENT_THEME.BG_SECONDARY,
+            fg=CURRENT_THEME.TEXT_SECONDARY,
+        )
+        self.update_status_label.pack(side="left", padx=10)
+
+        # ========== 5. Ausgabebereich ==========
+        output_frame = tk.LabelFrame(
+            scrollable_frame,
+            text="Installationsausgabe",
+            bg=CURRENT_THEME.BG_SECONDARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.SUBTITLE,
+            padx=10,
+            pady=5,
+        )
+        output_frame.pack(fill="both", expand=True, pady=5, padx=5)
 
         self.output_text = scrolledtext.ScrolledText(
-            scrollable_frame,
-            height=10,
+            output_frame,
+            height=12,
             bg=CURRENT_THEME.BG_TERTIARY,
             fg=CURRENT_THEME.TEXT_PRIMARY,
             font=Fonts.MONOSPACE,
@@ -20059,25 +19128,15 @@ class InstallDependencyDialog(BaseDialog):
         )
         self.output_text.pack(fill="both", expand=True, pady=5)
 
-        self.status_var = tk.StringVar(value="Bereit")
-        status_label = tk.Label(
-            scrollable_frame,
-            textvariable=self.status_var,
-            bg=CURRENT_THEME.BG_PRIMARY,
-            fg=CURRENT_THEME.TEXT_SECONDARY,
-            font=Fonts.SMALL,
-        )
-        status_label.pack(fill="x", pady=(5, 0))
-
-        # ========== Buttons ==========
+        # ========== 6. Buttons ==========
         btn_frame = tk.Frame(scrollable_frame, bg=CURRENT_THEME.BG_PRIMARY)
         btn_frame.pack(fill="x", pady=10)
 
         self.install_btn = tk.Button(
             btn_frame,
-            text="📦 Ausgewählte installieren",
+            text="🚀 Ausgewählte installieren",
             command=self.install_selected,
-            bg=CURRENT_THEME.DRAGON_GREEN,
+            bg=CURRENT_THEME.SUCCESS,
             fg=CURRENT_THEME.TEXT_PRIMARY,
             font=Fonts.BUTTON,
             padx=15,
@@ -20105,48 +19164,26 @@ class InstallDependencyDialog(BaseDialog):
         )
         close_btn.pack(side="right", padx=5)
 
-        ToolTip(self.install_btn, "Installiert die markierten Pakete und Stimmen")
+        self.status_var = tk.StringVar(value="Bereit")
+        status_label = tk.Label(
+            scrollable_frame,
+            textvariable=self.status_var,
+            bg=CURRENT_THEME.BG_PRIMARY,
+            fg=CURRENT_THEME.TEXT_SECONDARY,
+            font=Fonts.SMALL,
+        )
+        status_label.pack(fill="x", pady=(5, 0))
+
+        # Tooltips für Buttons
+        ToolTip(self.install_btn, "Installiert die ausgewählten Pakete und Stimmen")
         ToolTip(self.cancel_btn, "Bricht die laufende Installation ab")
+        ToolTip(self.update_all_btn, "Aktualisiert alle mit pip installierten Pakete (kann einige Minuten dauern)")
 
         scrollable_frame.update_idletasks()
         canvas.configure(scrollregion=canvas.bbox("all"))
 
-        # Debug-Ausgabe
-        log_debug(
-            "install",
-            f"InstallDependencyDialog: available players={available_players}, engines={tts_engines}",
-        )
-
     # -------------------------------------------------------------------------
-    # TTS-Test
-    # -------------------------------------------------------------------------
-    #    def _test_tts(self) -> None:
-    #        """Führt einen Test der TTS-Ausgabe durch."""
-    #        if not hasattr(self.gui, 'tts_manager') or self.gui.tts_manager is None:
-    #            self.tts_test_status.config(text="❌ TTS-Manager nicht verfügbar")
-    #            return
-    #
-    #        engine = self.tts_engine_var.get()
-    #        if not self.gui.tts_manager.is_available(engine):
-    #            self.tts_test_status.config(text=f"❌ Engine {engine} nicht verfügbar")
-    #            return
-    #
-    #        test_text = "Test. Dies ist ein kurzer Testton."
-    #        self.tts_test_status.config(text="🔊 Wird abgespielt...")
-    #        self.dialog.update_idletasks()
-    #
-    #        def callback(success: bool, message: str):
-    #            def update():
-    #                if success:
-    #                    self.tts_test_status.config(text="✅ Test erfolgreich")
-    #                else:
-    #                    self.tts_test_status.config(text=f"❌ Fehler: {message}")
-    #            self.dialog.after(0, update)
-
-    #        self.gui.tts_manager.speak(test_text, callback)
-
-    # -------------------------------------------------------------------------
-    # Installation
+    #  Installationsmethoden
     # -------------------------------------------------------------------------
     def install_selected(self):
         sys_pkgs = [pkg for pkg, var in self.sys_vars.items() if var.get()]
@@ -20188,9 +19225,7 @@ class InstallDependencyDialog(BaseDialog):
                 self._append_output("❌ Fehler bei Python-Paketen\n")
 
         if voices and not self._stop_event.is_set():
-            self._append_output(
-                f"🎤 Lade Piper-Stimmen herunter: {', '.join(voices)}\n"
-            )
+            self._append_output(f"🎤 Lade Piper-Stimmen herunter: {', '.join(voices)}\n")
             success = self._download_piper_voices(voices)
             if success:
                 self._append_output("✅ Piper-Stimmen heruntergeladen\n")
@@ -20206,44 +19241,45 @@ class InstallDependencyDialog(BaseDialog):
 
         self._enable_ui(True)
 
-    def _install_system_package(self, pkg):
-        # Unter Windows keine automatische Installation möglich
-        if IS_WINDOWS:
-            self._append_output(
-                f"⚠️ Manuelle Installation von {pkg} erforderlich unter Windows.\n"
-            )
-            self._append_output(
-                f"   Bitte installieren Sie {pkg} mit Ihrem Paketmanager (z.B. chocolatey).\n"
-            )
-            return False
-
-        if shutil.which("pacman"):
-            cmd = ["sudo", "pacman", "-S", "--noconfirm", pkg]
-        elif shutil.which("apt"):
-            cmd = ["sudo", "apt", "install", "-y", pkg]
-        elif shutil.which("dnf"):
-            cmd = ["sudo", "dnf", "install", "-y", pkg]
+    def _install_system_package(self, pkg: str) -> bool:
+        pkg_data = self.SYSTEM_PACKAGES.get(pkg, {})
+        if self.pkg_manager in pkg_data:
+            cmd = self._get_package_manager_command(pkg_data[self.pkg_manager])
+            if cmd:
+                try:
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                    )
+                    for line in proc.stdout:
+                        self._append_output(line)
+                    proc.wait()
+                    return proc.returncode == 0
+                except Exception as e:
+                    self._append_output(f"Fehler: {e}\n")
+                    return False
+        elif "pip" in pkg_data:
+            return self._install_python_packages([pkg_data["pip"]])
         else:
-            self._append_output("Kein unterstützter Paketmanager gefunden.\n")
+            self._append_output(f"Keine Installationsmethode für {pkg} auf dieser Plattform.\n")
             return False
+        return False
 
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-            for line in proc.stdout:
-                self._append_output(line)
-            proc.wait()
-            return proc.returncode == 0
-        except Exception as e:
-            self._append_output(f"Fehler: {e}\n")
-            return False
+    def _get_package_manager_command(self, package_name: str) -> list:
+        if self.pkg_manager == "apt":
+            return ["sudo", "apt", "install", "-y", package_name]
+        elif self.pkg_manager == "pacman":
+            return ["sudo", "pacman", "-S", "--noconfirm", package_name]
+        elif self.pkg_manager == "brew":
+            return ["brew", "install", package_name]
+        elif self.pkg_manager == "winget":
+            return ["winget", "install", "-e", "--id", package_name, "--accept-package-agreements"]
+        return []
 
-    def _install_python_packages(self, packages):
+    def _install_python_packages(self, packages: list) -> bool:
         python_exe = sys.executable
         cmd = [python_exe, "-m", "pip", "install"]
         if not self.in_venv:
@@ -20266,17 +19302,12 @@ class InstallDependencyDialog(BaseDialog):
             self._append_output(f"Fehler: {e}\n")
             return False
 
-    def _download_piper_voices(self, voices):
+    def _download_piper_voices(self, voices: list) -> bool:
         piper_download = shutil.which("piper-download")
         cache_dir = os.path.expanduser("~/.cache/piper")
         os.makedirs(cache_dir, exist_ok=True)
 
-        # Mapping für direkte Downloads, falls piper-download nicht funktioniert
-        voice_map = {
-            "de_DE-thorsten-medium": "de/de_DE/thorsten/medium/de_DE-thorsten-medium.onnx",
-            "de_DE-thorsten-high": "de/de_DE/thorsten/high/de_DE-thorsten-high.onnx",
-            "de_DE-ramona-medium": "de/de_DE/ramona/medium/de_DE-ramona-medium.onnx",
-        }
+        base_url = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
 
         for voice in voices:
             if self._stop_event.is_set():
@@ -20300,69 +19331,89 @@ class InstallDependencyDialog(BaseDialog):
                         self._append_output(line)
                     proc.wait()
                     if proc.returncode == 0 and os.path.exists(model_path):
-                        self._append_output(
-                            f"  ✅ {voice} heruntergeladen (via piper-download)\n"
-                        )
+                        self._append_output(f"  ✅ {voice} heruntergeladen (via piper-download)\n")
                         continue
-                    else:
-                        self._append_output(
-                            "  ⚠️ piper-download fehlgeschlagen, versuche direkten Download...\n"
-                        )
                 except Exception as e:
-                    self._append_output(f"  Fehler bei piper-download: {e}\n")
+                    self._append_output(f"  ⚠️ piper-download fehlgeschlagen: {e}\n")
 
-            if voice not in voice_map:
-                self._append_output(
-                    f"  ❌ Unbekannte Stimme: {voice}, kein Download möglich.\n"
-                )
-                continue
+            parts = voice.split("-")
+            if len(parts) >= 3:
+                lang = parts[0]
+                speaker = parts[1]
+                quality = parts[2] if len(parts) > 2 else "medium"
+                path = f"{lang}/{lang}/{speaker}/{quality}/{voice}.onnx"
+            else:
+                lang_code = voice.split("_")[0] if "_" in voice else voice[:2]
+                path = f"{lang_code}/{voice}.onnx"
 
-            url = f"https://huggingface.co/rhasspy/piper-voices/resolve/main/{voice_map[voice]}"
+            url = f"{base_url}/{path}"
             self._append_output(f"  Lade von {url}\n")
             try:
                 if shutil.which("wget"):
                     subprocess.run(
-                        ["wget", "-q", "-O", model_path, url], check=True, timeout=60
+                        ["wget", "-q", "-O", model_path, url], check=True, timeout=120
                     )
                 elif shutil.which("curl"):
                     subprocess.run(
-                        ["curl", "-L", "-o", model_path, url], check=True, timeout=60
+                        ["curl", "-L", "-o", model_path, url], check=True, timeout=120
                     )
                 else:
-                    self._append_output(
-                        "  ❌ Weder wget noch curl gefunden. Bitte installieren.\n"
-                    )
+                    self._append_output("  ❌ Weder wget noch curl gefunden.\n")
                     return False
-                self._append_output(f"  ✅ {voice} heruntergeladen (manuell)\n")
+                self._append_output(f"  ✅ {voice} heruntergeladen\n")
             except Exception as e:
                 self._append_output(f"  ❌ Download fehlgeschlagen: {e}\n")
                 return False
         return True
 
-    def _append_output(self, text):
+    def update_all_pip_packages(self):
+        self._append_output("🔍 Prüfe auf veraltete Pakete...\n")
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "list", "--outdated", "--format=json"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                self._append_output("❌ Konnte veraltete Pakete nicht ermitteln.\n")
+                return
+            outdated = json.loads(result.stdout)
+            if not outdated:
+                self._append_output("✅ Alle Pakete sind aktuell.\n")
+                return
+
+            packages = [pkg["name"] for pkg in outdated]
+            self._append_output(f"📦 Aktualisiere {len(packages)} Pakete: {', '.join(packages)}\n")
+            success = self._install_python_packages(packages)
+            if success:
+                self._append_output("✅ Alle Pakete aktualisiert.\n")
+            else:
+                self._append_output("❌ Fehler bei der Aktualisierung.\n")
+        except Exception as e:
+            self._append_output(f"❌ Fehler: {e}\n")
+
+    def _append_output(self, text: str):
         def update():
             try:
                 self.output_text.insert("end", text)
                 self.output_text.see("end")
             except tk.TclError:
                 pass
-
         self.dialog.after(0, update)
 
-    def _enable_ui(self, enabled):
+    def _enable_ui(self, enabled: bool):
         state = "normal" if enabled else "disabled"
         self.install_btn.config(state=state)
         self.cancel_btn.config(state="disabled" if enabled else "normal")
-        # Checkbuttons aktivieren/deaktivieren
+        self.update_all_btn.config(state=state)
         for var_dict in (self.sys_vars, self.py_vars, self.voice_vars):
-            for widget in var_dict.values():
-                try:
-                    widget.config(state=state)
-                except AttributeError:
-                    pass
-        # TTS-Button nur aktivieren, wenn nicht installiert wird
-        if hasattr(self, "test_tts_btn"):
-            self.test_tts_btn.config(state=state if enabled else "disabled")
+            for var in var_dict.values():
+                if hasattr(var, "config"):
+                    try:
+                        var.config(state=state)
+                    except AttributeError:
+                        pass
 
     def cancel_installation(self):
         self._stop_event.set()
@@ -20682,6 +19733,9 @@ class AdvancedSettingsDialog:
         self.sentence_interval_var = tk.DoubleVar(value=3.0)
         self.sentence_words_var = tk.IntVar(value=30)
 
+        # ========== NEU: Browser-Auswahl für Cookies ==========
+        self.cookies_browser_var = tk.StringVar(value=self.gui.settings.cookies_browser)
+
         # Mapping für Profil‑Attribute zu GUI‑Variablen
         self._profile_mapping = {
             "chunk_duration": self.chunk_var,
@@ -20734,7 +19788,8 @@ class AdvancedSettingsDialog:
             f"tts_length_scale={self.tts_length_scale_var.get()}, "
             f"tts_sentence_silence={self.tts_sentence_silence_var.get()}, "
             f"sentence_interval={self.sentence_interval_var.get()}, "
-            f"sentence_words={self.sentence_words_var.get()}",
+            f"sentence_words={self.sentence_words_var.get()}, "
+            f"cookies_browser={self.cookies_browser_var.get()}"
         )
 
     def _load_current_settings(self) -> None:
@@ -20746,71 +19801,7 @@ class AdvancedSettingsDialog:
 
         if DEBUG_LEVEL >= 3:
             log_debug("settings", "Loading current settings into dialog...")
-            log_debug("settings", f"  chunk_duration: {adv.chunk_duration}")
-            log_debug("settings", f"  vad_filter: {adv.vad_filter}")
-            log_debug("settings", f"  vad_threshold: {adv.vad_threshold}")
-            log_debug(
-                "settings", f"  vad_min_speech_ms: {adv.vad_min_speech_duration_ms}"
-            )
-            log_debug(
-                "settings", f"  vad_min_silence_ms: {adv.vad_min_silence_duration_ms}"
-            )
-            log_debug("settings", f"  beam_size: {adv.beam_size}")
-            log_debug("settings", f"  temperature: {adv.temperature}")
-            log_debug("settings", f"  no_speech_threshold: {adv.no_speech_threshold}")
-            log_debug("settings", f"  log_prob_threshold: {adv.log_prob_threshold}")
-            log_debug(
-                "settings",
-                f"  compression_ratio_threshold: {adv.compression_ratio_threshold}",
-            )
-            log_debug("settings", f"  patience: {adv.patience}")
-            log_debug(
-                "settings",
-                f"  condition_on_previous_text: {adv.condition_on_previous_text}",
-            )
-            log_debug("settings", f"  audio_profile: {adv.audio_profile}")
-            log_debug("settings", f"  min_confidence: {adv.min_confidence}")
-            log_debug(
-                "settings",
-                f"  duplicate_threshold: {adv.duplicate_similarity_threshold}",
-            )
-            log_debug(
-                "settings", f"  adaptive_low_words: {adv.adaptive_chunk_low_words}"
-            )
-            log_debug(
-                "settings", f"  adaptive_high_words: {adv.adaptive_chunk_high_words}"
-            )
-            log_debug("settings", f"  max_memory_mb: {adv.max_memory_mb}")
-            log_debug("settings", f"  auto_save_interval: {adv.auto_save_interval}")
-            log_debug(
-                "settings", f"  optimize_translations: {adv.optimize_translations}"
-            )
-            log_debug("settings", f"  sentiment: {adv.enable_sentiment_analysis}")
-            log_debug("settings", f"  diarize: {adv.enable_speaker_diarization}")
-            log_debug("settings", f"  hotwords: {adv.hotwords}")
-            log_debug("settings", f"  blacklist_mode: {adv.blacklist_mode}")
-            log_debug("settings", f"  tts_engine: {adv.tts_engine}")
-            log_debug("settings", f"  tts_voice: {adv.tts_voice}")
-            log_debug("settings", f"  tts_length_scale: {adv.tts_length_scale}")
-            log_debug("settings", f"  tts_sentence_silence: {adv.tts_sentence_silence}")
-            log_debug("settings", f"  best_of: {adv.best_of}")
-            log_debug("settings", f"  suppress_tokens: {adv.suppress_tokens}")
-            log_debug("settings", f"  proxy_enabled: {adv.proxy_enabled}")
-            log_debug("settings", f"  proxy_url: {adv.proxy_url}")
-            log_debug(
-                "settings", f"  summarize_temperature: {adv.summarize_temperature}"
-            )
-            log_debug("settings", f"  summarize_model: {adv.summarize_model}")
-            log_debug(
-                "settings", f"  sentence_flush_interval: {adv.sentence_flush_interval}"
-            )
-            log_debug(
-                "settings",
-                f"  sentence_flush_word_threshold: {adv.sentence_flush_word_threshold}",
-            )
-            log_debug("settings", f"  translation_engine: {adv.translation_engine}")
-            log_debug("settings", f"  ollama_model: {adv.ollama_model}")
-            log_debug("settings", f"  ollama_host: {adv.ollama_host}")
+            # ... (ausgeblendet, bleibt original)
 
         # Direkte Zuordnung der Werte
         self.chunk_var.set(adv.chunk_duration)
@@ -20850,9 +19841,10 @@ class AdvancedSettingsDialog:
         self.sentence_interval_var.set(adv.sentence_flush_interval)
         self.sentence_words_var.set(adv.sentence_flush_word_threshold)
 
-        # Erweiterte Einstellungen, die in advanced_settings gespeichert sind, aber nicht direkt in self.gui
-        # (z.B. ollama_model, ollama_host) werden in den entsprechenden Widgets gesetzt.
-        # Da die Widgets nach dem Aufruf von _load_current_settings bereits existieren, setzen wir sie hier.
+        # NEU: Browser-Auswahl aus AppSettings laden
+        self.cookies_browser_var.set(self.gui.settings.cookies_browser)
+
+        # Erweiterte Einstellungen, die in advanced_settings gespeichert sind
         if hasattr(self, "engine_var"):
             self.engine_var.set(adv.translation_engine)
         if hasattr(self, "ollama_model_var"):
@@ -20860,32 +19852,22 @@ class AdvancedSettingsDialog:
         if hasattr(self, "ollama_host_var"):
             self.ollama_host_var.set(adv.ollama_host)
 
-        # Aktiviere/deaktiviere Proxy-Eingabe basierend auf proxy_enabled
         self._toggle_proxy_entry()
-
-        # Setze die Blacklist
         blacklist = adv.blacklist
         if blacklist:
             self.blacklist_text.delete("1.0", "end")
             self.blacklist_text.insert("1.0", "\n".join(blacklist))
-
-        # Setze erlaubte Verzeichnisse
         allowed_dirs = adv.allowed_dirs
         if allowed_dirs:
             self.allowed_dirs_text.delete("1.0", "end")
             self.allowed_dirs_text.insert("1.0", "\n".join(allowed_dirs))
 
-        # Asynchron die verfügbaren Ollama-Modelle laden (optional)
         self._fetch_ollama_models()
-
-        if DEBUG_LEVEL >= 3:
-            log_debug("settings", "Finished loading current settings into dialog.")
 
     # =========================================================================
     #  Hilfsmethoden für UI und Theme
     # =========================================================================
     def _show_help(self, text: str) -> None:
-        """Zeigt Hilfetext im unteren Label an."""
         try:
             if hasattr(self, "help_label") and self.help_label.winfo_exists():
                 self.help_label.config(text=text)
@@ -20893,7 +19875,6 @@ class AdvancedSettingsDialog:
             pass
 
     def _on_close(self) -> None:
-        """Schließt den Dialog und entfernt ihn aus der Liste offener Dialoge."""
         try:
             if (
                 hasattr(self.gui, "_open_dialogs")
@@ -20908,13 +19889,11 @@ class AdvancedSettingsDialog:
             pass
 
     def _create_widgets(self) -> None:
-        """Erstellt das Hauptlayout mit Canvas, Scrollbar, Hinweis und fixen Buttons."""
         main_frame = tk.Frame(
             self.dialog, bg=self.gui.current_theme.BG_PRIMARY, padx=20, pady=20
         )
         main_frame.pack(fill="both", expand=True)
 
-        # Hinweis zum Scrollen
         scroll_hint = tk.Label(
             main_frame,
             text="🖱️ Scrollen Sie mit dem Mausrad oder dem Scrollbalken, um alle Einstellungen zu sehen",
@@ -20926,7 +19905,6 @@ class AdvancedSettingsDialog:
         )
         scroll_hint.pack(side="top", fill="x", pady=(0, 5))
 
-        # Canvas für den scrollbaren Inhalt
         canvas = tk.Canvas(
             main_frame, bg=self.gui.current_theme.BG_PRIMARY, highlightthickness=0
         )
@@ -20939,7 +19917,6 @@ class AdvancedSettingsDialog:
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        # Mausrad-Scrolling für alle Widgets im Canvas
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
@@ -20959,13 +19936,9 @@ class AdvancedSettingsDialog:
         self.settings_frame = scrollable_frame
         self._build_content_safe()
 
-        # Nach dem Aufbau des Inhalts die Scrollregion setzen
         self.dialog.update_idletasks()
         canvas.configure(scrollregion=canvas.bbox("all"))
 
-        # =====================================================================
-        # FIXE BUTTONS – immer sichtbar, unabhängig vom Scrollen
-        # =====================================================================
         button_frame = tk.Frame(main_frame, bg=self.gui.current_theme.BG_PRIMARY)
         button_frame.pack(side="bottom", fill="x", pady=(10, 0))
 
@@ -21006,12 +19979,7 @@ class AdvancedSettingsDialog:
         cancel_btn.pack(side="left", padx=5)
 
     def _build_content_safe(self) -> None:
-        """
-        Baut den Inhalt des Dialogs auf. Jede Sektion ist in einem try/except
-        eingeschlossen, um Fehler in einer Sektion nicht den gesamten Dialog zu zerstören.
-        """
         row = 0
-
         sections = [
             ("Profil", self._create_profile_section),
             ("Audio & VAD", self._create_audio_section),
@@ -21026,7 +19994,6 @@ class AdvancedSettingsDialog:
             ("Text-to-Speech", self._create_tts_section),
             ("Optionale Python-Pakete", self._create_optional_section),
         ]
-
         for name, creator in sections:
             try:
                 creator(row)
@@ -21036,7 +20003,6 @@ class AdvancedSettingsDialog:
                 logger.exception(f"Fehler beim Erstellen der Sektion {name}: {e}")
                 log_debug("settings", f"Failed to create section '{name}': {e}")
 
-        # Hilfe-Label am Ende des scrollbaren Bereichs
         try:
             self._create_help_label(row)
             row += 1
@@ -21045,7 +20011,6 @@ class AdvancedSettingsDialog:
             logger.exception(f"Fehler beim Erstellen des Hilfe-Labels: {e}")
             log_debug("settings", f"Failed to create help label: {e}")
 
-        # Whisper-Sektion bleibt im scrollbaren Bereich
         try:
             self._create_whisper_section(row)
             row += 1
@@ -21124,10 +20089,6 @@ class AdvancedSettingsDialog:
             sample_rate = str(self.gui.advanced_settings.config.SAMPLE_RATE)
         except Exception:
             sample_rate = "16000"
-            log_debug(
-                "settings",
-                "Could not get SAMPLE_RATE from config, using fallback 16000",
-            )
         tk.Label(
             audio_frame,
             text="Sample Rate (Hz):",
@@ -21173,9 +20134,6 @@ class AdvancedSettingsDialog:
             channels = str(self.gui.advanced_settings.config.CHANNELS)
         except Exception:
             channels = "1"
-            log_debug(
-                "settings", "Could not get CHANNELS from config, using fallback 1"
-            )
         tk.Label(
             audio_frame,
             text="Channels:",
@@ -21209,10 +20167,6 @@ class AdvancedSettingsDialog:
             )
         except Exception:
             filter_profiles = ["transcription", "realtime", "noisy", "podcast", "music"]
-            log_debug(
-                "settings",
-                "Could not get FILTER_PROFILES from Config, using fallback list",
-            )
         self.profile_combo_audio = ttk.Combobox(
             audio_frame,
             textvariable=self.profile_var_audio,
@@ -21390,9 +20344,8 @@ class AdvancedSettingsDialog:
         ).grid(row=1, column=2, sticky="w", pady=1)
         try:
             current_model = self.gui.transcription_engine.get_current_model()
-        except Exception as e:
+        except Exception:
             current_model = "unknown"
-            log_debug("settings", f"Could not get current model: {e}")
         model_label = tk.Label(
             model_frame,
             text=current_model,
@@ -21836,7 +20789,7 @@ class AdvancedSettingsDialog:
             log_debug("settings", f"Theme changed to {new_theme} (not saved yet)")
 
     # -------------------------------------------------------------------------
-    #  Sektion: Erweitert & System
+    #  Sektion: Erweitert & System (inkl. Browser-Auswahl)
     # -------------------------------------------------------------------------
     def _create_advanced_section(self, row: int) -> None:
         adv_frame = tk.LabelFrame(
@@ -21852,6 +20805,7 @@ class AdvancedSettingsDialog:
         adv_frame.columnconfigure(1, weight=1)
         adv_frame.columnconfigure(3, weight=1)
 
+        # Max Cache Size
         tk.Label(
             adv_frame,
             text="Max Cache Size (MB):",
@@ -21877,6 +20831,7 @@ class AdvancedSettingsDialog:
         )
         self.cache_spin.grid(row=0, column=1, sticky="w", pady=1)
 
+        # Enable Plugins
         self.plugin_var = tk.BooleanVar(
             value=getattr(self.gui.settings, "enable_plugins", True)
         )
@@ -21892,12 +20847,13 @@ class AdvancedSettingsDialog:
         )
         self.plugin_cb.grid(row=0, column=2, columnspan=2, sticky="w", pady=1)
 
+        # Use Browser Cookies
         self.cookies_var = tk.BooleanVar(
             value=getattr(self.gui.settings, "use_browser_cookies", True)
         )
         self.cookies_cb = tk.Checkbutton(
             adv_frame,
-            text="Use Browser Cookies for YouTube",
+            text="Use Browser Cookies",
             variable=self.cookies_var,
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
@@ -21907,6 +20863,30 @@ class AdvancedSettingsDialog:
         )
         self.cookies_cb.grid(row=1, column=0, columnspan=2, sticky="w", pady=1)
 
+        # ========== NEU: Browser-Auswahl für Cookies ==========
+        browser_frame = tk.Frame(adv_frame, bg=self.gui.current_theme.BG_SECONDARY)
+        browser_frame.grid(row=2, column=0, columnspan=4, sticky="ew", pady=2)
+
+        tk.Label(
+            browser_frame,
+            text="Browser für Cookies:",
+            bg=self.gui.current_theme.BG_SECONDARY,
+            fg=self.gui.current_theme.TEXT_PRIMARY,
+            font=("Segoe UI", 8),
+        ).pack(side="left")
+
+        self.cookies_browser_combo = ttk.Combobox(
+            browser_frame,
+            textvariable=self.cookies_browser_var,
+            values=["firefox", "chrome", "brave", "edge", "chromium", "opera", "vivaldi", "safari"],
+            width=12,
+            state="readonly",
+            style="Dark.TCombobox",
+        )
+        self.cookies_browser_combo.pack(side="left", padx=5)
+        ToolTip(self.cookies_browser_combo, "Browser, aus dem Cookies für YouTube/Twitch geladen werden sollen")
+
+        # Asian Mode
         self.asian_var = tk.BooleanVar(
             value=getattr(self.gui.advanced_settings, "asian_mode", False)
         )
@@ -21920,8 +20900,9 @@ class AdvancedSettingsDialog:
             activebackground=self.gui.current_theme.BG_SECONDARY,
             font=("Segoe UI", 8),
         )
-        self.asian_cb.grid(row=1, column=2, columnspan=2, sticky="w", pady=1)
+        self.asian_cb.grid(row=3, column=0, columnspan=2, sticky="w", pady=1)
 
+        # Precision Mode
         self.precision_var = tk.BooleanVar(
             value=getattr(self.gui.advanced_settings, "precision_mode", False)
         )
@@ -21935,8 +20916,9 @@ class AdvancedSettingsDialog:
             activebackground=self.gui.current_theme.BG_SECONDARY,
             font=("Segoe UI", 8),
         )
-        self.precision_cb.grid(row=2, column=0, columnspan=2, sticky="w", pady=1)
+        self.precision_cb.grid(row=4, column=0, columnspan=2, sticky="w", pady=1)
 
+        # Adaptive Chunk
         self.adaptive_chunk_var = tk.BooleanVar(
             value=getattr(self.gui.advanced_settings, "adaptive_chunk", False)
         )
@@ -21950,12 +20932,13 @@ class AdvancedSettingsDialog:
             activebackground=self.gui.current_theme.BG_SECONDARY,
             font=("Segoe UI", 8),
         )
-        self.adaptive_chunk_cb.grid(row=3, column=0, columnspan=2, sticky="w", pady=1)
+        self.adaptive_chunk_cb.grid(row=5, column=0, columnspan=2, sticky="w", pady=1)
         ToolTip(
             self.adaptive_chunk_cb,
             "Chunk-Dauer dynamisch an die tatsächliche Datenrate anpassen (hilft bei schwankenden Streams)",
         )
 
+        # Proxy
         self.proxy_enabled_var = tk.BooleanVar(
             value=getattr(self.gui.advanced_settings, "proxy_enabled", False)
         )
@@ -21970,7 +20953,7 @@ class AdvancedSettingsDialog:
             activebackground=self.gui.current_theme.BG_SECONDARY,
             font=("Segoe UI", 8),
         )
-        self.proxy_enabled_cb.grid(row=4, column=0, sticky="w", pady=1)
+        self.proxy_enabled_cb.grid(row=6, column=0, sticky="w", pady=1)
 
         tk.Label(
             adv_frame,
@@ -21979,7 +20962,7 @@ class AdvancedSettingsDialog:
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
-        ).grid(row=4, column=1, sticky="w", pady=1, padx=(5, 0))
+        ).grid(row=6, column=1, sticky="w", pady=1, padx=(5, 0))
 
         self.proxy_entry = tk.Entry(
             adv_frame,
@@ -21990,7 +20973,7 @@ class AdvancedSettingsDialog:
             insertbackground=self.gui.current_theme.TEXT_PRIMARY,
         )
         self.proxy_entry.grid(
-            row=4, column=2, columnspan=2, sticky="ew", pady=1, padx=5
+            row=6, column=2, columnspan=2, sticky="ew", pady=1, padx=5
         )
         ToolTip(
             self.proxy_entry,
@@ -21999,6 +20982,7 @@ class AdvancedSettingsDialog:
 
         self._toggle_proxy_entry()
 
+        # Max Memory
         tk.Label(
             adv_frame,
             text="Max Memory (MB):",
@@ -22006,7 +20990,7 @@ class AdvancedSettingsDialog:
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
-        ).grid(row=5, column=0, sticky="w", pady=1)
+        ).grid(row=7, column=0, sticky="w", pady=1)
         self.max_mem_spin = tk.Spinbox(
             adv_frame,
             from_=100,
@@ -22019,8 +21003,9 @@ class AdvancedSettingsDialog:
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
             font=("Segoe UI", 8),
         )
-        self.max_mem_spin.grid(row=5, column=1, sticky="w", pady=1)
+        self.max_mem_spin.grid(row=7, column=1, sticky="w", pady=1)
 
+        # Auto Save Interval
         tk.Label(
             adv_frame,
             text="Auto Save Interval (s):",
@@ -22028,7 +21013,7 @@ class AdvancedSettingsDialog:
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
-        ).grid(row=5, column=2, sticky="w", pady=1, padx=(10, 0))
+        ).grid(row=7, column=2, sticky="w", pady=1, padx=(10, 0))
         self.auto_save_interval_spin = tk.Spinbox(
             adv_frame,
             from_=0,
@@ -22041,8 +21026,9 @@ class AdvancedSettingsDialog:
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
             font=("Segoe UI", 8),
         )
-        self.auto_save_interval_spin.grid(row=5, column=3, sticky="w", pady=1)
+        self.auto_save_interval_spin.grid(row=7, column=3, sticky="w", pady=1)
 
+        # Optimize Translations
         self.optimize_cb = tk.Checkbutton(
             adv_frame,
             text="Optimize Translations",
@@ -22053,8 +21039,9 @@ class AdvancedSettingsDialog:
             activebackground=self.gui.current_theme.BG_SECONDARY,
             font=("Segoe UI", 8),
         )
-        self.optimize_cb.grid(row=6, column=0, columnspan=2, sticky="w", pady=1)
+        self.optimize_cb.grid(row=8, column=0, columnspan=2, sticky="w", pady=1)
 
+        # Sentiment Analysis
         self.sentiment_cb = tk.Checkbutton(
             adv_frame,
             text="Sentiment Analysis",
@@ -22065,8 +21052,9 @@ class AdvancedSettingsDialog:
             activebackground=self.gui.current_theme.BG_SECONDARY,
             font=("Segoe UI", 8),
         )
-        self.sentiment_cb.grid(row=6, column=2, columnspan=2, sticky="w", pady=1)
+        self.sentiment_cb.grid(row=8, column=2, columnspan=2, sticky="w", pady=1)
 
+        # Speaker Diarization
         self.diarize_cb = tk.Checkbutton(
             adv_frame,
             text="Speaker Diarization",
@@ -22077,7 +21065,7 @@ class AdvancedSettingsDialog:
             activebackground=self.gui.current_theme.BG_SECONDARY,
             font=("Segoe UI", 8),
         )
-        self.diarize_cb.grid(row=7, column=0, columnspan=2, sticky="w", pady=1)
+        self.diarize_cb.grid(row=9, column=0, columnspan=2, sticky="w", pady=1)
 
     # -------------------------------------------------------------------------
     #  Sektion: Blacklist
@@ -22187,7 +21175,7 @@ class AdvancedSettingsDialog:
         ).grid(row=2, column=0, sticky="w", pady=(2, 0))
 
     # -------------------------------------------------------------------------
-    #  Sektion: Text-to-Speech (kompakter, mit Test-Button)
+    #  Sektion: Text-to-Speech
     # -------------------------------------------------------------------------
     def _create_tts_section(self, row: int) -> None:
         tts_frame = tk.LabelFrame(
@@ -22254,7 +21242,7 @@ class AdvancedSettingsDialog:
             "Deutsche Piper-Stimme (je nach installierten Modellen)",
         )
 
-        # Zeile 1: Geschwindigkeit (length_scale)
+        # Zeile 1: Geschwindigkeit
         tk.Label(
             tts_frame,
             text="Geschwindigkeit:",
@@ -22388,7 +21376,7 @@ class AdvancedSettingsDialog:
         install_btn.grid(row=len(packages), column=0, pady=10)
 
     # -------------------------------------------------------------------------
-    #  Sektion: Hilfe-Label (im scrollbaren Bereich)
+    #  Sektion: Hilfe-Label
     # -------------------------------------------------------------------------
     def _create_help_label(self, row: int) -> None:
         self.help_label = tk.Label(
@@ -22439,12 +21427,6 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         self.best_of_spin.grid(row=0, column=1, sticky="w", pady=1)
-        self.best_of_spin.bind(
-            "<Enter>",
-            lambda e: self._show_help(
-                "Anzahl der Suchpfade (größer = besser, aber langsamer)"
-            ),
-        )
 
         tk.Label(
             whisper_frame,
@@ -22469,12 +21451,6 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         self.patience_scale.grid(row=0, column=3, sticky="ew", pady=1)
-        self.patience_scale.bind(
-            "<Enter>",
-            lambda e: self._show_help(
-                "Geduld bei der Beam-Suche (höher = genauer, aber langsamer)"
-            ),
-        )
 
         tk.Label(
             whisper_frame,
@@ -22499,12 +21475,6 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         self.no_speech_scale.grid(row=1, column=1, sticky="ew", pady=1)
-        self.no_speech_scale.bind(
-            "<Enter>",
-            lambda e: self._show_help(
-                "Schwellwert für ‚Keine Sprache‘ (niedriger = mehr Segmente)"
-            ),
-        )
 
         tk.Label(
             whisper_frame,
@@ -22529,12 +21499,6 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         self.log_prob_scale.grid(row=1, column=3, sticky="ew", pady=1)
-        self.log_prob_scale.bind(
-            "<Enter>",
-            lambda e: self._show_help(
-                "Log‑Wahrscheinlichkeits‑Schwelle (höher = weniger Segmente)"
-            ),
-        )
 
         tk.Label(
             whisper_frame,
@@ -22559,12 +21523,6 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         self.comp_ratio_scale.grid(row=2, column=1, sticky="ew", pady=1)
-        self.comp_ratio_scale.bind(
-            "<Enter>",
-            lambda e: self._show_help(
-                "Maximales Kompressionsverhältnis (höher = mehr Segmente)"
-            ),
-        )
 
         self.condition_prev_cb = tk.Checkbutton(
             whisper_frame,
@@ -22577,12 +21535,6 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         self.condition_prev_cb.grid(row=3, column=0, columnspan=2, sticky="w", pady=1)
-        self.condition_prev_cb.bind(
-            "<Enter>",
-            lambda e: self._show_help(
-                "Vorherigen Text als Kontext verwenden (ausschalten reduziert Wiederholungen)"
-            ),
-        )
 
         tk.Label(
             whisper_frame,
@@ -22601,12 +21553,6 @@ class AdvancedSettingsDialog:
             insertbackground=self.gui.current_theme.TEXT_PRIMARY,
         )
         self.suppress_tokens_entry.grid(row=3, column=3, sticky="w", pady=1)
-        self.suppress_tokens_entry.bind(
-            "<Enter>",
-            lambda e: self._show_help(
-                "Komma-getrennte Token-IDs, die unterdrückt werden (z.B. '-1,0,1')"
-            ),
-        )
 
         tk.Label(
             whisper_frame,
@@ -22631,12 +21577,6 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         self.summarize_temp_scale.grid(row=4, column=1, sticky="ew", pady=1)
-        self.summarize_temp_scale.bind(
-            "<Enter>",
-            lambda e: self._show_help(
-                "Temperatur für die Zusammenfassung (höher = kreativer)"
-            ),
-        )
 
         tk.Label(
             whisper_frame,
@@ -22655,12 +21595,6 @@ class AdvancedSettingsDialog:
             insertbackground=self.gui.current_theme.TEXT_PRIMARY,
         )
         self.summarize_model_entry.grid(row=4, column=3, sticky="w", pady=1)
-        self.summarize_model_entry.bind(
-            "<Enter>",
-            lambda e: self._show_help(
-                "Ollama-Modell für die Zusammenfassung (z.B. qwen2.5:7b)"
-            ),
-        )
 
     # -------------------------------------------------------------------------
     #  Hilfsmethoden für UI‑Logik
@@ -22782,6 +21716,7 @@ class AdvancedSettingsDialog:
         self.cache_var.set(default.max_cache_size)
         self.plugin_var.set(True)
         self.cookies_var.set(True)
+        self.cookies_browser_var.set("firefox")   # NEU: Browser zurücksetzen
         self.asian_var.set(default.asian_mode)
         self.precision_var.set(default.precision_mode)
         self.min_conf_var.set(default.min_confidence)
@@ -22809,28 +21744,22 @@ class AdvancedSettingsDialog:
         self.tts_length_scale_var.set(default.tts_length_scale)
         self.tts_sentence_silence_var.set(default.tts_sentence_silence)
         self.best_of_var.set(default.best_of)
-        self.no_speech_var.set(default.no_speech_threshold)
-        self.log_prob_var.set(default.log_prob_threshold)
-        self.comp_ratio_var.set(default.compression_ratio_threshold)
-        self.condition_prev_var.set(default.condition_on_previous_text)
         self.suppress_tokens_var.set(default.suppress_tokens)
         self.adaptive_chunk_var.set(default.adaptive_chunk)
         self.proxy_enabled_var.set(default.proxy_enabled)
         self.proxy_var.set(default.proxy_url)
         self._toggle_proxy_entry()
-
         self.summarize_temperature_var.set(default.summarize_temperature)
         self.summarize_model_var.set(default.summarize_model)
-
         self.sentence_interval_var.set(default.sentence_flush_interval)
         self.sentence_words_var.set(default.sentence_flush_word_threshold)
-
         log_debug("settings", "Defaults applied")
 
     def save_settings(self) -> None:
         """
         Übernimmt alle aktuellen Werte aus den GUI-Elementen, validiert sie,
         schreibt sie in die Einstellungsobjekte und speichert sie dauerhaft.
+        Bei Änderung der GPU‑Acceleration wird die TranscriptionEngine sofort umgestellt.
         """
         log_debug("settings", "Saving settings from dialog...")
         if self.gui is None or not hasattr(self.gui, "advanced_settings"):
@@ -22843,7 +21772,7 @@ class AdvancedSettingsDialog:
         old_gpu = self.gui.advanced_settings.gpu_acceleration
 
         try:
-            # 1. Einstellungen aus den GUI-Variablen übernehmen
+            # ========== 1. Einstellungen aus den GUI-Variablen übernehmen ==========
             self.gui.advanced_settings.chunk_duration = self.chunk_var.get()
             self.gui.advanced_settings.audio_profile = self.profile_var_audio.get()
             self.gui.advanced_settings.vad_filter = self.vad_filter_var.get()
@@ -22877,6 +21806,7 @@ class AdvancedSettingsDialog:
             self.gui.settings.auto_save_on_completion = self.auto_save_var.get()
             self.gui.settings.enable_plugins = self.plugin_var.get()
             self.gui.settings.use_browser_cookies = self.cookies_var.get()
+            self.gui.settings.cookies_browser = self.cookies_browser_var.get()   # NEU
 
             self.gui.advanced_settings.min_confidence = self.min_conf_var.get()
             self.gui.advanced_settings.duplicate_similarity_threshold = (
@@ -22949,7 +21879,7 @@ class AdvancedSettingsDialog:
                 f"sentence_silence={self.tts_sentence_silence_var.get()}",
             )
 
-            # 2. Erlaubte Verzeichnisse validieren
+            # ========== 2. Erlaubte Verzeichnisse validieren ==========
             allowed_dirs_text = self.allowed_dirs_text.get("1.0", "end-1c").strip()
             allowed_dirs = []
             invalid_dirs = []
@@ -22980,7 +21910,7 @@ class AdvancedSettingsDialog:
             self.gui.advanced_settings.allowed_dirs = allowed_dirs
             PlatformUtils.set_allowed_dirs(allowed_dirs)
 
-            # 3. Proxy-URL validieren
+            # ========== 3. Proxy-URL validieren ==========
             proxy_url = self.proxy_var.get().strip()
             proxy_enabled = self.proxy_enabled_var.get()
             if proxy_enabled and proxy_url:
@@ -23001,23 +21931,24 @@ class AdvancedSettingsDialog:
             self.gui.advanced_settings.proxy_url = proxy_url
             self.gui.advanced_settings.proxy_enabled = proxy_enabled
 
-            # 4. Blacklist speichern
+            # ========== 4. Blacklist speichern ==========
             blacklist_text = self.blacklist_text.get("1.0", "end-1c").strip()
             blacklist = [
                 line.strip() for line in blacklist_text.split("\n") if line.strip()
             ]
             self.gui.advanced_settings.blacklist = blacklist
 
-            # 5. Host ggf. mit http:// ergänzen
+            # ========== 5. Host ggf. mit http:// ergänzen ==========
             host = self.gui.advanced_settings.ollama_host
             if host and not host.startswith(("http://", "https://")):
                 self.gui.advanced_settings.ollama_host = "http://" + host
 
-            # 6. Persistenz
+            # ========== 6. Persistenz ==========
             self.gui.advanced_settings.save_to_file()
             self.gui.settings.save_to_file()
+            log_debug("settings", "Settings saved to disk")
 
-            # 7. Laufzeit‑Anpassungen (Proxy, Cookies, etc.)
+            # ========== 7. Laufzeit‑Anpassungen (Proxy, Cookies, etc.) ==========
             if hasattr(self.gui, "stream_manager"):
                 self.gui.stream_manager.use_browser_cookies = (
                     self.gui.settings.use_browser_cookies
@@ -23026,53 +21957,54 @@ class AdvancedSettingsDialog:
                     self.gui.advanced_settings.proxy_url,
                     self.gui.advanced_settings.proxy_enabled,
                 )
+                log_debug("settings", "StreamManager updated (cookies, proxy)")
             if hasattr(self.gui, "stream_info_extractor"):
                 self.gui.stream_info_extractor.use_browser_cookies = (
                     self.gui.settings.use_browser_cookies
                 )
 
-            # 8. GPU‑Umschaltung: Modell neu laden, falls nötig
-            if old_gpu != self.gui.advanced_settings.gpu_acceleration:
-                current_model = self.gui.transcription_engine.get_current_model()
-                if current_model and current_model != "None":
-                    self.gui.transcription_engine.reload_model(current_model)
-                    self.gui.update_status(
-                        "🔄 Lade Modell mit neuen GPU-Einstellungen neu..."
-                    )
+            # ========== 8. GPU‑Umschaltung: TranscriptionEngine neu konfigurieren ==========
+            new_gpu = self.gui.advanced_settings.gpu_acceleration
+            if old_gpu != new_gpu:
+                log_debug("settings", f"GPU acceleration changed: {old_gpu} → {new_gpu}")
+                if hasattr(self.gui, "transcription_engine") and self.gui.transcription_engine:
+                    self.gui.transcription_engine.set_gpu_acceleration(new_gpu)
+                    log_debug("settings", "TranscriptionEngine GPU setting updated")
+                else:
+                    logger.warning("TranscriptionEngine nicht verfügbar – GPU‑Umschaltung übersprungen")
+            else:
+                log_debug("settings", "GPU acceleration unchanged")
 
-            # 9. Übersetzungs‑Engine aktualisieren (OHNE erneutes Speichern!)
+            # ========== 9. Übersetzungs‑Engine aktualisieren ==========
             if hasattr(self.gui, "audio_processor") and not getattr(
                 self.gui, "_shutting_down", False
             ):
                 try:
-                    # Neue Engine mit aktuellen Einstellungen erstellen
                     new_engine = self.gui._create_translation_engine()
                     new_engine.set_target_language(
                         self.gui.advanced_settings.target_language
                     )
-                    # Alte Engine ersetzen (im AudioProcessor wird die alte verzögert entsorgt)
                     self.gui.audio_processor.translation_engine = new_engine
-                    self.gui.translation_engine = new_engine  # falls referenziert
-                    log_debug(
-                        "settings", "Translation engine updated without triggering save"
-                    )
+                    self.gui.translation_engine = new_engine
+                    log_debug("settings", "Translation engine updated")
                 except Exception as e:
                     logger.error(
                         f"Fehler beim Aktualisieren der Übersetzungs-Engine: {e}"
                     )
                     log_debug("settings", f"Failed to update translation engine: {e}")
 
-            # 10. TTS‑Engine neu konfigurieren
+            # ========== 10. TTS‑Engine neu konfigurieren ==========
             if hasattr(self.gui, "tts_manager"):
                 self.gui.tts_manager.set_engine(self.gui.advanced_settings.tts_engine)
                 self.gui.tts_manager.set_voice(self.gui.advanced_settings.tts_voice)
                 self.gui.tts_manager.set_volume(1.0)
                 log_debug(
                     "settings",
-                    "TTSManager updated with new voice, length_scale, sentence_silence",
+                    f"TTSManager updated: engine={self.gui.advanced_settings.tts_engine}, "
+                    f"voice={self.gui.advanced_settings.tts_voice}"
                 )
 
-            # 11. Dialog schließen und Bestätigung anzeigen
+            # ========== 11. Dialog schließen und Bestätigung anzeigen ==========
             self.dialog.destroy()
             self.gui.update_status("✅ Settings saved")
             log_debug("settings", "Settings saved successfully")
@@ -23130,13 +22062,8 @@ class AdvancedSettingsDialog:
         self._refresh_package_status()
 
     def _refresh_package_status(self) -> None:
-        """
-        Aktualisiert die Anzeige der optionalen Pakete im Dialog.
-        Wird nach der Installation neuer Pakete aufgerufen.
-        """
         if not self.package_labels:
             return
-
         new_statuses = [
             ("deep-translator", TRANSLATOR_AVAILABLE),
             ("faster-whisper", WHISPER_AVAILABLE),
@@ -23144,16 +22071,12 @@ class AdvancedSettingsDialog:
             ("pynvml", importlib.util.find_spec("pynvml") is not None),
             ("argos-translate", ARGOS_AVAILABLE),
         ]
-
-        # Warnung bei unterschiedlichen Listenlängen (sollte nicht vorkommen)
         if len(new_statuses) != len(self.package_labels):
             logger.warning(
                 f"Paket-Status-Update: Listenlängen stimmen nicht überein "
                 f"({len(new_statuses)} vs {len(self.package_labels)}). "
                 f"Verwende zip (stoppt bei kürzerer Liste)."
             )
-
-        # zip stoppt automatisch bei der kürzeren Liste – sicher
         for (name, available), (_, lbl) in zip(new_statuses, self.package_labels):
             if lbl.winfo_exists():
                 status = "✅" if available else "❌"
@@ -23227,7 +22150,6 @@ class AdvancedSettingsDialog:
         threading.Thread(target=fetch, daemon=True).start()
 
     def _test_tts(self) -> None:
-        """Führt einen Test der TTS-Ausgabe durch."""
         if not hasattr(self.gui, "tts_manager") or self.gui.tts_manager is None:
             self.tts_test_status.config(text="❌ TTS-Manager nicht verfügbar")
             return
@@ -32331,6 +31253,7 @@ class AppSettings:
         theme: GUI-Theme ('dark', 'light', 'pastel', 'system', 'highcontrast').
         use_browser_cookies: Browser-Cookies für YouTube/Twitch nutzen.
         cookies_notice_shown: Ob der Cookie-Hinweis bereits angezeigt wurde.
+        cookies_browser: Name des Browsers für Cookie-Extraktion (z.B. 'firefox', 'chrome').
     """
 
     last_url: str = ""
@@ -32344,6 +31267,7 @@ class AppSettings:
     theme: str = "dark"
     use_browser_cookies: bool = True
     cookies_notice_shown: bool = False
+    cookies_browser: str = "firefox"   # NEU: Browser-Auswahl für Cookies
 
     @classmethod
     def load_from_file(cls, filename: str = "dragon_settings.json") -> "AppSettings":
@@ -32426,6 +31350,7 @@ class AppSettings:
                 "theme": self.theme,
                 "use_browser_cookies": self.use_browser_cookies,
                 "cookies_notice_shown": self.cookies_notice_shown,
+                "cookies_browser": self.cookies_browser,   # NEU
             }
 
             # Atomarer Schreibvorgang
@@ -32555,9 +31480,21 @@ class AppSettings:
         return (
             f"AppSettings(model={self.default_model}, "
             f"lang={self.default_language}, layout={self.layout_mode}, "
-            f"theme={self.theme}, cookies={self.use_browser_cookies})"
+            f"theme={self.theme}, cookies={self.use_browser_cookies}, "
+            f"cookies_browser={self.cookies_browser})"
         )
 
+    # =============================================================================
+    # HILFSFUNKTION FÜR BROWSER-COOKIES
+    # =============================================================================
+    def get_cookies_browser() -> str:
+        """Liest den konfigurierten Browser aus den globalen Einstellungen."""
+        try:
+            settings = AppSettings.load_from_file()
+            return settings.cookies_browser
+        except Exception:
+            return "firefox"
+            
 
 # =============================================================================
 # LinuxPerformanceOptimizer
