@@ -74,6 +74,9 @@ pip install openai-whisper   # Falls faster-whisper nicht verfügbar
 Basis‑Abhängigkeiten:
 
 pip install torch numpy scipy deep-translator psutil requests
+pip install faster-whisper argostranslate deep-translator pyttsx3 \
+            noisereduce rapidfuzz python-docx dimits langdetect \
+            pathvalidate psutil pynvml
 
 GUI (tkinter):
 
