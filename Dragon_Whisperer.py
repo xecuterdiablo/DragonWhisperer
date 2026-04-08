@@ -6536,6 +6536,13 @@ class TranscriptionEngine:
         self.device, self.compute_type = self._detect_optimal_device()
         self._debug = logger.isEnabledFor(logging.DEBUG)
 
+        # Warnung, wenn GPU-Acceleration aktiviert, aber kein CUDA/MPS erkannt wurde
+        if self.settings.gpu_acceleration and self.device == "cpu":
+            logger.warning(
+                "⚠️ GPU acceleration is enabled in settings, but no compatible GPU was found or PyTorch does not support your GPU. "
+                "Falling back to CPU. You can disable GPU acceleration in advanced settings to suppress this warning."
+            )
+
         self._model_locks: Dict[str, threading.Lock] = {}
         self._model_locks_lock = threading.Lock()
         self._model_load_stop_event = threading.Event()
@@ -6656,7 +6663,6 @@ class TranscriptionEngine:
         if set_active:
             with self._model_usage_lock:
                 if self.model is not None and self.model_size == model_size:
-                    # Wichtig: Hier das aktuelle Device ausgeben
                     if self._debug:
                         logger.debug(f"Modell {model_size} bereits aktiv – verwende bestehendes (device={self.device})")
                     return self.model, self.whisper_backend
@@ -6934,6 +6940,7 @@ class TranscriptionEngine:
                     cc_major, cc_minor = torch.cuda.get_device_capability(0)
                     gpu_name = torch.cuda.get_device_name(0)
                     logger.info(f"✅ NVIDIA GPU: {gpu_name} (CC {cc_major}.{cc_minor})")
+
                     if cc_major >= 6:          # Pascal oder neuer
                         compute_type = "int8"
                         logger.info("   → Verwende int8 (optimal)")
