@@ -8495,10 +8495,11 @@ class StreamManager:
         match = self._YOUTUBE_ID_REGEX.search(url)
         return match.group(1) if match else None
 
-    def _try_browser_cookies(self, url: str, format_str: str = "bestaudio[ext=m4a]/bestaudio/best") -> Optional[str]:
+    def _try_browser_cookies(self, url: str, format_str: str = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/worstaudio") -> Optional[str]:
         """
         Versucht, die Audio-URL mit Cookies aus dem konfigurierten Browser zu extrahieren.
-        Verwendet nur den in den Einstellungen festgelegten Browser (keine Schleife über alle).
+        Bevorzugt reine Audio-Formate (m4a, webm) und vermeidet Video-Streams.
+        Bei Fehlschlag wird ein zweiter Versuch ohne Cookies gestartet.
         """
         proxy_arg = self._proxy if self._proxy_enabled else ""
 
@@ -8507,15 +8508,15 @@ class StreamManager:
             if hasattr(self, "settings") and self.settings is not None:
                 browser = getattr(self.settings, "cookies_browser", "firefox")
             else:
-                # Fallback: direkter Zugriff auf die JSON-Datei
                 settings = AppSettings.load_from_file()
                 browser = getattr(settings, "cookies_browser", "firefox")
         except Exception:
             browser = "firefox"
 
         if self._debug:
-            logger.debug(f"    🧪 Versuche Cookies von {browser}...")
+            logger.debug(f"    🧪 Versuche Cookies von {browser} (Format: {format_str})...")
 
+        # Erster Versuch mit Cookies
         audio_url = YtDlpHelper.get_audio_url(
             url,
             format_str=format_str,
@@ -8526,10 +8527,46 @@ class StreamManager:
         )
 
         if audio_url:
+            # Prüfen, ob die URL auf einen Videostream hindeutet (itag=18,22,37 etc.)
+            video_tags = ["itag=18", "itag=22", "itag=37"]
+            if any(tag in audio_url for tag in video_tags):
+                if self._debug:
+                    logger.warning(f"    ⚠️ Extrahiert möglicherweise Video-URL: {audio_url[:100]}...")
+                    logger.debug("    🔄 Versuche Fallback ohne Cookies...")
+                # Zweiter Versuch ohne Cookies mit "worstaudio"
+                audio_url2 = YtDlpHelper.get_audio_url(
+                    url,
+                    format_str="worstaudio",
+                    timeout=20,
+                    use_cookies=False,
+                    proxy=proxy_arg,
+                )
+                if audio_url2 and not any(tag in audio_url2 for tag in video_tags):
+                    if self._debug:
+                        logger.debug(f"    ✅ Fallback zu worstaudio ohne Cookies: {audio_url2[:100]}...")
+                    return audio_url2
+                # Falls das auch nicht hilft, trotzdem die erste URL zurückgeben (besser als nichts)
             if self._debug:
                 logger.debug(f"    ✅ Erfolg mit {browser}-Cookies")
             return audio_url
 
+        # Zweiter Versuch ohne Cookies (falls erster komplett fehlschlug)
+        if self._debug:
+            logger.debug("    🔄 Cookies fehlgeschlagen, versuche ohne Cookies...")
+        audio_url = YtDlpHelper.get_audio_url(
+            url,
+            format_str=format_str,
+            timeout=20,
+            use_cookies=False,
+            proxy=proxy_arg,
+        )
+        if audio_url:
+            if self._debug:
+                logger.debug("    ✅ Erfolg ohne Cookies")
+            return audio_url
+
+        if self._debug:
+            logger.debug("    ❌ Alle Versuche fehlgeschlagen")
         return None
 
     def _try_standard_methods(
@@ -10752,10 +10789,12 @@ class FFmpegManager:
         except Exception:
             browser = "firefox"
 
+        # Format-String priorisiert reine Audio-Formate
+        format_str = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/worstaudio"
+
         yt_cmd = [
             "yt-dlp",
-            "-f",
-            "bestaudio[ext=m4a]/bestaudio/best",
+            "-f", format_str,
             "--no-playlist",
             "--verbose",
             "--no-warnings",
@@ -10781,6 +10820,16 @@ class FFmpegManager:
             start_new_session=True,
         )
         logger.info(f"  ✅ yt‑dlp started (PID: {yt_process.pid})")
+
+        # Kurze Wartezeit, um sofortigen Prozess-Tod zu erkennen
+        time.sleep(0.5)
+        if yt_process.poll() is not None:
+            stderr_hint = self._read_stderr(yt_process)
+            logger.error(
+                f"❌ yt-dlp starb sofort (Exit {yt_process.poll()}). "
+                f"Stderr: {stderr_hint[:200]}"
+            )
+            return None
 
         profile = "realtime"
         if self.settings and hasattr(self.settings, "audio_profile"):
@@ -20860,7 +20909,7 @@ class AdvancedSettingsDialog:
         )
         self.cookies_cb = tk.Checkbutton(
             adv_frame,
-            text="Use Browser Cookies",
+            text="Use Browser Cookies for YouTube",
             variable=self.cookies_var,
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
@@ -20870,7 +20919,7 @@ class AdvancedSettingsDialog:
         )
         self.cookies_cb.grid(row=1, column=0, columnspan=2, sticky="w", pady=1)
 
-        # ========== NEU: Browser-Auswahl für Cookies ==========
+        # ========== Browser-Auswahl für Cookies (NEU) ==========
         browser_frame = tk.Frame(adv_frame, bg=self.gui.current_theme.BG_SECONDARY)
         browser_frame.grid(row=2, column=0, columnspan=4, sticky="ew", pady=2)
 
@@ -20882,7 +20931,8 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         ).pack(side="left")
 
-        self.cookies_browser_combo = ttk.Combobox(
+        self.cookies_browser_var = tk.StringVar(value=self.gui.settings.cookies_browser)
+        browser_combo = ttk.Combobox(
             browser_frame,
             textvariable=self.cookies_browser_var,
             values=["firefox", "chrome", "brave", "edge", "chromium", "opera", "vivaldi", "safari"],
@@ -20890,8 +20940,8 @@ class AdvancedSettingsDialog:
             state="readonly",
             style="Dark.TCombobox",
         )
-        self.cookies_browser_combo.pack(side="left", padx=5)
-        ToolTip(self.cookies_browser_combo, "Browser, aus dem Cookies für YouTube/Twitch geladen werden sollen")
+        browser_combo.pack(side="left", padx=5)
+        ToolTip(browser_combo, "Browser, aus dem Cookies für YouTube/Twitch geladen werden sollen")
 
         # Asian Mode
         self.asian_var = tk.BooleanVar(
@@ -28143,16 +28193,10 @@ class AudioProcessor:
             log_debug("processor", "_stop_dispatcher: queue full, sentinel not added")
 
         if self._dispatcher_thread and self._dispatcher_thread.is_alive():
-            log_debug(
-                "processor",
-                f"_stop_dispatcher: waiting for dispatcher thread ({self._dispatcher_thread.name})",
-            )
+            log_debug("processor", f"_stop_dispatcher: waiting for dispatcher thread ({self._dispatcher_thread.name})")
             self._dispatcher_thread.join(timeout=5.0)
             if self._dispatcher_thread.is_alive():
-                logger.warning(
-                    "⚠️ Dispatcher-Thread beendet sich nicht innerhalb von 5 Sekunden"
-                )
-                # Notfall: Thread als Daemon markieren (hilft beim Shutdown)
+                logger.warning("⚠️ Dispatcher-Thread beendet sich nicht innerhalb von 5 Sekunden")
                 self._dispatcher_thread.daemon = True
             else:
                 log_debug("processor", "_stop_dispatcher: dispatcher thread joined")
@@ -28969,17 +29013,32 @@ class AudioProcessor:
             return self._processed_seconds
 
     def _shutdown_executor_safe(self, executor, name, timeout=5.0):
-        """Fährt einen Executor herunter – blockiert maximal `timeout` Sekunden."""
+        """
+        Fährt einen Executor sauber herunter und wartet auf alle Worker‑Threads.
+        Blockiert maximal `timeout` Sekunden.
+        """
         if executor is None:
             return
+
         log_debug("shutdown", f"Shutting down {name} executor...")
         executor.shutdown(wait=False, cancel_futures=True)
+
+        # 1. Versuche, Worker-Threads über das Executor-Objekt zu finden
         worker_threads = getattr(executor, "_threads", [])
         if not worker_threads:
-            log_debug("shutdown", f"  → {name}: no worker threads found")
-            return
+            # Fallback: Suche Threads, deren Name mit dem Executor-Namen beginnt
+            for t in threading.enumerate():
+                if t.name.startswith(name) and t != threading.current_thread():
+                    worker_threads.append(t)
+            if not worker_threads:
+                log_debug("shutdown", f"  → {name}: no worker threads found")
+                return
+
         end_time = time.time() + timeout
         for t in worker_threads:
+            if not t.is_alive():
+                log_debug("shutdown", f"  → {name} worker thread {t.name} already dead")
+                continue
             remaining = max(0.1, end_time - time.time())
             t.join(timeout=remaining)
             if t.is_alive():
@@ -28989,6 +29048,9 @@ class AudioProcessor:
                 t.daemon = True
             else:
                 log_debug("shutdown", f"  → {name} worker thread {t.name} terminated")
+
+        # Optional: Kurze Pause, um dem Garbage Collector Zeit zu geben
+        time.sleep(0.1)
 
     def dispose(self) -> None:
         """
@@ -29029,22 +29091,11 @@ class AudioProcessor:
                 self._set_state(AudioProcessor.State.IDLE)
             log_debug("shutdown", "Stop event set, state IDLE")
 
-            # ========== 3. Dispatcher stoppen und auf Thread warten ==========
+            # ========== 3. Dispatcher stoppen ==========
             self._stop_dispatcher()
-            if self._dispatcher_thread and self._dispatcher_thread.is_alive():
-                log_debug("shutdown", "Waiting for dispatcher thread...")
-                self._dispatcher_thread.join(timeout=3.0)
-                if self._dispatcher_thread.is_alive():
-                    logger.warning("Dispatcher thread did not terminate within timeout")
-                else:
-                    log_debug("shutdown", "Dispatcher thread joined")
-            self._dispatcher_thread = None
 
             # ========== 4. Auf den Processing-Thread warten ==========
-            if (
-                hasattr(self, "_processing_thread")
-                and self._processing_thread is not None
-            ):
+            if hasattr(self, "_processing_thread") and self._processing_thread is not None:
                 if self._processing_thread.is_alive():
                     log_debug("shutdown", "Waiting for processing thread...")
                     self._processing_thread.join(timeout=3.0)
@@ -29054,13 +29105,9 @@ class AudioProcessor:
                         log_debug("shutdown", "Processing thread joined")
                 self._processing_thread = None
 
-            # ========== 5. Executoren mit Timeout herunterfahren ==========
-            self._shutdown_executor_safe(
-                self._transcription_executor, "Transcription", timeout=5.0
-            )
-            self._shutdown_executor_safe(
-                self._translation_executor, "Translation", timeout=5.0
-            )
+            # ========== 5. Executoren mit verbesserter Thread-Bereinigung ==========
+            self._shutdown_executor_safe(self._transcription_executor, "Transcribe", timeout=5.0)
+            self._shutdown_executor_safe(self._translation_executor, "Translate", timeout=5.0)
 
             # ========== 6. PluginManager entsorgen ==========
             if self.plugin_manager is not None:
@@ -29832,62 +29879,50 @@ class AudioProcessor:
             return True
 
     def emergency_diagnosis(self, url: str) -> bool:
+        """
+        Führt eine schnelle Diagnose durch, ob ein Stream erreichbar ist.
+        Bei YouTube wird der Test übersprungen (Pipe-Zweig funktioniert trotzdem).
+        """
         logger.info(f"🔍 [EMERGENCY_DIAGNOSIS] Testing: {url[:80]}...")
+
+        # YouTube-Streams werden immer über den Pipe-Zweig (yt-dlp + FFmpeg) gestartet,
+        # der die notwendigen Header setzt. Daher überspringen wir den Test komplett.
+        if "youtube.com" in url.lower() or "youtu.be" in url.lower():
+            logger.info("  ✅ YouTube erkannt – überspringe Stream-Test (Pipe-Zweig wird verwendet)")
+            return True
+
         try:
             audio_url = self.stream_manager.extract_audio_url(url)
             if not audio_url:
                 logger.info("  ❌ Could not extract audio URL")
                 return False
             logger.info(f"  ✅ Audio URL extracted: {audio_url[:80]}...")
-            is_youtube = (
-                "youtube.com" in audio_url.lower() or "googlevideo.com" in audio_url
-            )
+
+            # Test mit ffmpeg (nur bei Nicht-YouTube-Streams)
             test_cmd = [
                 "ffmpeg",
-                "-i",
-                audio_url,
-                "-t",
-                "3",
-                "-f",
-                "null",
+                "-hide_banner",
+                "-i", audio_url,
+                "-t", "3",
+                "-f", "null",
                 "-",
-                "-loglevel",
-                "error",
+                "-loglevel", "error"
             ]
-            timeout = (
-                Config.YOUTUBE_STREAM_TEST_TIMEOUT
-                if is_youtube
-                else Config.STREAM_TEST_TIMEOUT
-            )
+            timeout = Config.STREAM_TEST_TIMEOUT
             try:
-                result = subprocess.run(
-                    test_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    shell=False,
-                )
-            except subprocess.TimeoutExpired as e:
-                logger.info(f"  ⏰ Stream test timeout: {e}")
-                if is_youtube:
-                    logger.info("  ⚠️ YouTube timeout – trying anyway...")
+                result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=timeout, shell=False)
+                if result.returncode == 0:
+                    logger.info("  ✅ Stream connection successful")
                     return True
                 else:
-                    logger.info("  ❌ Timeout – stream not reachable")
+                    error_msg = result.stderr[:200] if result.stderr else "Unknown error"
+                    logger.info(f"  ❌ Stream test failed: {error_msg}")
                     return False
-            except (OSError, PermissionError) as e:
-                logger.info(f"  ⚠️ Emergency diagnosis OS error: {e}")
+            except subprocess.TimeoutExpired as e:
+                logger.info(f"  ⏰ Stream test timeout: {e}")
                 return False
-
-            if result.returncode == 0:
-                logger.info("  ✅ Stream connection successful")
-                return True
-            else:
-                error_msg = result.stderr[:100] if result.stderr else "Unknown error"
-                logger.info(f"  ❌ Stream test failed: {error_msg}")
-                if is_youtube and "403" in error_msg:
-                    logger.info("  ⚠️ YouTube 403 error – trying anyway...")
-                    return True
+            except Exception as e:
+                logger.info(f"  ⚠️ Stream test error: {e}")
                 return False
         except Exception as e:
             logger.info(f"  ⚠️ Emergency diagnosis error: {e}")
@@ -32699,20 +32734,25 @@ def _save_console_state() -> None:
 
 
 def _restore_console_state() -> None:
-    if not IS_WINDOWS:
-        return
-    try:
-        import ctypes
-
-        kernel32 = ctypes.windll.kernel32
-        if _original_console_mode is not None:
-            handle = kernel32.GetStdHandle(-11)
-            kernel32.SetConsoleMode(handle, _original_console_mode)
-        if _original_codepage is not None:
-            kernel32.SetConsoleOutputCP(_original_codepage)
-            kernel32.SetConsoleCP(_original_codepage)
-    except Exception:
-        pass
+    """Stellt die ursprünglichen Konsolen-/Terminal-Einstellungen wieder her."""
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            if _original_console_mode is not None:
+                handle = kernel32.GetStdHandle(-11)
+                kernel32.SetConsoleMode(handle, _original_console_mode)
+            if _original_codepage is not None:
+                kernel32.SetConsoleOutputCP(_original_codepage)
+                kernel32.SetConsoleCP(_original_codepage)
+        except Exception as e:
+            logger.debug(f"Fehler beim Wiederherstellen der Windows-Konsole: {e}")
+    else:
+        # Linux / macOS: Terminal wieder in den normalen Modus versetzen
+        try:
+            subprocess.run(["stty", "sane"], check=False, timeout=1)
+        except Exception as e:
+            logger.debug(f"Fehler beim Wiederherstellen des Terminals: {e}")
 
 
 _save_console_state()
@@ -33529,66 +33569,71 @@ def _handle_headless_mode(args: argparse.Namespace) -> int:
         _show_user_error(str(e))
         return 1
 
-    settings = AdvancedSettings()
+    # ========== 1. Einstellungen korrekt laden ==========
+    app_settings = AppSettings.load_from_file()      # Benutzereinstellungen (Modell, Sprache, Cookies)
+    adv_settings = AdvancedSettings()                 # Technische Einstellungen (Proxy, Engine, etc.)
+
+    # ========== 2. Kommandozeilen-Overrides ==========
     if args.model and args.model in Config.WHISPER_MODELS:
-        settings.default_model = args.model
+        app_settings.default_model = args.model
         logger.info(f"Model override: {args.model}")
     elif args.model:
         logger.warning(f"⚠️ Unknown model '{args.model}', using default")
 
     if args.language and args.language in SUPPORTED_LANGUAGES:
-        settings.default_language = args.language
+        app_settings.default_language = args.language
         logger.info(f"Language override: {args.language}")
     elif args.language:
         logger.warning(f"⚠️ Unknown language '{args.language}', using default")
 
-    ffmpeg_manager = FFmpegManager(settings.config, settings=settings)
+    # ========== 3. FFmpeg und StreamManager ==========
+    ffmpeg_manager = FFmpegManager(adv_settings.config, settings=adv_settings)
     stream_manager = StreamManager(
         enable_debug=(DEBUG_LEVEL >= 1),
-        use_browser_cookies=settings.use_browser_cookies,
-        proxy=settings.proxy_url,
-        proxy_enabled=settings.proxy_enabled,
+        use_browser_cookies=app_settings.use_browser_cookies,
+        proxy=adv_settings.proxy_url,
+        proxy_enabled=adv_settings.proxy_enabled,
     )
 
+    # ========== 4. Transkriptions-Engine ==========
     if WHISPER_AVAILABLE:
-        transcription_engine = TranscriptionEngine(settings)
-        logger.info(f"📁 Loading model {settings.default_model}...")
-        if (
-            transcription_engine.load_model(settings.default_model, set_active=True)
-            is None
-        ):
+        transcription_engine = TranscriptionEngine(adv_settings)
+        logger.info(f"📁 Loading model {app_settings.default_model}...")
+        if transcription_engine.load_model(app_settings.default_model, set_active=True) is None:
             logger.error("❌ Failed to load model")
             return 1
     else:
-        transcription_engine = DummyTranscriptionEngine(settings)
+        transcription_engine = DummyTranscriptionEngine(adv_settings)
         logger.warning("⚠️ No Whisper backend, using dummy transcriptions")
 
-    if settings.translation_engine == "ollama" and OLLAMA_AVAILABLE:
+    # ========== 5. Übersetzungs-Engine ==========
+    if adv_settings.translation_engine == "ollama" and OLLAMA_AVAILABLE:
         translation_engine = OllamaTranslationEngine(
-            target_lang=settings.default_language,
-            settings=settings,
-            model=settings.ollama_model,
-            host=settings.ollama_host,
+            target_lang=app_settings.default_language,
+            settings=adv_settings,
+            model=adv_settings.ollama_model,
+            host=adv_settings.ollama_host,
         )
-    elif settings.translation_engine == "argos" and ARGOS_AVAILABLE:
+    elif adv_settings.translation_engine == "argos" and ARGOS_AVAILABLE:
         translation_engine = ArgosTranslateEngine(
-            target_lang=settings.default_language,
-            settings=settings,
+            target_lang=app_settings.default_language,
+            settings=adv_settings,
         )
     elif TRANSLATOR_AVAILABLE:
         translation_engine = GoogleTranslationEngine(
-            target_lang=settings.default_language,
-            settings=settings,
+            target_lang=app_settings.default_language,
+            settings=adv_settings,
         )
     else:
         translation_engine = DummyTranslationEngine(
-            target_lang=settings.default_language,
-            settings=settings,
+            target_lang=app_settings.default_language,
+            settings=adv_settings,
         )
         logger.warning("⚠️ No translation engine, using dummy")
 
+    # ========== 6. AudioProcessor ==========
     processor = AudioProcessor(
-        None, ffmpeg_manager, settings, stream_manager=stream_manager
+        None, ffmpeg_manager, adv_settings, stream_manager=stream_manager
     )
     processor.set_engines(
         transcription_engine=transcription_engine,
@@ -33597,6 +33642,7 @@ def _handle_headless_mode(args: argparse.Namespace) -> int:
         plugin_manager=None,
     )
 
+    # ========== 7. Callbacks ==========
     def info_cb(msg: str):
         logger.info(msg)
 
@@ -33614,6 +33660,7 @@ def _handle_headless_mode(args: argparse.Namespace) -> int:
     def finished_cb():
         logger.info("Processing finished.")
 
+    # ========== 8. Start ==========
     processor.start_processing(
         url=args.url,
         transcription_callback=trans_cb,
@@ -33623,6 +33670,7 @@ def _handle_headless_mode(args: argparse.Namespace) -> int:
         finished_callback=finished_cb,
     )
 
+    # ========== 9. Auf Ende warten ==========
     try:
         while processor._state == AudioProcessor.State.PROCESSING:
             time.sleep(0.5)
@@ -33635,8 +33683,8 @@ def _handle_headless_mode(args: argparse.Namespace) -> int:
         translation_engine.dispose()
         ffmpeg_manager.dispose()
         stream_manager.dispose()
-    return 0
 
+    return 0
 
 # -----------------------------------------------------------------------------
 # Hauptfunktion
@@ -33675,9 +33723,7 @@ def main() -> int:
 
     if args.headless or args.url:
         if not args.url:
-            print(
-                "Error: --headless requires --url to specify a stream.", file=sys.stderr
-            )
+            print("Error: --headless requires --url to specify a stream.", file=sys.stderr)
             return 1
         return _handle_headless_mode(args)
 
@@ -33695,9 +33741,7 @@ def main() -> int:
         logger.debug("✅ Dependencies OK")
 
         if not GUI_AVAILABLE:
-            raise RuntimeError(
-                "Tkinter/GUI not available. Install with: pip install tk"
-            )
+            raise RuntimeError("Tkinter/GUI not available. Install with: pip install tk")
 
         logger.debug("🖥️ Initializing GUI...")
         app = DragonWhispererGUI()
@@ -33717,9 +33761,7 @@ def main() -> int:
                             setattr(app.advanced_settings, key, value)
                     logger.info(f"✅ Profile '{args.profile}' loaded")
                 else:
-                    logger.warning(
-                        f"⚠️ Profile '{args.profile}' not found, using defaults"
-                    )
+                    logger.warning(f"⚠️ Profile '{args.profile}' not found, using defaults")
             except Exception as e:
                 logger.warning(f"⚠️ Failed to load profile: {e}")
 
@@ -33739,9 +33781,15 @@ def main() -> int:
         app.run()
         logger.info("✅ Application closed normally")
 
+        # ========== Terminal wiederherstellen (Linux/macOS) ==========
+        if not IS_WINDOWS:
+            try:
+                subprocess.run(["stty", "sane"], check=False, timeout=1)
+            except Exception:
+                pass
+
         if debug_level >= 1:
             import threading
-
             all_threads = threading.enumerate()
             logger.info(
                 f"Active threads after GUI close: {[t.name for t in all_threads if t.is_alive()]}"
@@ -33765,7 +33813,6 @@ def main() -> int:
         logger.exception(f"💥 Unexpected error: {e}")
         if debug_level >= 2:
             import traceback
-
             traceback.print_exc()
         _show_critical_error(str(e))
         return 2
@@ -33787,6 +33834,12 @@ def main() -> int:
             logger.exception(f"⚠️ Executor shutdown error: {e}")
         if IS_WINDOWS:
             _restore_console_state()
+        else:
+            # Auch hier nochmal sicherheitshalber stty sane
+            try:
+                subprocess.run(["stty", "sane"], check=False, timeout=1)
+            except Exception:
+                pass
         gc.collect()
         logger.debug("✅ Shutdown complete")
 
