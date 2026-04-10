@@ -180,9 +180,15 @@ class TranscriptionError(Exception):
 # =============================================================================
 # 8. BASIS-SPRACHDATEN (erweitert für Whisper-Sprachen)
 # =============================================================================
+# -----------------------------------------------------------------------------
+# 8.1 Basis‑Sprachliste (ISO‑Code → Anzeigename)
+# -----------------------------------------------------------------------------
+# Alle Sprachen, die von faster-whisper / openai-whisper unterstützt werden.
+# Die Liste basiert auf der offiziellen Whisper‑Dokumentation (Modell large‑v3).
+# Quelle: https://github.com/openai/whisper/blob/main/whisper/tokenizer.py
 BASE_LANGUAGES = {
     "auto": "Automatisch",
-    # Europäische Sprachen
+    # --------------------------- Europäische Sprachen ---------------------------
     "de": "Deutsch",
     "en": "Englisch",
     "fr": "Französisch",
@@ -224,17 +230,16 @@ BASE_LANGUAGES = {
     "ga": "Irisch",
     "gd": "Schottisch-Gälisch",
     "mt": "Maltesisch",
-    # Asiatische Sprachen
+    # --------------------------- Asiatische Sprachen ---------------------------
     "ja": "Japanisch",
     "zh": "Chinesisch (vereinfacht)",
-    "zh-tw": "China / Taiwan)",
-    "zh-cn": "Chinesisch (vereinfacht / China)",
+    "yue": "Kantonesisch",               # Whisper unterstützt Kantonesisch (yue)
     "ko": "Koreanisch",
     "vi": "Vietnamesisch",
     "th": "Thailändisch",
     "id": "Indonesisch",
     "ms": "Malaysisch",
-    "tl": "Tagalog (Filipino)",
+    "tl": "Tagalog",                     # Whisper-Code 'tl', Google erwartet 'fil'
     "lo": "Laotisch",
     "km": "Khmer",
     "my": "Burmesisch",
@@ -251,7 +256,9 @@ BASE_LANGUAGES = {
     "ur": "Urdu",
     "bn": "Bengalisch",
     "hi": "Hindi",
-    # Naher Osten / Afrika
+    "as": "Assamesisch",                 # NEU
+    "or": "Oriya",                       # NEU
+    # --------------------------- Naher Osten / Afrika ---------------------------
     "ar": "Arabisch",
     "fa": "Persisch",
     "he": "Hebräisch",
@@ -278,7 +285,10 @@ BASE_LANGUAGES = {
     "mg": "Madagassisch",
     "so": "Somali",
     "ti": "Tigrinya",
-    # Weitere
+    "ln": "Lingala",                     # NEU
+    "om": "Oromo",                       # NEU
+    "wo": "Wolof",                       # NEU
+    # --------------------------- Weitere / Sonstige ---------------------------
     "af": "Afrikaans",
     "eo": "Esperanto",
     "la": "Latein",
@@ -291,21 +301,84 @@ BASE_LANGUAGES = {
     "sm": "Samoanisch",
     "su": "Sundanesisch",
     "yi": "Jiddisch",
+    "bo": "Tibetisch",                   # NEU
+    "dv": "Dhivehi",                     # NEU
+    "kl": "Grönländisch",                # NEU
+    "qu": "Quechua",                     # NEU
+    "sa": "Sanskrit",                    # NEU
+    "sd": "Sindhi",                      # NEU
+    "tn": "Tswana",                      # NEU
+    "tt": "Tatarisch",                   # NEU
 }
 
-# Mapping für Whisper: Taiwanesisch -> Chinesisch, usw.
+# -----------------------------------------------------------------------------
+# 8.2 Mapping für abweichende Sprachcodes (Whisper → andere Engines)
+# -----------------------------------------------------------------------------
+# Diese Tabelle wird verwendet, um den korrekten Code für Übersetzungs‑APIs
+# (Google, Argos, Ollama) zu ermitteln, falls dieser vom Whisper‑Code abweicht.
 LANGUAGE_CODE_MAPPING = {
-    "zh-tw": "zh",  # Taiwanesisch (traditionell) -> vereinfachtes Chinesisch für Whisper
-    "zh-cn": "zh",  # vereinfachtes Chinesisch (China) -> Chinesisch
-    "tl": "fil",  # Tagalog -> Filipino (Whisper erwartet 'fil')
-    "ht": "ht",  # Haitianisch (Whisper kennt 'ht')
+    # Whisper-Code : Google-Code (bzw. Ziel-Code für die Engine)
+    "yue": "zh-TW",          # Kantonesisch → Traditionelles Chinesisch (Google)
+    "tl": "fil",             # Tagalog → Filipino
+    "he": "iw",              # Hebräisch → iw (Google)
+    "zh": "zh-CN",           # Chinesisch (vereinfacht) → zh-CN (Google)
+    # Die folgenden werden von Whisper genauso erwartet, keine Änderung nötig:
+    # "ht": "ht",
+    # "jw": "jw",
+    # ...
 }
 
+# -----------------------------------------------------------------------------
+# 8.3 Abgeleitete Strukturen (nicht manuell ändern)
+# -----------------------------------------------------------------------------
 SUPPORTED_LANGUAGES = BASE_LANGUAGES.copy()
 SORTED_LANGUAGES = sorted(
     ((name, code) for code, name in BASE_LANGUAGES.items()), key=lambda x: x[0]
 )
 LANGUAGE_SHORT_CODES = {code: name[:3] for code, name in BASE_LANGUAGES.items()}
+
+# -----------------------------------------------------------------------------
+# 8.4 Hilfsfunktionen für konsistenten Sprachcode‑Zugriff
+# -----------------------------------------------------------------------------
+def get_whisper_language_code(display_name: str) -> Optional[str]:
+    """Gibt den Whisper‑Code für einen Anzeigenamen zurück (z. B. 'Deutsch' → 'de')."""
+    for code, name in BASE_LANGUAGES.items():
+        if name == display_name:
+            return code
+    return None
+
+def get_display_name(code: str) -> str:
+    """Gibt den Anzeigenamen für einen Sprachcode zurück (z. B. 'de' → 'Deutsch')."""
+    return BASE_LANGUAGES.get(code, code)
+
+def map_to_google_code(whisper_code: str) -> str:
+    """Konvertiert einen Whisper‑Sprachcode in den von Google Translate erwarteten Code."""
+    if whisper_code == "auto":
+        return "auto"
+    return LANGUAGE_CODE_MAPPING.get(whisper_code, whisper_code)
+
+# -----------------------------------------------------------------------------
+# 8.5 Vordefinierte Gruppen für die GUI (Common, Asian, More)
+# -----------------------------------------------------------------------------
+# Diese Gruppen werden in WhisperLayoutManager.create_compact_control_panel verwendet.
+COMMON_LANGUAGE_CODES = ["de", "en", "fr", "es", "it", "pt", "nl", "pl", "ru"]
+ASIAN_LANGUAGE_CODES = ["ja", "zh", "ko", "vi", "th", "id", "tl", "hi", "ar", "fa", "tr"]
+
+def get_common_language_names() -> List[str]:
+    """Gibt die Anzeigenamen der häufigsten Sprachen zurück."""
+    return [BASE_LANGUAGES[code] for code in COMMON_LANGUAGE_CODES if code in BASE_LANGUAGES]
+
+def get_asian_language_names() -> List[str]:
+    """Gibt die Anzeigenamen asiatischer / nahöstlicher Sprachen zurück."""
+    return [BASE_LANGUAGES[code] for code in ASIAN_LANGUAGE_CODES if code in BASE_LANGUAGES]
+
+def get_other_language_names() -> List[str]:
+    """Gibt alle übrigen Sprachanzeigenamen zurück, die nicht in den Gruppen sind."""
+    excluded = set(COMMON_LANGUAGE_CODES + ASIAN_LANGUAGE_CODES)
+    return [
+        name for code, name in SORTED_LANGUAGES
+        if code not in excluded and code != "auto"
+    ]
 
 
 # =============================================================================
@@ -23277,11 +23350,13 @@ class DragonWhispererGUI:
             ("reset_gui", self._on_reset_gui),
             ("progress", self.update_progress),
             ("model_changed", self._on_model_changed),
+            ("translation_quality_warning", self._on_translation_quality_warning),
         ]
         with self._subscriptions_lock:
             for event, callback in subs:
                 self.event_bus.subscribe(event, callback)
                 self._event_subscriptions.append((event, callback))
+        log_debug("gui", f"Event handlers registered: {[e for e, _ in subs]}")
 
     def _init_managers(self) -> None:
         """Initialisiert die verschiedenen Manager (Stream, FFmpeg, Export, Memory)."""
@@ -24221,6 +24296,24 @@ class DragonWhispererGUI:
             )
 
         self._safe_gui_update(update, important=True)
+
+    def _on_translation_quality_warning(self, data: dict) -> None:
+        """
+        Wird aufgerufen, wenn eine Übersetzung von schlechter Qualität erkannt wurde.
+        Zeigt ein Warnsymbol neben der Übersetzungsüberschrift an.
+        """
+        target_lang = data.get("target_lang", "de")
+        lang_display = LANGUAGE_SHORT_CODES.get(target_lang, target_lang.upper())
+        warning_text = f"🌐 Übersetzung ({lang_display}) ⚠️"
+        normal_text = f"🌐 Übersetzung ({lang_display})"
+
+        def update() -> None:
+            if hasattr(self, "translation_header") and self.translation_header.winfo_exists():
+                self.translation_header.config(text=warning_text)
+                # Nach 5 Sekunden zurücksetzen
+                self.root.after(5000, lambda: self.translation_header.config(text=normal_text))
+
+        self._safe_gui_update(update, important=False)
 
     @gui_error_handler
     def _on_reset_gui(self, _=None) -> None:
@@ -28372,6 +28465,8 @@ class AudioProcessor:
         self.ffmpeg_manager = ffmpeg_manager
         self.settings = settings or AdvancedSettings()
         self.use_browser_cookies = use_browser_cookies
+        self._event_bus = getattr(self.controller_ref, "event_bus", None)
+        log_debug("processor", f"Event-Bus verfügbar: {self._event_bus is not None}")
 
         # Keine eigene config-Referenz mehr – alle Zugriffe über self.settings.config
         self._update_derived_attributes()
@@ -28743,6 +28838,7 @@ class AudioProcessor:
 
         self._dispatcher_thread = None
         self._dispatcher_started = False
+        self._dispatcher_shutdown.clear()
         log_debug("processor", "_stop_dispatcher: finished")
 
     def _dispatcher_loop(self) -> None:
@@ -29189,6 +29285,85 @@ class AudioProcessor:
                 logger.debug(f"Language detection error: {e}")
             return None
 
+    def _assess_translation_quality(self, original: str, translated: str, target_lang: str) -> float:
+        """
+        Bewertet die Qualität einer Übersetzung anhand erweiterter Heuristiken.
+        Rückgabe: 0.0 (sehr schlecht) bis 1.0 (gut).
+
+        Kriterien:
+            - Leere Antwort → 0.0
+            - Extremes Längenverhältnis (<0.2 oder >4.0) → 0.0
+            - Zu wenige Wörter im Vergleich zum Original → Abwertung
+            - Falsches Schriftsystem für die Zielsprache → starke Abwertung
+            - Zu viele Sonderzeichen (nicht alphanumerisch) → moderate Abwertung
+        """
+        if not translated:
+            return 0.0
+
+        len_orig = len(original)
+        len_trans = len(translated)
+        if len_orig == 0:
+            return 0.5
+
+        # ----- 1. Längenverhältnis (Zeichen) -----
+        ratio = len_trans / len_orig
+        if ratio < 0.2 or ratio > 4.0:
+            log_debug("translate", f"Suspicious length ratio: {ratio:.2f}")
+            return 0.0
+
+        # ----- 2. Wortanzahl-Verhältnis -----
+        words_orig = len(original.split())
+        words_trans = len(translated.split())
+        if words_orig > 0:
+            word_ratio = words_trans / words_orig
+            if word_ratio < 0.15 or word_ratio > 5.0:
+                log_debug("translate", f"Suspicious word ratio: {word_ratio:.2f}")
+                return 0.1
+
+        # ----- 3. Schriftsystem-Prüfung für Zielsprache -----
+        # Für Deutsch: keine großen Mengen an CJK, Kyrillisch oder Arabisch
+        if target_lang == "de":
+            non_latin = sum(1 for c in translated if ord(c) > 0x7F and not c.isspace())
+            if non_latin > len_trans * 0.3:
+                log_debug("translate", f"Too many non-Latin characters ({non_latin}/{len_trans})")
+                return 0.1
+            # Zusätzlich: Prüfen auf typische nicht-deutsche Skripte
+            cjk = sum(1 for c in translated if '\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff')
+            cyrillic = sum(1 for c in translated if '\u0400' <= c <= '\u04ff')
+            arabic = sum(1 for c in translated if '\u0600' <= c <= '\u06ff')
+            if cjk > len_trans * 0.1 or cyrillic > len_trans * 0.1 or arabic > len_trans * 0.1:
+                log_debug("translate", f"Wrong script detected (CJK:{cjk}, Cyrillic:{cyrillic}, Arabic:{arabic})")
+                return 0.0
+
+        # Für Englisch: ähnlich, aber weniger streng
+        elif target_lang == "en":
+            non_latin = sum(1 for c in translated if ord(c) > 0x7F and not c.isspace())
+            if non_latin > len_trans * 0.5:
+                log_debug("translate", f"Too many non-Latin characters for English ({non_latin}/{len_trans})")
+                return 0.2
+
+        # Für Chinesisch (zh): es sollten viele CJK-Zeichen enthalten sein
+        elif target_lang.startswith("zh"):
+            cjk = sum(1 for c in translated if '\u4e00' <= c <= '\u9fff')
+            if len_trans > 10 and cjk < len_trans * 0.1:
+                log_debug("translate", f"Too few CJK characters for Chinese ({cjk}/{len_trans})")
+                return 0.1
+
+        # ----- 4. Sonderzeichen-Anteil -----
+        special_chars = sum(1 for c in translated if not c.isalnum() and not c.isspace())
+        special_ratio = special_chars / max(len_trans, 1)
+        if special_ratio > 0.5:
+            log_debug("translate", f"Too many special characters ({special_ratio:.2f})")
+            return 0.2
+
+        # ----- 5. Wiederholungsprüfung (gleicher Text wie Original) -----
+        if translated.strip().lower() == original.strip().lower():
+            log_debug("translate", "Translation is identical to original")
+            return 0.0
+
+        # Alle Prüfungen bestanden
+        return 1.0
+
     def _update_chunk_size(self) -> None:
         self.chunk_size = int(
             self.settings.config.CHUNK_DURATION * self.settings.config.BYTES_PER_SECOND
@@ -29363,6 +29538,11 @@ class AudioProcessor:
 
         self._last_chunk_duration = self.settings.config.CHUNK_DURATION
         self._chunk_stable_counter = 0
+
+        # Sicherstellen, dass kein alter Dispatcher mehr läuft, bevor ein neuer gestartet wird
+        if self._dispatcher_started:
+            log_debug("processor", "start_processing: old dispatcher still running, stopping it")
+            self._stop_dispatcher()
 
         self._start_dispatcher()
         if DEBUG_LEVEL >= 3:
@@ -29940,33 +30120,94 @@ class AudioProcessor:
         error_occurred: bool,
         callbacks: Dict[str, Callable],
     ) -> None:
+        """
+        Bereinigt nach dem Stream-Ende: wartet auf Audio-Queue, stoppt Dispatcher,
+        wartet auf Transkriptionen, leert dann den Satzpuffer, stoppt FFmpeg, etc.
+        """
         log_debug(
             "processor",
             f"_cleanup_after_stream: normal_ending={normal_ending}, error_occurred={error_occurred}",
         )
 
-        # 1. Ausstehende Sätze übersetzen (letzte Satzenden)
+        # --- NEUE REIHENFOLGE: Zuerst Audio-Queue vollständig abarbeiten lassen ---
+        log_debug("processor", "Waiting for audio queue to empty...")
+        wait_start = time.time()
+        max_wait = 60.0
+        while (
+            not self._raw_audio_queue.empty() and (time.time() - wait_start) < max_wait
+        ):
+            time.sleep(0.1)
+        if self._raw_audio_queue.empty():
+            log_debug(
+                "processor",
+                f"Audio queue emptied after {time.time() - wait_start:.2f}s",
+            )
+        else:
+            logger.warning(f"Audio queue not empty after {max_wait}s, forcing stop")
+
+        # --- Jetzt Dispatcher stoppen (damit keine neuen Tasks mehr angenommen werden) ---
+        self._stop_dispatcher()
+        log_debug("processor", "Dispatcher stopped")
+
+        # --- Dann auf ausstehende Transkriptionen warten ---
+        log_debug("processor", "Waiting for transcription tasks to complete...")
+        wait_start = time.time()
+        max_wait = 60.0
+        while self._pending_tasks > 0 and (time.time() - wait_start) < max_wait:
+            self._tasks_done_event.wait(1.0)
+        if self._pending_tasks == 0:
+            log_debug(
+                "processor",
+                f"All transcription tasks finished after {time.time() - wait_start:.2f}s",
+            )
+        else:
+            if DEBUG_LEVEL >= 2:
+                logger.warning(
+                    f"{self._pending_tasks} transcription tasks still pending after {max_wait}s"
+                )
+
+        # --- Jetzt den Satzpuffer leeren (sollte jetzt gefüllt sein) ---
         with self._sentence_lock:
             if self._sentence_parts:
                 sentence = " ".join(self._sentence_parts).strip()
+                log_debug(
+                    "translate",
+                    f"Cleanup: flushing remaining sentence buffer ({len(sentence)} chars)"
+                )
                 if (
                     sentence
                     and self.translation_engine is not None
                     and self._translation_enabled.is_set()
                 ):
+                    # Sprache aus dem letzten Segment ermitteln
                     detected_lang = "auto"
                     if self._sentence_segments:
-                        first = self._sentence_segments[0]
-                        last = self._sentence_segments[-1]
-                        self._translate_and_send_async(
-                            sentence,
-                            detected_lang,
-                            callbacks["translation"],
-                            start=first.start if hasattr(first, "start") else None,
-                            end=last.end if hasattr(last, "end") else None,
-                        )
+                        last_seg = self._sentence_segments[-1]
+                        if hasattr(last_seg, "language") and last_seg.language != "unknown":
+                            detected_lang = last_seg.language
+                            log_debug(
+                                "translate",
+                                f"Using detected language '{detected_lang}' for final flush"
+                            )
+                    first = self._sentence_segments[0] if self._sentence_segments else None
+                    last = self._sentence_segments[-1] if self._sentence_segments else None
+                    self._translate_and_send_async(
+                        sentence,
+                        detected_lang,
+                        callbacks["translation"],
+                        start=first.start if first and hasattr(first, "start") else None,
+                        end=last.end if last and hasattr(last, "end") else None,
+                    )
+                else:
+                    log_debug(
+                        "translate",
+                        f"Final flush skipped: engine={self.translation_engine is not None}, "
+                        f"enabled={self._translation_enabled.is_set()}, text_len={len(sentence)}"
+                    )
                 self._sentence_parts.clear()
                 self._sentence_segments.clear()
+            else:
+                log_debug("translate", "No pending sentence parts to flush after waiting for transcription")
 
         # 2. Letzte Audiodaten im Puffer verarbeiten (falls Executor noch läuft)
         trans_cb = callbacks.get("transcription")
@@ -29996,44 +30237,7 @@ class AudioProcessor:
         self._log_final_stats()
         self._current_stream_id = None
 
-        # 5. Dispatcher stoppen
-        self._stop_dispatcher()
-        log_debug("processor", "Dispatcher stopped")
-
-        # 6. Auf das Ende der Audio-Queue warten
-        log_debug("processor", "Waiting for audio queue to empty...")
-        wait_start = time.time()
-        max_wait = 60.0
-        while (
-            not self._raw_audio_queue.empty() and (time.time() - wait_start) < max_wait
-        ):
-            time.sleep(0.1)
-        if self._raw_audio_queue.empty():
-            log_debug(
-                "processor",
-                f"Audio queue emptied after {time.time() - wait_start:.2f}s",
-            )
-        else:
-            logger.warning(f"Audio queue not empty after {max_wait}s, forcing stop")
-
-        # 7. Auf die Transkriptions-Tasks warten
-        log_debug("processor", "Waiting for transcription tasks to complete...")
-        wait_start = time.time()
-        max_wait = 60.0
-        while self._pending_tasks > 0 and (time.time() - wait_start) < max_wait:
-            self._tasks_done_event.wait(1.0)
-        if self._pending_tasks == 0:
-            log_debug(
-                "processor",
-                f"All transcription tasks finished after {time.time() - wait_start:.2f}s",
-            )
-        else:
-            if DEBUG_LEVEL >= 2:
-                logger.warning(
-                    f"{self._pending_tasks} transcription tasks still pending after {max_wait}s"
-                )
-
-        # 8. finished_callback aufrufen
+        # 5. finished_callback aufrufen
         if not error_occurred and normal_ending:
             logger.info("✅ Stream normal beendet – rufe finished_callback auf")
             if callbacks.get("finished"):
@@ -30488,9 +30692,59 @@ class AudioProcessor:
         result: Union[TranscriptionResult, Any],
         translation_callback: TranslationCallback,
     ) -> None:
+        """
+        Puffert Transkriptionssegmente zu Sätzen und löst Übersetzungen aus,
+        sobald ein Satzende erkannt wird, der Timeout erreicht ist oder
+        der Stop-Event gesetzt wurde.
+        """
         text = result.text.strip()
         with self._sentence_lock:
             now = time.time()
+
+            # --- NEU: Wenn der Stop-Event gesetzt ist, sofort übersetzen ---
+            if self._stop_event.is_set():
+                if self._sentence_parts:
+                    # Puffer mit aktuellem Text kombinieren
+                    combined_parts = self._sentence_parts + [text]
+                    sentence = " ".join(combined_parts).strip()
+                    log_debug(
+                        "translate",
+                        f"Flushing sentence due to stop event: {sentence[:50]}... "
+                        f"({len(sentence)} chars)"
+                    )
+                    if (
+                        sentence
+                        and self.translation_engine is not None
+                        and self._translation_enabled.is_set()
+                    ):
+                        # Sprache aus dem letzten Segment ermitteln
+                        lang = getattr(result, "language", "auto")
+                        conf = getattr(result, "confidence", 0.0)
+                        if lang == "auto" or conf < 0.5:
+                            fallback = self._fallback_language_detection(text)
+                            if fallback:
+                                lang = fallback
+                        first = self._sentence_segments[0] if self._sentence_segments else result
+                        last = result
+                        self._translate_and_send_async(
+                            sentence,
+                            lang,
+                            translation_callback,
+                            start=first.start if hasattr(first, "start") else None,
+                            end=last.end if hasattr(last, "end") else None,
+                        )
+                    else:
+                        log_debug(
+                            "translate",
+                            f"Stop-event flush skipped: engine={self.translation_engine is not None}, "
+                            f"enabled={self._translation_enabled.is_set()}, text_len={len(sentence)}"
+                        )
+                self._sentence_parts.clear()
+                self._sentence_segments.clear()
+                return
+            # --- Ende NEU ---
+
+            # Timeout-basierte Flush-Prüfung
             if (
                 self._sentence_parts
                 and (now - self._last_sentence_time) > self._sentence_flush_interval
@@ -30507,33 +30761,30 @@ class AudioProcessor:
                         fallback = self._fallback_language_detection(text)
                         if fallback:
                             lang = fallback
-                    first = (
-                        self._sentence_segments[0] if self._sentence_segments else None
-                    )
-                    last = (
-                        self._sentence_segments[-1] if self._sentence_segments else None
-                    )
+                    first = self._sentence_segments[0] if self._sentence_segments else None
+                    last = self._sentence_segments[-1] if self._sentence_segments else None
                     log_debug(
                         "translate",
-                        f"Flushing sentence due to timeout: {sentence[:50]}...",
+                        f"Flushing sentence due to timeout ({self._sentence_flush_interval}s): "
+                        f"{sentence[:50]}... ({len(sentence)} chars)"
                     )
                     self._translate_and_send_async(
                         sentence,
                         lang,
                         translation_callback,
-                        start=(
-                            first.start if first and hasattr(first, "start") else None
-                        ),
+                        start=first.start if first and hasattr(first, "start") else None,
                         end=last.end if last and hasattr(last, "end") else None,
                     )
                 self._sentence_parts.clear()
                 self._sentence_segments.clear()
                 self._last_sentence_time = now
 
+            # Aktuellen Text zum Puffer hinzufügen
             self._sentence_parts.append(text)
             self._sentence_segments.append(result)
             self._last_sentence_time = now
 
+            # Satzzeichen-Prüfung
             if text and text[-1] in ".!?。！？":
                 sentence = " ".join(self._sentence_parts).strip()
                 if (
@@ -30551,7 +30802,8 @@ class AudioProcessor:
                     last = result
                     log_debug(
                         "translate",
-                        f"Flushing sentence due to punctuation: {sentence[:50]}...",
+                        f"Flushing sentence due to punctuation: {sentence[:50]}... "
+                        f"({len(sentence)} chars)"
                     )
                     self._translate_and_send_async(
                         sentence,
@@ -30563,6 +30815,8 @@ class AudioProcessor:
                 self._sentence_parts.clear()
                 self._sentence_segments.clear()
                 self._last_sentence_time = time.time()
+
+            # Wortanzahl-Prüfung
             elif len(self._sentence_parts) > self._sentence_flush_word_threshold:
                 sentence = " ".join(self._sentence_parts).strip()
                 if (
@@ -30576,21 +30830,18 @@ class AudioProcessor:
                         fallback = self._fallback_language_detection(text)
                         if fallback:
                             lang = fallback
-                    first = (
-                        self._sentence_segments[0] if self._sentence_segments else None
-                    )
+                    first = self._sentence_segments[0] if self._sentence_segments else None
                     last = result
                     log_debug(
                         "translate",
-                        f"Flushing sentence due to word limit: {sentence[:50]}...",
+                        f"Flushing sentence due to word limit ({self._sentence_flush_word_threshold}): "
+                        f"{sentence[:50]}... ({len(sentence)} chars)"
                     )
                     self._translate_and_send_async(
                         sentence,
                         lang,
                         translation_callback,
-                        start=(
-                            first.start if first and hasattr(first, "start") else None
-                        ),
+                        start=first.start if first and hasattr(first, "start") else None,
                         end=last.end,
                     )
                 self._sentence_parts.clear()
@@ -30737,7 +30988,31 @@ class AudioProcessor:
                     ):
                         with self._subtitle_lock:
                             self._timed_translations.append(translation)
-                    translation_callback(translation)
+
+                    # --- NEU: Qualitätsbewertung ---
+                    quality = self._assess_translation_quality(text, translation.translated, target_lang)
+                    if quality < 0.5:
+                        log_debug("translate", f"Low quality translation detected (score={quality:.2f})")
+                        if self._event_bus:
+                            self._event_bus.emit("translation_quality_warning", {
+                                "target_lang": target_lang,
+                                "quality": quality,
+                            })
+                    # --- Ende NEU ---
+
+                    # GUI‑Referenz prüfen, bevor Callback aufgerufen wird
+                    if self.controller_ref is not None:
+                        gui = (
+                            self.controller_ref.gui_ref()
+                            if hasattr(self.controller_ref, "gui_ref")
+                            else None
+                        )
+                        if gui is not None and not gui.is_shutting_down():
+                            translation_callback(translation)
+                        else:
+                            log_debug("translate", "GUI not available, skipping callback")
+                    else:
+                        translation_callback(translation)
                     log_debug(
                         "translate",
                         f"Translation delivered: {len(translation.translated)} chars, source length: {len(text)} chars",
@@ -30745,7 +31020,7 @@ class AudioProcessor:
                 else:
                     log_debug(
                         "translate",
-                        "No translation produced (primary and fallback both failed)",
+                        f"No translation produced (primary and fallback both failed) for text: {text[:50]}...",
                     )
 
             except Exception as e:
@@ -31105,7 +31380,7 @@ class WhisperLayoutManager:
             self.gui_ref.src_lang_combo,
             "Quellsprache (Automatisch = Whisper-Erkennung)",
         )
-
+    
         # Modellauswahl
         model_frame = tk.Frame(
             center_controls, bg=self.gui_ref.current_theme.BG_PRIMARY
@@ -31136,7 +31411,7 @@ class WhisperLayoutManager:
             self.gui_ref.model_combo.config(state="disabled")
             self.gui_ref.model_var.set("dummy (Demo)")
 
-        # Zielsprache (Translate) – optimiert mit Sprachcodes
+        # Zielsprache (Translate) – optimierte Gruppierung
         target_lang_frame = tk.Frame(
             center_controls, bg=self.gui_ref.current_theme.BG_PRIMARY
         )
@@ -31149,34 +31424,17 @@ class WhisperLayoutManager:
             font=Fonts.PRIMARY,
         ).pack(side="left")
 
-        # Sprachliste für Zielsprache (nur Namen, gruppiert)
-        common_codes = ["de", "en", "fr", "es", "it"]
-        asian_codes = ["ja", "zh", "ko", "vi", "th"]
-
-        common_names = [
-            SUPPORTED_LANGUAGES[code]
-            for code in common_codes
-            if code in SUPPORTED_LANGUAGES
-        ]
-        asian_names = [
-            SUPPORTED_LANGUAGES[code]
-            for code in asian_codes
-            if code in SUPPORTED_LANGUAGES
-        ]
-
-        excluded_codes = set(common_codes + asian_codes)
-        other_names = [
-            name
-            for code, name in SORTED_LANGUAGES
-            if code not in excluded_codes and code != "auto"
-        ]
+        # Sprachliste für Zielsprache (gruppiert mit neuen Hilfsfunktionen)
+        common_names = get_common_language_names()
+        asian_names = get_asian_language_names()
+        other_names = get_other_language_names()
 
         target_lang_values = []
         if common_names:
             target_lang_values.append("--- Common ---")
             target_lang_values.extend(common_names)
         if asian_names:
-            target_lang_values.append("--- Asian ---")
+            target_lang_values.append("--- Asian / Middle East ---")
             target_lang_values.extend(asian_names)
         if other_names:
             target_lang_values.append("--- More ---")
@@ -31203,7 +31461,7 @@ class WhisperLayoutManager:
         self.gui_ref.lang_combo.bind(
             "<<ComboboxSelected>>", self.gui_ref.on_language_change
         )
-
+    
         # Rechte Buttons (Start/Stop, Übersetzung, Untertitel)
         right_controls = tk.Frame(
             control_frame, bg=self.gui_ref.current_theme.BG_PRIMARY
