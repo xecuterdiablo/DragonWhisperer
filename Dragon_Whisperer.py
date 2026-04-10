@@ -3308,7 +3308,11 @@ SCIPY_AVAILABLE = FastLazyLoader.is_available("scipy.signal")
 FASTER_WHISPER_AVAILABLE = importlib.util.find_spec("faster_whisper") is not None
 OPENAI_WHISPER_AVAILABLE = importlib.util.find_spec("whisper") is not None
 WHISPER_AVAILABLE = FASTER_WHISPER_AVAILABLE or OPENAI_WHISPER_AVAILABLE
-OLLAMA_AVAILABLE = importlib.util.find_spec("requests") is not None
+OLLAMA_AVAILABLE = importlib.util.find_spec("requests") is not None   # <-- HIER EINGEFÜGT
+ARGOS_AVAILABLE = importlib.util.find_spec("argostranslate") is not None
+PSUTIL_AVAILABLE = importlib.util.find_spec("psutil") is not None
+
+#OLLAMA_AVAILABLE = importlib.util.find_spec("requests") is not None
 
 ARGOS_AVAILABLE = False
 try:
@@ -3353,7 +3357,19 @@ class DummyQueue:
     """
     Dummy‑Implementierung eines thread‑sicheren Queues für Umgebungen ohne echte Queue.
     Verwendet eine Liste und ein Lock. Die Methoden entsprechen denen von queue.Queue.
+
+    Features:
+        - Thread‑sicher durch `threading.RLock`
+        - Begrenzte Kapazität (`maxsize`); bei Überschreitung werden älteste Elemente verworfen
+        - Kompatibel zu `queue.Queue` (bietet `put`, `get`, `put_nowait`, `get_nowait`, `empty`, `qsize`)
+        - Explizites `maxsize`‑Attribut für Kompatibilität mit `QueueManager`
+
+    Verwendung:
+        Kann überall dort eingesetzt werden, wo eine echte `queue.Queue` erwartet wird,
+        z. B. in Tests oder Fallback‑Szenarien.
     """
+
+    __slots__ = ("maxsize", "_items", "_lock")
 
     def __init__(self, maxsize: int = 0) -> None:
         """
@@ -3367,23 +3383,24 @@ class DummyQueue:
         self._items: List[Any] = []
         self._lock = threading.RLock()
 
-    def put(
-        self, item: Any, block: bool = True, timeout: Optional[float] = None
-    ) -> None:
+    def put(self, item: Any, block: bool = True, timeout: Optional[float] = None) -> None:
         """
         Fügt ein Element ein. Bei Überschreitung von maxsize wird das älteste Element entfernt.
-        block und timeout werden ignoriert (immer nicht‑blockierend).
+        Die Parameter `block` und `timeout` werden ignoriert (immer nicht‑blockierend).
         """
         with self._lock:
             self._items.append(item)
             if self.maxsize > 0 and len(self._items) > self.maxsize:
-                self._items.pop(0)
+                self._items.pop(0)  # ältestes Element entfernen
 
     def get(self, block: bool = True, timeout: Optional[float] = None) -> Any:
         """
-        Entfernt und gibt das älteste Element zurück.
-        block und timeout werden ignoriert (immer nicht‑blockierend). Bei leerer Queue wird
-        queue.Empty geworfen.
+        Entnimmt und gibt das älteste Element zurück.
+        Die Parameter `block` und `timeout` werden ignoriert (immer nicht‑blockierend).
+        Bei leerer Queue wird `queue.Empty` geworfen.
+
+        Raises:
+            queue.Empty: Wenn die Queue leer ist.
         """
         with self._lock:
             if self._items:
@@ -3391,11 +3408,11 @@ class DummyQueue:
             raise queue.Empty()
 
     def put_nowait(self, item: Any) -> None:
-        """Nicht‑blockierendes Einfügen (Alias für put)."""
+        """Nicht‑blockierendes Einfügen (Alias für `put`)."""
         self.put(item, block=False)
 
     def get_nowait(self) -> Any:
-        """Nicht‑blockierendes Entnehmen (Alias für get)."""
+        """Nicht‑blockierendes Entnehmen (Alias für `get`)."""
         return self.get(block=False)
 
     def empty(self) -> bool:
@@ -3407,6 +3424,12 @@ class DummyQueue:
         """Gibt die aktuelle Anzahl Elemente zurück."""
         with self._lock:
             return len(self._items)
+
+    def __repr__(self) -> str:
+        """String‑Repräsentation für Debugging."""
+        with self._lock:
+            size = len(self._items)
+        return f"<DummyQueue maxsize={self.maxsize} size={size}>"
 
 
 @dataclass
@@ -5508,9 +5531,14 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
                 return final
 
             except Exception as e:
+                # === WICHTIGE ÄNDERUNG: Fehlerzähler für Circuit Breaker erhöhen ===
+                self._record_error()
+
                 # DEBUG: Fehler detailliert loggen
                 if DEBUG_LEVEL >= 3:
                     logger.exception(f"Google Translate API error: {e}")
+                else:
+                    logger.warning(f"Google Translate API error: {e}")
 
                 # Fehlerbehandlung: Bei Sprachcode-Problem evtl. mit auto versuchen
                 if "language" in str(e).lower() and src != "auto":
@@ -5530,6 +5558,8 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
                                 f"Fallback translation error: {fallback_e}"
                             )
                         logger.warning(f"Auch Fallback fehlgeschlagen: {fallback_e}")
+
+                # Exception weiterwerfen, damit translate_text die Wiederholungslogik anwenden kann
                 raise
 
     # -------------------------------------------------------------------------
@@ -6152,10 +6182,6 @@ class DummyTranslationEngine(BaseTranslationEngine):
         self._last_translations: Deque[str] = deque(maxlen=5)
         self.last_detected_language = "auto"
 
-    def set_target_language(self, target_lang: str) -> None:
-        """Setzt die Zielsprache (nur gespeichert)."""
-        self.target_lang = target_lang
-
     def translate_text(
         self, text: str, source_lang: str = "auto"
     ) -> Optional[TranslationResult]:
@@ -6166,6 +6192,10 @@ class DummyTranslationEngine(BaseTranslationEngine):
             source_lang=source_lang,
             target_lang=self.target_lang,
         )
+
+    def set_target_language(self, target_lang: str) -> None:
+        """Setzt die Zielsprache (wird nur gespeichert)."""
+        self.target_lang = target_lang
 
     def dispose(self) -> None:
         """Nichts zu tun."""
@@ -6566,7 +6596,7 @@ class TranscriptionEngine:
     def set_gpu_acceleration(self, enabled: bool) -> None:
         """
         Aktiviert oder deaktiviert die GPU-Beschleunigung zur Laufzeit.
-        Bei Änderung wird das Modell synchron neu geladen (erzwungen).
+        Bei Änderung wird das Modell asynchron neu geladen (nicht blockierend).
         """
         log_debug("gpu", f"set_gpu_acceleration called with enabled={enabled}")
 
@@ -6594,19 +6624,25 @@ class TranscriptionEngine:
         new_compute = self.compute_type
         log_debug("gpu", f"New device={new_device}, compute_type={new_compute}")
 
-        # Wenn sich das Device oder der Compute-Typ geändert hat, Modell synchron neu laden (erzwungen)
+        # Wenn sich das Device oder der Compute-Typ geändert hat, Modell asynchron neu laden
         if old_device != new_device or old_compute != new_compute:
             current_model = self.get_current_model()
             if current_model and current_model != "None" and not self._disposing:
-                logger.info(f"🔄 Device changed from {old_device} to {new_device} – reloading model {current_model} synchronously...")
-                log_debug("gpu", f"Calling reload_model_sync({current_model})")
-                self._reload_model_sync(current_model, force=True)
+                logger.info(
+                    f"🔄 Device changed from {old_device}/{old_compute} to "
+                    f"{new_device}/{new_compute} – reloading model {current_model} asynchronously..."
+                )
+                log_debug("gpu", f"Calling reload_model({current_model}) asynchronously")
+                success = self.reload_model(current_model)   # <-- ASYNCHRON
+                if not success:
+                    logger.error("Failed to start asynchronous model reload")
+                    log_debug("gpu", "reload_model returned False")
             else:
                 log_debug("gpu", "No model to reload (model is None or disposing)")
         else:
             log_debug("gpu", "Device unchanged, no reload needed")
 
-        # Event-Bus benachrichtigen
+        # Event-Bus benachrichtigen (der neue GPU-Status gilt sofort)
         if self.event_bus:
             self.event_bus.emit("gpu_status_changed", enabled)
             log_debug("gpu", f"Emitted gpu_status_changed event with value {enabled}")
@@ -7625,28 +7661,63 @@ class DummyTranscriptionEngine:
     """
     Platzhalter‑Engine, wenn kein Whisper‑Backend verfügbar ist.
     Thread‑sicher und gibt konsistente Dummy‑Ergebnisse zurück.
+
+    Implementiert alle Methoden der echten TranscriptionEngine,
+    sodass sie ohne weitere Anpassungen in der GUI und im AudioProcessor
+    verwendet werden kann.
     """
 
     def __init__(
         self,
         settings: Optional["AdvancedSettings"] = None,
         cache_manager: Optional[CacheManager] = None,
-    ):
+        event_bus: Optional[EventBus] = None,      # optional, wird ignoriert
+    ) -> None:
+        """
+        Initialisiert die Dummy‑Engine.
+
+        Args:
+            settings: Erweiterte Einstellungen (optional).
+            cache_manager: Cache‑Manager (optional).
+            event_bus: Event‑Bus (optional, wird ignoriert).
+        """
         self.settings = settings or AdvancedSettings()
         self.cache_manager = cache_manager or AppContext().cache_manager
-        self.model = None
+        self.model: Any = None
         self.model_size = "dummy"
-        self.whisper_backend = None
+        self.whisper_backend: Optional[str] = None
         self.demo_mode = True
+        self.device = "cpu"
+        self.compute_type = "int8"
+        self.forced_language: Optional[str] = None
+
         self._lock = threading.RLock()
         self._last_result: Optional[TranscriptionResult] = None
         self._last_audio_hash: Optional[str] = None
+        self._disposing = False
+        self._reloading = False
+        self._model_loaded_flag = True
+        self._vad_fallback_enabled = False
 
+        # Dummy‑Cache für Audiodaten (optional)
+        self._audio_cache: Dict[str, TranscriptionResult] = {}
+        self._cache_max_size = 50
+
+        logger.info("📟 DummyTranscriptionEngine initialisiert (Demo‑Modus)")
+
+    # -------------------------------------------------------------------------
+    # Öffentliche Methoden (kompatibel zu TranscriptionEngine)
+    # -------------------------------------------------------------------------
     def load_model(
         self, model_size: str, set_active: bool = False
     ) -> Optional[Tuple[Any, str]]:
+        """
+        Simuliert das Laden eines Modells.
+        Gibt immer ein Dummy‑Modell zurück.
+        """
         with self._lock:
-            logger.info("Dummy-Modus: Laden eines Modells nicht erforderlich.")
+            logger.info(f"Dummy‑Modus: Laden von '{model_size}' nicht erforderlich.")
+            self.model_size = model_size
             return (None, "dummy")
 
     def transcribe_audio(
@@ -7658,15 +7729,16 @@ class DummyTranscriptionEngine:
         Ergebnis geliefert (optionales Caching).
         """
         with self._lock:
-            # Optional: Cache basierend auf Audio‑Hash, falls gewünscht
+            # Optional: Cache basierend auf Audio‑Hash
             audio_hash = hashlib.sha256(audio_data).hexdigest() if audio_data else None
             if self._last_audio_hash == audio_hash and self._last_result is not None:
                 result = self._last_result
             else:
                 if include_timestamps:
+                    # Für Untertitel‑Modus: Liste von Segmenten
                     result = [
                         TranscriptionResult(
-                            text="[Whisper nicht verfügbar]",
+                            text="[Whisper nicht verfügbar – Dummy‑Transkription]",
                             confidence=0.5,
                             language="de",
                             start=0.0,
@@ -7675,13 +7747,19 @@ class DummyTranscriptionEngine:
                     ]
                 else:
                     result = TranscriptionResult(
-                        text="[Whisper nicht verfügbar]",
+                        text="[Whisper nicht verfügbar – Dummy‑Transkription]",
                         confidence=0.5,
                         language="de",
                     )
                 # Cache speichern (für identische Audiodaten)
                 self._last_audio_hash = audio_hash
                 self._last_result = result
+
+                # Cache‑Größe begrenzen
+                if len(self._audio_cache) >= self._cache_max_size:
+                    self._audio_cache.pop(next(iter(self._audio_cache)))
+                if audio_hash:
+                    self._audio_cache[audio_hash] = result
 
             return result
 
@@ -7694,33 +7772,99 @@ class DummyTranscriptionEngine:
         """
         result = self.transcribe_audio(audio_data, include_timestamps=False)
         if isinstance(result, list) and result:
-            return result[0]  # Falls doch Liste, nimm ersten
+            return result[0]
         return result
 
+    def emergency_fallback_transcription(
+        self, audio_data: Union[bytes, Any]
+    ) -> Optional[TranscriptionResult]:
+        """Notfall‑Methode – identisch zu safe_transcribe."""
+        return self.safe_transcribe(audio_data)
+
     def is_functional(self) -> bool:
+        """Gibt immer False zurück, da es sich um eine Dummy‑Engine handelt."""
         return False
 
     def get_current_model(self) -> str:
-        return "dummy"
+        """Gibt den Namen des aktuell geladenen Modells zurück."""
+        with self._lock:
+            return self.model_size
 
     def is_model_loading(self) -> bool:
+        """Gibt immer False zurück (kein asynchrones Laden)."""
         return False
 
     def reload_model(self, model_size: str) -> bool:
-        return False
+        """Simuliert das Neuladen eines Modells."""
+        with self._lock:
+            self.model_size = model_size
+            logger.info(f"Dummy: Modell auf '{model_size}' gewechselt")
+            return True
 
     def test_model_functionality(self) -> bool:
+        """Gibt immer True zurück (Dummy ist funktional)."""
         return True
 
     def set_vad_fallback_enabled(self, enabled: bool) -> None:
-        """Dummy‑Implementierung – hat keine Wirkung."""
-        pass
-
-    def dispose(self) -> None:
-        """Räumt auf (hier nichts zu tun)."""
+        """
+        Aktiviert oder deaktiviert den VAD‑Fallback.
+        Dummy‑Implementierung – hat keine Wirkung, speichert nur den Zustand.
+        """
         with self._lock:
+            self._vad_fallback_enabled = enabled
+            logger.debug(f"Dummy: VAD‑Fallback auf {enabled} gesetzt")
+
+    def set_gpu_acceleration(self, enabled: bool) -> None:
+        """
+        Aktiviert oder deaktiviert die GPU‑Beschleunigung.
+        Dummy‑Implementierung – hat keine Wirkung.
+        """
+        logger.debug(f"Dummy: GPU‑Acceleration auf {enabled} gesetzt (ignoriert)")
+
+    def validate_audio_data(self, audio_data: bytes) -> Tuple[bool, str]:
+        """Überprüft, ob Audiodaten gültig sind (minimale Prüfung)."""
+        if not isinstance(audio_data, bytes):
+            return False, "Audio data must be bytes"
+        if len(audio_data) == 0:
+            return False, "Audio data is empty"
+        return True, "Valid"
+
+    def is_valid_segment(self, text: str, confidence: float) -> bool:
+        """Prüft, ob ein Segment gültig ist (minimale Prüfung)."""
+        return bool(text and text.strip())
+
+    def clear_cache(self) -> None:
+        """Leert den internen Cache."""
+        with self._lock:
+            self._audio_cache.clear()
             self._last_result = None
             self._last_audio_hash = None
+
+    def dispose(self) -> None:
+        """Gibt alle Ressourcen frei."""
+        with self._lock:
+            self._disposing = True
+            self._audio_cache.clear()
+            self._last_result = None
+            self._last_audio_hash = None
+        logger.info("🧹 DummyTranscriptionEngine disposed")
+
+    # -------------------------------------------------------------------------
+    # Zusätzliche Kompatibilitätsmethoden (von GUI erwartet)
+    # -------------------------------------------------------------------------
+    def get_status(self) -> Dict[str, Any]:
+        """Gibt einen Status‑Dictionary zurück (für Statistiken)."""
+        return {
+            "model": self.model_size,
+            "device": self.device,
+            "compute_type": self.compute_type,
+            "backend": "dummy",
+            "functional": False,
+            "demo_mode": True,
+        }
+
+    def __repr__(self) -> str:
+        return f"<DummyTranscriptionEngine model='{self.model_size}'>"
 
 
 # =============================================================================
@@ -9499,27 +9643,42 @@ class FFmpegManager:
     ) -> Optional[subprocess.Popen]:
         """
         Startet einen Audio‑Stream mit korrekter Slot‑Lebensdauer.
-        Der Slot wird reserviert, bevor der Stream startet, und erst in _remove_process() freigegeben.
+
+        Der Slot wird reserviert, bevor der Stream startet, und erst in _remove_process()
+        freigegeben, wenn der Prozess erfolgreich registriert wurde. Bei Fehlschlag wird
+        der Slot sofort wieder freigegeben.
+
+        Args:
+            video_url: Die ursprüngliche Video‑URL.
+            output_queue: Queue für Audiodaten (wird derzeit nicht verwendet).
+            process_id: Eindeutige ID für den Stream.
+            force_refresh_audio_url: Erzwingt das Neuabrufen der Audio‑URL.
+            audio_url: Bereits aufgelöste Audio‑URL (optional).
+            seek_seconds: Startposition für lokale Dateien.
+            detected_language: Erkannte Sprache für Audio‑Filter.
+
+        Returns:
+            subprocess.Popen des gestarteten FFmpeg‑Prozesses oder None bei Fehler.
         """
+        # Sicherheitshalber Kürzung der URL für Logs
+        url_display = video_url[:80] + "..." if video_url and len(video_url) > 80 else video_url
         log_debug(
             "ffmpeg",
-            f"start_stream called: video_url={video_url[:80]}... process_id={process_id}",
+            f"start_stream called: video_url={url_display}, process_id={process_id}"
         )
-        logger.info(f"\n🎬 FFmpegManager: Starting stream for: {video_url[:80]}...")
+        logger.info(f"\n🎬 FFmpegManager: Starting stream for: {url_display}...")
 
         # ========== 1. Zustandsprüfungen (bevor Slot reserviert wird) ==========
         with self._lock:
             if self._shutting_down:
-                logger.warning(
-                    "FFmpegManager is shutting down – cannot start new stream"
-                )
+                logger.warning("FFmpegManager is shutting down – cannot start new stream")
                 return None
             if self.is_active(process_id):
                 logger.warning(f"⚠️ Stream {process_id} already active")
                 return None
 
         # ========== 2. Slot reservieren ==========
-        if not self._acquire_slot():
+        if not self._acquire_slot(purpose=f"start_stream:{process_id}"):
             msg = f"❌ Kein freier Slot für {process_id} – maximale Prozessanzahl erreicht"
             logger.warning(msg)
             log_debug("ffmpeg", f"start_stream: {msg}")
@@ -9562,7 +9721,7 @@ class FFmpegManager:
 
         finally:
             if slot_acquired:
-                self._release_slot()
+                self._release_slot(purpose=f"start_stream_failed:{process_id}")
                 log_debug(
                     "ffmpeg",
                     "start_stream: Slot freigegeben (Start fehlgeschlagen oder Exception)",
@@ -10619,7 +10778,9 @@ class FFmpegManager:
             }
 
     def get_semaphore_value(self) -> int:
-        return self._active_slots
+        """Gibt die Anzahl aktuell belegter Slots zurück (thread‑sicher)."""
+        with self._lock:
+            return self._active_slots
 
     def get_active_process_count(self) -> int:
         """Gibt die Anzahl der noch aktiven (laufenden) Prozesse zurück."""
@@ -10627,6 +10788,23 @@ class FFmpegManager:
             return sum(
                 1 for pinfo in self._processes.values() if pinfo.process.poll() is None
             )
+
+    @contextmanager
+    def slot_context(self, purpose: str = ""):
+        """
+        Kontextmanager für automatische Slot‑Freigabe.
+        Beispiel:
+            with self.slot_context("start_stream_123"):
+                # Slot ist belegt, geschützte Operationen durchführen
+                ...
+        Wirft RuntimeError, wenn kein Slot erworben werden konnte.
+        """
+        if not self._acquire_slot(purpose):
+            raise RuntimeError(f"Could not acquire slot for '{purpose}'")
+        try:
+            yield
+        finally:
+            self._release_slot(purpose)
 
     def dispose(self) -> None:
         """
@@ -10674,26 +10852,62 @@ class FFmpegManager:
     # -------------------------------------------------------------------------
     #  Private Hilfsmethoden
     # -------------------------------------------------------------------------
-    def _acquire_slot(self) -> bool:
-        """Versucht, einen Slot zu belegen. Gibt True bei Erfolg zurück."""
-        if self._process_semaphore.acquire(blocking=False):
-            with self._lock:
-                self._active_slots += 1
-            return True
-        return False
+    def _acquire_slot(self, purpose: str = "") -> bool:
+        """
+        Versucht, einen Slot zu belegen.
+        Args:
+            purpose: Optionale Beschreibung für Debug‑Logs (z. B. process_id).
+        Returns:
+            True bei Erfolg, False wenn kein Slot frei ist.
+        """
+        acquired = self._process_semaphore.acquire(blocking=False)
+        if not acquired:
+            logger.debug(f"❌ Slot nicht verfügbar (purpose={purpose})")
+            return False
 
-    def _release_slot(self) -> None:
-        """Gibt einen Slot frei, wenn einer belegt war."""
+        with self._lock:
+            self._active_slots += 1
+            current = self._active_slots
+            max_slots = self._process_semaphore_max
+
+        logger.debug(
+            f"✅ Slot belegt (purpose={purpose}) – "
+            f"active_slots={current}/{max_slots}"
+        )
+        if DEBUG_LEVEL >= 3:
+            # Detaillierte Stack‑Trace bei hohem Debug‑Level
+            import traceback
+            stack = traceback.extract_stack()[-3:-1]
+            caller = " -> ".join(f"{f.name}:{f.lineno}" for f in stack)
+            log_debug("slot", f"  Acquired by: {caller}")
+
+        return True
+
+    def _release_slot(self, purpose: str = "") -> None:
+        """
+        Gibt einen zuvor belegten Slot frei.
+        Args:
+            purpose: Optionale Beschreibung für Debug‑Logs.
+        """
         with self._lock:
             if self._active_slots > 0:
                 self._active_slots -= 1
+                current = self._active_slots
             else:
-                log_debug(
-                    "ffmpeg",
-                    f"Attempted to release slot, but no active slots (current={self._active_slots})",
+                logger.error(
+                    f"❌ CRITICAL: _release_slot called but _active_slots is already 0! "
+                    f"(purpose={purpose})"
                 )
+                current = 0
 
         self._process_semaphore.release()
+        max_slots = self._process_semaphore_max
+        logger.debug(
+            f"🔓 Slot freigegeben (purpose={purpose}) – "
+            f"active_slots={current}/{max_slots}"
+        )
+        if DEBUG_LEVEL >= 3 and current == 0:
+            log_debug("slot", "  All slots are now free.")
 
     @contextmanager
     def _slot_context(self):
@@ -11707,237 +11921,250 @@ class FFmpegManager:
         """
         logger.debug(f"  _remove_process called for {process_id} (force={force})")
 
-        # 1. Prozess-Info holen und als "entfernend" markieren, um doppelte Aufrufe zu verhindern
-        with self._lock:
-            if process_id not in self._processes:
-                logger.debug(
-                    f"  _remove_process: process {process_id} not found, returning False"
-                )
-                return False
-            pinfo = self._processes[process_id]
-            if pinfo._removing:
-                logger.debug(
-                    f"  Process {process_id} is already being removed, skipping."
-                )
-                return False
-            pinfo._removing = True
-            skip_release = getattr(pinfo, "_skip_semaphore_release", False)
-            logger.debug(
-                f"  _remove_process: marked as removing, skip_release={skip_release}"
-            )
+        # Merker, ob der Slot am Ende freigegeben werden muss
+        skip_release = False
 
-        # 2. Threads stoppen (Lesen, Stderr, yt-dlp)
-        logger.debug(f"  _remove_process: stopping threads for {process_id}")
-        self._stop_read_thread(pinfo)
-        self._stop_stderr_thread(pinfo)
-
-        # yt-dlp stderr-Thread bereinigen (mit join)
-        yt_thread = getattr(pinfo, "yt_stderr_thread", None)
-        if yt_thread is not None:
-            logger.debug(
-                f"  _remove_process: cleaning yt_stderr_thread for {process_id}"
-            )
-            yt_stop = getattr(pinfo, "yt_stderr_stop", None)
-            if yt_stop:
-                yt_stop.set()
-                if DEBUG_LEVEL >= 3:
-                    log_debug("ffmpeg", f"yt_stop event set for {process_id}")
-            if (
-                pinfo.yt_process
-                and pinfo.yt_process.stderr
-                and not pinfo.yt_process.stderr.closed
-            ):
-                try:
-                    pinfo.yt_process.stderr.close()
-                    if DEBUG_LEVEL >= 3:
-                        log_debug(
-                            "ffmpeg", f"closed yt_process stderr for {process_id}"
-                        )
-                except Exception as e:
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("ffmpeg", f"error closing yt_process stderr: {e}")
-
-            if yt_thread.is_alive():
-                if DEBUG_LEVEL >= 3:
-                    log_debug("ffmpeg", f"joining yt_stderr_thread for {process_id}")
-                yt_thread.join(timeout=2.0)
-                if yt_thread.is_alive():
-                    logger.warning(
-                        f"  _remove_process: yt_stderr_thread for {process_id} did not terminate within timeout"
-                    )
-                else:
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("ffmpeg", "yt_stderr_thread joined")
-            else:
-                if DEBUG_LEVEL >= 3:
-                    log_debug("ffmpeg", "yt_stderr_thread already dead")
-
-            pinfo.yt_stderr_thread = None
-            pinfo.yt_stderr_stop = None
-            if DEBUG_LEVEL >= 3:
-                log_debug("ffmpeg", f"yt_stderr_thread cleared for {process_id}")
-
-        # 3. Stderr-Hinweis für Fehlerbehandlung lesen (nur bei Bedarf)
-        stderr_hint = ""
-        if not force:
-            try:
-                if pinfo.process.stderr and not pinfo.process.stderr.closed:
-                    if DEBUG_LEVEL >= 3:
-                        stderr_hint = pinfo.process.stderr.read().decode(
-                            "utf-8", errors="ignore"
-                        )
-                        logger.debug(
-                            f"  _remove_process: read stderr hint ({len(stderr_hint)} chars)"
-                        )
-                    else:
-                        stderr_hint = pinfo.process.stderr.read(200).decode(
-                            "utf-8", errors="ignore"
-                        )
-                        if DEBUG_LEVEL >= 3:
-                            logger.debug(
-                                "  _remove_process: read stderr hint (truncated)"
-                            )
-            except Exception as e:
-                if DEBUG_LEVEL >= 3:
-                    log_exception(
-                        "ffmpeg",
-                        "Error reading stderr in _remove_process",
-                        e,
-                        level="debug",
-                    )
-                else:
-                    logger.debug(f"  _remove_process: error reading stderr: {e}")
-
-        # 4. Aus der Registry entfernen (vor dem Terminieren, um weitere Zugriffe zu verhindern)
-        with self._lock:
-            if process_id not in self._processes:
-                logger.debug(
-                    f"  _remove_process: process {process_id} disappeared before lock, returning False"
-                )
-                return False
-            process = pinfo.process
-            yt_process = pinfo.yt_process
-            del self._processes[process_id]
-            if pinfo.process.pid in self._pid_tracking:
-                del self._pid_tracking[pinfo.process.pid]
-                if DEBUG_LEVEL >= 3:
-                    log_debug(
-                        "ffmpeg", f"removed PID {pinfo.process.pid} from tracking"
-                    )
-            if pinfo.yt_process and pinfo.yt_process.pid in self._pid_tracking:
-                del self._pid_tracking[pinfo.yt_process.pid]
-                if DEBUG_LEVEL >= 3:
-                    log_debug(
-                        "ffmpeg", f"removed yt PID {pinfo.yt_process.pid} from tracking"
-                    )
-            logger.debug(
-                f"  _remove_process: removed from registry, process PID={process.pid if process else None}, yt PID={yt_process.pid if yt_process else None}"
-            )
-
-        # 5. Prozesse terminieren
-        success = True
         try:
-            if force:
-                logger.debug("  _remove_process: force mode, killing processes")
-                if yt_process and yt_process.poll() is None:
+            # 1. Prozess-Info holen und als "entfernend" markieren, um doppelte Aufrufe zu verhindern
+            with self._lock:
+                if process_id not in self._processes:
                     logger.debug(
-                        f"  Force‑killing yt_process {process_id} (PID {yt_process.pid})"
+                        f"  _remove_process: process {process_id} not found, returning False"
                     )
-                    yt_process.kill()
-                    if DEBUG_LEVEL >= 3:
-                        log_debug(
-                            "ffmpeg", f"yt_process kill sent, poll={yt_process.poll()}"
-                        )
-                if process and process.poll() is None:
+                    return False
+                pinfo = self._processes[process_id]
+                if pinfo._removing:
                     logger.debug(
-                        f"  Force‑killing process {process_id} (PID {process.pid})"
+                        f"  Process {process_id} is already being removed, skipping."
                     )
-                    process.kill()
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("ffmpeg", f"process kill sent, poll={process.poll()}")
-            else:
-                logger.debug("  _remove_process: normal mode, terminating processes")
-                if yt_process and yt_process.poll() is None:
-                    logger.debug(
-                        f"  Terminating yt_process {process_id} (PID {yt_process.pid})"
-                    )
-                    self._terminate_process(yt_process)
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("ffmpeg", "yt_process termination done")
-                if process and process.poll() is None:
-                    logger.debug(
-                        f"  Terminating process {process_id} (PID {process.pid})"
-                    )
-                    success = self._terminate_process(process)
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("ffmpeg", f"process termination success={success}")
+                    return False
+                pinfo._removing = True
+                skip_release = getattr(pinfo, "_skip_semaphore_release", False)
+                logger.debug(
+                    f"  _remove_process: marked as removing, skip_release={skip_release}"
+                )
 
-            # Pipes schließen
-            for pipe_name in ("stdout", "stderr", "stdin"):
-                pipe = getattr(process, pipe_name, None)
-                if pipe and not pipe.closed:
+            # 2. Threads stoppen (Lesen, Stderr, yt-dlp)
+            logger.debug(f"  _remove_process: stopping threads for {process_id}")
+            self._stop_read_thread(pinfo)
+            self._stop_stderr_thread(pinfo)
+
+            # yt-dlp stderr-Thread bereinigen (mit join)
+            yt_thread = getattr(pinfo, "yt_stderr_thread", None)
+            if yt_thread is not None:
+                logger.debug(
+                    f"  _remove_process: cleaning yt_stderr_thread for {process_id}"
+                )
+                yt_stop = getattr(pinfo, "yt_stderr_stop", None)
+                if yt_stop:
+                    yt_stop.set()
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("ffmpeg", f"yt_stop event set for {process_id}")
+                if (
+                    pinfo.yt_process
+                    and pinfo.yt_process.stderr
+                    and not pinfo.yt_process.stderr.closed
+                ):
                     try:
-                        pipe.close()
+                        pinfo.yt_process.stderr.close()
                         if DEBUG_LEVEL >= 3:
                             log_debug(
-                                "ffmpeg", f"closed {pipe_name} pipe for {process_id}"
+                                "ffmpeg", f"closed yt_process stderr for {process_id}"
                             )
                     except Exception as e:
                         if DEBUG_LEVEL >= 3:
-                            log_exception(
-                                "ffmpeg",
-                                f"Error closing {pipe_name} pipe",
-                                e,
-                                level="debug",
+                            log_debug("ffmpeg", f"error closing yt_process stderr: {e}")
+
+                if yt_thread.is_alive():
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("ffmpeg", f"joining yt_stderr_thread for {process_id}")
+                    yt_thread.join(timeout=2.0)
+                    if yt_thread.is_alive():
+                        logger.warning(
+                            f"  _remove_process: yt_stderr_thread for {process_id} did not terminate within timeout"
+                        )
+                    else:
+                        if DEBUG_LEVEL >= 3:
+                            log_debug("ffmpeg", "yt_stderr_thread joined")
+                else:
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("ffmpeg", "yt_stderr_thread already dead")
+
+                pinfo.yt_stderr_thread = None
+                pinfo.yt_stderr_stop = None
+                if DEBUG_LEVEL >= 3:
+                    log_debug("ffmpeg", f"yt_stderr_thread cleared for {process_id}")
+
+            # 3. Stderr-Hinweis für Fehlerbehandlung lesen (nur bei Bedarf)
+            stderr_hint = ""
+            if not force:
+                try:
+                    if pinfo.process.stderr and not pinfo.process.stderr.closed:
+                        if DEBUG_LEVEL >= 3:
+                            stderr_hint = pinfo.process.stderr.read().decode(
+                                "utf-8", errors="ignore"
+                            )
+                            logger.debug(
+                                f"  _remove_process: read stderr hint ({len(stderr_hint)} chars)"
                             )
                         else:
-                            logger.debug(
-                                f"  _remove_process: error closing {pipe_name} pipe: {e}"
+                            stderr_hint = pinfo.process.stderr.read(200).decode(
+                                "utf-8", errors="ignore"
                             )
-
-            # Crash-Callback aufrufen (nur wenn vorhanden und nicht erzwungen)
-            if self._on_process_crash is not None and not success and not force:
-                if DEBUG_LEVEL >= 3:
-                    log_debug(
-                        "ffmpeg",
-                        f"process crash detected, calling callback for {process_id}",
-                    )
-                try:
-                    self._on_process_crash(process_id, stderr_hint)
+                            if DEBUG_LEVEL >= 3:
+                                logger.debug(
+                                    "  _remove_process: read stderr hint (truncated)"
+                                )
                 except Exception as e:
-                    log_exception("ffmpeg", "Crash callback error", e, level="error")
                     if DEBUG_LEVEL >= 3:
-                        log_debug("ffmpeg", f"crash callback error: {e}")
+                        log_exception(
+                            "ffmpeg",
+                            "Error reading stderr in _remove_process",
+                            e,
+                            level="debug",
+                        )
+                    else:
+                        logger.debug(f"  _remove_process: error reading stderr: {e}")
+
+            # 4. Aus der Registry entfernen (vor dem Terminieren, um weitere Zugriffe zu verhindern)
+            with self._lock:
+                if process_id not in self._processes:
+                    logger.debug(
+                        f"  _remove_process: process {process_id} disappeared before lock, returning False"
+                    )
+                    return False
+                process = pinfo.process
+                yt_process = pinfo.yt_process
+                del self._processes[process_id]
+                if pinfo.process.pid in self._pid_tracking:
+                    del self._pid_tracking[pinfo.process.pid]
+                    if DEBUG_LEVEL >= 3:
+                        log_debug(
+                            "ffmpeg", f"removed PID {pinfo.process.pid} from tracking"
+                        )
+                if pinfo.yt_process and pinfo.yt_process.pid in self._pid_tracking:
+                    del self._pid_tracking[pinfo.yt_process.pid]
+                    if DEBUG_LEVEL >= 3:
+                        log_debug(
+                            "ffmpeg", f"removed yt PID {pinfo.yt_process.pid} from tracking"
+                        )
+                logger.debug(
+                    f"  _remove_process: removed from registry, process PID={process.pid if process else None}, yt PID={yt_process.pid if yt_process else None}"
+                )
+
+            # 5. Prozesse terminieren
+            success = True
+            try:
+                if force:
+                    logger.debug("  _remove_process: force mode, killing processes")
+                    if yt_process and yt_process.poll() is None:
+                        logger.debug(
+                            f"  Force‑killing yt_process {process_id} (PID {yt_process.pid})"
+                        )
+                        yt_process.kill()
+                        if DEBUG_LEVEL >= 3:
+                            log_debug(
+                                "ffmpeg", f"yt_process kill sent, poll={yt_process.poll()}"
+                            )
+                    if process and process.poll() is None:
+                        logger.debug(
+                            f"  Force‑killing process {process_id} (PID {process.pid})"
+                        )
+                        process.kill()
+                        if DEBUG_LEVEL >= 3:
+                            log_debug("ffmpeg", f"process kill sent, poll={process.poll()}")
+                else:
+                    logger.debug("  _remove_process: normal mode, terminating processes")
+                    if yt_process and yt_process.poll() is None:
+                        logger.debug(
+                            f"  Terminating yt_process {process_id} (PID {yt_process.pid})"
+                        )
+                        self._terminate_process(yt_process)
+                        if DEBUG_LEVEL >= 3:
+                            log_debug("ffmpeg", "yt_process termination done")
+                    if process and process.poll() is None:
+                        logger.debug(
+                            f"  Terminating process {process_id} (PID {process.pid})"
+                        )
+                        success = self._terminate_process(process)
+                        if DEBUG_LEVEL >= 3:
+                            log_debug("ffmpeg", f"process termination success={success}")
+
+                # Pipes schließen
+                for pipe_name in ("stdout", "stderr", "stdin"):
+                    pipe = getattr(process, pipe_name, None)
+                    if pipe and not pipe.closed:
+                        try:
+                            pipe.close()
+                            if DEBUG_LEVEL >= 3:
+                                log_debug(
+                                    "ffmpeg", f"closed {pipe_name} pipe for {process_id}"
+                                )
+                        except Exception as e:
+                            if DEBUG_LEVEL >= 3:
+                                log_exception(
+                                    "ffmpeg",
+                                    f"Error closing {pipe_name} pipe",
+                                    e,
+                                    level="debug",
+                                )
+                            else:
+                                logger.debug(
+                                    f"  _remove_process: error closing {pipe_name} pipe: {e}"
+                                )
+
+                # Crash-Callback aufrufen (nur wenn vorhanden und nicht erzwungen)
+                if self._on_process_crash is not None and not success and not force:
+                    if DEBUG_LEVEL >= 3:
+                        log_debug(
+                            "ffmpeg",
+                            f"process crash detected, calling callback for {process_id}",
+                        )
+                    try:
+                        self._on_process_crash(process_id, stderr_hint)
+                    except Exception as e:
+                        log_exception("ffmpeg", "Crash callback error", e, level="error")
+                        if DEBUG_LEVEL >= 3:
+                            log_debug("ffmpeg", f"crash callback error: {e}")
+
+            except Exception as e:
+                logger.exception(
+                    f"  _remove_process: unexpected error during process termination: {e}"
+                )
+                success = False
+
+            finally:
+                # Semaphore freigeben, falls nicht übersprungen
+                if not skip_release:
+                    self._release_slot()
+                    if DEBUG_LEVEL >= 3:
+                        log_debug(
+                            "ffmpeg", f"Semaphore released, now value={self._active_slots}"
+                        )
+                    else:
+                        logger.debug(
+                            f"  _remove_process: semaphore released, active slots now {self._active_slots}"
+                        )
+                else:
+                    if DEBUG_LEVEL >= 3:
+                        log_debug(
+                            "ffmpeg",
+                            f"Semaphore release skipped for {process_id} (refresh in progress)",
+                        )
+                    else:
+                        logger.debug("  _remove_process: semaphore release skipped")
+
+            logger.debug(f"  _remove_process completed for {process_id}, success={success}")
+            return success
 
         except Exception as e:
-            logger.exception(
-                f"  _remove_process: unexpected error during process termination: {e}"
-            )
-            success = False
-
-        finally:
-            # Semaphore freigeben, falls nicht übersprungen
+            # Falls eine Exception vor dem Setzen von skip_release auftritt,
+            # muss der Slot dennoch freigegeben werden.
+            logger.exception(f"  _remove_process: outer exception caught: {e}")
             if not skip_release:
                 self._release_slot()
-                if DEBUG_LEVEL >= 3:
-                    log_debug(
-                        "ffmpeg", f"Semaphore released, now value={self._active_slots}"
-                    )
-                else:
-                    logger.debug(
-                        f"  _remove_process: semaphore released, active slots now {self._active_slots}"
-                    )
-            else:
-                if DEBUG_LEVEL >= 3:
-                    log_debug(
-                        "ffmpeg",
-                        f"Semaphore release skipped for {process_id} (refresh in progress)",
-                    )
-                else:
-                    logger.debug("  _remove_process: semaphore release skipped")
-
-        logger.debug(f"  _remove_process completed for {process_id}, success={success}")
-        return success
+                logger.debug("  _remove_process: emergency slot release after outer exception")
+            return False
 
     def cleanup_stale_processes(self) -> None:
         stale_pids = []
@@ -12329,6 +12556,288 @@ class FFmpegManager:
             log_debug("ffmpeg", f"Refresh diagnosis for {process_id}: {diagnosis}")
 
         return new_process if diagnosis["success"] else None
+
+
+# =============================================================================
+# APPSETTINGS & ADVANCEDSETTINGS
+# =============================================================================
+@dataclass
+class AppSettings:
+    """
+    Anwendungseinstellungen für Dragon Whisperer.
+
+    Diese Klasse speichert benutzerspezifische Einstellungen wie die zuletzt
+    verwendete URL, das Standardmodell, die Sprache (als ISO‑Code), das Layout, etc.
+    Die Daten werden im plattformspezifischen Konfigurationsverzeichnis
+    als JSON‑Datei gespeichert.
+
+    Attributes:
+        last_url: Zuletzt verwendete URL (leerer String, falls nicht vorhanden).
+        default_model: Standard-Whisper-Modell (z.B. 'large-v3').
+        default_language: Standard-Quellsprache als ISO-Code (z.B. 'de', 'auto').
+        layout_mode: GUI-Layout ('vertical' oder 'horizontal').
+        recent_urls: Liste der zuletzt verwendeten URLs (max. 10).
+        enable_plugins: Ob Plugins aktiviert sind.
+        export_format: Standard-Exportformat ('txt', 'srt', 'vtt', 'json', 'docx').
+        auto_save_on_completion: Automatisches Speichern nach Abschluss.
+        theme: GUI-Theme ('dark', 'light', 'pastel', 'system', 'highcontrast').
+        use_browser_cookies: Browser-Cookies für YouTube/Twitch nutzen.
+        cookies_notice_shown: Ob der Cookie-Hinweis bereits angezeigt wurde.
+        cookies_browser: Name des Browsers für Cookie-Extraktion (z.B. 'firefox', 'chrome').
+    """
+
+    last_url: str = ""
+    default_model: str = "large-v3"
+    default_language: str = "auto"          # <-- Jetzt ISO‑Code!
+    layout_mode: str = "horizontal"
+    recent_urls: List[str] = field(default_factory=list)
+    enable_plugins: bool = True
+    export_format: str = "srt"
+    auto_save_on_completion: bool = False
+    theme: str = "dark"
+    use_browser_cookies: bool = True
+    cookies_notice_shown: bool = False
+    cookies_browser: str = "firefox"
+
+    # -------------------------------------------------------------------------
+    # Hilfsmethoden für Sprachcodes ↔ Namen
+    # -------------------------------------------------------------------------
+    def get_language_name(self) -> str:
+        """
+        Gibt den lesbaren Namen der aktuellen Standardsprache zurück.
+        Wird für die Anzeige in der GUI verwendet.
+        """
+        code = self.default_language
+        if code in SUPPORTED_LANGUAGES:
+            return SUPPORTED_LANGUAGES[code]
+        # Fallback, falls Code unbekannt (sollte nicht vorkommen)
+        logger.warning(f"Unbekannter Sprachcode '{code}', verwende 'Deutsch'")
+        return "Deutsch"
+
+    def set_language_by_name(self, name: str) -> None:
+        """
+        Setzt die Standardsprache anhand des lesbaren Namens.
+        Wenn der Name nicht gefunden wird, bleibt der alte Code erhalten.
+        """
+        for code, lang_name in SUPPORTED_LANGUAGES.items():
+            if lang_name == name:
+                self.default_language = code
+                logger.debug(f"Sprache gesetzt: {name} -> Code '{code}'")
+                return
+        logger.warning(f"Sprachname '{name}' nicht gefunden – Sprache bleibt unverändert.")
+
+    # -------------------------------------------------------------------------
+    # Persistenz
+    # -------------------------------------------------------------------------
+    @classmethod
+    def load_from_file(cls, filename: str = "dragon_settings.json") -> "AppSettings":
+        """
+        Lädt die Einstellungen aus einer JSON-Datei.
+        Konvertiert automatisch alte Sprach‑Namen in ISO‑Codes.
+        """
+        try:
+            config_dir = PlatformUtils.get_platform_config_dir()
+            file_path = config_dir / filename
+            if not file_path.exists():
+                return cls()
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            # Nur Felder übernehmen, die in der Dataclass existieren
+            valid_fields = {f.name for f in fields(cls) if f.init}
+            filtered = {k: v for k, v in data.items() if k in valid_fields}
+
+            # Typkorrekturen
+            if "recent_urls" in filtered and not isinstance(filtered["recent_urls"], list):
+                filtered["recent_urls"] = []
+            if "default_model" in filtered:
+                model = filtered["default_model"]
+                if model not in Config.WHISPER_MODELS and model != "large-v3":
+                    filtered["default_model"] = "large-v3"
+
+            # ========== Sprach‑Konvertierung (Name → Code) ==========
+            if "default_language" in filtered:
+                lang_value = filtered["default_language"]
+                # Prüfen, ob es bereits ein gültiger Code ist
+                if lang_value in SUPPORTED_LANGUAGES:
+                    # Schon Code – nichts tun
+                    pass
+                else:
+                    # Es könnte ein Name sein – versuche Mapping
+                    found = False
+                    for code, name in SUPPORTED_LANGUAGES.items():
+                        if name == lang_value:
+                            filtered["default_language"] = code
+                            found = True
+                            logger.info(f"🔄 Sprache '{lang_value}' in Code '{code}' konvertiert")
+                            break
+                    if not found:
+                        # Weder Code noch Name – auf Standard setzen
+                        logger.warning(
+                            f"⚠️ Unbekannte Sprache '{lang_value}' – setze auf 'auto'"
+                        )
+                        filtered["default_language"] = "auto"
+            # =========================================================
+
+            # Leere recent_urls-Einträge filtern
+            if "recent_urls" in filtered and isinstance(filtered["recent_urls"], list):
+                filtered["recent_urls"] = [
+                    u for u in filtered["recent_urls"] if u and u.strip()
+                ]
+
+            return cls(**filtered)
+
+        except (json.JSONDecodeError, OSError, PermissionError) as e:
+            logger.warning(f"⚠️ Konnte Einstellungen nicht laden: {e}")
+            return cls()
+        except Exception as e:
+            logger.error(f"❌ Unerwarteter Fehler beim Laden der Einstellungen: {e}")
+            return cls()
+
+    def save_to_file(self, filename: str = "dragon_settings.json") -> bool:
+        """
+        Speichert die Einstellungen in einer JSON-Datei (atomarer Schreibvorgang).
+        Die Sprache wird als ISO‑Code gespeichert.
+        """
+        try:
+            config_dir = PlatformUtils.get_platform_config_dir()
+            config_dir.mkdir(parents=True, exist_ok=True)
+            file_path = config_dir / filename
+            temp_path = file_path.with_suffix(".tmp")
+
+            # Daten für JSON vorbereiten
+            data = {
+                "last_url": self.last_url,
+                "default_model": self.default_model,
+                "default_language": self.default_language,   # <-- Code wird gespeichert
+                "layout_mode": self.layout_mode,
+                "recent_urls": self.recent_urls[:10],
+                "enable_plugins": self.enable_plugins,
+                "export_format": self.export_format,
+                "auto_save_on_completion": self.auto_save_on_completion,
+                "theme": self.theme,
+                "use_browser_cookies": self.use_browser_cookies,
+                "cookies_notice_shown": self.cookies_notice_shown,
+                "cookies_browser": self.cookies_browser,
+            }
+
+            # Atomarer Schreibvorgang
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            try:
+                os.replace(temp_path, file_path)
+            except AttributeError:
+                temp_path.replace(file_path)
+            except FileNotFoundError:
+                config_dir.mkdir(parents=True, exist_ok=True)
+                os.replace(temp_path, file_path)
+
+            logger.debug(f"💾 Einstellungen gespeichert: {file_path}")
+            return True
+        except (OSError, PermissionError) as e:
+            logger.warning(f"⚠️ Konnte Einstellungen nicht speichern: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Fehler beim Speichern der Einstellungen: {e}")
+            return False
+
+    # -------------------------------------------------------------------------
+    # Weitere Methoden
+    # -------------------------------------------------------------------------
+    def add_recent_url(self, url: str) -> None:
+        """Fügt eine URL zur Liste der zuletzt verwendeten URLs hinzu."""
+        if not url:
+            return
+        if url in self.recent_urls:
+            self.recent_urls.remove(url)
+        self.recent_urls.insert(0, url)
+        self.recent_urls = self.recent_urls[:10]
+        self.save_to_file()
+
+    def update_last_url(self, url: str) -> None:
+        """Aktualisiert die zuletzt verwendete URL."""
+        if url != self.last_url:
+            self.last_url = url
+            self.save_to_file()
+
+    def clean_recent_urls(self) -> int:
+        """Entfernt ungültige oder leere Einträge aus der Liste der letzten URLs."""
+        old_len = len(self.recent_urls)
+        cleaned = [u for u in self.recent_urls if u and u.strip()]
+        removed = old_len - len(cleaned)
+        if removed > 0:
+            self.recent_urls = cleaned
+            self.save_to_file()
+        return removed
+
+    def validate(self) -> List[str]:
+        """Validiert die aktuellen Einstellungen."""
+        issues = []
+        if self.default_model not in Config.WHISPER_MODELS and self.default_model != "large-v3":
+            issues.append(f"Ungültiges Modell: {self.default_model}")
+        # Sprache muss ein gültiger Code oder "auto" sein
+        if self.default_language not in SUPPORTED_LANGUAGES and self.default_language != "auto":
+            issues.append(f"Ungültiger Sprachcode: {self.default_language}")
+        if self.layout_mode not in ("vertical", "horizontal"):
+            issues.append(f"Ungültiges Layout: {self.layout_mode}")
+        if self.export_format not in ("txt", "srt", "vtt", "json", "docx"):
+            issues.append(f"Ungültiges Exportformat: {self.export_format}")
+        if self.theme not in ("dark", "light", "pastel", "system", "highcontrast"):
+            issues.append(f"Ungültiges Theme: {self.theme}")
+        return issues
+
+    def repair(self) -> List[str]:
+        """Stellt die Konsistenz der Einstellungen wieder her."""
+        repairs = []
+        default = AppSettings()
+
+        if self.default_model not in Config.WHISPER_MODELS and self.default_model != "large-v3":
+            old = self.default_model
+            self.default_model = default.default_model
+            repairs.append(f"Modell {old} -> {self.default_model}")
+
+        if self.default_language not in SUPPORTED_LANGUAGES and self.default_language != "auto":
+            old = self.default_language
+            self.default_language = default.default_language
+            repairs.append(f"Sprachcode {old} -> {self.default_language}")
+
+        if self.layout_mode not in ("vertical", "horizontal"):
+            old = self.layout_mode
+            self.layout_mode = default.layout_mode
+            repairs.append(f"Layout {old} -> {self.layout_mode}")
+
+        if self.export_format not in ("txt", "srt", "vtt", "json", "docx"):
+            old = self.export_format
+            self.export_format = default.export_format
+            repairs.append(f"Exportformat {old} -> {self.export_format}")
+
+        if self.theme not in ("dark", "light", "pastel", "system", "highcontrast"):
+            old = self.theme
+            self.theme = default.theme
+            repairs.append(f"Theme {old} -> {self.theme}")
+
+        if repairs:
+            logger.info(f"✅ AppSettings repariert: {', '.join(repairs)}")
+            self.save_to_file()
+        return repairs
+
+    def __repr__(self) -> str:
+        return (
+            f"AppSettings(model={self.default_model}, "
+            f"lang={self.default_language}, layout={self.layout_mode}, "
+            f"theme={self.theme}, cookies={self.use_browser_cookies}, "
+            f"cookies_browser={self.cookies_browser})"
+        )
+
+    @staticmethod
+    def get_cookies_browser() -> str:
+        """Liest den konfigurierten Browser aus den globalen Einstellungen."""
+        try:
+            settings = AppSettings.load_from_file()
+            return settings.cookies_browser
+        except Exception:
+            return "firefox"
 
 
 class StreamInfoExtractor:
@@ -14675,44 +15184,53 @@ class QueueManager:
 
     def _process_gui_item(self, item: Any) -> None:
         """
-        Verarbeitet ein einzelnes GUI-Queue-Element.
-        Erwartet Tupel (msg_type, callback, important).
+        Verarbeitet ein einzelnes GUI‑Queue‑Element.
+        Erwartet Tupel (msg_type, callback, important) oder (msg_type, callback).
 
         Args:
-            item: Das Queue-Element.
+            item: Das Queue‑Element.
         """
+        # Extrahiere die Bestandteile
         if isinstance(item, tuple) and len(item) in (2, 3):
-            msg_type, callback = item[0], item[1]
+            msg_type = item[0]
+            callback = item[1]
             important = item[2] if len(item) == 3 else False
-            if callable(callback):
-                # Prüfen, ob GUI noch existiert und der Limiter verfügbar ist
-                if hasattr(self.gui, "_gui_update_limiter"):
-                    limiter = self.gui._gui_update_limiter
-                    # Wichtige Updates werden sofort ausgeführt (ohne Rate-Limit)
-                    if important or limiter.can_update(f"gui_{msg_type}"):
-                        try:
-                            callback()
-                        except (tk.TclError, RuntimeError) as e:
-                            if logger.isEnabledFor(logging.DEBUG):
-                                log_debug(
-                                    "gui", f"GUI callback error ({msg_type}): {e}"
-                                )
-                        except Exception as e:
-                            logger.warning(f"⚠️ GUI callback error ({msg_type}): {e}")
-                    elif DEBUG_LEVEL >= 4:
-                        log_debug(
-                            "gui", f"Rate‑Limit für {msg_type} – Element verworfen"
-                        )
-                else:
-                    # GUI nicht mehr vorhanden – Element verwerfen
-                    if DEBUG_LEVEL >= 3:
-                        log_debug(
-                            "gui", f"GUI nicht verfügbar, Element verworfen: {msg_type}"
-                        )
         else:
-            logger.warning(
-                f"⚠️ Unbekanntes Element in GUI‑Queue entfernt: {type(item)}"
-            )
+            logger.warning(f"⚠️ Unbekanntes Element in GUI‑Queue entfernt: {type(item)}")
+            return
+
+        if not callable(callback):
+            logger.warning(f"⚠️ GUI‑Queue‑Element ist nicht aufrufbar: {msg_type}")
+            return
+
+        # Prüfen, ob GUI noch existiert und der Limiter verfügbar ist
+        if not hasattr(self.gui, "_gui_update_limiter"):
+            # GUI nicht mehr vorhanden – Element verwerfen
+            if DEBUG_LEVEL >= 3:
+                log_debug("gui", f"GUI nicht verfügbar, Element verworfen: {msg_type}")
+            return
+
+        limiter = self.gui._gui_update_limiter
+
+        # Wichtige Updates werden sofort ausgeführt (ohne Rate‑Limit)
+        if important or limiter.can_update(f"gui_{msg_type}"):
+            try:
+                callback()
+            except tk.TclError as e:
+                # Erwarteter Fehler (z.B. Widget existiert nicht mehr) – ignorieren
+                if logger.isEnabledFor(logging.DEBUG):
+                    log_debug("gui", f"GUI callback error ({msg_type}): {e}")
+            except Exception as e:
+                # Unerwarteter Fehler – loggen, aber Queue‑Verarbeitung fortsetzen
+                logger.error(
+                    f"❌ Unerwarteter Fehler in GUI‑Callback ({msg_type}): {e}",
+                    exc_info=True
+                )
+                if DEBUG_LEVEL >= 3:
+                    log_debug("gui", f"Unexpected exception in callback: {type(e).__name__}")
+        else:
+            if DEBUG_LEVEL >= 4:
+                log_debug("gui", f"Rate‑Limit für {msg_type} – Element verworfen")
 
     def _process_text_item(self, item: Any) -> None:
         """
@@ -17318,15 +17836,33 @@ class StatisticsDialog(BaseDialog):
 
 class SummarizeDialog(BaseDialog):
     """
-    Dialog zur Zusammenfassung von Texten mit Ollama (thread‑sicher).
+    Dialog zur Zusammenfassung von Texten mit Ollama (thread‑sicher, optimiert).
+
+    Features:
+        - Automatische Erkennung verfügbarer Modelle
+        - Mehrsprachige Zusammenfassung (Deutsch, Englisch, Spanisch, Koreanisch, Chinesisch)
+        - Chunk‑basierte Verarbeitung langer Texte (>2000 Wörter)
+        - Abbruchmöglichkeit während der Verarbeitung
+        - Blacklist‑Filterung der finalen Zusammenfassung
+        - Speichern und Kopieren der Ergebnisse
+        - Direkte Übersetzung der Zusammenfassung
+        - Vollständige Ressourcenfreigabe beim Schließen
     """
 
     def __init__(self, parent: Any, text: str, gui_ref: Any) -> None:
+        """
+        Initialisiert den Zusammenfassungsdialog.
+
+        Args:
+            parent: Übergeordnetes Tkinter‑Fenster.
+            text: Der zu verarbeitende Text (z. B. das Transkript).
+            gui_ref: Referenz auf die Haupt‑GUI (für Einstellungen und Engine‑Zugriff).
+        """
         self.text = text
         self.gui = gui_ref
         self.stream_title = None
 
-        # Versuche, den Stream‑Titel zu ermitteln
+        # Versuche, den aktuellen Stream‑Titel zu ermitteln
         if (
             self.gui
             and hasattr(self.gui, "current_stream_info")
@@ -17350,7 +17886,10 @@ class SummarizeDialog(BaseDialog):
         if not self.stream_title:
             self.stream_title = ""
 
+        # Abbruch‑Event für die asynchrone Verarbeitung
         self._request_cancel = threading.Event()
+
+        # OllamaSummarizer mit den aktuellen Einstellungen erstellen
         self.summarizer = OllamaSummarizer(
             parent,
             model=self.gui.advanced_settings.summarize_model,
@@ -17358,6 +17897,7 @@ class SummarizeDialog(BaseDialog):
             cache_manager=self.gui.app_context.cache_manager,
         )
 
+        # Ursprüngliche Einstellungen für späteres Zurückschreiben speichern
         self.saved_temp = self.gui.advanced_settings.summarize_temperature
         self.saved_model = self.gui.advanced_settings.summarize_model
 
@@ -17371,12 +17911,13 @@ class SummarizeDialog(BaseDialog):
         self.full_summary = ""
         self._destroyed = False
 
+        # Basisklasse initialisieren (erstellt das Toplevel‑Fenster und ruft build_ui auf)
         super().__init__(
             parent, "Zusammenfassung mit Ollama", width=750, height=650, modal=True
         )
 
     # -------------------------------------------------------------------------
-    # UI-Aufbau
+    # UI‑Aufbau
     # -------------------------------------------------------------------------
     def build_ui(self) -> None:
         """Erstellt die Benutzeroberfläche des Dialogs."""
@@ -17391,7 +17932,7 @@ class SummarizeDialog(BaseDialog):
             self.close()
             return
 
-        # 1. Modell-Auswahl
+        # 1. Modell‑Auswahl
         model_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
         model_frame.pack(fill="x", pady=5)
 
@@ -17405,7 +17946,7 @@ class SummarizeDialog(BaseDialog):
         self.model_var = tk.StringVar(value=self.saved_model)
         available = self.summarizer.get_available_models()
         if available:
-            # Bevorzugte Modelle zuerst
+            # Bevorzugte Modelle zuerst anzeigen
             preferred = ["qwen2.5:7b", "glm4:9b", "llama3.1:8b"]
             values = []
             for pref in preferred:
@@ -17525,7 +18066,7 @@ class SummarizeDialog(BaseDialog):
                 "<ButtonRelease-1>", lambda e: self._set_default_prompt()
             )
 
-        # 5. Prompt-Textfeld (editierbar)
+        # 5. Prompt‑Textfeld (editierbar)
         tk.Label(
             self.main,
             text="Prompt (optional):",
@@ -17562,7 +18103,7 @@ class SummarizeDialog(BaseDialog):
         self.summary_text.pack(fill="both", expand=True, pady=10)
         ContextMenuMixin(self.summary_text)
 
-        # 7. Button-Leiste
+        # 7. Button‑Leiste
         btn_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
         btn_frame.pack(fill="x", pady=5)
 
@@ -17654,7 +18195,7 @@ class SummarizeDialog(BaseDialog):
     # Hilfsmethoden
     # -------------------------------------------------------------------------
     def _set_default_prompt(self) -> None:
-        """Setzt den Standard-Prompt basierend auf der ausgewählten Sprache und dem Videotitel."""
+        """Setzt den Standard‑Prompt basierend auf der ausgewählten Sprache und dem Videotitel."""
         target = self.summary_lang_var.get()
         if target == "Deutsch":
             prompt = (
@@ -17784,7 +18325,7 @@ class SummarizeDialog(BaseDialog):
 
         def on_chunk_error(error: str):
             if retry_count < 3:
-                delay_ms = 1000 * (2**retry_count)
+                delay_ms = 1000 * (2 ** retry_count)
                 log_debug(
                     "summarize",
                     f"Chunk {self._current_chunk+1} fehlgeschlagen (Versuch {retry_count+1}): {error}, Wiederholung in {delay_ms//1000}s",
@@ -18233,7 +18774,8 @@ class SummarizeDialog(BaseDialog):
                 text="⚠️ Übersetzungs-Engine derzeit nicht verfügbar"
             )
             return
-        TranslationDialog(self.dialog, engine, initial_text=summary)
+        # Korrigierter Aufruf mit gui_ref
+        TranslationDialog(self.dialog, engine, self.gui, initial_text=summary)
 
     def close(self) -> None:
         """
@@ -21850,7 +22392,7 @@ class AdvancedSettingsDialog:
                 self.ollama_model_var.get().strip()
             )
             self.gui.advanced_settings.ollama_host = self.ollama_host_var.get().strip()
-
+    
             self.gui.advanced_settings.transcript_max_lines = self.trans_lines_var.get()
             self.gui.advanced_settings.translation_max_lines = (
                 self.transl_lines_var.get()
@@ -21863,7 +22405,7 @@ class AdvancedSettingsDialog:
             self.gui.settings.auto_save_on_completion = self.auto_save_var.get()
             self.gui.settings.enable_plugins = self.plugin_var.get()
             self.gui.settings.use_browser_cookies = self.cookies_var.get()
-            self.gui.settings.cookies_browser = self.cookies_browser_var.get()   # NEU
+            self.gui.settings.cookies_browser = self.cookies_browser_var.get()
 
             self.gui.advanced_settings.min_confidence = self.min_conf_var.get()
             self.gui.advanced_settings.duplicate_similarity_threshold = (
@@ -21920,7 +22462,6 @@ class AdvancedSettingsDialog:
                 self.tts_sentence_silence_var.get()
             )
 
-            # Neue Satzpufferungswerte
             self.gui.advanced_settings.sentence_flush_interval = (
                 self.sentence_interval_var.get()
             )
@@ -21928,13 +22469,23 @@ class AdvancedSettingsDialog:
                 self.sentence_words_var.get()
             )
 
-            log_debug(
-                "settings",
-                f"TTS settings saved: engine={self.tts_engine_var.get()}, "
-                f"voice={self.tts_voice_var.get()}, "
-                f"length_scale={self.tts_length_scale_var.get()}, "
-                f"sentence_silence={self.tts_sentence_silence_var.get()}",
-            )
+            # ========== NEU: Zielsprache aus GUI synchronisieren ==========
+            try:
+                selected_lang_name = self.gui.lang_var.get()
+                lang_code = None
+                for code, name in SORTED_LANGUAGES:
+                    if name == selected_lang_name:
+                        lang_code = code
+                        break
+
+                if lang_code:
+                    self.gui.advanced_settings.target_language = lang_code
+                    self.gui.settings.default_language = lang_code
+                    log_debug("settings", f"Target language synced: {selected_lang_name} -> {lang_code}")
+                else:
+                    logger.warning(f"Konnte Sprachcode für '{selected_lang_name}' nicht finden")
+            except Exception as e:
+                logger.warning(f"Fehler beim Synchronisieren der Zielsprache: {e}")
 
             # ========== 2. Erlaubte Verzeichnisse validieren ==========
             allowed_dirs_text = self.allowed_dirs_text.get("1.0", "end-1c").strip()
@@ -22005,7 +22556,7 @@ class AdvancedSettingsDialog:
             self.gui.settings.save_to_file()
             log_debug("settings", "Settings saved to disk")
 
-            # ========== 7. Laufzeit‑Anpassungen (Proxy, Cookies, etc.) ==========
+            # ========== 7. Laufzeit‑Anpassungen ==========
             if hasattr(self.gui, "stream_manager"):
                 self.gui.stream_manager.use_browser_cookies = (
                     self.gui.settings.use_browser_cookies
@@ -22014,23 +22565,17 @@ class AdvancedSettingsDialog:
                     self.gui.advanced_settings.proxy_url,
                     self.gui.advanced_settings.proxy_enabled,
                 )
-                log_debug("settings", "StreamManager updated (cookies, proxy)")
             if hasattr(self.gui, "stream_info_extractor"):
                 self.gui.stream_info_extractor.use_browser_cookies = (
                     self.gui.settings.use_browser_cookies
                 )
 
-            # ========== 8. GPU‑Umschaltung: TranscriptionEngine neu konfigurieren ==========
+            # ========== 8. GPU‑Umschaltung ==========
             new_gpu = self.gui.advanced_settings.gpu_acceleration
             if old_gpu != new_gpu:
                 log_debug("settings", f"GPU acceleration changed: {old_gpu} → {new_gpu}")
                 if hasattr(self.gui, "transcription_engine") and self.gui.transcription_engine:
                     self.gui.transcription_engine.set_gpu_acceleration(new_gpu)
-                    log_debug("settings", "TranscriptionEngine GPU setting updated")
-                else:
-                    logger.warning("TranscriptionEngine nicht verfügbar – GPU‑Umschaltung übersprungen")
-            else:
-                log_debug("settings", "GPU acceleration unchanged")
 
             # ========== 9. Übersetzungs‑Engine aktualisieren ==========
             if hasattr(self.gui, "audio_processor") and not getattr(
@@ -22048,20 +22593,14 @@ class AdvancedSettingsDialog:
                     logger.error(
                         f"Fehler beim Aktualisieren der Übersetzungs-Engine: {e}"
                     )
-                    log_debug("settings", f"Failed to update translation engine: {e}")
 
             # ========== 10. TTS‑Engine neu konfigurieren ==========
             if hasattr(self.gui, "tts_manager"):
                 self.gui.tts_manager.set_engine(self.gui.advanced_settings.tts_engine)
                 self.gui.tts_manager.set_voice(self.gui.advanced_settings.tts_voice)
                 self.gui.tts_manager.set_volume(1.0)
-                log_debug(
-                    "settings",
-                    f"TTSManager updated: engine={self.gui.advanced_settings.tts_engine}, "
-                    f"voice={self.gui.advanced_settings.tts_voice}"
-                )
 
-            # ========== 11. Dialog schließen und Bestätigung anzeigen ==========
+            # ========== 11. Dialog schließen ==========
             self.dialog.destroy()
             self.gui.update_status("✅ Settings saved")
             log_debug("settings", "Settings saved successfully")
@@ -22207,6 +22746,7 @@ class AdvancedSettingsDialog:
         threading.Thread(target=fetch, daemon=True).start()
 
     def _test_tts(self) -> None:
+        """Testet die TTS‑Ausgabe mit den aktuellen Einstellungen (thread‑sicher)."""
         if not hasattr(self.gui, "tts_manager") or self.gui.tts_manager is None:
             self.tts_test_status.config(text="❌ TTS-Manager nicht verfügbar")
             return
@@ -22220,15 +22760,22 @@ class AdvancedSettingsDialog:
         self.tts_test_status.config(text="🔊 Wird abgespielt...")
         self.dialog.update_idletasks()
 
-        def callback(success: bool, message: str):
-            def update():
-                if success:
-                    self.tts_test_status.config(text="✅ Test erfolgreich")
-                else:
-                    self.tts_test_status.config(text=f"❌ Fehler: {message}")
-
+        def callback(success: bool, message: str) -> None:
+            """Callback wird im Hintergrundthread aufgerufen – GUI‑Updates müssen mit after erfolgen."""
+            def update() -> None:
+                if not self.dialog or not self.dialog.winfo_exists():
+                    return
+                try:
+                    if success:
+                        self.tts_test_status.config(text="✅ Test erfolgreich")
+                    else:
+                        self.tts_test_status.config(text=f"❌ Fehler: {message}")
+                except tk.TclError:
+                    pass  # Widget existiert nicht mehr
+            # Update im Hauptthread planen
             self.dialog.after(0, update)
 
+        # Sprachausgabe asynchron starten
         self.gui.tts_manager.speak(test_text, callback)
 
 
@@ -27543,26 +28090,35 @@ class StreamHandler:
         """
         Haupt‑Stream‑Loop. Liest Audiodaten vom FFmpeg‑Prozess,
         übergibt sie an den AudioProcessor und führt bei Bedarf Reconnects durch.
+
+        Enthält Verzögerungen in Fehlerfällen, um CPU‑Spitzen zu vermeiden.
         """
         normal_ending = False
-        platform_id, platform_name = self.stream_manager.detect_platform(
-            original_video_url
-        )
+        platform_id, platform_name = self.stream_manager.detect_platform(original_video_url)
         logger.info(f"🎯 StreamHandler loop started for {platform_name}")
 
         last_data_time = time.time()
         empty_reads = 0
-        reconnect_attempts = 0
         processing_errors = 0
         current_process = process
         is_local_file = original_video_url.startswith("file://")
 
+        # Schwellwerte
+        MAX_EMPTY_READS = 3
+        MAX_RECONNECT_ATTEMPTS = 2
+        INACTIVITY_TIMEOUT = 30.0
+        MAX_PROCESSING_ERRORS = 3
+
+        # Verzögerungen (Sekunden)
+        DELAY_EMPTY_READ = 0.2          # kurze Pause nach leerem Read
+        DELAY_PROCESSING_ERROR = 0.5    # Pause nach Verarbeitungsfehler
+        DELAY_RECONNECT_RETRY = 2.0     # Pause zwischen Reconnect‑Versuchen
+        DELAY_AFTER_RECONNECT = 1.0     # Pause nach erfolgreichem Reconnect
+
         while True:
             ap = self._get_ap()
             if ap is None:
-                logger.info(
-                    "AudioProcessor nicht mehr verfügbar – beende StreamHandler."
-                )
+                logger.info("AudioProcessor nicht mehr verfügbar – beende StreamHandler.")
                 break
 
             ffmpeg = self._get_ffmpeg()
@@ -27585,9 +28141,9 @@ class StreamHandler:
                 break
 
             # ----- Inaktivitätserkennung -----
-            if time.time() - last_data_time > self.INACTIVITY_TIMEOUT:
+            if time.time() - last_data_time > INACTIVITY_TIMEOUT:
                 logger.info(
-                    f"📴 Stream inactive for {self.INACTIVITY_TIMEOUT}s – trying reconnect."
+                    f"📴 Stream inactive for {INACTIVITY_TIMEOUT}s – trying reconnect."
                 )
                 info_callback("Stream inactive – reconnecting...")
                 new_process = ffmpeg.refresh_and_restart(
@@ -27601,9 +28157,8 @@ class StreamHandler:
                     empty_reads = 0
                     processing_errors = 0
                     last_data_time = time.time()
-                    logger.info(
-                        f"✅ Reconnect after inactivity successful (PID: {new_process.pid})"
-                    )
+                    time.sleep(DELAY_AFTER_RECONNECT)
+                    logger.info(f"✅ Reconnect after inactivity successful (PID: {new_process.pid})")
                     continue
                 else:
                     error_callback("❌ Reconnect after inactivity failed")
@@ -27639,57 +28194,50 @@ class StreamHandler:
             # ----- Verarbeitung des Leseergebnisses -----
             if audio_data is None:
                 # Keine Daten (Timeout oder Sentinel)
-                # Sofort prüfen, ob Stop angefordert wurde, um Schleife zu beenden
-                if ap.is_stop_requested():
-                    log_debug(
-                        "stream", "Stop requested after receiving None, exiting loop"
-                    )
-                    break
-
                 empty_reads += 1
-                if empty_reads >= self.MAX_EMPTY_READS:
+                if empty_reads >= MAX_EMPTY_READS:
                     logger.warning(
                         f"⚠️ Too many consecutive timeouts ({empty_reads}), trying reconnect..."
                     )
                     info_callback("🔄 Stream timeout – reconnecting...")
-                    new_process = ffmpeg.refresh_and_restart(
-                        process_id=process_id,
-                        video_url=original_video_url,
-                        detected_language=detected_language,
-                        max_attempts=1,
-                    )
-                    if new_process is not None:
-                        current_process = new_process
-                        empty_reads = 0
-                        processing_errors = 0
-                        last_data_time = time.time()
-                        logger.info(
-                            f"✅ Reconnect after timeout successful (PID: {new_process.pid})"
+    
+                    # Reconnect mit Backoff zwischen Versuchen
+                    for attempt in range(1, MAX_RECONNECT_ATTEMPTS + 1):
+                        new_process = ffmpeg.refresh_and_restart(
+                            process_id=process_id,
+                            video_url=original_video_url,
+                            detected_language=detected_language,
+                            max_attempts=1,
                         )
-                        continue
-                    else:
-                        reconnect_attempts += 1
-                        if reconnect_attempts >= self.MAX_RECONNECT_ATTEMPTS:
-                            error_callback(
-                                "❌ Stream connection lost after multiple reconnect attempts"
-                            )
+                        if new_process is not None:
+                            current_process = new_process
+                            empty_reads = 0
+                            processing_errors = 0
+                            last_data_time = time.time()
+                            time.sleep(DELAY_AFTER_RECONNECT)
+                            logger.info(f"✅ Reconnect after timeout successful (PID: {new_process.pid})")
                             break
                         else:
                             logger.warning(
-                                f"⚠️ Reconnect attempt {reconnect_attempts}/{self.MAX_RECONNECT_ATTEMPTS} failed, waiting before retry..."
+                                f"⚠️ Reconnect attempt {attempt}/{MAX_RECONNECT_ATTEMPTS} failed"
                             )
-                            time.sleep(5.0)
-                            continue
-                else:
-                    time.sleep(1.0)
+                            if attempt < MAX_RECONNECT_ATTEMPTS:
+                                time.sleep(DELAY_RECONNECT_RETRY)
+                    else:
+                        # Alle Reconnect‑Versuche fehlgeschlagen
+                        error_callback("❌ Stream connection lost after multiple reconnect attempts")
+                        break
                     continue
+                else:
+                    # Noch nicht genug Timeouts – kurze Pause, dann nächster Leseversuch
+                    time.sleep(DELAY_EMPTY_READ)
+                    continue
+
             elif audio_data == b"":
                 # Prozess beendet – keine weiteren Daten
                 if current_process.poll() is not None:
                     if is_local_file:
-                        logger.info(
-                            "Local file: FFmpeg process terminated – finishing loop."
-                        )
+                        logger.info("Local file: FFmpeg process terminated – finishing loop.")
                         normal_ending = True
                         normal_ending_container[0] = True
                         break
@@ -27707,23 +28255,19 @@ class StreamHandler:
                             empty_reads = 0
                             processing_errors = 0
                             last_data_time = time.time()
-                            logger.info(
-                                f"✅ Reconnect after termination successful (PID: {new_process.pid})"
-                            )
+                            time.sleep(DELAY_AFTER_RECONNECT)
+                            logger.info(f"✅ Reconnect after termination successful (PID: {new_process.pid})")
                             continue
                         else:
-                            error_callback(
-                                "❌ Stream connection lost after process termination"
-                            )
+                            error_callback("❌ Stream connection lost after process termination")
                             break
                 else:
                     # Prozess läuft noch, aber keine Daten – kurze Pause
-                    time.sleep(0.5)
+                    time.sleep(DELAY_EMPTY_READ)
                     continue
             else:
                 # Erfolgreicher Read
                 empty_reads = 0
-                reconnect_attempts = 0
                 last_data_time = time.time()
                 ffmpeg.update_process_activity(process_id)
                 with ap._stats_lock:
@@ -27749,19 +28293,15 @@ class StreamHandler:
                         exc_info=True,
                     )
                     error_callback("❌ Fehler bei der Verarbeitung")
-
+    
                     if DEBUG_LEVEL >= 3:
-                        log_debug(
-                            "process", f"Processing error #{processing_errors}: {e}"
-                        )
+                        log_debug("process", f"Processing error #{processing_errors}: {e}")
 
                     if not ap.is_processing():
-                        logger.info(
-                            "AudioProcessor hat Verarbeitung gestoppt – breche ab"
-                        )
+                        logger.info("AudioProcessor hat Verarbeitung gestoppt – breche ab")
                         break
 
-                    if processing_errors >= self.MAX_PROCESSING_ERRORS:
+                    if processing_errors >= MAX_PROCESSING_ERRORS:
                         logger.warning(
                             f"⚠️ Too many consecutive processing errors ({processing_errors}), trying reconnect..."
                         )
@@ -27777,17 +28317,15 @@ class StreamHandler:
                             empty_reads = 0
                             processing_errors = 0
                             last_data_time = time.time()
-                            logger.info(
-                                f"✅ Reconnect after processing errors successful (PID: {new_process.pid})"
-                            )
+                            time.sleep(DELAY_AFTER_RECONNECT)
+                            logger.info(f"✅ Reconnect after processing errors successful (PID: {new_process.pid})")
                             continue
                         else:
-                            error_callback(
-                                "❌ Stream nach Verarbeitungsfehlern nicht wiederherstellbar"
-                            )
+                            error_callback("❌ Stream nach Verarbeitungsfehlern nicht wiederherstellbar")
                             break
                     else:
-                        time.sleep(0.5)
+                        # Kurze Pause nach Verarbeitungsfehler, bevor weiter gelesen wird
+                        time.sleep(DELAY_PROCESSING_ERROR)
                         continue
 
         if not normal_ending and not ap.is_stop_requested():
@@ -30598,7 +31136,7 @@ class WhisperLayoutManager:
             self.gui_ref.model_combo.config(state="disabled")
             self.gui_ref.model_var.set("dummy (Demo)")
 
-        # Zielsprache (Translate) – hier erfolgt die Optimierung
+        # Zielsprache (Translate) – optimiert mit Sprachcodes
         target_lang_frame = tk.Frame(
             center_controls, bg=self.gui_ref.current_theme.BG_PRIMARY
         )
@@ -30646,13 +31184,8 @@ class WhisperLayoutManager:
 
         self.gui_ref.lang_var = tk.StringVar()
 
-        # Standard-Zielsprache aus den Einstellungen (als Name)
-        default_lang = self.gui_ref.settings.default_language
-        # Falls default_language ein Code ist, in Namen umwandeln
-        if default_lang in SUPPORTED_LANGUAGES:
-            default_lang_name = SUPPORTED_LANGUAGES[default_lang]
-        else:
-            default_lang_name = default_lang  # sollte bereits Name sein
+        # Standard-Zielsprache aus den Einstellungen (als lesbarer Name)
+        default_lang_name = self.gui_ref.settings.get_language_name()
         if default_lang_name not in target_lang_values:
             default_lang_name = "Deutsch"
         self.gui_ref.lang_var.set(default_lang_name)
@@ -31269,274 +31802,6 @@ class WhisperLayoutManager:
         self.gui_ref.live_mode_btn.pack(side="right", padx=2)
         ToolTip(self.gui_ref.live_mode_btn, "Chunk-Dauer umschalten (20s/10s)")
 
-
-# =============================================================================
-# 18. APPSETTINGS & ADVANCEDSETTINGS
-# =============================================================================
-@dataclass
-class AppSettings:
-    """
-    Anwendungseinstellungen für Dragon Whisperer.
-
-    Diese Klasse speichert benutzerspezifische Einstellungen wie die zuletzt
-    verwendete URL, das Standardmodell, die Sprache, das Layout, etc.
-    Die Daten werden im plattformspezifischen Konfigurationsverzeichnis
-    als JSON-Datei gespeichert.
-
-    Attributes:
-        last_url: Zuletzt verwendete URL (leerer String, falls nicht vorhanden).
-        default_model: Standard-Whisper-Modell (z.B. 'large-v3').
-        default_language: Standard-Quellsprache als ISO-Code (z.B. 'de', 'auto').
-        layout_mode: GUI-Layout ('vertical' oder 'horizontal').
-        recent_urls: Liste der zuletzt verwendeten URLs (max. 10).
-        enable_plugins: Ob Plugins aktiviert sind.
-        export_format: Standard-Exportformat ('txt', 'srt', 'vtt', 'json', 'docx').
-        auto_save_on_completion: Automatisches Speichern nach Abschluss.
-        theme: GUI-Theme ('dark', 'light', 'pastel', 'system', 'highcontrast').
-        use_browser_cookies: Browser-Cookies für YouTube/Twitch nutzen.
-        cookies_notice_shown: Ob der Cookie-Hinweis bereits angezeigt wurde.
-        cookies_browser: Name des Browsers für Cookie-Extraktion (z.B. 'firefox', 'chrome').
-    """
-
-    last_url: str = ""
-    default_model: str = "large-v3"
-    default_language: str = "auto"
-    layout_mode: str = "horizontal"
-    recent_urls: List[str] = field(default_factory=list)
-    enable_plugins: bool = True
-    export_format: str = "srt"
-    auto_save_on_completion: bool = False
-    theme: str = "dark"
-    use_browser_cookies: bool = True
-    cookies_notice_shown: bool = False
-    cookies_browser: str = "firefox"   # NEU: Browser-Auswahl für Cookies
-
-    @classmethod
-    def load_from_file(cls, filename: str = "dragon_settings.json") -> "AppSettings":
-        """
-        Lädt die Einstellungen aus einer JSON-Datei.
-        Konvertiert dabei die Standardsprache automatisch von einem Code in den lesbaren Namen.
-        """
-        try:
-            config_dir = PlatformUtils.get_platform_config_dir()
-            file_path = config_dir / filename
-            if not file_path.exists():
-                return cls()
-            with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            # Nur Felder übernehmen, die in der Dataclass existieren
-            valid_fields = {f.name for f in fields(cls) if f.init}
-            filtered = {k: v for k, v in data.items() if k in valid_fields}
-
-            # Typkorrekturen
-            if "recent_urls" in filtered and not isinstance(
-                filtered["recent_urls"], list
-            ):
-                filtered["recent_urls"] = []
-            if "default_model" in filtered:
-                model = filtered["default_model"]
-                if model not in Config.WHISPER_MODELS and model != "large-v3":
-                    filtered["default_model"] = "large-v3"
-
-            # Sprach-Code in Namen umwandeln
-            if "default_language" in filtered:
-                lang = filtered["default_language"]
-                # Falls es ein Code ist, in Namen umwandeln
-                if lang in SUPPORTED_LANGUAGES:
-                    filtered["default_language"] = SUPPORTED_LANGUAGES[lang]
-                # Falls es weder Code noch Name ist, auf Deutsch setzen
-                elif lang not in [name for name, _ in SORTED_LANGUAGES]:
-                    filtered["default_language"] = "Deutsch"
-
-            # Leere recent_urls-Einträge filtern
-            if "recent_urls" in filtered and isinstance(filtered["recent_urls"], list):
-                filtered["recent_urls"] = [
-                    u for u in filtered["recent_urls"] if u and u.strip()
-                ]
-
-            return cls(**filtered)
-        except (json.JSONDecodeError, OSError, PermissionError) as e:
-            logger.warning(f"⚠️ Konnte Einstellungen nicht laden: {e}")
-            return cls()
-        except Exception as e:
-            logger.error(f"❌ Unerwarteter Fehler beim Laden der Einstellungen: {e}")
-            return cls()
-
-    def save_to_file(self, filename: str = "dragon_settings.json") -> bool:
-        """
-        Speichert die Einstellungen in einer JSON-Datei (atomarer Schreibvorgang).
-
-        Args:
-            filename: Dateiname im Konfigurationsverzeichnis.
-
-        Returns:
-            True bei Erfolg, sonst False.
-        """
-        try:
-            config_dir = PlatformUtils.get_platform_config_dir()
-            config_dir.mkdir(parents=True, exist_ok=True)
-            file_path = config_dir / filename
-            temp_path = file_path.with_suffix(".tmp")
-
-            # Daten für JSON vorbereiten
-            data = {
-                "last_url": self.last_url,
-                "default_model": self.default_model,
-                "default_language": self.default_language,
-                "layout_mode": self.layout_mode,
-                "recent_urls": self.recent_urls[:10],  # maximal 10 Einträge
-                "enable_plugins": self.enable_plugins,
-                "export_format": self.export_format,
-                "auto_save_on_completion": self.auto_save_on_completion,
-                "theme": self.theme,
-                "use_browser_cookies": self.use_browser_cookies,
-                "cookies_notice_shown": self.cookies_notice_shown,
-                "cookies_browser": self.cookies_browser,   # NEU
-            }
-
-            # Atomarer Schreibvorgang
-            with open(temp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-
-            # Ersetzen der alten Datei (atomar unter Unix, nicht garantiert unter Windows)
-            try:
-                os.replace(temp_path, file_path)
-            except AttributeError:
-                temp_path.replace(file_path)
-            except FileNotFoundError:
-                config_dir.mkdir(parents=True, exist_ok=True)
-                os.replace(temp_path, file_path)
-
-            logger.debug(f"💾 Einstellungen gespeichert: {file_path}")
-            return True
-        except (OSError, PermissionError) as e:
-            logger.warning(f"⚠️ Konnte Einstellungen nicht speichern: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"❌ Fehler beim Speichern der Einstellungen: {e}")
-            return False
-
-    def add_recent_url(self, url: str) -> None:
-        """
-        Fügt eine URL zur Liste der zuletzt verwendeten URLs hinzu.
-        Duplikate werden entfernt, die Liste wird auf 10 Einträge begrenzt.
-        """
-        if not url:
-            return
-        if url in self.recent_urls:
-            self.recent_urls.remove(url)
-        self.recent_urls.insert(0, url)
-        self.recent_urls = self.recent_urls[:10]
-        self.save_to_file()
-
-    def update_last_url(self, url: str) -> None:
-        """
-        Aktualisiert die zuletzt verwendete URL.
-        """
-        if url != self.last_url:
-            self.last_url = url
-            self.save_to_file()
-
-    def clean_recent_urls(self) -> int:
-        """
-        Entfernt ungültige oder leere Einträge aus der Liste der letzten URLs.
-
-        Returns:
-            Anzahl der entfernten Einträge.
-        """
-        old_len = len(self.recent_urls)
-        cleaned = [u for u in self.recent_urls if u and u.strip()]
-        removed = old_len - len(cleaned)
-        if removed > 0:
-            self.recent_urls = cleaned
-            self.save_to_file()
-        return removed
-
-    def validate(self) -> List[str]:
-        """
-        Validiert die aktuellen Einstellungen.
-
-        Returns:
-            Liste von Fehlermeldungen (leere Liste bei Erfolg).
-        """
-        issues = []
-        if (
-            self.default_model not in Config.WHISPER_MODELS
-            and self.default_model != "large-v3"
-        ):
-            issues.append(f"Ungültiges Modell: {self.default_model}")
-        valid_languages = [code for code, name in SUPPORTED_LANGUAGES.items()]
-        if self.default_language not in valid_languages:
-            issues.append(f"Ungültige Sprache: {self.default_language}")
-        if self.layout_mode not in ("vertical", "horizontal"):
-            issues.append(f"Ungültiges Layout: {self.layout_mode}")
-        if self.export_format not in ("txt", "srt", "vtt", "json", "docx"):
-            issues.append(f"Ungültiges Exportformat: {self.export_format}")
-        if self.theme not in ("dark", "light", "pastel", "system", "highcontrast"):
-            issues.append(f"Ungültiges Theme: {self.theme}")
-        return issues
-
-    def repair(self) -> List[str]:
-        """
-        Stellt die Konsistenz der Einstellungen wieder her.
-        Korrigiert ungültige Werte mit sinnvollen Standardwerten.
-
-        Returns:
-            Liste der durchgeführten Reparaturen.
-        """
-        repairs = []
-        default = AppSettings()
-
-        if (
-            self.default_model not in Config.WHISPER_MODELS
-            and self.default_model != "large-v3"
-        ):
-            old = self.default_model
-            self.default_model = default.default_model
-            repairs.append(f"Modell {old} -> {self.default_model}")
-        valid_languages = [code for code, name in SUPPORTED_LANGUAGES.items()]
-        if self.default_language not in valid_languages:
-            old = self.default_language
-            self.default_language = default.default_language
-            repairs.append(f"Sprache {old} -> {self.default_language}")
-        if self.layout_mode not in ("vertical", "horizontal"):
-            old = self.layout_mode
-            self.layout_mode = default.layout_mode
-            repairs.append(f"Layout {old} -> {self.layout_mode}")
-        if self.export_format not in ("txt", "srt", "vtt", "json", "docx"):
-            old = self.export_format
-            self.export_format = default.export_format
-            repairs.append(f"Exportformat {old} -> {self.export_format}")
-        if self.theme not in ("dark", "light", "pastel", "system", "highcontrast"):
-            old = self.theme
-            self.theme = default.theme
-            repairs.append(f"Theme {old} -> {self.theme}")
-
-        if repairs:
-            logger.info(f"✅ AppSettings repariert: {', '.join(repairs)}")
-            self.save_to_file()
-        return repairs
-
-    def __repr__(self) -> str:
-        return (
-            f"AppSettings(model={self.default_model}, "
-            f"lang={self.default_language}, layout={self.layout_mode}, "
-            f"theme={self.theme}, cookies={self.use_browser_cookies}, "
-            f"cookies_browser={self.cookies_browser})"
-        )
-
-    # =============================================================================
-    # HILFSFUNKTION FÜR BROWSER-COOKIES
-    # =============================================================================
-    def get_cookies_browser() -> str:
-        """Liest den konfigurierten Browser aus den globalen Einstellungen."""
-        try:
-            settings = AppSettings.load_from_file()
-            return settings.cookies_browser
-        except Exception:
-            return "firefox"
-            
 
 # =============================================================================
 # LinuxPerformanceOptimizer
