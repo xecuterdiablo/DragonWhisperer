@@ -48,6 +48,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Set,
     Tuple,
     TypeVar,
     Union,
@@ -166,15 +167,25 @@ os.environ.update(env_updates)
 # 7. EIGENE AUSNAHMEKLASSEN
 # =============================================================================
 class StreamError(Exception):
-    """Fehler bei der Stream-Verarbeitung."""
+    """
+    Wird bei Fehlern während der Stream‑Verarbeitung ausgelöst.
+    Kann eine optionale Fehlermeldung enthalten.
+    """
 
-    pass
+    def __init__(self, message: str = "Stream processing error") -> None:
+        self.message = message
+        super().__init__(self.message)
 
 
 class TranscriptionError(Exception):
-    """Fehler während der Transkription."""
+    """
+    Wird bei Fehlern während der Transkription ausgelöst.
+    Kann eine optionale Fehlermeldung enthalten.
+    """
 
-    pass
+    def __init__(self, message: str = "Transcription error") -> None:
+        self.message = message
+        super().__init__(self.message)
 
 
 # =============================================================================
@@ -183,10 +194,14 @@ class TranscriptionError(Exception):
 # -----------------------------------------------------------------------------
 # 8.1 Basis‑Sprachliste (ISO‑Code → Anzeigename)
 # -----------------------------------------------------------------------------
-# Alle Sprachen, die von faster-whisper / openai-whisper unterstützt werden.
-# Die Liste basiert auf der offiziellen Whisper‑Dokumentation (Modell large‑v3).
-# Quelle: https://github.com/openai/whisper/blob/main/whisper/tokenizer.py
-BASE_LANGUAGES = {
+# Vollständige Liste aller von Whisper (faster-whisper / openai-whisper)
+# unterstützten Sprachen. Basierend auf der offiziellen Dokumentation:
+# https://github.com/openai/whisper/blob/main/whisper/tokenizer.py
+#
+# Hinweis: Der Code "auto" ist ein Kunstwort und wird von Whisper nicht direkt
+#          unterstützt – er signalisiert der Anwendung, die automatische
+#          Spracherkennung zu verwenden.
+BASE_LANGUAGES: Dict[str, str] = {
     "auto": "Automatisch",
     # --------------------------- Europäische Sprachen ---------------------------
     "de": "Deutsch",
@@ -233,13 +248,13 @@ BASE_LANGUAGES = {
     # --------------------------- Asiatische Sprachen ---------------------------
     "ja": "Japanisch",
     "zh": "Chinesisch (vereinfacht)",
-    "yue": "Kantonesisch",               # Whisper unterstützt Kantonesisch (yue)
+    "yue": "Kantonesisch",
     "ko": "Koreanisch",
     "vi": "Vietnamesisch",
     "th": "Thailändisch",
     "id": "Indonesisch",
     "ms": "Malaysisch",
-    "tl": "Tagalog",                     # Whisper-Code 'tl', Google erwartet 'fil'
+    "tl": "Tagalog",
     "lo": "Laotisch",
     "km": "Khmer",
     "my": "Burmesisch",
@@ -256,8 +271,8 @@ BASE_LANGUAGES = {
     "ur": "Urdu",
     "bn": "Bengalisch",
     "hi": "Hindi",
-    "as": "Assamesisch",                 # NEU
-    "or": "Oriya",                       # NEU
+    "as": "Assamesisch",
+    "or": "Oriya",
     # --------------------------- Naher Osten / Afrika ---------------------------
     "ar": "Arabisch",
     "fa": "Persisch",
@@ -285,9 +300,9 @@ BASE_LANGUAGES = {
     "mg": "Madagassisch",
     "so": "Somali",
     "ti": "Tigrinya",
-    "ln": "Lingala",                     # NEU
-    "om": "Oromo",                       # NEU
-    "wo": "Wolof",                       # NEU
+    "ln": "Lingala",
+    "om": "Oromo",
+    "wo": "Wolof",
     # --------------------------- Weitere / Sonstige ---------------------------
     "af": "Afrikaans",
     "eo": "Esperanto",
@@ -301,84 +316,178 @@ BASE_LANGUAGES = {
     "sm": "Samoanisch",
     "su": "Sundanesisch",
     "yi": "Jiddisch",
-    "bo": "Tibetisch",                   # NEU
-    "dv": "Dhivehi",                     # NEU
-    "kl": "Grönländisch",                # NEU
-    "qu": "Quechua",                     # NEU
-    "sa": "Sanskrit",                    # NEU
-    "sd": "Sindhi",                      # NEU
-    "tn": "Tswana",                      # NEU
-    "tt": "Tatarisch",                   # NEU
+    "bo": "Tibetisch",
+    "dv": "Dhivehi",
+    "kl": "Grönländisch",
+    "qu": "Quechua",
+    "sa": "Sanskrit",
+    "sd": "Sindhi",
+    "tn": "Tswana",
+    "tt": "Tatarisch",
 }
 
 # -----------------------------------------------------------------------------
-# 8.2 Mapping für abweichende Sprachcodes (Whisper → andere Engines)
+# 8.2 Mapping für abweichende Sprachcodes (Whisper → Übersetzungs-APIs)
 # -----------------------------------------------------------------------------
-# Diese Tabelle wird verwendet, um den korrekten Code für Übersetzungs‑APIs
-# (Google, Argos, Ollama) zu ermitteln, falls dieser vom Whisper‑Code abweicht.
-LANGUAGE_CODE_MAPPING = {
-    # Whisper-Code : Google-Code (bzw. Ziel-Code für die Engine)
-    "yue": "zh-TW",          # Kantonesisch → Traditionelles Chinesisch (Google)
-    "tl": "fil",             # Tagalog → Filipino
-    "he": "iw",              # Hebräisch → iw (Google)
-    "zh": "zh-CN",           # Chinesisch (vereinfacht) → zh-CN (Google)
-    # Die folgenden werden von Whisper genauso erwartet, keine Änderung nötig:
-    # "ht": "ht",
-    # "jw": "jw",
-    # ...
+# ACHTUNG: Dieses Mapping wird NUR für Übersetzungs-Engines (Google, Argos, Ollama)
+#          verwendet, NICHT für die Whisper-Transkription!
+#          Whisper erwartet die originalen ISO-Codes (z. B. 'tl' für Tagalog).
+LANGUAGE_CODE_MAPPING: Dict[str, str] = {
+    "yue": "zh-TW",   # Kantonesisch → Traditionelles Chinesisch (Google)
+    "tl": "fil",      # Tagalog → Filipino (Google)
+    "he": "iw",       # Hebräisch → iw (Google)
+    "zh": "zh-CN",    # Chinesisch (vereinfacht) → zh-CN (Google)
 }
 
 # -----------------------------------------------------------------------------
-# 8.3 Abgeleitete Strukturen (nicht manuell ändern)
+# 8.3 Von Whisper direkt unterstützte Sprachcodes (ohne "auto")
 # -----------------------------------------------------------------------------
-SUPPORTED_LANGUAGES = BASE_LANGUAGES.copy()
-SORTED_LANGUAGES = sorted(
+WHISPER_SUPPORTED_LANGUAGES: Set[str] = {
+    code for code in BASE_LANGUAGES if code != "auto"
+}
+
+# -----------------------------------------------------------------------------
+# 8.4 Abgeleitete Strukturen (nicht manuell ändern)
+# -----------------------------------------------------------------------------
+SUPPORTED_LANGUAGES: Dict[str, str] = BASE_LANGUAGES.copy()
+# Liste von Tupeln (Anzeigename, Code), sortiert nach Anzeigename
+SORTED_LANGUAGES: List[Tuple[str, str]] = sorted(
     ((name, code) for code, name in BASE_LANGUAGES.items()), key=lambda x: x[0]
 )
-LANGUAGE_SHORT_CODES = {code: name[:3] for code, name in BASE_LANGUAGES.items()}
+# Kurzformen (max. 3 Zeichen) für Anzeige in GUI
+LANGUAGE_SHORT_CODES: Dict[str, str] = {
+    code: name[:3] for code, name in BASE_LANGUAGES.items()
+}
+# Reverse-Mapping für schnelle Suche: Anzeigename → Code
+DISPLAY_NAME_TO_CODE: Dict[str, str] = {
+    name: code for code, name in BASE_LANGUAGES.items()
+}
 
 # -----------------------------------------------------------------------------
-# 8.4 Hilfsfunktionen für konsistenten Sprachcode‑Zugriff
+# 8.5 Hilfsfunktionen für konsistenten Sprachcode‑Zugriff
 # -----------------------------------------------------------------------------
 def get_whisper_language_code(display_name: str) -> Optional[str]:
-    """Gibt den Whisper‑Code für einen Anzeigenamen zurück (z. B. 'Deutsch' → 'de')."""
-    for code, name in BASE_LANGUAGES.items():
-        if name == display_name:
-            return code
-    return None
+    """
+    Gibt den Whisper‑Code für einen Anzeigenamen zurück.
+
+    Args:
+        display_name: Der lesbare Name der Sprache (z. B. 'Deutsch').
+
+    Returns:
+        Der zugehörige ISO‑Code (z. B. 'de') oder None, wenn nicht gefunden.
+    """
+    return DISPLAY_NAME_TO_CODE.get(display_name)
+
 
 def get_display_name(code: str) -> str:
-    """Gibt den Anzeigenamen für einen Sprachcode zurück (z. B. 'de' → 'Deutsch')."""
+    """
+    Gibt den lesbaren Namen für einen Sprachcode zurück.
+
+    Args:
+        code: Der Sprachcode (z. B. 'de').
+
+    Returns:
+        Der Anzeigename (z. B. 'Deutsch') oder der Code selbst, falls unbekannt.
+    """
     return BASE_LANGUAGES.get(code, code)
 
+
 def map_to_google_code(whisper_code: str) -> str:
-    """Konvertiert einen Whisper‑Sprachcode in den von Google Translate erwarteten Code."""
+    """
+    Konvertiert einen Whisper‑Sprachcode in den von Google Translate erwarteten Code.
+
+    Args:
+        whisper_code: Der Whisper‑Code (z. B. 'tl', 'yue').
+
+    Returns:
+        Der für die Übersetzungs‑API geeignete Code (z. B. 'fil', 'zh-TW').
+        Bei unbekannten Codes wird der Originalcode zurückgegeben.
+    """
     if whisper_code == "auto":
         return "auto"
     return LANGUAGE_CODE_MAPPING.get(whisper_code, whisper_code)
 
+
+def is_whisper_language_code(code: str) -> bool:
+    """
+    Prüft, ob ein gegebener Code von Whisper direkt unterstützt wird.
+
+    Args:
+        code: Der zu prüfende Sprachcode (z. B. 'de', 'tl').
+
+    Returns:
+        True, wenn Whisper diesen Code akzeptiert, sonst False.
+    """
+    return code in WHISPER_SUPPORTED_LANGUAGES
+
+
+def is_valid_source_language(display_name: str) -> bool:
+    """
+    Prüft, ob ein Anzeigename eine gültige Quellsprache für Whisper ist.
+
+    Args:
+        display_name: Der lesbare Name (z. B. 'Deutsch' oder 'Automatisch').
+
+    Returns:
+        True, wenn der Name in der Sprachliste existiert (einschließlich 'auto').
+    """
+    return display_name in DISPLAY_NAME_TO_CODE
+
+
 # -----------------------------------------------------------------------------
-# 8.5 Vordefinierte Gruppen für die GUI (Common, Asian, More)
+# 8.6 Vordefinierte Gruppen für die GUI (Common, Asian, More)
 # -----------------------------------------------------------------------------
-# Diese Gruppen werden in WhisperLayoutManager.create_compact_control_panel verwendet.
-COMMON_LANGUAGE_CODES = ["de", "en", "fr", "es", "it", "pt", "nl", "pl", "ru"]
-ASIAN_LANGUAGE_CODES = ["ja", "zh", "ko", "vi", "th", "id", "tl", "hi", "ar", "fa", "tr"]
+# Diese Gruppen werden im WhisperLayoutManager für die übersichtliche Darstellung
+# der Zielsprachen verwendet.
+COMMON_LANGUAGE_CODES: List[str] = [
+    "de", "en", "fr", "es", "it", "pt", "nl", "pl", "ru"
+]
+ASIAN_LANGUAGE_CODES: List[str] = [
+    "ja", "zh", "ko", "vi", "th", "id", "tl", "hi", "ar", "fa", "tr"
+]
+
+# Für bessere Performance: Vorberechnete Namenslisten (nur einmal initialisiert)
+_COMMON_NAMES: Optional[List[str]] = None
+_ASIAN_NAMES: Optional[List[str]] = None
+_OTHER_NAMES: Optional[List[str]] = None
+
 
 def get_common_language_names() -> List[str]:
-    """Gibt die Anzeigenamen der häufigsten Sprachen zurück."""
-    return [BASE_LANGUAGES[code] for code in COMMON_LANGUAGE_CODES if code in BASE_LANGUAGES]
+    """Gibt die lesbaren Namen der häufigsten Sprachen zurück (mit Caching)."""
+    global _COMMON_NAMES
+    if _COMMON_NAMES is None:
+        _COMMON_NAMES = [
+            BASE_LANGUAGES[code] for code in COMMON_LANGUAGE_CODES
+            if code in BASE_LANGUAGES
+        ]
+    return _COMMON_NAMES.copy()
+
 
 def get_asian_language_names() -> List[str]:
-    """Gibt die Anzeigenamen asiatischer / nahöstlicher Sprachen zurück."""
-    return [BASE_LANGUAGES[code] for code in ASIAN_LANGUAGE_CODES if code in BASE_LANGUAGES]
+    """Gibt die lesbaren Namen asiatischer / nahöstlicher Sprachen zurück (mit Caching)."""
+    global _ASIAN_NAMES
+    if _ASIAN_NAMES is None:
+        _ASIAN_NAMES = [
+            BASE_LANGUAGES[code] for code in ASIAN_LANGUAGE_CODES
+            if code in BASE_LANGUAGES
+        ]
+    return _ASIAN_NAMES.copy()
+
 
 def get_other_language_names() -> List[str]:
-    """Gibt alle übrigen Sprachanzeigenamen zurück, die nicht in den Gruppen sind."""
-    excluded = set(COMMON_LANGUAGE_CODES + ASIAN_LANGUAGE_CODES)
-    return [
-        name for code, name in SORTED_LANGUAGES
-        if code not in excluded and code != "auto"
-    ]
+    """
+    Gibt alle übrigen lesbaren Sprachnamen zurück, die nicht in den
+    vordefinierten Gruppen sind (mit Caching).
+    """
+    global _OTHER_NAMES
+    if _OTHER_NAMES is None:
+        excluded = set(COMMON_LANGUAGE_CODES + ASIAN_LANGUAGE_CODES)
+        # SORTED_LANGUAGES enthält Tupel (name, code)
+        _OTHER_NAMES = [
+            name for name, code in SORTED_LANGUAGES
+            if code not in excluded and code != "auto"
+        ]
+    return _OTHER_NAMES.copy()
 
 
 # =============================================================================
@@ -5927,6 +6036,123 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         self._available_models.clear()
 
 
+# =============================================================================
+# REFLECTION TRANSLATION ENGINE (Wrapper)
+# =============================================================================
+class ReflectionTranslationEngine(BaseTranslationEngine):
+    """
+    Eine Wrapper-Klasse, die eine bestehende Übersetzungs-Engine (z.B. Ollama)
+    mit einem Selbstreflexions-Schritt (Self-Reflection) erweitert, um die
+    Qualität der Übersetzungen zu verbessern.
+    """
+
+    def __init__(self, base_engine: BaseTranslationEngine, settings: "AdvancedSettings"):
+        super().__init__()
+        self.base_engine = base_engine  # Das ist z.B. Ihre OllamaTranslationEngine
+        self.settings = settings
+        self._lock = threading.RLock()  # Für Thread-Sicherheit
+
+        # Zwei verschiedene Prompts für die beiden Phasen
+        self.reflection_prompt_template = (
+            "You are an expert linguistic editor. Your task is to review the following translation from '{source_lang}' to '{target_lang}'.\n\n"
+            "Original text:\n{source_text}\n\n"
+            "Draft translation:\n{draft_translation}\n\n"
+            "Please provide a critical analysis of the draft translation. Focus on:\n"
+            "- Accuracy: Does it correctly convey the meaning of the original? Are there any factual errors?\n"
+            "- Tone & Style: Does it match the tone (e.g., joyful, sad, neutral) of the original?\n"
+            "- Naturalness: Does it sound like natural, idiomatic {target_lang}?\n"
+            "- Specifics: Are there any terms (like 'monkey') that create a wrong or violent connotation where the original is positive?\n\n"
+            "Provide your analysis as a list of constructive suggestions for improvement. Do NOT output a new translation, only the analysis."
+        )
+
+        self.improvement_prompt_template = (
+            "You are a master translator. Based on the following critique, improve the draft translation.\n\n"
+            "Original text:\n{source_text}\n\n"
+            "Draft translation:\n{draft_translation}\n\n"
+            "Critique:\n{reflection}\n\n"
+            "Now, provide an improved, final version of the translation. The translation must be accurate, natural, and match the tone of the original. Output ONLY the final translation, no additional text."
+        )
+
+    def set_target_language(self, target_lang: str) -> None:
+        """Leitet die Zielsprache an die Basis-Engine weiter."""
+        with self._lock:
+            self.base_engine.set_target_language(target_lang)
+
+    def translate_text(self, text: str, source_lang: str = "auto") -> Optional[TranslationResult]:
+        """
+        Führt eine zweistufige Übersetzung mit Reflexion durch.
+        1. Initiale Übersetzung mit der Basis-Engine.
+        2. Reflexion und Verbesserung mit demselben Modell.
+        """
+        if not text or not text.strip():
+            return None
+
+        # --- Phase 1: Initiale Übersetzung ---
+        initial_result = self.base_engine.translate_text(text, source_lang)
+        if not initial_result or not initial_result.translated:
+            logger.warning("ReflectionEngine: Initial translation failed, aborting.")
+            return None
+
+        draft_translation = initial_result.translated
+
+        # --- Phase 2: Reflexion (Analyse der eigenen Übersetzung) ---
+        # Verwende die Methode der Basis-Engine für den Aufruf. Wir nehmen an, dass es eine Ollama-Engine ist.
+        if not hasattr(self.base_engine, '_call_ollama'):
+            logger.warning("ReflectionEngine: Base engine does not support reflection (_call_ollama missing). Returning initial translation.")
+            return initial_result
+
+        # Erstelle den Reflexions-Prompt
+        src_lang_name = source_lang if source_lang != "auto" else initial_result.source_lang
+        target_lang_name = self.base_engine.default_target_lang
+        reflection_prompt = self.reflection_prompt_template.format(
+            source_lang=src_lang_name,
+            target_lang=target_lang_name,
+            source_text=text,
+            draft_translation=draft_translation
+        )
+
+        if DEBUG_LEVEL >= 2:
+            log_debug("reflection", f"Reflection Prompt:\n{reflection_prompt}")
+
+        # Führe die Reflexion durch (dies ist ein weiterer API-Call)
+        reflection_analysis = self.base_engine._call_ollama(reflection_prompt)
+        if not reflection_analysis:
+            logger.warning("ReflectionEngine: Reflection analysis failed. Returning initial translation.")
+            return initial_result
+
+        if DEBUG_LEVEL >= 2:
+            log_debug("reflection", f"Reflection Analysis:\n{reflection_analysis}")
+
+        # --- Phase 3: Verbesserte Übersetzung basierend auf der Reflexion ---
+        improvement_prompt = self.improvement_prompt_template.format(
+            source_text=text,
+            draft_translation=draft_translation,
+            reflection=reflection_analysis
+        )
+
+        if DEBUG_LEVEL >= 2:
+            log_debug("reflection", f"Improvement Prompt:\n{improvement_prompt}")
+
+        final_translation = self.base_engine._call_ollama(improvement_prompt)
+        if not final_translation:
+            logger.warning("ReflectionEngine: Improvement step failed. Returning initial translation.")
+            return initial_result
+
+        # Erstelle das finale Ergebnis
+        final_result = TranslationResult(
+            original=text,
+            translated=final_translation.strip(),
+            source_lang=src_lang_name,
+            target_lang=target_lang_name,
+        )
+        return final_result
+
+    def dispose(self) -> None:
+        """Gibt die Ressourcen der Basis-Engine frei."""
+        with self._lock:
+            self.base_engine.dispose()
+
+
 class ArgosTranslateEngine(BaseCachedTranslationEngine):
     """
     Übersetzungs‑Engine mit argos‑translate (offline, OpenNMT).
@@ -6558,7 +6784,7 @@ class TranscriptionEngine:
 
     MODEL_SIZE_ORDER = [
         "tiny", "tiny.en", "base", "base.en", "small", "small.en",
-        "medium", "medium.en", "large-v1", "large-v2", "large-v3", "large-v3-turbo"
+        "medium", "medium.en", "large-v1", "large-v2", "large-v3", "large-v3-turbo", "distil-large-v3"
     ]
 
     _ALLOWED_FASTER = {
@@ -7650,9 +7876,26 @@ class TranscriptionEngine:
             return self._create_continuous_result(valid_segments, info, total_confidence)
 
     def _update_detected_language(self, info: Any) -> None:
+        """Aktualisiert die erkannte Sprache, wenn die Konfidenz hoch genug ist."""
         if hasattr(info, "language") and info.language != "unknown":
-            with self._state_lock:
-                self._last_detected_language = info.language
+            # Backend-abhängige Konfidenzermittlung
+            if self.whisper_backend == "openai_whisper":
+                confidence = 1.0   # openai-whisper liefert keine Wahrscheinlichkeit → immer akzeptieren
+            else:
+                confidence = getattr(info, "language_probability", 0.0)  # faster-whisper
+    
+            min_confidence = getattr(self.settings, "min_language_confidence", 0.4)
+
+            if confidence >= min_confidence:
+                with self._state_lock:
+                    self._last_detected_language = info.language
+                if DEBUG_LEVEL >= 3:
+                    log_debug("language", f"Accepted language {info.language} with confidence {confidence:.2f}")
+            else:
+                if DEBUG_LEVEL >= 3:
+                    log_debug("language", f"Rejected language {info.language} (confidence {confidence:.2f} < {min_confidence})")
+                with self._state_lock:
+                    self._last_detected_language = None
 
     def _process_segments(self, segments: List[Any], info: Any) -> Tuple[List[Any], float]:
         valid = []
@@ -22455,7 +22698,7 @@ class AdvancedSettingsDialog:
             self.gui.advanced_settings.vad_min_silence_duration_ms = (
                 self.vad_min_silence_var.get()
             )
-
+    
             self.gui.advanced_settings.beam_size = self.beam_var.get()
             self.gui.advanced_settings.temperature = self.temp_var.get()
             self.gui.advanced_settings.gpu_acceleration = self.gpu_var.get()
@@ -22465,7 +22708,7 @@ class AdvancedSettingsDialog:
                 self.ollama_model_var.get().strip()
             )
             self.gui.advanced_settings.ollama_host = self.ollama_host_var.get().strip()
-    
+
             self.gui.advanced_settings.transcript_max_lines = self.trans_lines_var.get()
             self.gui.advanced_settings.translation_max_lines = (
                 self.transl_lines_var.get()
@@ -22542,25 +22785,35 @@ class AdvancedSettingsDialog:
                 self.sentence_words_var.get()
             )
 
-            # ========== NEU: Zielsprache aus GUI synchronisieren ==========
+            # ========== NEU: Reflection-Einstellung (optional) ==========
+            if hasattr(self, "enable_reflection_var"):
+                self.gui.advanced_settings.enable_reflection = self.enable_reflection_var.get()
+
+            # ========== 2. Zielsprache aus GUI synchronisieren (KORRIGIERT) ==========
             try:
                 selected_lang_name = self.gui.lang_var.get()
-                lang_code = None
-                for code, name in SORTED_LANGUAGES:
-                    if name == selected_lang_name:
-                        lang_code = code
-                        break
+                # Verwende das globale Reverse-Mapping DISPLAY_NAME_TO_CODE
+                # Falls nicht verfügbar, importiere oder greife über self.gui zu
+                if 'DISPLAY_NAME_TO_CODE' in globals():
+                    lang_code = DISPLAY_NAME_TO_CODE.get(selected_lang_name)
+                else:
+                    # Fallback: manuelle Suche in SORTED_LANGUAGES (korrekte Reihenfolge)
+                    lang_code = None
+                    for name, code in SORTED_LANGUAGES:  # Jetzt (name, code)!
+                        if name == selected_lang_name:
+                            lang_code = code
+                            break
 
                 if lang_code:
                     self.gui.advanced_settings.target_language = lang_code
                     self.gui.settings.default_language = lang_code
                     log_debug("settings", f"Target language synced: {selected_lang_name} -> {lang_code}")
                 else:
-                    logger.warning(f"Konnte Sprachcode für '{selected_lang_name}' nicht finden")
+                    logger.warning(f"Konnte Sprachcode für '{selected_lang_name}' nicht finden – verwende aktuellen Wert")
             except Exception as e:
                 logger.warning(f"Fehler beim Synchronisieren der Zielsprache: {e}")
 
-            # ========== 2. Erlaubte Verzeichnisse validieren ==========
+            # ========== 3. Erlaubte Verzeichnisse validieren ==========
             allowed_dirs_text = self.allowed_dirs_text.get("1.0", "end-1c").strip()
             allowed_dirs = []
             invalid_dirs = []
@@ -22591,7 +22844,7 @@ class AdvancedSettingsDialog:
             self.gui.advanced_settings.allowed_dirs = allowed_dirs
             PlatformUtils.set_allowed_dirs(allowed_dirs)
 
-            # ========== 3. Proxy-URL validieren ==========
+            # ========== 4. Proxy-URL validieren ==========
             proxy_url = self.proxy_var.get().strip()
             proxy_enabled = self.proxy_enabled_var.get()
             if proxy_enabled and proxy_url:
@@ -22612,24 +22865,24 @@ class AdvancedSettingsDialog:
             self.gui.advanced_settings.proxy_url = proxy_url
             self.gui.advanced_settings.proxy_enabled = proxy_enabled
 
-            # ========== 4. Blacklist speichern ==========
+            # ========== 5. Blacklist speichern ==========
             blacklist_text = self.blacklist_text.get("1.0", "end-1c").strip()
             blacklist = [
                 line.strip() for line in blacklist_text.split("\n") if line.strip()
             ]
             self.gui.advanced_settings.blacklist = blacklist
 
-            # ========== 5. Host ggf. mit http:// ergänzen ==========
+            # ========== 6. Host ggf. mit http:// ergänzen ==========
             host = self.gui.advanced_settings.ollama_host
             if host and not host.startswith(("http://", "https://")):
                 self.gui.advanced_settings.ollama_host = "http://" + host
 
-            # ========== 6. Persistenz ==========
+            # ========== 7. Persistenz ==========
             self.gui.advanced_settings.save_to_file()
             self.gui.settings.save_to_file()
             log_debug("settings", "Settings saved to disk")
 
-            # ========== 7. Laufzeit‑Anpassungen ==========
+            # ========== 8. Laufzeit‑Anpassungen ==========
             if hasattr(self.gui, "stream_manager"):
                 self.gui.stream_manager.use_browser_cookies = (
                     self.gui.settings.use_browser_cookies
@@ -22643,14 +22896,14 @@ class AdvancedSettingsDialog:
                     self.gui.settings.use_browser_cookies
                 )
 
-            # ========== 8. GPU‑Umschaltung ==========
+            # ========== 9. GPU‑Umschaltung ==========
             new_gpu = self.gui.advanced_settings.gpu_acceleration
             if old_gpu != new_gpu:
                 log_debug("settings", f"GPU acceleration changed: {old_gpu} → {new_gpu}")
                 if hasattr(self.gui, "transcription_engine") and self.gui.transcription_engine:
                     self.gui.transcription_engine.set_gpu_acceleration(new_gpu)
 
-            # ========== 9. Übersetzungs‑Engine aktualisieren ==========
+            # ========== 10. Übersetzungs‑Engine aktualisieren ==========
             if hasattr(self.gui, "audio_processor") and not getattr(
                 self.gui, "_shutting_down", False
             ):
@@ -22667,13 +22920,13 @@ class AdvancedSettingsDialog:
                         f"Fehler beim Aktualisieren der Übersetzungs-Engine: {e}"
                     )
 
-            # ========== 10. TTS‑Engine neu konfigurieren ==========
+            # ========== 11. TTS‑Engine neu konfigurieren ==========
             if hasattr(self.gui, "tts_manager"):
                 self.gui.tts_manager.set_engine(self.gui.advanced_settings.tts_engine)
                 self.gui.tts_manager.set_voice(self.gui.advanced_settings.tts_voice)
                 self.gui.tts_manager.set_volume(1.0)
 
-            # ========== 11. Dialog schließen ==========
+            # ========== 12. Dialog schließen ==========
             self.dialog.destroy()
             self.gui.update_status("✅ Settings saved")
             log_debug("settings", "Settings saved successfully")
@@ -23817,6 +24070,7 @@ class DragonWhispererGUI:
     def _create_translation_engine(self) -> BaseTranslationEngine:
         """
         Erzeugt die primäre Übersetzungs-Engine gemäß den Einstellungen.
+        Unterstützt jetzt optional die Reflection-Engine (selbstkorrigierende Übersetzung).
 
         Diese Methode wird beim Start und bei Änderungen der Einstellungen aufgerufen.
         Sie verwendet die konfigurierte Engine, fällt bei Nichtverfügbarkeit auf
@@ -23826,37 +24080,70 @@ class DragonWhispererGUI:
             Eine funktionsfähige Übersetzungs-Engine (niemals None).
         """
         engine_name = self.advanced_settings.translation_engine
+        enable_reflection = getattr(self.advanced_settings, "enable_reflection", False)
         log_debug(
             "engine",
-            f"Erstelle primäre Engine '{engine_name}' für Zielsprache {self.current_language}",
+            f"Erstelle primäre Engine '{engine_name}' für Zielsprache {self.current_language} "
+            f"(Reflection={'aktiviert' if enable_reflection else 'deaktiviert'})",
         )
 
-        engine = self._create_engine_by_name(
+        # 1. Basis-Engine nach Konfiguration erstellen
+        base_engine = self._create_engine_by_name(
             engine_name, self.current_language, for_dialog=False
         )
-        if engine is not None:
-            return engine
 
-        # Fallback: Google Translate (wenn nicht bereits versucht)
-        if engine_name != "google" and TRANSLATOR_AVAILABLE:
-            logger.warning(
-                f"Fallback auf Google Translate (Engine '{engine_name}' nicht verfügbar)"
-            )
-            engine = GoogleTranslationEngine(
-                target_lang=self.current_language,
-                settings=self.advanced_settings,
-                cache_manager=self.app_context.cache_manager,
-            )
-            if engine is not None:
-                return engine
+        # 2. Fallback: Google Translate (wenn konfigurierte Engine nicht verfügbar)
+        if base_engine is None:
+            if engine_name != "google" and TRANSLATOR_AVAILABLE:
+                logger.warning(
+                    f"Fallback auf Google Translate (Engine '{engine_name}' nicht verfügbar)"
+                )
+                base_engine = GoogleTranslationEngine(
+                    target_lang=self.current_language,
+                    settings=self.advanced_settings,
+                    cache_manager=self.app_context.cache_manager,
+                )
+            else:
+                # Letzte Möglichkeit: Dummy-Engine (funktioniert immer)
+                logger.error("Keine Übersetzungs-Engine verfügbar – verwende Dummy")
+                return DummyTranslationEngine(
+                    self.current_language,
+                    self.advanced_settings,
+                    cache_manager=self.app_context.cache_manager,
+                )
 
-        # Letzte Möglichkeit: Dummy-Engine (funktioniert immer)
-        logger.error("Keine Übersetzungs-Engine verfügbar – verwende Dummy")
-        return DummyTranslationEngine(
-            self.current_language,
-            self.advanced_settings,
-            cache_manager=self.app_context.cache_manager,
-        )
+        # 3. Wenn Reflection aktiviert ist und die Basis-Engine dies unterstützt, wrappen
+        if enable_reflection and base_engine is not None:
+            # Prüfen, ob die ReflectionTranslationEngine-Klasse existiert
+            if 'ReflectionTranslationEngine' not in globals():
+                logger.warning(
+                    "ReflectionTranslationEngine-Klasse nicht gefunden – Reflection deaktiviert"
+                )
+                log_debug("engine", "ReflectionTranslationEngine class missing")
+                return base_engine
+
+            # Prüfen, ob die Basis-Engine die benötigte _call_ollama-Methode hat
+            if not hasattr(base_engine, '_call_ollama'):
+                logger.warning(
+                    f"Basis-Engine '{type(base_engine).__name__}' unterstützt keine Reflection "
+                    "(fehlende _call_ollama-Methode) – Reflection deaktiviert"
+                )
+                log_debug("engine", f"Base engine {type(base_engine).__name__} has no _call_ollama")
+                return base_engine
+
+            # Reflection-Engine erstellen und zurückgeben
+            try:
+                reflection_engine = ReflectionTranslationEngine(base_engine, self.advanced_settings)
+                logger.info("✅ ReflectionTranslationEngine erfolgreich aktiviert")
+                log_debug("engine", "Reflection wrapper created")
+                return reflection_engine
+            except Exception as e:
+                logger.error(f"Fehler beim Erstellen der ReflectionTranslationEngine: {e}")
+                log_debug("engine", f"Reflection creation failed: {e}")
+                return base_engine
+
+        # 4. Keine Reflection – einfach die Basis-Engine zurückgeben
+        return base_engine
 
     def _create_google_translation_engine(self) -> BaseTranslationEngine:
         """Erzeugt die Google-Übersetzungs-Engine (oder Dummy, falls nicht verfügbar)."""
@@ -27922,25 +28209,69 @@ class WhisperController:
             return False
 
     def _set_source_language(self, gui, src_lang_name: str) -> None:
+        """
+        Setzt die Quellsprache für die Whisper-Transkription.
+        Verwendet die originalen ISO-Codes, KEINE Mapping-Tabelle.
+        Bei ungültigen Codes wird auf Auto-Erkennung zurückgefallen.
+        """
         try:
             if not hasattr(gui, "transcription_engine"):
+                if DEBUG_LEVEL >= 1:
+                    logger.warning("_set_source_language: Keine TranscriptionEngine verfügbar")
                 return
 
+            engine = gui.transcription_engine
+            # Menge der von Whisper unterstützten Sprachcodes (ohne 'auto')
+            valid_whisper_codes = WHISPER_SUPPORTED_LANGUAGES  # muss global definiert sein
+
             if src_lang_name != "Automatisch":
-                for name, code in SORTED_LANGUAGES:
+                # Sprachcode aus dem Anzeigenamen ermitteln
+                code = None
+                for name, c in SORTED_LANGUAGES:
                     if name == src_lang_name:
-                        # Mapping für Whisper anwenden
-                        actual_code = LANGUAGE_CODE_MAPPING.get(code, code)
-                        gui.transcription_engine.forced_language = actual_code
-                        logger.info(
-                            f"🔤 Quellsprache manuell gesetzt: {actual_code} (als {code})"
-                        )
+                        code = c
                         break
+
+                if code is None:
+                    logger.warning(f"Unbekannter Sprachname '{src_lang_name}', verwende Auto-Erkennung")
+                    engine.forced_language = None
+                    if self.event_bus:
+                        self.event_bus.emit("info", f"⚠️ Unbekannte Sprache '{src_lang_name}' – automatische Erkennung")
+                    return
+
+                # Prüfen, ob der Code von Whisper unterstützt wird
+                if code not in valid_whisper_codes:
+                    logger.warning(
+                        f"Sprachcode '{code}' wird von Whisper nicht unterstützt. "
+                        f"Verfügbare Codes: {len(valid_whisper_codes)} Sprachen. "
+                        f"Falle zurück auf Auto-Erkennung."
+                    )
+                    engine.forced_language = None
+                    if self.event_bus:
+                        self.event_bus.emit(
+                            "info",
+                            f"⚠️ Sprache '{src_lang_name}' wird von Whisper nicht unterstützt. Automatische Erkennung aktiviert."
+                        )
+                    return
+
+                # Alles ok – setze die Sprache (ohne Mapping!)
+                engine.forced_language = code
+                logger.info(f"🔤 Quellsprache manuell gesetzt: {code} ({src_lang_name})")
+                if DEBUG_LEVEL >= 3:
+                    log_debug("language", f"Whisper forced_language = {code}")
+
             else:
-                gui.transcription_engine.forced_language = None
+                # Auto-Erkennung
+                engine.forced_language = None
                 logger.info("🔤 Quellsprache: Automatisch (Whisper-Erkennung)")
+
+            # Event-Bus benachrichtigen (optional, für andere Komponenten)
+            if self.event_bus:
+                self.event_bus.emit("source_language_changed", engine.forced_language)
+
         except Exception as e:
-            logger.warning(f"⚠️ Quellsprache setzen fehlgeschlagen: {e}")
+            logger.exception(f"❌ Kritischer Fehler in _set_source_language: {e}")
+            # Im Fehlerfall auf Auto-Erkennung zurückfallen
             if hasattr(gui, "transcription_engine"):
                 gui.transcription_engine.forced_language = None
 
@@ -32572,6 +32903,7 @@ class AdvancedSettings:
     adaptive_chunk_low_words: int = 3
     adaptive_chunk_high_words: int = 10
     min_confidence: float = 0.1
+    min_language_confidence: float = 0.4
 
     # =========================================================================
     # VAD (Voice Activity Detection)
