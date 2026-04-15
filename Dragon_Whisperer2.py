@@ -6710,6 +6710,7 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
             "prompt": prompt,
             "stream": False,
             "options": {"temperature": self.temperature},
+            "keep_alive": 0,
         }
         if self.system_prompt:
             payload["system"] = self.system_prompt
@@ -16249,6 +16250,7 @@ class OllamaSummarizer:
                     "prompt": full_prompt,
                     "stream": True,
                     "options": {"temperature": temperature, "num_predict": 2048},
+                    "keep_alive": 0,
                 }
                 if self.system_prompt:
                     payload["system"] = self.system_prompt
