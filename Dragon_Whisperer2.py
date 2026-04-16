@@ -11096,8 +11096,15 @@ class StreamManager:
 class YtDlpHelper:
     """
     Hilfsklasse für yt-dlp-Aufrufe.
+
     Bietet Methoden zum Abrufen von JSON-Metadaten und direkten Audio-URLs.
     Die Ausführung erfolgt immer ohne Shell (sicher gegen Injection).
+    Verbesserungen:
+        - cancel_event für vorzeitigen Abbruch
+        - robuste Prozess-Terminierung
+        - IPv4-Präferenz und Proxy-Unterstützung
+        - Detaillierte Debug-Ausgaben
+        - Validierung von Eingaben (Browser, Proxy, Format)
     """
 
     _ALLOWED_BROWSERS = {
@@ -11117,9 +11124,6 @@ class YtDlpHelper:
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/[]=+-"
     )
 
-    # RFC 3986 erlaubte Zeichen für URLs (zusätzliche Sicherheit)
-    _ALLOWED_PROXY_CHARS = re.compile(r"^[a-zA-Z0-9\-._~:/?#\[\]@!$&\'()*+,;=]*$")
-
     @classmethod
     def _validate_browser(cls, browser: str) -> bool:
         """Prüft, ob der angegebene Browser-Name unterstützt wird."""
@@ -11132,18 +11136,16 @@ class YtDlpHelper:
         """
         if not proxy:
             return False
-
         # Verbot von Steuerzeichen
         if re.search(r"[\x00-\x1f\x7f]", proxy):
             return False
-
         try:
             parsed = urllib.parse.urlparse(proxy)
             if parsed.scheme not in cls._ALLOWED_PROXY_SCHEMES:
                 return False
             if not parsed.netloc:
                 return False
-            # Whitelist für erlaubte Zeichen im gesamten Proxy-String
+            # Whitelist für erlaubte Zeichen
             if not re.fullmatch(r"^[a-zA-Z0-9\-._~:/?#\[\]@!$&\'()*+,;=]*$", proxy):
                 return False
             return True
@@ -11155,27 +11157,63 @@ class YtDlpHelper:
         """Prüft, ob der Format-String nur erlaubte Zeichen enthält."""
         return all(c in cls._ALLOWED_FORMAT_CHARS for c in format_str)
 
-    @staticmethod
+    @classmethod
+    def _terminate_process(cls, proc: subprocess.Popen) -> None:
+        """Beendet einen Prozess sauber (erst SIGTERM, dann SIGKILL)."""
+        if proc is None:
+            return
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=1.0)
+        except Exception:
+            pass
+
+    @classmethod
     def run_command(
+        cls,
         cmd: List[str],
         timeout: int = 15,
         method_name: str = "unknown",
         prefer_ipv4: bool = False,
+        cancel_event: Optional[threading.Event] = None,
     ) -> Optional[str]:
         """
         Führt einen externen Befehl aus (ohne Shell) und gibt die stdout-Ausgabe zurück.
-        Bei Timeout oder Fehler wird None zurückgegeben.
 
         Verbesserungen:
-        - Explizite Weitergabe der Umgebungsvariablen (`env=os.environ.copy()`)
-        - Saubere Behandlung von Timeouts und Prozessabbrüchen
-        - UTF-8 Encoding mit Fallback auf 'replace'
+            - Unterstützung für Abbruch durch cancel_event.
+            - Regelmäßige Prüfung des Prozess-Status mit kurzem Timeout.
+            - Saubere Terminierung des Prozesses bei Abbruch oder Timeout.
+            - Detaillierte Debug-Protokollierung bei DEBUG_LEVEL >= 3.
+            - Robuste Fehlerbehandlung mit aussagekräftigen Logs.
+
+        Args:
+            cmd: Liste der Befehlsargumente.
+            timeout: Maximale Ausführungszeit in Sekunden.
+            method_name: Name für Logging-Zwecke.
+            prefer_ipv4: Falls True, wird '-4' zu yt-dlp Befehlen hinzugefügt.
+            cancel_event: Optionales Event zum vorzeitigen Abbruch.
+
+        Returns:
+            stdout-Ausgabe als String oder None bei Fehler/Timeout/Abbruch.
         """
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"  Ausführen: {' '.join(cmd)}", extra={"component": "ytdlp"})
 
-        start = time.perf_counter()
-        proc = None
+        # Sicherheitscheck: URL darf keine Steuerzeichen enthalten
+        if cmd:
+            url = cmd[-1]
+            if url == "--" and len(cmd) >= 2:
+                url = cmd[-2]
+            if not url or any(ord(c) < 32 for c in url):
+                logger.error(
+                    "Ungültige URL enthält Steuerzeichen", extra={"component": "ytdlp"}
+                )
+                return None
 
         # Stelle sicher, dass "--" als Trennzeichen vor der URL gesetzt ist
         if "--" not in cmd:
@@ -11191,19 +11229,14 @@ class YtDlpHelper:
             except ValueError:
                 cmd.insert(-1, "-4")
 
-        # Sicherheitscheck: URL darf keine Steuerzeichen enthalten
-        if cmd:
-            url = cmd[-1]
-            if url == "--" and len(cmd) >= 2:
-                url = cmd[-2]
-            if not url or any(ord(c) < 32 for c in url):
-                logger.error(
-                    "Ungültige URL enthält Steuerzeichen", extra={"component": "ytdlp"}
-                )
-                return None
+        start = time.perf_counter()
+        proc = None
 
         try:
-            # ⭐ Wichtig: Umgebungsvariablen explizit übergeben
+            # Umgebungsvariablen explizit übergeben
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -11212,10 +11245,32 @@ class YtDlpHelper:
                 encoding="utf-8",
                 errors="replace",
                 shell=False,
-                env=os.environ.copy(),  # ← Sicherstellung konsistenter Umgebung
+                env=env,
             )
-            stdout, stderr = proc.communicate(timeout=timeout)
+
+            # Warte in kurzen Intervallen auf das Ende des Prozesses
+            poll_interval = 0.1
+            elapsed = 0.0
+
+            while proc.poll() is None and elapsed < timeout:
+                if cancel_event is not None and cancel_event.is_set():
+                    logger.info(f"  ⏹️ {method_name} abgebrochen durch cancel_event")
+                    cls._terminate_process(proc)
+                    return None
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+
+            if proc.poll() is None:
+                logger.warning(
+                    f"  ⏰ {method_name} Timeout nach {timeout}s – Prozess wird gekillt",
+                    extra={"component": "ytdlp"},
+                )
+                cls._terminate_process(proc)
+                return None
+
+            stdout, stderr = proc.communicate()
             duration = (time.perf_counter() - start) * 1000
+
             if proc.returncode == 0 and stdout.strip():
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
@@ -11234,19 +11289,7 @@ class YtDlpHelper:
                         extra={"component": "ytdlp"},
                     )
                 return None
-        except subprocess.TimeoutExpired:
-            if proc:
-                try:
-                    proc.kill()
-                    proc.communicate(timeout=1)
-                except subprocess.TimeoutExpired:
-                    pass
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    f"  ⏰ {method_name} Timeout nach {timeout}s – Prozess wurde gekillt",
-                    extra={"component": "ytdlp"},
-                )
-            return None
+
         except (OSError, ValueError) as e:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
@@ -11262,11 +11305,7 @@ class YtDlpHelper:
             return None
         finally:
             if proc and proc.poll() is None:
-                try:
-                    proc.kill()
-                    proc.wait(timeout=1)
-                except Exception:
-                    pass
+                cls._terminate_process(proc)
 
     @classmethod
     def get_json(
@@ -11277,6 +11316,7 @@ class YtDlpHelper:
         browser: Optional[str] = None,
         proxy: str = "",
         prefer_ipv4: bool = False,
+        cancel_event: Optional[threading.Event] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Ruft die JSON-Metadaten eines Videos/Streams ab.
@@ -11311,7 +11351,11 @@ class YtDlpHelper:
         cmd.append(url)
 
         stdout = cls.run_command(
-            cmd, timeout=timeout, method_name="get_json", prefer_ipv4=prefer_ipv4
+            cmd,
+            timeout=timeout,
+            method_name="get_json",
+            prefer_ipv4=prefer_ipv4,
+            cancel_event=cancel_event,
         )
         if stdout:
             try:
@@ -11334,14 +11378,11 @@ class YtDlpHelper:
         browser: Optional[str] = None,
         proxy: str = "",
         prefer_ipv4: bool = False,
+        cancel_event: Optional[threading.Event] = None,
     ) -> Optional[str]:
         """
         Extrahiert die direkte Audio-URL aus einem Video/Stream.
         Gibt die URL zurück oder None bei Fehlschlag.
-
-        Verbesserungen:
-        - Strengere Validierung des Format-Strings
-        - Fallback auf "bestaudio" bei ungültigem Format
         """
         if not cls._validate_format_str(format_str):
             logger.warning(
@@ -11386,6 +11427,7 @@ class YtDlpHelper:
             timeout=timeout,
             method_name=f"get_audio_url_{format_str}",
             prefer_ipv4=prefer_ipv4,
+            cancel_event=cancel_event,
         )
         if stdout:
             for line in stdout.splitlines():
@@ -18412,7 +18454,8 @@ class TTSManager:
         - Satzweise Aufteilung langer Texte (max. 500 Zeichen pro Chunk)
         - Asynchrone, nicht-blockierende Ausführung
         - Warteschlange für sequenzielle Wiedergabe (Auto-TTS)
-        - Detaillierte Debug-Ausgaben bei --debug=3
+        - Detaillierte Debug-Ausgaben bei --debug=tts oder --debug=3
+        - Diagnose unvollständiger Wiedergabe (Byte-Zählung, Zeitvergleich, Queue-Logging)
         - Automatischer Download fehlender Piper-Konfigurationsdateien (.onnx.json)
         - Reparatur beschädigter Modelldateien (Löschen und erneuter Download)
         - Fallback auf medium-Modell bei defektem high-Modell (mit Rekursionsschutz)
@@ -18428,6 +18471,7 @@ class TTSManager:
     MAX_CHUNK_LEN = 500                     # Maximale Textlänge pro Chunk
     PIPER_SAMPLE_RATE = 22050               # Piper gibt 22050 Hz aus
     PIPER_CHANNELS = 1                      # Mono
+    PIPER_BYTES_PER_SECOND = PIPER_SAMPLE_RATE * 2  # 16-bit = 2 Bytes pro Sample
     MAX_FALLBACK_DEPTH = 2                  # Maximale Rekursionstiefe für Fallbacks
 
     # Audio-Player in absteigender Priorität (aplay ist am zuverlässigsten)
@@ -18474,6 +18518,9 @@ class TTSManager:
             target=self._queue_worker_loop, daemon=True, name="TTSQueue"
         )
         self._queue_worker.start()
+
+        # Diagnose: Zähler für verworfene Queue-Einträge
+        self._queue_discarded_count = 0
 
         self._log_initialization()
 
@@ -18694,24 +18741,77 @@ class TTSManager:
             self._queue.put_nowait((text, callback))
         except queue.Full:
             try:
-                self._queue.get_nowait()
+                old = self._queue.get_nowait()
+                self._queue_discarded_count += 1
+                if DEBUG_LEVEL >= 3 or 'tts' in DEBUG_COMPONENTS:
+                    log_debug("tts", f"Queue voll – älteren Text verworfen (#{self._queue_discarded_count}): {old[0][:50]}...")
                 self._queue.put_nowait((text, callback))
             except queue.Empty:
                 pass
 
     def stop(self) -> None:
-        """Stoppt die laufende Sprachausgabe sofort."""
+        """
+        Stoppt die laufende Sprachausgabe sofort und zuverlässig.
+
+        Diese Methode setzt alle internen Stop‑Events, beendet laufende Subprozesse
+        (Piper und ggf. Audio‑Player) und leert die Warteschlange.
+        """
+        log_debug("tts", "TTSManager.stop() called")
+
         with self._lock:
             self._stop_requested.set()
             if self._process and self._process.poll() is None:
-                PlatformUtils.terminate_process(self._process, child_terminate_timeout=1.0)
-                self._process = None
+                log_debug("tts", f"  → Terminating Piper process (PID {self._process.pid})...")
+                try:
+                    PlatformUtils.terminate_process(
+                        self._process,
+                        child_terminate_timeout=1.0,
+                        child_kill_wait=0.5,
+                        parent_terminate_timeout=2.0,
+                        parent_kill_wait=1.0,
+                        fallback_terminate_timeout=1.0,
+                        fallback_kill_wait=0.5,
+                    )
+                    log_debug("tts", "  → Piper process terminated")
+                except Exception as e:
+                    logger.warning(f"Fehler beim Terminieren des Piper-Prozesses: {e}")
+                finally:
+                    self._process = None
+            else:
+                log_debug("tts", "  → No active Piper process to stop")
+
+        if self._forward_stop:
             self._forward_stop.set()
+        if self._forward_thread and self._forward_thread.is_alive():
+            log_debug("tts", "  → Joining forward thread...")
+            self._forward_thread.join(timeout=1.0)
+            if self._forward_thread.is_alive():
+                logger.warning("Forward thread did not terminate within timeout")
+                try:
+                    self._forward_thread.daemon = True
+                except RuntimeError:
+                    pass
+            else:
+                log_debug("tts", "  → Forward thread joined")
+        self._forward_thread = None
+
+        # Warteschlange leeren
+        cleared = 0
         try:
             while True:
                 self._queue.get_nowait()
+                cleared += 1
         except queue.Empty:
             pass
+        if cleared > 0:
+            log_debug("tts", f"  → Cleared {cleared} items from TTS queue")
+
+        try:
+            self._queue.put_nowait(None)
+        except queue.Full:
+            pass
+
+        log_debug("tts", "TTSManager.stop() completed")
 
     # -------------------------------------------------------------------------
     # Blockierende Ausführung (wird in Threads ausgeführt)
@@ -18728,6 +18828,9 @@ class TTSManager:
             if callback:
                 callback(False, "Kein Text zum Abspielen")
             return
+
+        if len(chunks) > 1 and (DEBUG_LEVEL >= 3 or 'tts' in DEBUG_COMPONENTS):
+            log_debug("tts", f"Text aufgeteilt in {len(chunks)} Chunks (Längen: {[len(c) for c in chunks]})")
 
         for i, chunk in enumerate(chunks):
             if self._stop_requested.is_set():
@@ -18819,7 +18922,6 @@ class TTSManager:
                 logger.info(f"Versuche Reparatur für Stimme {voice_name}...")
                 if not os.path.exists(json_path):
                     self._download_piper_json(voice_name, cache_dir)
-                # Nach Reparaturversuch erneut prüfen (ohne weitere Reparatur)
                 return self._validate_piper_model(voice_name, attempt_repair=False)
             return False, err_model or err_json
         return True, ""
@@ -18922,9 +19024,7 @@ class TTSManager:
         Synchrone Piper-Ausgabe (wird im Worker-Thread aufgerufen).
         Gibt (erfolg, nachricht) zurück.
 
-        Args:
-            text: Der zu sprechende Text.
-            _depth: Rekursionstiefe für Fallbacks (intern).
+        Enthält umfangreiche Diagnose bei DEBUG_LEVEL >= 3 oder 'tts' in DEBUG_COMPONENTS.
         """
         if _depth >= self.MAX_FALLBACK_DEPTH:
             return False, f"Maximale Fallback-Tiefe ({self.MAX_FALLBACK_DEPTH}) erreicht"
@@ -18932,6 +19032,7 @@ class TTSManager:
         process = None
         audio_player = None
         forwarded_bytes = 0
+        total_piper_bytes = 0
         _np_available = NUMPY_AVAILABLE
         original_voice = self._voice
 
@@ -18956,7 +19057,7 @@ class TTSManager:
                 "--sentence_silence", str(self._sentence_silence),
                 "--output-raw",
             ]
-            if DEBUG_LEVEL >= 3:
+            if DEBUG_LEVEL >= 3 or 'tts' in DEBUG_COMPONENTS:
                 log_debug("tts", f"Starte Piper: {' '.join(cmd)}")
             process = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -18966,6 +19067,7 @@ class TTSManager:
 
             # --- Audio-Player starten ---
             audio_player = self._start_audio_player()
+            player_start_time = time.perf_counter()
 
             # --- Text an Piper senden ---
             try:
@@ -18986,13 +19088,14 @@ class TTSManager:
             forward_done = threading.Event()
 
             def forward():
-                nonlocal forwarded_bytes, forward_error
+                nonlocal forwarded_bytes, forward_error, total_piper_bytes
                 try:
                     start_time = time.time()
                     while not self._forward_stop.is_set():
                         chunk = process.stdout.read(8192)
                         if not chunk:
                             break
+                        total_piper_bytes += len(chunk)
                         if forwarded_bytes == 0 and time.time() - start_time > 3.0:
                             forward_error = TimeoutError("Piper liefert keine Audiodaten")
                             break
@@ -19000,9 +19103,11 @@ class TTSManager:
                         chunk = self._apply_volume_scaling(chunk, _np_available)
                         try:
                             audio_player.stdin.write(chunk)
+                            audio_player.stdin.flush()
                             forwarded_bytes += len(chunk)
                         except BrokenPipeError:
                             logger.warning("Audio-Player-Pipe unterbrochen")
+                            forward_error = BrokenPipeError("Audio player pipe closed early")
                             break
                 except Exception as e:
                     forward_error = e
@@ -19032,13 +19137,40 @@ class TTSManager:
                 self._forward_thread.join(timeout=2.0)
             self._forward_thread = None
 
-            # --- Auf Audio-Player warten ---
-            time.sleep(0.1)
+            # --- Auf Audio-Player warten (mit längerem Timeout für Puffer-Leerung) ---
+            time.sleep(0.2)
             try:
-                audio_player.wait(timeout=60)
+                audio_player.stdin.close()
+            except Exception:
+                pass
+            try:
+                audio_player.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
                 audio_player.terminate()
                 audio_player.wait(timeout=2.0)
+                logger.warning("Audio-Player musste gekillt werden")
+
+            player_duration = time.perf_counter() - player_start_time
+            expected_duration = forwarded_bytes / self.PIPER_BYTES_PER_SECOND
+
+            # --- Detaillierte Debug-Ausgaben ---
+            if DEBUG_LEVEL >= 3 or 'tts' in DEBUG_COMPONENTS:
+                log_debug("tts", f"Piper bytes read: {total_piper_bytes}, forwarded: {forwarded_bytes}")
+                if total_piper_bytes != forwarded_bytes:
+                    log_debug("tts", f"WARNUNG: Nicht alle Bytes wurden weitergeleitet! "
+                              f"Diff: {total_piper_bytes - forwarded_bytes} bytes")
+                if forward_error:
+                    log_debug("tts", f"Forward-Fehler: {forward_error}")
+                log_debug("tts", f"Player lief {player_duration:.2f}s, erwartete Dauer {expected_duration:.2f}s")
+                if player_duration < expected_duration * 0.9:
+                    log_debug("tts", f"WARNUNG: Audio-Player endete {expected_duration - player_duration:.2f}s zu früh!")
+                stderr = process.stderr.read().decode(errors="ignore")
+                if stderr:
+                    log_debug("tts", f"Piper stderr: {stderr[:500]}")
+                if audio_player.stderr:
+                    aplay_stderr = audio_player.stderr.read().decode(errors="ignore")
+                    if aplay_stderr:
+                        log_debug("tts", f"aplay stderr: {aplay_stderr.strip()}")
 
             # --- Fehlerauswertung ---
             if forward_error:
@@ -19049,7 +19181,6 @@ class TTSManager:
                 stderr = process.stderr.read().decode(errors="ignore")
                 logger.error(f"❌ Piper Fehler (exit {process.returncode}, bytes={forwarded_bytes}):\n{stderr}")
 
-                # Automatische Reparatur bei Protobuf-Fehler
                 if "InvalidProtobuf" in stderr or "Protobuf parsing failed" in stderr:
                     model_path = os.path.join(self._get_piper_cache_dir(), f"{self._voice}.onnx")
                     logger.warning(f"Beschädigtes Piper-Modell erkannt, lösche: {model_path}")
@@ -19059,7 +19190,6 @@ class TTSManager:
                         logger.error(f"Löschen fehlgeschlagen: {e}")
                     logger.info("Das Modell wurde gelöscht und wird beim nächsten Start neu heruntergeladen.")
 
-                # Fallback auf medium, wenn high fehlschlägt
                 if self._voice.endswith("-high"):
                     fallback_voice = self._voice.replace("-high", "-medium")
                     logger.warning(f"Wechsle zu Fallback-Stimme: {fallback_voice}")
@@ -19270,21 +19400,81 @@ class TTSManager:
     # Ressourcenfreigabe und dynamische Stimmen-Erkennung
     # -------------------------------------------------------------------------
     def dispose(self) -> None:
-        """Gibt alle Ressourcen frei."""
-        self.stop()
+        """
+        Gibt alle Ressourcen des TTSManagers frei und beendet laufende Prozesse.
+        """
+        if getattr(self, "_disposed", False):
+            log_debug("tts", "TTSManager.dispose() already called, skipping")
+            return
+        self._disposed = True
+
+        log_debug("tts", "TTSManager.dispose() called – cleaning up resources")
+
+        self._stop_requested.set()
+        log_debug("tts", "  → Stop requested event set")
+
+        if self._forward_thread and self._forward_thread.is_alive():
+            log_debug("tts", "  → Stopping forward thread...")
+            self._forward_stop.set()
+            self._forward_thread.join(timeout=1.0)
+            if self._forward_thread.is_alive():
+                logger.warning("Forward thread did not terminate within timeout")
+                try:
+                    self._forward_thread.daemon = True
+                except RuntimeError:
+                    pass
+            else:
+                log_debug("tts", "  → Forward thread joined")
+        self._forward_thread = None
+
+        with self._lock:
+            proc = self._process
+            self._process = None
+        if proc and proc.poll() is None:
+            log_debug("tts", f"  → Terminating Piper process (PID {proc.pid})...")
+            try:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2.0)
+                    log_debug("tts", "  → Piper terminated gracefully")
+                except subprocess.TimeoutExpired:
+                    logger.warning("Piper did not terminate, sending SIGKILL")
+                    proc.kill()
+                    proc.wait(timeout=1.0)
+                    log_debug("tts", "  → Piper killed")
+            except Exception as e:
+                logger.warning(f"Error terminating Piper: {e}")
+
         self._queue_stop.set()
+        log_debug("tts", "  → Queue stop event set")
+
         try:
             while True:
                 self._queue.get_nowait()
         except queue.Empty:
             pass
+        log_debug("tts", "  → Queue emptied")
+
         try:
             self._queue.put_nowait(None)
         except queue.Full:
             pass
+
         if self._queue_worker.is_alive():
+            log_debug("tts", "  → Joining queue worker thread...")
             self._queue_worker.join(timeout=2.0)
-        log_debug("tts", "TTSManager disposed")
+            if self._queue_worker.is_alive():
+                logger.warning("Queue worker thread did not terminate within timeout")
+                try:
+                    self._queue_worker.daemon = True
+                except RuntimeError:
+                    pass
+            else:
+                log_debug("tts", "  → Queue worker thread joined")
+        self._queue_worker = None
+
+        gc.collect()
+        log_debug("tts", "TTSManager.dispose() completed successfully")
 
     def get_installed_piper_voices(self) -> List[str]:
         """
@@ -28401,12 +28591,16 @@ class WhisperController:
         Diese Methode setzt den Zustand auf STOPPING, stoppt sofort alle Audio-Ressourcen
         (AudioProcessor, FFmpegManager) und setzt den Zustand auf IDLE zurück.
         Sie kehrt innerhalb weniger Sekunden zurück, auch wenn Prozesse blockieren.
-        Die Parameter `wait` und `timeout` werden aus Kompatibilitätsgründen beibehalten,
-        haben aber keine Auswirkung auf die synchrone Ausführung.
+
+        Verbesserungen:
+            - Konsistente Verwendung des `timeout`‑Parameters für AudioProcessor.
+            - Detaillierte Debug‑Ausgaben mit Zeitmessungen.
+            - Robuste Fehlerbehandlung in jedem Schritt.
+            - Garantiertes Setzen des IDLE‑Zustands auch bei Ausnahmen.
 
         Args:
             wait: Ignoriert (immer synchron).
-            timeout: Ignoriert (maximale Zeit wird intern festgelegt).
+            timeout: Maximale Wartezeit in Sekunden für das Beenden des AudioProcessors.
 
         Returns:
             Immer True (da Zustand erzwungen wird).
@@ -28414,6 +28608,7 @@ class WhisperController:
         import traceback
         caller = traceback.format_stack()[-2].strip()
         log_debug("controller", f"stop_processing called from: {caller}")
+        start_time = time.perf_counter()
 
         # -----------------------------------------------------------------
         # 1. Zustandsprüfung und Übergang zu STOPPING
@@ -28443,15 +28638,25 @@ class WhisperController:
             return True
 
         # -----------------------------------------------------------------
-        # 2. AudioProcessor sofort stoppen (synchron, kurzer Timeout)
+        # 2. AudioProcessor sofort stoppen (synchron, Timeout aus Parameter)
         # -----------------------------------------------------------------
         if hasattr(gui, "audio_processor") and gui.audio_processor:
             try:
-                log_debug("controller", "stop_processing: stopping audio processor (sync)")
-                gui.audio_processor.stop_processing(wait=True, timeout=1.0)
-                log_debug("controller", "stop_processing: audio processor stopped")
+                log_debug(
+                    "controller",
+                    f"stop_processing: stopping audio processor (sync, timeout={timeout}s)"
+                )
+                ap_stop_start = time.perf_counter()
+                gui.audio_processor.stop_processing(wait=True, timeout=timeout)
+                ap_stop_duration = (time.perf_counter() - ap_stop_start) * 1000
+                log_debug(
+                    "controller",
+                    f"stop_processing: audio processor stopped in {ap_stop_duration:.2f}ms"
+                )
             except Exception as e:
                 logger.error(f"Fehler beim Stoppen des AudioProcessors: {e}", exc_info=True)
+        else:
+            log_debug("controller", "stop_processing: no audio processor found")
 
         # -----------------------------------------------------------------
         # 3. FFmpeg-Stream sofort beenden (kill_all_streams)
@@ -28466,7 +28671,9 @@ class WhisperController:
                 self._current_stream_id = None
                 log_debug("controller", "stop_processing: FFmpeg streams killed")
             except Exception as e:
-                logger.error(f"Fehler beim Beenden des Streams: {e}", exc_info=True)
+                logger.error(f"Fehler beim Beenden des FFmpeg-Streams: {e}", exc_info=True)
+        else:
+            log_debug("controller", "stop_processing: no active FFmpeg stream to kill")
 
         # -----------------------------------------------------------------
         # 4. Dispatcher anhalten (leert Queue und sendet Sentinel)
@@ -28478,12 +28685,18 @@ class WhisperController:
                 log_debug("controller", "stop_processing: dispatcher stopped")
             except Exception as e:
                 logger.error(f"Fehler beim Stoppen des Dispatchers: {e}", exc_info=True)
+        else:
+            log_debug("controller", "stop_processing: no dispatcher to stop")
 
         # -----------------------------------------------------------------
         # 5. Event-Bus benachrichtigen (Stream-Info zurücksetzen)
         # -----------------------------------------------------------------
-        self.event_bus.emit("stream_info", None)
-        self.event_bus.emit("processing_state_changed", False)
+        try:
+            self.event_bus.emit("stream_info", None)
+            self.event_bus.emit("processing_state_changed", False)
+            log_debug("controller", "stop_processing: event bus notified")
+        except Exception as e:
+            logger.warning(f"Event-Bus Fehler: {e}")
 
         # -----------------------------------------------------------------
         # 6. Zustand endgültig auf IDLE setzen
@@ -28491,7 +28704,11 @@ class WhisperController:
         with self._state_lock:
             self._set_state(WhisperController.State.IDLE)
 
-        log_debug("controller", "stop_processing: completed, state IDLE")
+        total_duration = (time.perf_counter() - start_time) * 1000
+        log_debug(
+            "controller",
+            f"stop_processing: completed in {total_duration:.2f}ms, state IDLE"
+        )
         return True
 
     def safe_exit(self) -> None:
@@ -31232,7 +31449,7 @@ class AudioProcessor:
         sauber beendet wird, um Folgedurchläufe nicht zu beeinträchtigen.
 
         Verbesserungen:
-            - Sofortige Abbruchprüfung vor jedem größeren Schritt
+            - Sofortige Abbruchprüfung vor jedem größeren Schritt (insb. Benutzer‑Stop)
             - Detaillierte Debug-Protokollierung mit Zeitmessungen
             - Robuste Queue-Leerung bei abgestorbenem Dispatcher
             - Explizite Prüfung auf ausstehende Tasks mit Timeout
@@ -31281,6 +31498,7 @@ class AudioProcessor:
         info_cb = getattr(self, '_info_callback', None)
         error_cb = getattr(self, '_error_callback', None)
 
+        # Erneute Abbruchprüfung nach Dispatcher-Start
         if self.is_stop_requested():
             logger.info("Download-Modus: Abbruch nach Dispatcher-Start erkannt")
             if info_cb:
@@ -31616,6 +31834,7 @@ class AudioProcessor:
         info_cb: Optional[InfoCallback] = None,
         seek: Union[bool, float] = False,
         timeout: Optional[float] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> int:
         """
         Startet eine Pipeline aus yt‑dlp und ffmpeg, liest PCM‑Daten und speist
@@ -31627,6 +31846,8 @@ class AudioProcessor:
             - Robustere Ressourcenfreigabe bei vorzeitigem Abbruch
             - Detaillierte Debug-Informationen
             - Thread‑sicherer Inaktivitäts‑Timer mit RLock
+            - Windows‑sicheres Schließen der Pipes
+            - Übergabe eines cancel_event für externe Abbruchsignale
         """
         start_total = time.perf_counter()
         chunk_count = 0
@@ -31636,6 +31857,8 @@ class AudioProcessor:
         # Hilfsfunktion für Abbruchprüfung (verhindert Code-Duplizierung)
         # -----------------------------------------------------------------
         def is_stop_requested() -> bool:
+            if cancel_event is not None and cancel_event.is_set():
+                return True
             ap = self._get_ap()
             return ap is not None and ap.is_stop_requested()
 
@@ -31884,12 +32107,16 @@ class AudioProcessor:
             log_debug("download", "Inactivity timer cancelled")
 
             # -----------------------------------------------------------------
-            # 2. Pipes schließen (nicht blockierend)
+            # 2. Pipes schließen (Windows‑sicher: nicht blockierend)
             # -----------------------------------------------------------------
             def close_pipe_safe(pipe):
                 if pipe and not pipe.closed:
                     try:
-                        pipe.close()
+                        if IS_WINDOWS:
+                            # Unter Windows kann pipe.close() blockieren, daher in Daemon‑Thread auslagern
+                            threading.Thread(target=pipe.close, daemon=True).start()
+                        else:
+                            pipe.close()
                     except Exception:
                         pass
 
