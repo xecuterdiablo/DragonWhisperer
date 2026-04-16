@@ -5010,16 +5010,27 @@ class CacheManager:
     # =========================================================================
     def _cleanup_worker(self) -> None:
         """
-        Worker‑Methode für den Cleanup‑Thread.
+        Worker‑Methode für den periodischen Cleanup‑Thread.
+
         Wartet auf das Stop‑Event oder den Cleanup‑Intervall.
-        Bei Exceptions wird der Thread nicht beendet, sondern läuft weiter.
+        Prüft vor jedem Cache‑Zugriff, ob der CacheManager bereits disposed wurde,
+        um Zugriffe auf gelöschte Objekte zu vermeiden.
+        Bei Exceptions wird der Thread nicht beendet, sondern läuft weiter,
+        es sei denn, der CacheManager wurde disposed.
         """
         logger.debug("CacheCleanup thread started")
+
         while not self._stop_event.wait(self._cleanup_interval):
+            # Vor jeder Aktion prüfen, ob der CacheManager disposed ist
+            if self._disposed:
+                logger.debug("CacheCleanup: disposed flag detected, exiting")
+                break
+
             try:
                 start = time.perf_counter()
                 expired = self.clear_expired_entries()
                 duration = (time.perf_counter() - start) * 1000
+
                 with self._metrics_lock:
                     self._metrics["cleanup_cycles"] += 1
 
@@ -5032,12 +5043,20 @@ class CacheManager:
                         f"{expired['audio_expired']} audio entries removed "
                         f"in {duration:.2f}ms",
                     )
+
             except Exception as e:
+                # Wenn der CacheManager während der Bereinigung disposed wurde,
+                # brechen wir den Thread ab.
+                if self._disposed:
+                    logger.debug("CacheCleanup: disposed during cleanup, exiting")
+                    break
+
                 logger.error(
                     f"Fehler bei periodischer Cache-Bereinigung: {e}", exc_info=True
                 )
                 # Kurze Pause, um bei dauerhaften Fehlern nicht die CPU zu überlasten
                 time.sleep(1.0)
+
         logger.debug("CacheCleanup thread terminated")
 
     def clear_expired_entries(self) -> Dict[str, int]:
@@ -5272,6 +5291,8 @@ class CacheManager:
                 if DEBUG_LEVEL >= 3:
                     log_debug("cache", "CacheManager already disposed, skipping")
                 return
+            # Wichtig: Flag sofort setzen, damit der Cleanup‑Worker bei der
+            # nächsten Gelegenheit erkennt, dass er beendet werden soll.
             self._disposed = True
 
         # Cache-Größen vor dem Leeren loggen (für Debugging)
@@ -5292,6 +5313,7 @@ class CacheManager:
             if not force:
                 if DEBUG_LEVEL >= 3:
                     log_debug("cache", "Waiting for cleanup thread to finish...")
+                # Dem Thread Zeit geben, sauber zu beenden.
                 self._cleanup_thread.join(timeout=3.0)
                 if self._cleanup_thread.is_alive():
                     logger.warning(
@@ -5305,12 +5327,17 @@ class CacheManager:
                     log_debug("cache", "Force mode: not waiting for cleanup thread")
             self._cleanup_thread = None
 
-        # Caches leeren
+        # Caches leeren – der Worker ist entweder beendet oder hat das _disposed-Flag
+        # erkannt und beendet sich selbst. Zugriffe auf die Caches sind danach sicher,
+        # da der Worker vor jedem Zugriff _disposed prüft.
         self.transcription_cache.clear()
         self.translation_cache.clear()
         self.audio_cache.clear()
 
-        # Nur EINE Log-Ausgabe
+        # Metriken zurücksetzen (optional, aber sauber)
+        with self._metrics_lock:
+            self._metrics.clear()
+
         if DEBUG_LEVEL >= 3:
             log_debug("cache", "CacheManager disposed")
         else:
@@ -14110,16 +14137,12 @@ class FFmpegManager:
 
         Die Methode erzwingt das sofortige Schließen der stdout‑Pipe des Prozesses,
         um einen blockierenden `read()`‑Aufruf im Lese‑Thread zu unterbrechen.
-        Anschließend wird der Thread mit einem kurzen Timeout gejoint und alle
-        zugehörigen Ressourcen werden freigegeben.
-
-        Diese Strategie verhindert zuverlässig den Fehler
-        "PyMemoryView_FromBuffer(): info->buf must not be NULL" sowie das
-        Festhängen des Lese‑Threads während des Shutdowns.
+        Unter Windows wird das Schließen der Pipe in einen separaten Daemon‑Thread
+        ausgelagert, um Blockaden des Haupt‑Threads zu vermeiden.
 
         Ablauf:
             1. `read_stop`‑Event setzen (signalisiert dem Thread das Ende).
-            2. stdout‑Pipe **sofort schließen**, um `read()` zu unterbrechen.
+            2. stdout‑Pipe schließen (Windows‑sicher).
             3. Kurze Pause, damit die Exception den Thread erreichen kann.
             4. Thread joinen (maximal 1 Sekunde warten).
             5. Thread‑bezogene Attribute aufräumen.
@@ -14127,31 +14150,44 @@ class FFmpegManager:
         Args:
             pinfo: Die `_ProcessInfo`‑Instanz des zu stoppenden Prozesses.
         """
-        logger.debug(f"[FFmpegManager] _stop_read_thread: {pinfo.process_id}")
+        process_id = pinfo.process_id
+        logger.debug(f"[FFmpegManager] _stop_read_thread: {process_id}")
 
         # -----------------------------------------------------------------
         # 1. read_stop‑Event setzen (falls vorhanden)
         # -----------------------------------------------------------------
         if pinfo.read_stop:
             pinfo.read_stop.set()
-            logger.debug(f"[FFmpegManager] read_stop event set for {pinfo.process_id}")
+            logger.debug(f"[FFmpegManager] read_stop event set for {process_id}")
         else:
-            logger.debug(f"[FFmpegManager] read_stop event is None for {pinfo.process_id}")
+            logger.debug(f"[FFmpegManager] read_stop event is None for {process_id}")
 
         # -----------------------------------------------------------------
-        # 2. stdout‑Pipe sofort schließen, um blockierenden read()‑Aufruf zu unterbrechen
+        # 2. stdout‑Pipe sicher schließen (Windows‑optimiert)
         # -----------------------------------------------------------------
         if pinfo.process and pinfo.process.stdout and not pinfo.process.stdout.closed:
             try:
-                pinfo.process.stdout.close()
-                logger.debug(
-                    f"[FFmpegManager] Closed stdout for {pinfo.process_id} to interrupt read()"
-                )
+                if IS_WINDOWS:
+                    # Unter Windows kann pipe.close() blockieren, wenn ein anderer
+                    # Thread in read() hängt. Daher in separaten Thread auslagern.
+                    threading.Thread(
+                        target=pinfo.process.stdout.close,
+                        daemon=True,
+                        name=f"PipeClose-{process_id}"
+                    ).start()
+                    logger.debug(
+                        f"[FFmpegManager] Started background thread to close stdout for {process_id}"
+                    )
+                else:
+                    pinfo.process.stdout.close()
+                    logger.debug(
+                        f"[FFmpegManager] Closed stdout for {process_id} to interrupt read()"
+                    )
             except Exception as e:
-                logger.debug(f"[FFmpegManager] Error closing stdout for {pinfo.process_id}: {e}")
+                logger.debug(f"[FFmpegManager] Error closing stdout for {process_id}: {e}")
         else:
             logger.debug(
-                f"[FFmpegManager] stdout pipe for {pinfo.process_id} already closed or unavailable"
+                f"[FFmpegManager] stdout pipe for {process_id} already closed or unavailable"
             )
 
         # -----------------------------------------------------------------
@@ -14163,19 +14199,24 @@ class FFmpegManager:
         # 4. Thread joinen (maximal 1 Sekunde warten)
         # -----------------------------------------------------------------
         if pinfo.read_thread and pinfo.read_thread.is_alive():
-            logger.debug(f"[FFmpegManager] Joining read_thread for {pinfo.process_id}...")
+            logger.debug(f"[FFmpegManager] Joining read_thread for {process_id}...")
             pinfo.read_thread.join(timeout=1.0)
             if pinfo.read_thread.is_alive():
                 logger.warning(
-                    f"[FFmpegManager] read_thread for {pinfo.process_id} still alive after timeout"
+                    f"[FFmpegManager] read_thread for {process_id} still alive after timeout"
                 )
+                # Letzter Versuch: Thread als Daemon markieren, damit er Shutdown nicht blockiert
+                try:
+                    pinfo.read_thread.daemon = True
+                except RuntimeError:
+                    pass
             else:
-                logger.debug(f"[FFmpegManager] read_thread joined for {pinfo.process_id}")
+                logger.debug(f"[FFmpegManager] read_thread joined for {process_id}")
         else:
             if pinfo.read_thread is None:
-                logger.debug(f"[FFmpegManager] read_thread already None for {pinfo.process_id}")
+                logger.debug(f"[FFmpegManager] read_thread already None for {process_id}")
             else:
-                logger.debug(f"[FFmpegManager] read_thread already dead for {pinfo.process_id}")
+                logger.debug(f"[FFmpegManager] read_thread already dead for {process_id}")
 
         # -----------------------------------------------------------------
         # 5. Aufräumen der Thread‑bezogenen Attribute
@@ -14185,7 +14226,7 @@ class FFmpegManager:
         pinfo.read_stop = None
         pinfo.read_buffer = b""
 
-        logger.debug(f"[FFmpegManager] _stop_read_thread done for {pinfo.process_id}")
+        logger.debug(f"[FFmpegManager] _stop_read_thread done for {process_id}")
 
     def _start_stderr_thread(self, pinfo: "_ProcessInfo") -> None:
         rate_limiter = self._RateLimiter(max_messages=10, period=60.0)
@@ -14344,6 +14385,7 @@ class FFmpegManager:
         detected_language: Optional[str] = None,
         max_attempts: Optional[int] = None,
         seek_seconds: Optional[float] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> Optional[subprocess.Popen]:
         """
         Versucht, einen Stream zu erneuern (neue Audio‑URL, neuer FFmpeg‑Prozess).
@@ -14355,6 +14397,10 @@ class FFmpegManager:
             max_attempts: Maximale Anzahl Wiederholungsversuche.
             seek_seconds: Falls angegeben, wird die Wiedergabe an dieser Position fortgesetzt
                           (nur für Nicht‑YouTube‑Streams wirksam).
+            cancel_event: Optionales Event zum vorzeitigen Abbruch. Wird regelmäßig geprüft.
+
+        Returns:
+            Neuen FFmpeg‑Prozess bei Erfolg, sonst None.
         """
         class RefreshState(Enum):
             INIT = 0
@@ -14391,6 +14437,29 @@ class FFmpegManager:
             "total_duration_ms": 0.0,
         }
 
+        # -----------------------------------------------------------------
+        # Hilfsfunktion: Abbruch prüfen
+        # -----------------------------------------------------------------
+        def is_cancelled() -> bool:
+            return cancel_event is not None and cancel_event.is_set()
+
+        # -----------------------------------------------------------------
+        # Hilfsfunktion: Unterbrechbares Warten
+        # -----------------------------------------------------------------
+        def cancellable_sleep(seconds: float) -> bool:
+            """Schläft für `seconds` Sekunden, prüft aber alle 0.1s auf Abbruch.
+            Returns True, falls vorzeitig abgebrochen wurde."""
+            if seconds <= 0:
+                return False
+            if cancel_event is None:
+                time.sleep(seconds)
+                return False
+            end = time.time() + seconds
+            while time.time() < end:
+                if cancel_event.wait(min(0.1, end - time.time())):
+                    return True
+            return False
+
         # ========== KRITISCHER ABSCHNITT: Slot-Freigabe mit Lock ==========
         with self._lock:
             if process_id not in self._processes:
@@ -14409,6 +14478,7 @@ class FFmpegManager:
         if hasattr(self, "event_bus") and self.event_bus:
             self.event_bus.emit("refresh_started", {"process_id": process_id, "max_attempts": max_attempts})
 
+        # Cache für Audio-URLs (begrenzte Größe)
         url_cache = getattr(self, "_audio_url_cache", None)
         if url_cache is None:
             from collections import OrderedDict
@@ -14422,6 +14492,15 @@ class FFmpegManager:
 
         try:
             for attempt in range(1, max_attempts + 1):
+                # ---------------------------------------------------------
+                # Abbruch durch Benutzer oder globalen Timeout prüfen
+                # ---------------------------------------------------------
+                if is_cancelled():
+                    logger.info(f"Refresh abgebrochen durch Benutzer (Versuch {attempt})")
+                    diagnosis["failure_reason"] = "cancelled"
+                    current_state = RefreshState.FAILED
+                    break
+
                 if time.time() - start_time > TOTAL_REFRESH_TIMEOUT:
                     logger.error(f"⏰ Total refresh timeout exceeded after {TOTAL_REFRESH_TIMEOUT}s for {process_id}")
                     diagnosis["failure_reason"] = "total_timeout"
@@ -14433,10 +14512,16 @@ class FFmpegManager:
                 if DEBUG_LEVEL >= 1:
                     logger.info(f"  🔁 Refresh attempt {attempt}/{max_attempts} for {process_id}")
 
+                # Alten Prozess stoppen (falls noch aktiv)
                 if self.is_active(process_id):
                     self.stop_stream(process_id)
-                    time.sleep(0.2)
+                    # Kurze Pause, aber unterbrechbar
+                    if cancellable_sleep(0.2):
+                        diagnosis["failure_reason"] = "cancelled"
+                        current_state = RefreshState.FAILED
+                        break
 
+                # Stream-Typ und Plattform ermitteln
                 is_live, platform = self._detect_stream_type(video_url)
                 is_youtube = "youtube.com" in video_url.lower() or "youtu.be" in video_url.lower()
                 if is_youtube and not is_live:
@@ -14455,6 +14540,12 @@ class FFmpegManager:
 
                 current_state = RefreshState.EXTRACTING
                 diagnosis["state_history"].append(f"attempt_{attempt}_extracting")
+
+                if is_cancelled():
+                    diagnosis["failure_reason"] = "cancelled"
+                    current_state = RefreshState.FAILED
+                    break
+
                 if not use_pipe:
                     cache_key = f"{video_url}_refresh"
                     cached_url = url_cache.get(cache_key) if not force_refresh and hasattr(url_cache, "get") else None
@@ -14470,7 +14561,10 @@ class FFmpegManager:
                             jitter = random.uniform(0, base_wait * 0.3)
                             wait = base_wait + jitter
                             logger.warning(f"  ❌ Refresh attempt {attempt} failed (no new URL). Retry in {wait:.1f}s")
-                            time.sleep(wait)
+                            if cancellable_sleep(wait):
+                                diagnosis["failure_reason"] = "cancelled"
+                                current_state = RefreshState.FAILED
+                                break
                             continue
                         audio_url = new_url
                         url_cache[cache_key] = audio_url
@@ -14481,6 +14575,11 @@ class FFmpegManager:
                 else:
                     if DEBUG_LEVEL >= 3:
                         log_debug("ffmpeg", f"Attempt {attempt}: using pipe mode")
+
+                if is_cancelled():
+                    diagnosis["failure_reason"] = "cancelled"
+                    current_state = RefreshState.FAILED
+                    break
 
                 current_state = RefreshState.STARTING
                 diagnosis["state_history"].append(f"attempt_{attempt}_starting")
@@ -14504,24 +14603,45 @@ class FFmpegManager:
                     current_state = RefreshState.TESTING
                     diagnosis["state_history"].append(f"attempt_{attempt}_testing")
 
+                    # Executor für asynchronen Lesetest (OptimizedThreadPoolExecutor bevorzugt)
                     if executor is None:
-                        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="RefreshTest")
+                        try:
+                            # Verwende den optimierten Executor, falls verfügbar
+                            from dragon_whisperer import OptimizedThreadPoolExecutor
+                            executor = OptimizedThreadPoolExecutor(max_workers=1, thread_name_prefix="RefreshTest")
+                        except ImportError:
+                            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="RefreshTest")
 
                     future = executor.submit(self._read_audio_data_with_timeout, process_id, 1024, 0.5)
                     data_received = False
                     try:
-                        test_data = future.result(timeout=2.0)
-                        if test_data is not None and len(test_data) > 0:
-                            data_received = True
-                            logger.info("  ✅ Data received asynchronously. Refresh successful.")
+                        # Warte auf erstes Datenpaket, aber prüfe regelmäßig auf Abbruch
+                        deadline = time.time() + 2.0
+                        while time.time() < deadline:
+                            if is_cancelled():
+                                future.cancel()
+                                diagnosis["failure_reason"] = "cancelled"
+                                current_state = RefreshState.FAILED
+                                break
+                            try:
+                                test_data = future.result(timeout=0.1)
+                                if test_data is not None and len(test_data) > 0:
+                                    data_received = True
+                                    logger.info("  ✅ Data received asynchronously. Refresh successful.")
+                                else:
+                                    if DEBUG_LEVEL >= 3:
+                                        log_debug("ffmpeg", "Async test: no data received")
+                                break
+                            except FutureTimeout:
+                                continue
                         else:
-                            if DEBUG_LEVEL >= 3:
-                                log_debug("ffmpeg", "Async test: no data received")
-                    except FutureTimeout:
-                        logger.warning("  ⚠️ Async test timed out after 2 seconds")
-                        future.cancel()
+                            logger.warning("  ⚠️ Async test timed out after 2 seconds")
+                            future.cancel()
                     except Exception as e:
                         logger.warning(f"  ⚠️ Async test exception: {e}")
+
+                    if current_state == RefreshState.FAILED:
+                        break
 
                     if data_received:
                         with self._stats_lock:
@@ -14544,14 +14664,20 @@ class FFmpegManager:
                         base_wait = min(self.REFRESH_RETRY_DELAY_MAX, self.REFRESH_RETRY_DELAY_BASE * (2 ** (attempt - 1)))
                         jitter = random.uniform(0, base_wait * 0.3)
                         wait = base_wait + jitter
-                        time.sleep(wait)
+                        if cancellable_sleep(wait):
+                            diagnosis["failure_reason"] = "cancelled"
+                            current_state = RefreshState.FAILED
+                            break
                         continue
                 else:
                     base_wait = min(self.REFRESH_RETRY_DELAY_MAX, self.REFRESH_RETRY_DELAY_BASE * (2 ** (attempt - 1)))
                     jitter = random.uniform(0, base_wait * 0.3)
                     wait = base_wait + jitter
                     logger.warning(f"  ❌ Refresh attempt {attempt} failed (start_stream returned None). Retry in {wait:.1f}s")
-                    time.sleep(wait)
+                    if cancellable_sleep(wait):
+                        diagnosis["failure_reason"] = "cancelled"
+                        current_state = RefreshState.FAILED
+                        break
 
             if current_state != RefreshState.SUCCESS:
                 with self._stats_lock:
@@ -14565,9 +14691,15 @@ class FFmpegManager:
         finally:
             if executor:
                 executor.shutdown(wait=False)
+            # Stelle sicher, dass das _skip_semaphore_release Flag zurückgesetzt wird,
+            # falls der Prozess noch existiert und wir nicht erfolgreich waren.
             with self._lock:
                 if process_id in self._processes:
-                    self._processes[process_id]._skip_semaphore_release = False
+                    pinfo = self._processes[process_id]
+                    # Nur zurücksetzen, wenn der Prozess nicht erfolgreich neu gestartet wurde
+                    if not diagnosis["success"]:
+                        pinfo._skip_semaphore_release = False
+                    # Bei Erfolg wurde das Flag bereits in der success-Branche zurückgesetzt
 
         diagnosis["total_duration_ms"] = (time.time() - start_time) * 1000.0
         diagnosis["state_history"] = diagnosis["state_history"][-20:]
