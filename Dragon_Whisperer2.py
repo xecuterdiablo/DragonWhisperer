@@ -18509,7 +18509,7 @@ class TTSManager:
 
     # Audio-Player in absteigender Priorität (aplay ist am zuverlässigsten)
     _PLAYER_PRIORITY = [
-        ("aplay", ["aplay", "-r", "22050", "-f", "S16_LE", "-t", "raw"]),
+        ("aplay", ["aplay", "-r", "22050", "-f", "S16_LE", "-t", "raw", "--buffer-size=65536"]),
         ("paplay", ["paplay", "--raw", "/dev/stdin"]),
         ("ffplay", ["ffplay", "-autoexit", "-nodisp", "-f", "s16le", "-ar", "22050", "-ac", "1", "-i", "pipe:0"]),
         ("sox", ["play", "-t", "raw", "-r", "22050", "-e", "signed", "-b", "16", "-c", "1", "-"]),
@@ -18549,7 +18549,7 @@ class TTSManager:
         self._available_engines = self._detect_engines()
 
         # Queue für sequenzielle Wiedergabe (Auto-TTS)
-        self._queue = queue.Queue(maxsize=3)
+        self._queue = queue.Queue(maxsize=4)
         self._queue_stop = threading.Event()
         self._queue_worker = threading.Thread(
             target=self._queue_worker_loop, daemon=True, name="TTSQueue"
@@ -19110,7 +19110,9 @@ class TTSManager:
         Gibt (erfolg, nachricht) zurück.
 
         Enthält umfangreiche Diagnose, Wiederholungslogik und Schutz gegen
-        Ausführung während des Shutdowns (dispose).
+        Ausführung während des Shutdowns (dispose). Der Timeout für den
+        Audio-Player wurde auf 15 Sekunden erhöht, um ein vorzeitiges Killen
+        zu vermeiden. Bei Bedarf wird erst SIGTERM, dann SIGKILL gesendet.
         """
         # -----------------------------------------------------------------
         # 0. Vorab-Prüfung: Wurde der TTSManager bereits disposed oder gestoppt?
@@ -19256,18 +19258,24 @@ class TTSManager:
                 self._forward_thread.join(timeout=2.0)
             self._forward_thread = None
 
-            # --- Auf Audio-Player warten (mit längerem Timeout für Puffer-Leerung) ---
+            # --- Auf Audio-Player warten (mit gestaffelter Terminierung) ---
             time.sleep(0.2)
             try:
                 audio_player.stdin.close()
             except Exception:
                 pass
             try:
-                audio_player.wait(timeout=5.0)
+                # Erhöhter Timeout: 15 Sekunden statt 5
+                audio_player.wait(timeout=15.0)
             except subprocess.TimeoutExpired:
+                logger.warning("Audio-Player beendet sich nicht, sende SIGTERM")
                 audio_player.terminate()
-                audio_player.wait(timeout=2.0)
-                logger.warning("Audio-Player musste gekillt werden")
+                try:
+                    audio_player.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    logger.warning("Audio-Player reagiert nicht auf SIGTERM, sende SIGKILL")
+                    audio_player.kill()
+                    audio_player.wait(timeout=1.0)
 
             player_duration = time.perf_counter() - player_start_time
             expected_duration = forwarded_bytes / self.PIPER_BYTES_PER_SECOND
