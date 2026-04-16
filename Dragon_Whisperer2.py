@@ -18463,6 +18463,10 @@ class TTSManager:
         - Robuste Fehlerbehandlung mit vollständiger stderr-Protokollierung
         - Sicherer Shutdown ohne Queue-Worker-Abstürze
         - Dynamische Erkennung installierter Piper-Stimmen (für GUI)
+        - Textbereinigung: Entfernung von Markup-Zeichen (*, **, _, __)
+        - Textnormalisierung: Konvertierung von Zahlen und Abkürzungen
+        - Wiederholungslogik bei fehlgeschlagener Piper-Synthese
+        - Erweiterte Piper-Debug-Ausgabe bei Wiederholungen
     """
 
     # -------------------------------------------------------------------------
@@ -18473,6 +18477,35 @@ class TTSManager:
     PIPER_CHANNELS = 1                      # Mono
     PIPER_BYTES_PER_SECOND = PIPER_SAMPLE_RATE * 2  # 16-bit = 2 Bytes pro Sample
     MAX_FALLBACK_DEPTH = 2                  # Maximale Rekursionstiefe für Fallbacks
+    MAX_SYNTHESIS_RETRIES = 2               # Wiederholungen bei fehlgeschlagener Synthese
+
+    # Muster für Textbereinigung (Markup)
+    _MARKUP_PATTERNS = [
+        (re.compile(r'\*\*(.+?)\*\*'), r'\1'),      # **fett** -> fett
+        (re.compile(r'\*(.+?)\*'), r'\1'),          # *kursiv* -> kursiv
+        (re.compile(r'__(.+?)__'), r'\1'),          # __unterstrichen__ -> unterstrichen
+        (re.compile(r'_(.+?)_'), r'\1'),            # _kursiv_ -> kursiv
+        (re.compile(r'`(.+?)`'), r'\1'),            # `code` -> code
+        (re.compile(r'~~(.+?)~~'), r'\1'),          # ~~durchgestrichen~~ -> durchgestrichen
+    ]
+
+    # Abkürzungen für Textnormalisierung (Deutsch/Englisch)
+    _ABBREVIATIONS = {
+        r'\bDr\.': 'Doktor',
+        r'\bMr\.': 'Mister',
+        r'\bMrs\.': 'Misses',
+        r'\bMs\.': 'Miss',
+        r'\bProf\.': 'Professor',
+        r'\betc\.': 'et cetera',
+        r'\be\.g\.': 'for example',
+        r'\bi\.e\.': 'that is',
+        r'\bvs\.': 'versus',
+        r'\bca\.': 'circa',
+        r'\bNo\.': 'Nummer',
+        r'\bBd\.': 'Band',
+        r'\bJr\.': 'Junior',
+        r'\bSr\.': 'Senior',
+    }
 
     # Audio-Player in absteigender Priorität (aplay ist am zuverlässigsten)
     _PLAYER_PRIORITY = [
@@ -18507,12 +18540,16 @@ class TTSManager:
         self._volume = getattr(settings, "tts_volume", 1.0)
         self._engine_name = getattr(settings, "tts_engine", "piper")
 
+        # Optionen für Textbereinigung und Normalisierung
+        self._clean_markup = getattr(settings, "tts_clean_markup", True)
+        self._normalize_text = getattr(settings, "tts_normalize_text", True)
+
         # Verfügbare Player und Engines erkennen
         self._available_players = self._detect_audio_players()
         self._available_engines = self._detect_engines()
 
         # Queue für sequenzielle Wiedergabe (Auto-TTS)
-        self._queue = queue.Queue(maxsize=1)
+        self._queue = queue.Queue(maxsize=3)
         self._queue_stop = threading.Event()
         self._queue_worker = threading.Thread(
             target=self._queue_worker_loop, daemon=True, name="TTSQueue"
@@ -18535,7 +18572,8 @@ class TTSManager:
             "tts",
             f"TTSManager initialized: engine={self._engine_name}, voice={self._voice}, "
             f"length_scale={self._length_scale}, sentence_silence={self._sentence_silence}, "
-            f"volume={self._volume}"
+            f"volume={self._volume}, clean_markup={self._clean_markup}, "
+            f"normalize_text={self._normalize_text}"
         )
 
     # -------------------------------------------------------------------------
@@ -18653,6 +18691,47 @@ class TTSManager:
         self.speak("Test. Dies ist ein kurzer Testton.", callback)
 
     # -------------------------------------------------------------------------
+    # Textbereinigung und Normalisierung
+    # -------------------------------------------------------------------------
+    def _clean_text(self, text: str) -> str:
+        """
+        Bereinigt den Text von Markup-Zeichen und normalisiert ihn für TTS.
+        """
+        if not text:
+            return text
+
+        # 1. Markup-Zeichen entfernen
+        if self._clean_markup:
+            for pattern, replacement in self._MARKUP_PATTERNS:
+                text = pattern.sub(replacement, text)
+            # Verbleibende einzelne * oder _ entfernen
+            text = text.replace('*', '').replace('_', '')
+
+        # 2. Text normalisieren (Abkürzungen, Zahlen)
+        if self._normalize_text:
+            # Abkürzungen ersetzen
+            for pattern, replacement in self._ABBREVIATIONS.items():
+                text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+
+            # Einfache Zahlenkonvertierung (0-20)
+            number_map = {
+                '0': 'null', '1': 'eins', '2': 'zwei', '3': 'drei', '4': 'vier',
+                '5': 'fünf', '6': 'sechs', '7': 'sieben', '8': 'acht', '9': 'neun',
+                '10': 'zehn', '11': 'elf', '12': 'zwölf', '13': 'dreizehn',
+                '14': 'vierzehn', '15': 'fünfzehn', '16': 'sechzehn',
+                '17': 'siebzehn', '18': 'achtzehn', '19': 'neunzehn', '20': 'zwanzig',
+            }
+            def replace_number(match):
+                num = match.group(0)
+                return number_map.get(num, num)
+            text = re.sub(r'\b([0-9]|1[0-9]|20)\b', replace_number, text)
+
+        # 3. Mehrfache Leerzeichen und Zeilenumbrüche normalisieren
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        return text
+
+    # -------------------------------------------------------------------------
     # Hauptschnittstelle: speak und speak_to_file
     # -------------------------------------------------------------------------
     def speak(self, text: str, callback: Optional[Callable[[bool, str], None]] = None) -> None:
@@ -18667,6 +18746,12 @@ class TTSManager:
             if callback:
                 callback(False, "Leerer Text")
             return
+
+        # Text bereinigen vor der Verarbeitung
+        original_text = text
+        text = self._clean_text(text)
+        if text != original_text and (DEBUG_LEVEL >= 3 or 'tts' in DEBUG_COMPONENTS):
+            log_debug("tts", f"Text bereinigt: '{original_text[:50]}...' -> '{text[:50]}...'")
 
         engine = self._engine_name
         if not self.is_available(engine):
@@ -18711,6 +18796,9 @@ class TTSManager:
                 callback(False, "Nur .mp3 oder .wav werden unterstützt")
             return
 
+        # Text bereinigen
+        text = self._clean_text(text)
+
         engine = self._engine_name
         if not self.is_available(engine):
             fallback = self._fallback_engine()
@@ -18752,9 +18840,6 @@ class TTSManager:
     def stop(self) -> None:
         """
         Stoppt die laufende Sprachausgabe sofort und zuverlässig.
-
-        Diese Methode setzt alle internen Stop‑Events, beendet laufende Subprozesse
-        (Piper und ggf. Audio‑Player) und leert die Warteschlange.
         """
         log_debug("tts", "TTSManager.stop() called")
 
@@ -19019,15 +19104,28 @@ class TTSManager:
             scaled = tuple(int(max(-32768, min(32767, s * self._volume))) for s in samples)
             return struct.pack(fmt, *scaled)
 
-    def _speak_piper_sync(self, text: str, _depth: int = 0) -> Tuple[bool, str]:
+    def _speak_piper_sync(self, text: str, _depth: int = 0, _retry: int = 0) -> Tuple[bool, str]:
         """
         Synchrone Piper-Ausgabe (wird im Worker-Thread aufgerufen).
         Gibt (erfolg, nachricht) zurück.
 
-        Enthält umfangreiche Diagnose bei DEBUG_LEVEL >= 3 oder 'tts' in DEBUG_COMPONENTS.
+        Enthält umfangreiche Diagnose, Wiederholungslogik und Schutz gegen
+        Ausführung während des Shutdowns (dispose).
         """
+        # -----------------------------------------------------------------
+        # 0. Vorab-Prüfung: Wurde der TTSManager bereits disposed oder gestoppt?
+        # -----------------------------------------------------------------
+        if getattr(self, "_disposed", False):
+            log_debug("tts", "_speak_piper_sync: TTSManager disposed – abort")
+            return False, "TTSManager disposed"
+        if self._stop_requested.is_set():
+            log_debug("tts", "_speak_piper_sync: Stop requested – abort")
+            return False, "Stop requested"
+
         if _depth >= self.MAX_FALLBACK_DEPTH:
             return False, f"Maximale Fallback-Tiefe ({self.MAX_FALLBACK_DEPTH}) erreicht"
+        if _retry >= self.MAX_SYNTHESIS_RETRIES:
+            return False, f"Maximale Wiederholungen ({self.MAX_SYNTHESIS_RETRIES}) erreicht"
 
         process = None
         audio_player = None
@@ -19041,13 +19139,19 @@ class TTSManager:
             try:
                 model_path, json_path = self._prepare_piper_model()
             except FileNotFoundError as e:
+                if getattr(self, "_disposed", False) or self._stop_requested.is_set():
+                    return False, "Aborted during model preparation"
                 if self._voice.endswith("-high"):
                     fallback_voice = self._voice.replace("-high", "-medium")
                     logger.warning(f"Piper high-Modell fehlerhaft, versuche Fallback auf {fallback_voice}")
                     self._voice = fallback_voice
-                    return self._speak_piper_sync(text, _depth + 1)
+                    return self._speak_piper_sync(text, _depth + 1, _retry)
                 else:
                     return False, str(e)
+
+            # --- Erneute Prüfung nach Modell-Vorbereitung ---
+            if getattr(self, "_disposed", False) or self._stop_requested.is_set():
+                return False, "Aborted before starting Piper"
 
             # --- Piper starten ---
             piper_exe = self._find_piper_executable()
@@ -19057,24 +19161,37 @@ class TTSManager:
                 "--sentence_silence", str(self._sentence_silence),
                 "--output-raw",
             ]
+            if _retry > 0:
+                cmd.append("--debug")
+
             if DEBUG_LEVEL >= 3 or 'tts' in DEBUG_COMPONENTS:
-                log_debug("tts", f"Starte Piper: {' '.join(cmd)}")
+                log_debug("tts", f"Starte Piper (retry={_retry}): {' '.join(cmd)}")
             process = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
             with self._lock:
+                # Prüfen, ob während Popen disposed wurde
+                if getattr(self, "_disposed", False):
+                    process.kill()
+                    return False, "Disposed during process start"
                 self._process = process
 
             # --- Audio-Player starten ---
             audio_player = self._start_audio_player()
             player_start_time = time.perf_counter()
 
-            # --- Text an Piper senden ---
+            # --- Text an Piper senden (mit Flush) ---
             try:
                 process.stdin.write(text.encode("utf-8"))
+                process.stdin.flush()
             except BrokenPipeError:
                 stderr = process.stderr.read().decode(errors="ignore")
                 process.wait(timeout=2.0)
+                if getattr(self, "_disposed", False) or self._stop_requested.is_set():
+                    return False, "Aborted"
+                if _retry < self.MAX_SYNTHESIS_RETRIES:
+                    logger.warning(f"Piper stdin BrokenPipe, versuche erneut ({_retry+1}/{self.MAX_SYNTHESIS_RETRIES})")
+                    return self._speak_piper_sync(text, _depth, _retry + 1)
                 return False, f"Piper schloss stdin frühzeitig (exit {process.returncode}):\n{stderr}"
             finally:
                 try:
@@ -19128,6 +19245,8 @@ class TTSManager:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+                if getattr(self, "_disposed", False):
+                    return False, "Disposed"
                 return False, "Piper timeout nach 120 Sekunden"
 
             # --- Forward beenden ---
@@ -19173,14 +19292,23 @@ class TTSManager:
                         log_debug("tts", f"aplay stderr: {aplay_stderr.strip()}")
 
             # --- Fehlerauswertung ---
+            # Vor jeder weiteren Aktion prüfen, ob disposed wurde
+            if getattr(self, "_disposed", False):
+                log_debug("tts", "_speak_piper_sync: disposed during execution – returning without fallback")
+                return False, "Disposed"
+
             if forward_error:
                 stderr = process.stderr.read().decode(errors="ignore")
+                if _retry < self.MAX_SYNTHESIS_RETRIES and not self._stop_requested.is_set():
+                    logger.warning(f"Forward-Fehler, versuche erneut ({_retry+1}/{self.MAX_SYNTHESIS_RETRIES})")
+                    return self._speak_piper_sync(text, _depth, _retry + 1)
                 return False, f"Forward-Fehler: {forward_error}\nPiper stderr:\n{stderr}"
 
             if process.returncode != 0 or forwarded_bytes == 0:
                 stderr = process.stderr.read().decode(errors="ignore")
                 logger.error(f"❌ Piper Fehler (exit {process.returncode}, bytes={forwarded_bytes}):\n{stderr}")
 
+                # Automatische Reparatur bei Protobuf-Fehler
                 if "InvalidProtobuf" in stderr or "Protobuf parsing failed" in stderr:
                     model_path = os.path.join(self._get_piper_cache_dir(), f"{self._voice}.onnx")
                     logger.warning(f"Beschädigtes Piper-Modell erkannt, lösche: {model_path}")
@@ -19190,12 +19318,16 @@ class TTSManager:
                         logger.error(f"Löschen fehlgeschlagen: {e}")
                     logger.info("Das Modell wurde gelöscht und wird beim nächsten Start neu heruntergeladen.")
 
-                if self._voice.endswith("-high"):
+                # Fallback auf medium, wenn high fehlschlägt – NUR wenn nicht disposed/stopped
+                if self._voice.endswith("-high") and not self._stop_requested.is_set():
                     fallback_voice = self._voice.replace("-high", "-medium")
                     logger.warning(f"Wechsle zu Fallback-Stimme: {fallback_voice}")
                     self._voice = fallback_voice
-                    return self._speak_piper_sync(text, _depth + 1)
+                    return self._speak_piper_sync(text, _depth + 1, _retry)
                 else:
+                    if _retry < self.MAX_SYNTHESIS_RETRIES and not self._stop_requested.is_set():
+                        logger.warning(f"Piper Fehler, versuche erneut ({_retry+1}/{self.MAX_SYNTHESIS_RETRIES})")
+                        return self._speak_piper_sync(text, _depth, _retry + 1)
                     return False, f"Piper exit {process.returncode}, bytes={forwarded_bytes}\n{stderr}"
 
             logger.info(f"✅ Piper erfolgreich: {forwarded_bytes} Bytes an {self._available_players[0][0]} gesendet")
@@ -19203,8 +19335,14 @@ class TTSManager:
 
         except Exception as e:
             logger.error(f"Unerwarteter Fehler in _speak_piper_sync: {e}", exc_info=True)
+            if getattr(self, "_disposed", False) or self._stop_requested.is_set():
+                return False, "Aborted due to dispose/stop"
+            if _retry < self.MAX_SYNTHESIS_RETRIES:
+                logger.warning(f"Unerwarteter Fehler, versuche erneut ({_retry+1}/{self.MAX_SYNTHESIS_RETRIES})")
+                return self._speak_piper_sync(text, _depth, _retry + 1)
             return False, str(e)
         finally:
+            # Aufräumen
             if process and process.poll() is None:
                 process.kill()
             if audio_player and audio_player.poll() is None:
@@ -19381,20 +19519,78 @@ class TTSManager:
         return None
 
     def _queue_worker_loop(self) -> None:
-        """Arbeitet die Warteschlange ab."""
+        """
+        Arbeitet die TTS-Warteschlange sequenziell ab.
+
+        Verbesserungen:
+            - Kurzer Timeout (0,1 s) für reaktionsschnellen Shutdown.
+            - Explizite Prüfung auf _queue_stop vor jedem get().
+            - Sentinel (None) beendet die Schleife sofort.
+            - Robuste Fehlerbehandlung – einzelne fehlgeschlagene Ausgaben
+              unterbrechen die Queue nicht.
+            - Debug-Ausgaben bei --debug=tts oder --debug=3.
+            - Prüfung auf _disposed und _stop_requested vor der Wiedergabe.
+        """
+        log_debug("tts", "TTSQueue worker thread started")
+
         while not self._queue_stop.is_set():
+            # Vor dem blockierenden get prüfen, ob Stop gesetzt ist
+            if self._queue_stop.is_set():
+                break
+
             try:
-                item = self._queue.get(timeout=0.5)
+                item = self._queue.get(timeout=0.1)
             except queue.Empty:
                 continue
 
+            # Sentinel behandeln
             if item is None:
-                break
-            if isinstance(item, tuple) and len(item) >= 1 and item[0] is None:
+                log_debug("tts", "TTSQueue received sentinel – exiting")
+                self._queue.task_done()
                 break
 
+            # Item muss ein Tupel (text, callback) sein
+            if not isinstance(item, tuple) or len(item) < 1:
+                log_debug("tts", f"Ungültiges Queue-Item ignoriert: {type(item)}")
+                self._queue.task_done()
+                continue
+
             text, callback = item
-            self._speak_blocking(text, callback, self._engine_name)
+            if not text or not text.strip():
+                log_debug("tts", "Leerer Text in Queue – ignoriert")
+                if callback:
+                    try:
+                        callback(False, "Leerer Text")
+                    except Exception:
+                        pass
+                self._queue.task_done()
+                continue
+
+            # Vor der Wiedergabe prüfen, ob der Manager disposed oder gestoppt wurde
+            if getattr(self, "_disposed", False) or self._stop_requested.is_set():
+                log_debug("tts", "TTSManager disposed/stopped – verwerfe Queue-Item")
+                if callback:
+                    try:
+                        callback(False, "Abgebrochen")
+                    except Exception:
+                        pass
+                self._queue.task_done()
+                continue
+
+            log_debug("tts", f"TTSQueue: speaking text ({len(text)} chars)")
+            try:
+                self._speak_blocking(text, callback, self._engine_name)
+            except Exception as e:
+                logger.error(f"Fehler in _speak_blocking: {e}", exc_info=True)
+                if callback:
+                    try:
+                        callback(False, str(e))
+                    except Exception:
+                        pass
+            finally:
+                self._queue.task_done()
+
+        log_debug("tts", "TTSQueue worker thread finished")
 
     # -------------------------------------------------------------------------
     # Ressourcenfreigabe und dynamische Stimmen-Erkennung
@@ -19402,7 +19598,18 @@ class TTSManager:
     def dispose(self) -> None:
         """
         Gibt alle Ressourcen des TTSManagers frei und beendet laufende Prozesse.
+
+        Diese Methode wird beim Herunterfahren der Anwendung aufgerufen. Sie stellt sicher,
+        dass:
+            - Laufende Sprachausgaben sofort abgebrochen werden.
+            - Alle Subprozesse (Piper, Audio‑Player) hart beendet werden.
+            - Der Queue‑Worker‑Thread sauber gestoppt wird.
+            - Keine Hintergrundprozesse oder Threads zurückbleiben.
+            - Keine Fallback-Mechanismen während des Shutdowns ausgelöst werden.
+
+        Die Methode ist idempotent und kann mehrfach aufgerufen werden.
         """
+        # Verhindert doppelte Ausführung
         if getattr(self, "_disposed", False):
             log_debug("tts", "TTSManager.dispose() already called, skipping")
             return
@@ -19410,12 +19617,19 @@ class TTSManager:
 
         log_debug("tts", "TTSManager.dispose() called – cleaning up resources")
 
+        # -----------------------------------------------------------------
+        # 1. Alle Stop-Events setzen, um laufende Threads zu benachrichtigen
+        # -----------------------------------------------------------------
         self._stop_requested.set()
-        log_debug("tts", "  → Stop requested event set")
+        self._forward_stop.set()
+        self._queue_stop.set()
+        log_debug("tts", "  → Stop events set (stop_requested, forward_stop, queue_stop)")
 
+        # -----------------------------------------------------------------
+        # 2. Laufenden Forward-Thread stoppen (falls vorhanden)
+        # -----------------------------------------------------------------
         if self._forward_thread and self._forward_thread.is_alive():
             log_debug("tts", "  → Stopping forward thread...")
-            self._forward_stop.set()
             self._forward_thread.join(timeout=1.0)
             if self._forward_thread.is_alive():
                 logger.warning("Forward thread did not terminate within timeout")
@@ -19427,27 +19641,28 @@ class TTSManager:
                 log_debug("tts", "  → Forward thread joined")
         self._forward_thread = None
 
+        # -----------------------------------------------------------------
+        # 3. Laufenden Piper-Prozess **hart** beenden (SIGKILL)
+        #    Verwende kill() statt terminate(), um zu verhindern, dass
+        #    die aufrufende _speak_piper_sync den Fallback-Mechanismus
+        #    (z. B. Wechsel auf medium) auslöst.
+        # -----------------------------------------------------------------
         with self._lock:
             proc = self._process
             self._process = None
         if proc and proc.poll() is None:
-            log_debug("tts", f"  → Terminating Piper process (PID {proc.pid})...")
+            log_debug("tts", f"  → Killing Piper process (PID {proc.pid})...")
             try:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=2.0)
-                    log_debug("tts", "  → Piper terminated gracefully")
-                except subprocess.TimeoutExpired:
-                    logger.warning("Piper did not terminate, sending SIGKILL")
-                    proc.kill()
-                    proc.wait(timeout=1.0)
-                    log_debug("tts", "  → Piper killed")
+                proc.kill()
+                proc.wait(timeout=1.0)
+                log_debug("tts", "  → Piper process killed")
             except Exception as e:
-                logger.warning(f"Error terminating Piper: {e}")
+                logger.warning(f"Error killing Piper: {e}")
 
-        self._queue_stop.set()
-        log_debug("tts", "  → Queue stop event set")
-
+        # -----------------------------------------------------------------
+        # 4. Queue-Worker sauber beenden
+        # -----------------------------------------------------------------
+        # Queue leeren und Sentinel senden, um Worker aufzuwecken
         try:
             while True:
                 self._queue.get_nowait()
@@ -19473,6 +19688,9 @@ class TTSManager:
                 log_debug("tts", "  → Queue worker thread joined")
         self._queue_worker = None
 
+        # -----------------------------------------------------------------
+        # 5. Garbage Collection anregen
+        # -----------------------------------------------------------------
         gc.collect()
         log_debug("tts", "TTSManager.dispose() completed successfully")
 
@@ -36842,36 +37060,55 @@ def configure_logging(
 ) -> None:
     """
     Konfiguriert das Logging basierend auf Debug-Level und Quiet-Modus.
-    Bei --debug=3 werden alle Debug-Ausgaben aller Komponenten aktiviert.
-    Bei spezifischen Komponenten (z.B. --debug=vad,network) werden nur diese aktiviert.
+
+    - Bei --debug=3 werden alle Debug-Ausgaben aller Komponenten aktiviert.
+    - Bei spezifischen Komponenten (z.B. --debug=tts) wird der Root-Logger auf DEBUG
+      gesetzt, aber nur Meldungen der angegebenen Komponenten werden ausgegeben.
+    - Im Quiet-Modus werden nur ERROR-Meldungen ausgegeben.
+    - Externe Bibliotheken werden standardmäßig auf WARNING gehalten, bei --debug=3
+      jedoch auf DEBUG.
     """
-    log_level = logging.WARNING
-    if debug_level >= 1:
-        log_level = logging.DEBUG
+    # Basis-Log-Level bestimmen
     if quiet:
         log_level = logging.ERROR
+    elif debug_level >= 1:
+        log_level = logging.DEBUG
+    else:
+        log_level = logging.WARNING
 
+    # Root-Logger konfigurieren
     logging.basicConfig(
         level=log_level,
         format="[%(asctime)s.%(msecs)03d] [%(levelname)s] %(message)s",
         datefmt="%H:%M:%S",
     )
 
+    # Sicherstellen, dass der 'dragon' Logger das gewünschte Level hat
+    dragon_logger = logging.getLogger("dragon")
+    dragon_logger.setLevel(log_level)
+
     # Externe Bibliotheken: bei DEBUG_LEVEL >= 3 auf DEBUG, sonst WARNING
     level_ext = logging.DEBUG if debug_level >= 3 else logging.WARNING
     for lib in ["huggingface_hub", "faster_whisper", "httpx", "urllib3", "httpcore"]:
         logging.getLogger(lib).setLevel(level_ext)
 
+    # Debug-Filter: Steuert, welche DEBUG-Meldungen tatsächlich ausgegeben werden
     class DebugFilter(logging.Filter):
         def filter(self, record):
+            # Bei debug_level >= 3 alles durchlassen
             if debug_level >= 3:
                 return True
+            # Prüfen, ob die Meldung von einer gewünschten Komponente stammt
             component = getattr(record, "component", None)
             if component and component in debug_components:
                 return True
+            # Alle Meldungen ab WARNING immer durchlassen
             return record.levelno >= logging.WARNING
 
-    logging.getLogger("dragon").addFilter(DebugFilter())
+    # Filter sowohl an den 'dragon' Logger als auch an den Root-Logger hängen
+    debug_filter = DebugFilter()
+    dragon_logger.addFilter(debug_filter)
+    logging.getLogger().addFilter(debug_filter)
 
 
 def setup_platform_environment() -> None:
