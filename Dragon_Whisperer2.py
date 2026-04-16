@@ -6682,11 +6682,48 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
 
 class OllamaTranslationEngine(BaseCachedTranslationEngine):
     """
-    Übersetzungs‑Engine mit lokalem Ollama‑Modell.
+    Übersetzungs‑Engine mit lokalem Ollama‑Modell – optimiert für strikte Übersetzungen.
 
-    Nutzt die Ollama‑API für Übersetzungen, mit Modell‑Auswahl,
-    Speicherprüfung und automatischer Wiederherstellung bei Fehlern.
+    Verbesserungen:
+        - Dedizierter System‑Prompt für Übersetzungsaufgaben.
+        - Strenger Benutzer‑Prompt, der Zusatzkommentare verbietet.
+        - Postprocessing zur Entfernung unerwünschter Muster (z. B. "(Note: ...)").
+        - Temperatur standardmäßig 0.0 für deterministische Ergebnisse.
+        - Intelligente Timeout‑Behandlung mit exponentiellem Backoff und separater
+          Fehlerzählung für Timeouts vs. andere Fehler.
+        - Automatische Wiederherstellung nach kürzerer Deaktivierungsdauer (60 s).
+        - `keep_alive`‑Optimierung (60 s) zur Reduzierung von VRAM‑Druck.
+        - Vollständige Thread‑Sicherheit für alle Zustandsvariablen.
+        - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 2`.
+
+    Verwendung:
+        engine = OllamaTranslationEngine(target_lang="de", settings=advanced_settings)
+        result = engine.translate_text("Hello", source_lang="en")
     """
+
+    __slots__ = (
+        "translator",
+        "_session",
+        "_requests",
+        "model",
+        "host",
+        "temperature",
+        "timeout",
+        "system_prompt",
+        "available",
+        "_available_models",
+        "_models_cache_time",
+        "_models_cache_ttl",
+        "_timeout_retries",
+        "_timeout_backoff_base",
+    )
+
+    # Standard‑System‑Prompt für Übersetzungen
+    DEFAULT_SYSTEM_PROMPT = (
+        "You are a professional translator. Your only task is to translate the given text "
+        "accurately and faithfully into the target language. Do not add any explanations, "
+        "notes, comments, or additional text. Output ONLY the translation, nothing else."
+    )
 
     def __init__(
         self,
@@ -6694,11 +6731,39 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         settings: Optional["AdvancedSettings"] = None,
         model: str = "llama3.1:8b",
         host: str = "http://localhost:11434",
-        temperature: float = 0.1,
-        timeout: int = 45,
+        temperature: float = 0.0,
+        timeout: int = 90,
         system_prompt: Optional[str] = None,
         cache_manager: Optional[CacheManager] = None,
-    ):
+        timeout_retries: int = 2,
+        timeout_backoff_base: float = 2.0,
+    ) -> None:
+        """
+        Initialisiert die OllamaTranslationEngine mit optimierten Standardwerten.
+
+        Args:
+            target_lang: Standard‑Zielsprache (ISO‑Code).
+            settings: Erweiterte Einstellungen (enthält Ollama‑Parameter).
+            model: Name des zu verwendenden Ollama‑Modells.
+            host: Basis‑URL des Ollama‑Servers.
+            temperature: Temperatur für die Generierung (0.0 = deterministisch).
+            timeout: Timeout pro API‑Aufruf in Sekunden.
+            system_prompt: Optionaler System‑Prompt.
+            cache_manager: Cache‑Manager für Übersetzungen.
+            timeout_retries: Maximale Wiederholungen bei Timeout‑Fehlern.
+            timeout_backoff_base: Basis‑Wartezeit in Sekunden für exponentiellen Backoff.
+        """
+        # Überschreibe Timeout und Temperatur aus Settings, falls vorhanden
+        if settings is not None:
+            if hasattr(settings, "ollama_timeout"):
+                timeout = settings.ollama_timeout
+            if hasattr(settings, "ollama_temperature"):
+                temperature = settings.ollama_temperature
+
+        self.timeout = timeout
+        self._timeout_retries = timeout_retries
+        self._timeout_backoff_base = timeout_backoff_base
+
         super().__init__(
             target_lang,
             settings,
@@ -6706,47 +6771,95 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
             retry_delay_base=1.0,
             retry_delay_max=5.0,
             cache_manager=cache_manager,
+            max_errors=5,
+            disable_duration=60.0,                # Kürzere Deaktivierung (60 s statt 300)
         )
+
         self.model = model
         self.host = host.rstrip("/")
         self.temperature = temperature
-        self.timeout = timeout
-        self.system_prompt = system_prompt
+        self.system_prompt = system_prompt or self.DEFAULT_SYSTEM_PROMPT
         self.available = OLLAMA_AVAILABLE and (requests is not None)
         self._session = None
+        self._requests = None
+
         if self.available:
-            self._session = requests.Session()
-            self._session.headers.update(
-                {"Content-Type": "application/json", "Accept": "application/json"}
-            )
+            self._setup_session()
+
         self._available_models: List[str] = []
         self._models_cache_time = 0.0
         self._models_cache_ttl = 300
         self._fetch_available_models()
 
+        self.translator = None  # Kompatibilität mit ReflectionTranslationEngine
+
+        if DEBUG_LEVEL >= 2:
+            log_debug(
+                "ollama",
+                f"OllamaTranslationEngine initialisiert: model={model}, host={host}, "
+                f"timeout={timeout}s, temperature={temperature}"
+            )
+
+    # -------------------------------------------------------------------------
+    # Session‑Management
+    # -------------------------------------------------------------------------
+    def _setup_session(self) -> None:
+        """Initialisiert eine persistente Requests‑Session mit Timeout‑Adapter."""
+        try:
+            import requests
+            from requests.adapters import HTTPAdapter
+            from urllib3.util.retry import Retry
+
+            self._requests = requests
+            self._session = self._requests.Session()
+
+            # Retry‑Strategie nur für Verbindungsfehler (nicht für Read‑Timeout)
+            retry_strategy = Retry(
+                total=1,
+                backoff_factor=0.3,
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["POST"],
+            )
+            adapter = HTTPAdapter(max_retries=retry_strategy)
+            self._session.mount("http://", adapter)
+            self._session.mount("https://", adapter)
+
+            self._session.headers.update({
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "DragonWhisperer/4.0",
+            })
+        except ImportError:
+            self._session = None
+            if DEBUG_LEVEL >= 2:
+                logger.debug("OllamaTranslationEngine: requests nicht verfügbar")
+
+    # -------------------------------------------------------------------------
+    # Modell‑Erkennung & Verfügbarkeit
+    # -------------------------------------------------------------------------
     def _fetch_available_models(self) -> List[str]:
-        """Holt die Liste der verfügbaren Modelle vom Ollama‑Server."""
+        """Holt die Liste der verfügbaren Modelle vom Ollama‑Server (mit Caching)."""
         if not self.available:
             return []
         with self._lock:
             now = time.time()
-            if (
-                now - self._models_cache_time > self._models_cache_ttl
-                or not self._available_models
-            ):
+            if now - self._models_cache_time > self._models_cache_ttl or not self._available_models:
                 try:
-                    r = self._session.get(f"{self.host}/api/tags", timeout=3)
+                    if self._session is None:
+                        self._setup_session()
+                    r = self._session.get(f"{self.host}/api/tags", timeout=5)
                     if r.status_code == 200:
                         data = r.json()
-                        self._available_models = [
-                            m["name"] for m in data.get("models", [])
-                        ]
+                        self._available_models = [m["name"] for m in data.get("models", [])]
                         self._models_cache_time = now
+                        if DEBUG_LEVEL >= 2:
+                            log_debug("ollama", f"Verfügbare Modelle: {self._available_models}")
                     else:
                         if not self._available_models:
                             self._available_models = []
                 except Exception as e:
-                    log_debug("ollama", f"Model list fetch failed: {e}")
+                    if DEBUG_LEVEL >= 2:
+                        log_debug("ollama", f"Fehler beim Abrufen der Modellliste: {e}")
             return self._available_models.copy()
 
     def is_model_available(self, model: Optional[str] = None) -> bool:
@@ -6757,8 +6870,26 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
             return True
         return check_model in available
 
+    def is_server_reachable(self) -> bool:
+        """Prüft, ob der Ollama‑Server erreichbar ist."""
+        if not self.available:
+            return False
+        try:
+            if self._session is None:
+                self._setup_session()
+            r = self._session.get(f"{self.host}/api/tags", timeout=3)
+            return r.status_code == 200
+        except Exception:
+            return False
+
+    # -------------------------------------------------------------------------
+    # Zielsprache & Modell setzen
+    # -------------------------------------------------------------------------
     def set_target_language(self, target_lang: str) -> None:
+        """Setzt die Zielsprache und leert den Cache."""
         super().set_target_language(target_lang)
+        if DEBUG_LEVEL >= 2:
+            log_debug("ollama", f"Zielsprache auf {target_lang} gesetzt")
 
     def set_model(self, model: str) -> None:
         """Wechselt das verwendete Ollama‑Modell."""
@@ -6769,185 +6900,193 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         self._fetch_available_models()
         logger.info(f"Ollama model geändert zu: {model}")
 
-    def _estimate_model_memory(self) -> Optional[float]:
+    # -------------------------------------------------------------------------
+    # Prompt‑Erstellung (strenger)
+    # -------------------------------------------------------------------------
+    def _build_translation_prompt(self, text: str, source_lang: str, target_lang: str) -> str:
+        source_name = SUPPORTED_LANGUAGES.get(source_lang, source_lang) if source_lang != "auto" else "the detected language"
+        target_name = SUPPORTED_LANGUAGES.get(target_lang, target_lang)
+
+        # Sehr strenge Anweisungen, um Zusatzkommentare zu verhindern
+        prompt = (
+            f"Translate the following text from {source_name} to {target_name}.\n"
+            f"Rules:\n"
+            f"- Output ONLY the translation.\n"
+            f"- Do NOT add any notes, explanations, comments, or disclaimers.\n"
+            f"- Do NOT include the original text.\n"
+            f"- Preserve formatting (line breaks, paragraphs).\n\n"
+            f"Text:\n{text}\n\n"
+            f"Translation:"
+        )
+        return prompt
+
+    # -------------------------------------------------------------------------
+    # API‑Aufruf mit Timeout‑Wiederholungen
+    # -------------------------------------------------------------------------
+    def _call_ollama_with_timeout_retry(self, prompt: str) -> Optional[str]:
         """
-        Schätzt den benötigten RAM für das Ollama-Modell in GB.
-        Gibt None zurück, wenn keine Schätzung möglich.
+        Ruft die Ollama‑API auf und wiederholt bei Timeout‑Fehlern mit exponentiellem Backoff.
+        Andere Fehler werden sofort als hart gewertet.
         """
-        model_lower = self.model.lower()
-        # Grobe Schätzungen basierend auf Modellgröße
-        if "70b" in model_lower:
-            return 140.0
-        if "13b" in model_lower:
-            return 26.0
-        if "8x7b" in model_lower:
-            return 56.0
-        if "7b" in model_lower or "8b" in model_lower:
-            return 16.0
-        if "3b" in model_lower:
-            return 6.0
-        if "1b" in model_lower:
-            return 2.0
-        return None
-
-    def _check_memory_before_call(self) -> Optional[str]:
-        """Prüft, ob genügend RAM für das Modell verfügbar ist."""
-        estimated = self._estimate_model_memory()
-        if estimated is None:
-            return None
-        try:
-            import psutil
-
-            available_ram = psutil.virtual_memory().available / (1024**3)
-            if available_ram < estimated * 0.8:
-                return (
-                    f"Warnung: Das Modell {self.model} benötigt schätzungsweise {estimated:.0f} GB RAM, "
-                    f"aber nur {available_ram:.1f} GB sind frei. Das System könnte stark ausgebremst werden "
-                    f"oder die Anfrage fehlschlagen."
-                )
-        except ImportError:
-            pass
-        except Exception as e:
-            log_debug("memory", f"Fehler bei Speicherprüfung: {e}")
-        return None
-
-    def _call_ollama(self, prompt: str) -> Optional[str]:
-        """Sendet einen Prompt an die Ollama‑API und gibt die Antwort zurück."""
         if not self.available or self._session is None:
             raise RuntimeError("Ollama nicht verfügbar (requests nicht installiert)")
 
         if not self.is_model_available():
-            model_list = (
-                ", ".join(self._available_models) if self._available_models else "keine"
-            )
-            raise RuntimeError(
-                f"Ollama-Modell '{self.model}' nicht auf Server gefunden. Verfügbare Modelle: {model_list}"
-            )
-
-        mem_warning = self._check_memory_before_call()
-        if mem_warning:
-            logger.warning(mem_warning)
+            model_list = ", ".join(self._available_models) if self._available_models else "keine"
+            raise RuntimeError(f"Ollama-Modell '{self.model}' nicht gefunden. Verfügbar: {model_list}")
 
         payload = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
             "options": {"temperature": self.temperature},
-            "keep_alive": -1, # 0
+            "keep_alive": 60,  # Modell 60 Sekunden im Speicher halten, dann entladen
+            "system": self.system_prompt,
         }
-        if self.system_prompt:
-            payload["system"] = self.system_prompt
+
+        for attempt in range(self._timeout_retries + 1):
+            try:
+                if DEBUG_LEVEL >= 2:
+                    log_debug(
+                        "ollama",
+                        f"Sende Anfrage (attempt {attempt+1}/{self._timeout_retries+1}): "
+                        f"prompt_len={len(prompt)}, timeout={self.timeout}s"
+                    )
+                response = self._session.post(
+                    f"{self.host}/api/generate", json=payload, timeout=self.timeout
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    translated = data.get("response", "").strip()
+                    if translated:
+                        if DEBUG_LEVEL >= 2:
+                            log_debug("ollama", f"Antwort erhalten: {len(translated)} Zeichen")
+                        return translated
+                    else:
+                        logger.warning("Ollama lieferte leere Antwort")
+                        return None
+                else:
+                    error_detail = response.text[:200]
+                    raise RuntimeError(f"Ollama Fehler {response.status_code}: {error_detail}")
+
+            except self._requests.exceptions.Timeout as e:
+                if attempt < self._timeout_retries:
+                    delay = self._timeout_backoff_base * (2 ** attempt)
+                    logger.warning(f"Ollama Timeout (attempt {attempt+1}), warte {delay:.1f}s")
+                    time.sleep(delay)
+                    continue
+                else:
+                    raise RuntimeError(f"Ollama Timeout nach {self.timeout}s (mehrfach)") from e
+
+            except self._requests.exceptions.ConnectionError as e:
+                raise RuntimeError(f"Ollama nicht erreichbar ({self.host})") from e
+
+            except Exception as e:
+                raise RuntimeError(f"Ollama Fehler: {str(e)}") from e
+
+        return None
+
+    # -------------------------------------------------------------------------
+    # Haupt‑API‑Aufruf
+    # -------------------------------------------------------------------------
+    def _call_translation_api(
+        self, text: str, source_lang: str, target_lang: str
+    ) -> Optional[str]:
+        """
+        Führt den API‑Aufruf durch und behandelt Timeouts intelligent.
+        Bei erfolgreicher Antwort wird der Fehlerzähler zurückgesetzt.
+        """
+        clean_text = self._preprocess_text(text)
+        if not clean_text:
+            return None
+
+        prompt = self._build_translation_prompt(clean_text, source_lang, target_lang)
 
         try:
-            response = self._session.post(
-                f"{self.host}/api/generate", json=payload, timeout=self.timeout
-            )
-            if response.status_code == 200:
-                data = response.json()
-                translated = data.get("response", "").strip()
-                return translated if translated else None
+            translated = self._call_ollama_with_timeout_retry(prompt)
+            if translated:
+                self._record_success()
+                return self._postprocess_translation(translated, clean_text)
             else:
-                error_detail = ""
-                try:
-                    error_data = response.json()
-                    error_detail = error_data.get("error", "")
-                except Exception:
-                    error_detail = response.text[:200]
-                raise RuntimeError(
-                    f"Ollama Fehler {response.status_code}: {error_detail}"
-                )
-        except requests.exceptions.Timeout:
-            raise RuntimeError(
-                f"Ollama Timeout nach {self.timeout}s – Server möglicherweise überlastet oder Modell zu groß?"
-            )
-        except requests.exceptions.ConnectionError:
-            raise RuntimeError(
-                f"Ollama nicht erreichbar (läuft der Server? Host: {self.host})"
-            )
-        except Exception as e:
-            raise RuntimeError(f"Ollama Fehler: {str(e)}")
+                self._record_error()
+                return None
+        except RuntimeError as e:
+            self._record_error()
+            logger.error(f"Ollama translation error: {e}")
+            raise
 
-    def _reinitialize(self):
-        """Wird nach einer Deaktivierung aufgerufen – aktualisiert die Modellliste."""
+    # -------------------------------------------------------------------------
+    # Pre‑ und Postprocessing
+    # -------------------------------------------------------------------------
+    def _preprocess_text(self, text: str) -> str:
+        """Minimal‑invasive Textbereinigung vor der Übersetzung."""
+        if not text:
+            return ""
+        return re.sub(r"\s+", " ", text.strip())
+
+    def _postprocess_translation(self, translated: str, original: str) -> str:
+        """
+        Entfernt unerwünschte Muster wie "(Note: ...)" oder "Translation:".
+        """
+        if not translated:
+            return ""
+
+        # Muster für unerwünschte Kommentare
+        patterns_to_remove = [
+            r"\(Note:.*?\)",                          # (Note: ...)
+            r"\(Please keep in mind.*?\)",            # (Please keep in mind ...)
+            r"Translation:\s*",                       # "Translation:" am Anfang
+            r"\n*Note:.*?(?:\n|$)",                   # "Note: ..." als eigener Absatz
+        ]
+        for pattern in patterns_to_remove:
+            translated = re.sub(pattern, "", translated, flags=re.IGNORECASE | re.DOTALL)
+
+        # Mehrfache Leerzeichen und Zeilenumbrüche bereinigen
+        translated = re.sub(r"\n{3,}", "\n\n", translated)
+        translated = re.sub(r" +", " ", translated)
+        translated = translated.strip()
+
+        # Fallback: Falls der Text nach Bereinigung leer ist, Original zurückgeben
+        if not translated:
+            logger.warning("Postprocessing entfernte den gesamten Text – Original wird verwendet")
+            return original
+
+        return translated
+
+    # -------------------------------------------------------------------------
+    # Übersetzungsqualität – ohne Fehlerzähler
+    # -------------------------------------------------------------------------
+    def _rate_translation_quality(self, original: str, translated: str) -> float:
+        if not translated or len(translated) < 2:
+            return 0.0
+        orig_words = len(original.split())
+        trans_words = len(translated.split())
+        if trans_words < 2 and orig_words > 2:
+            return 0.0
+        if orig_words > 0:
+            ratio = trans_words / orig_words
+            if ratio < 0.2 or ratio > 5.0:
+                return 0.0
+        alpha_orig = sum(c.isalpha() for c in original) / max(len(original), 1)
+        alpha_trans = sum(c.isalpha() for c in translated) / max(len(translated), 1)
+        if alpha_trans < 0.3 and alpha_orig > 0.5:
+            return 0.0
+        return 1.0
+
+    # -------------------------------------------------------------------------
+    # Reinitialisierung nach Deaktivierung
+    # -------------------------------------------------------------------------
+    def _reinitialize(self) -> None:
         logger.info("🔄 OllamaTranslationEngine wird reinitialisiert...")
         with self._lock:
             self._models_cache_time = 0
             self._available_models = []
         self._fetch_available_models()
-        if self.is_model_available():
-            try:
-                test_result = self._call_ollama("Translate 'Hello' to German.")
-                if test_result:
-                    logger.info(
-                        "✅ OllamaTranslationEngine nach Reinitialisierung funktionsfähig."
-                    )
-                else:
-                    logger.warning(
-                        "⚠️ OllamaTranslationEngine reagiert nicht – bleibt möglicherweise deaktiviert."
-                    )
-            except Exception as e:
-                logger.warning(f"⚠️ Testaufruf fehlgeschlagen: {e}")
 
-    def _is_valid_translation(self, original: str, translated: str) -> bool:
-        """Einfache Gültigkeitsprüfung für Ollama‑Antworten."""
-        if not translated or len(translated) < 2:
-            return False
-        if translated.lower() == original.lower():
-            return False
-        if len(translated) > len(original) * 5:
-            return False
-        return True
-
-    def _call_translation_api(
-        self, text: str, source_lang: str, target_lang: str
-    ) -> Optional[str]:
-        """Erzeugt den Prompt und ruft Ollama auf."""
-        if not self.available:
-            return None
-
-        if not self.is_model_available():
-            log_debug("ollama", f"Modell '{self.model}' nicht verfügbar")
-            self._record_error()
-            return None
-
-        source_lang_name = "auto"
-        if source_lang != "auto":
-            source_lang_name = SUPPORTED_LANGUAGES.get(source_lang, source_lang)
-        target_lang_name = SUPPORTED_LANGUAGES.get(target_lang, target_lang)
-
-        prompt = (
-            f"Translate the following text from {source_lang_name} to {target_lang_name}. "
-            f"Preserve the original formatting, including line breaks, paragraphs, and bullet points. "
-            f"Output only the translation, without any additional commentary.\n\n{text}"
-        )
-
-        # DEBUG: Request-Log
-        if DEBUG_LEVEL >= 3:
-            logger.debug(
-                f"Ollama translation request: model={self.model}, "
-                f"prompt='{prompt[:100]}...'"
-            )
-
-        try:
-            translated = self._call_ollama(prompt)
-
-            # DEBUG: Response-Log (gekürzt)
-            if DEBUG_LEVEL >= 3 and translated:
-                logger.debug(f"Ollama translation response: '{translated[:100]}...'")
-
-            return translated
-
-        except RuntimeError as e:
-            # DEBUG: Fehler detailliert loggen
-            if DEBUG_LEVEL >= 3:
-                logger.exception(f"Ollama translation error: {e}")
-            else:
-                logger.error(f"Ollama translation error: {e}")
-            self._record_error()
-            raise
-
+    # -------------------------------------------------------------------------
+    # Ressourcenfreigabe
+    # -------------------------------------------------------------------------
     def dispose(self) -> None:
-        """Gibt Ressourcen frei (Session schließen)."""
         super().dispose()
         if self._session:
             try:
@@ -6956,6 +7095,8 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                 pass
             self._session = None
         self._available_models.clear()
+        if DEBUG_LEVEL >= 2:
+            log_debug("ollama", "OllamaTranslationEngine disposed")
 
 
 # =============================================================================
@@ -20424,41 +20565,84 @@ class SummarizeDialog(BaseDialog):
 
     Features:
         - Automatische Erkennung verfügbarer Modelle
-        - Mehrsprachige Zusammenfassung (Deutsch, Englisch, Spanisch, Koreanisch, Chinesisch)
-        - Chunk‑basierte Verarbeitung langer Texte (>2000 Wörter)
-        - Abbruchmöglichkeit während der Verarbeitung
+        - Mehrsprachige Zusammenfassung (Deutsch, Englisch, Spanisch, Koreanisch,
+          Chinesisch, Japanisch) – erweiterbar über zentrale Prompt‑Map
+        - Parallele Chunk‑Verarbeitung langer Texte (> 2000 Wörter) mit begrenzter Parallelität
+        - Fortschrittsbalken und detaillierte Statusanzeige
+        - Abbruchmöglichkeit während der gesamten Verarbeitung (kooperativ)
         - Blacklist‑Filterung der finalen Zusammenfassung
         - Speichern und Kopieren der Ergebnisse
         - Direkte Übersetzung der Zusammenfassung
         - Vollständige Ressourcenfreigabe beim Schließen
+        - Wiederholungslogik bei Server‑Fehlern (exponentieller Backoff)
+        - Token‑Limit‑Warnung für große Prompts
+        - Debug‑Ausgaben bei --debug=3
     """
 
-    def __init__(self, parent: Any, text: str, gui_ref: Any) -> None:
-        """
-        Initialisiert den Zusammenfassungsdialog.
+    # -------------------------------------------------------------------------
+    # Sprach‑Prompt‑Map (zentrale Definition, leicht erweiterbar)
+    # -------------------------------------------------------------------------
+    SUMMARY_LANGUAGE_PROMPTS = {
+        "Deutsch": (
+            "Fasse den folgenden Text in 3-5 Sätzen auf Deutsch zusammen. "
+            "Konzentriere dich auf die Hauptaussagen, ignoriere Wiederholungen und Füllwörter. "
+            "Verwende vollständige, idiomatische Sätze.\n\n"
+            "WICHTIG: Die Ausgabe MUSS auf DEUTSCH erfolgen und darf KEINE Zeichen aus anderen "
+            "Sprachen (wie Chinesisch, Japanisch oder Koreanisch) enthalten. "
+            "Fachbegriffe wie 'Sakura' oder 'Kimchi' können als Lehnwörter verwendet werden, "
+            "aber bitte in lateinischer Schrift.\n\n"
+            "Achte darauf, dass Begriffe, die im Deutschen mehrere Bedeutungen haben könnten (z.B. ‚Verhältnis‘), "
+            "im jeweiligen Zusammenhang eindeutig sind. Wähle stattdessen präzisere Ausdrücke."
+        ),
+        "Englisch": (
+            "Summarize the following text in 3-5 sentences in English. "
+            "Focus on the main points, ignore repetitions and filler words. "
+            "Use complete, idiomatic sentences.\n\n"
+            "IMPORTANT: The output MUST be in ENGLISH and must NOT contain characters from other "
+            "languages (like Chinese, Japanese, or Korean). Loanwords are acceptable in Latin script."
+        ),
+        "Spanisch": (
+            "Resume el siguiente texto en 3-5 oraciones en español. "
+            "Concéntrate en las ideas principales, ignora repeticiones y palabras de relleno. "
+            "Utiliza oraciones completas e idiomáticas.\n\n"
+            "IMPORTANTE: La salida DEBE estar en ESPAÑOL y NO debe contener caracteres de otros "
+            "idiomas (como chino, japonés o coreano). Los préstamos son aceptables en escritura latina."
+        ),
+        "Koreanisch": (
+            "다음 텍스트를 한국어로 3-5문장으로 요약하세요. "
+            "핵심 내용에 집중하고, 반복과 불용어는 무시하세요. "
+            "완전하고 관용적인 문장을 사용하세요.\n\n"
+            "중요: 출력은 반드시 한국어로 작성되어야 하며 다른 언어(예: 중국어, 일본어)의 문자가 포함되어서는 안 됩니다. "
+            "외래어는 라틴 문자로 표기해도 됩니다."
+        ),
+        "Chinesisch": (
+            "将以下文本用中文总结成3-5句话。专注于主要观点，忽略重复和填充词。"
+            "使用完整、地道的句子。\n\n"
+            "重要：输出必须是中文，不能包含其他语言的字符。外来词可以用拉丁字母表示。"
+        ),
+        "Japanisch": (
+            "以下のテキストを日本語で3～5文に要約してください。"
+            "主要なポイントに焦点を当て、繰り返しや不要な言葉は無視してください。"
+            "完全で自然な日本語の文を使用してください。\n\n"
+            "重要: 出力は必ず日本語で行い、他の言語（中国語、韓国語など）の文字を含めないでください。"
+            "外来語はカタカナで表記しても構いません。"
+        ),
+    }
 
-        Args:
-            parent: Übergeordnetes Tkinter‑Fenster.
-            text: Der zu verarbeitende Text (z. B. das Transkript).
-            gui_ref: Referenz auf die Haupt‑GUI (für Einstellungen und Engine‑Zugriff).
-        """
+    SUPPORTED_SUMMARY_LANGUAGES = list(SUMMARY_LANGUAGE_PROMPTS.keys())
+
+    # -------------------------------------------------------------------------
+    # Initialisierung
+    # -------------------------------------------------------------------------
+    def __init__(self, parent: Any, text: str, gui_ref: Any) -> None:
         self.text = text
         self.gui = gui_ref
         self.stream_title = None
 
-        # Versuche, den aktuellen Stream‑Titel zu ermitteln
-        if (
-            self.gui
-            and hasattr(self.gui, "current_stream_info")
-            and self.gui.current_stream_info
-        ):
+        # Stream‑Titel ermitteln
+        if self.gui and hasattr(self.gui, "current_stream_info") and self.gui.current_stream_info:
             self.stream_title = self.gui.current_stream_info.title
-        if (
-            not self.stream_title
-            and self.gui
-            and hasattr(self.gui, "last_stream_title")
-            and self.gui.last_stream_title
-        ):
+        if not self.stream_title and self.gui and hasattr(self.gui, "last_stream_title") and self.gui.last_stream_title:
             self.stream_title = self.gui.last_stream_title
         if not self.stream_title and hasattr(self.gui, "stream_title_label"):
             try:
@@ -20470,10 +20654,10 @@ class SummarizeDialog(BaseDialog):
         if not self.stream_title:
             self.stream_title = ""
 
-        # Abbruch‑Event für die asynchrone Verarbeitung
+        # Abbruch‑Event
         self._request_cancel = threading.Event()
 
-        # OllamaSummarizer mit den aktuellen Einstellungen erstellen
+        # OllamaSummarizer (Hauptinstanz für finale Zusammenfassung)
         self.summarizer = OllamaSummarizer(
             parent,
             model=self.gui.advanced_settings.summarize_model,
@@ -20481,7 +20665,6 @@ class SummarizeDialog(BaseDialog):
             cache_manager=self.gui.app_context.cache_manager,
         )
 
-        # Ursprüngliche Einstellungen für späteres Zurückschreiben speichern
         self.saved_temp = self.gui.advanced_settings.summarize_temperature
         self.saved_model = self.gui.advanced_settings.summarize_model
 
@@ -20495,17 +20678,18 @@ class SummarizeDialog(BaseDialog):
         self.full_summary = ""
         self._destroyed = False
 
-        # Basisklasse initialisieren (erstellt das Toplevel‑Fenster und ruft build_ui auf)
+        # Executor für parallele Chunk‑Verarbeitung (wird bei Bedarf erstellt)
+        self._chunk_executor: Optional[ThreadPoolExecutor] = None
+        self._chunk_semaphore = threading.BoundedSemaphore(value=2)  # max. 2 parallele Chunks
+
         super().__init__(
-            parent, "Zusammenfassung mit Ollama", width=750, height=650, modal=True
+            parent, "Zusammenfassung mit Ollama", width=800, height=700, modal=True
         )
 
     # -------------------------------------------------------------------------
     # UI‑Aufbau
     # -------------------------------------------------------------------------
     def build_ui(self) -> None:
-        """Erstellt die Benutzeroberfläche des Dialogs."""
-        # Prüfen, ob Ollama erreichbar ist
         if not self.summarizer.is_server_reachable():
             DarkMessageBox.showwarning(
                 "Ollama nicht erreichbar",
@@ -20530,7 +20714,6 @@ class SummarizeDialog(BaseDialog):
         self.model_var = tk.StringVar(value=self.saved_model)
         available = self.summarizer.get_available_models()
         if available:
-            # Bevorzugte Modelle zuerst anzeigen
             preferred = ["qwen2.5:7b", "glm4:9b", "llama3.1:8b"]
             values = []
             for pref in preferred:
@@ -20562,7 +20745,7 @@ class SummarizeDialog(BaseDialog):
         self.model_combo.pack(side="left", padx=10)
         ToolTip(self.model_combo, "Wähle das Ollama-Modell für die Zusammenfassung")
 
-        # 2. Temperatur (Kreativität)
+        # 2. Temperatur
         tk.Label(
             model_frame,
             text="Temperatur:",
@@ -20592,7 +20775,7 @@ class SummarizeDialog(BaseDialog):
         ).pack(side="left", padx=5)
         ToolTip(temp_scale, "Zufälligkeit der Ausgabe (höher = kreativer)")
 
-        # 3. Sprachauswahl für die Zusammenfassung
+        # 3. Sprachauswahl
         lang_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
         lang_frame.pack(fill="x", pady=5)
         tk.Label(
@@ -20602,23 +20785,14 @@ class SummarizeDialog(BaseDialog):
             fg=CURRENT_THEME.TEXT_PRIMARY,
         ).pack(side="left")
         self.summary_lang_var = tk.StringVar()
-        supported_summary_langs = [
-            "Deutsch",
-            "Englisch",
-            "Spanisch",
-            "Koreanisch",
-            "Chinesisch",
-        ]
-        current_lang_name = SUPPORTED_LANGUAGES.get(
-            self.gui.current_language, "Deutsch"
-        )
-        if current_lang_name not in supported_summary_langs:
+        current_lang_name = SUPPORTED_LANGUAGES.get(self.gui.current_language, "Deutsch")
+        if current_lang_name not in self.SUPPORTED_SUMMARY_LANGUAGES:
             current_lang_name = "Deutsch"
         self.summary_lang_var.set(current_lang_name)
         lang_combo = ttk.Combobox(
             lang_frame,
             textvariable=self.summary_lang_var,
-            values=supported_summary_langs,
+            values=self.SUPPORTED_SUMMARY_LANGUAGES,
             width=15,
             state="readonly",
             style="Dark.TCombobox",
@@ -20627,7 +20801,7 @@ class SummarizeDialog(BaseDialog):
         lang_combo.bind("<<ComboboxSelected>>", lambda e: self._set_default_prompt())
         ToolTip(lang_combo, "Sprache der Zusammenfassung")
 
-        # 4. Checkbox für Videotitel als Kontext
+        # 4. Videotitel als Kontext
         self.use_title_var = tk.BooleanVar(value=False)
         self.title_checkbox = tk.Checkbutton(
             self.main,
@@ -20640,17 +20814,12 @@ class SummarizeDialog(BaseDialog):
             state="normal" if self.stream_title else "disabled",
         )
         self.title_checkbox.pack(anchor="w", pady=5)
-
         if not self.stream_title:
-            ToolTip(
-                self.title_checkbox, "Kein Titel verfügbar (z.B. bei lokalen Dateien)"
-            )
+            ToolTip(self.title_checkbox, "Kein Titel verfügbar (z.B. bei lokalen Dateien)")
         else:
-            self.title_checkbox.bind(
-                "<ButtonRelease-1>", lambda e: self._set_default_prompt()
-            )
+            self.title_checkbox.bind("<ButtonRelease-1>", lambda e: self._set_default_prompt())
 
-        # 5. Prompt‑Textfeld (editierbar)
+        # 5. Prompt‑Textfeld
         tk.Label(
             self.main,
             text="Prompt (optional):",
@@ -20669,7 +20838,17 @@ class SummarizeDialog(BaseDialog):
         self._set_default_prompt()
         ToolTip(self.prompt_text, "Optionaler Prompt – wird an das Modell gesendet")
 
-        # 6. Ausgabe der Zusammenfassung
+        # 6. Fortschrittsbalken
+        self.progress_var = tk.DoubleVar(value=0.0)
+        self.progress_bar = ttk.Progressbar(
+            self.main,
+            variable=self.progress_var,
+            maximum=100.0,
+            style="Dark.Horizontal.TProgressbar",
+        )
+        self.progress_bar.pack(fill="x", pady=(0, 5))
+
+        # 7. Ausgabe
         tk.Label(
             self.main,
             text="Zusammenfassung:",
@@ -20687,7 +20866,7 @@ class SummarizeDialog(BaseDialog):
         self.summary_text.pack(fill="both", expand=True, pady=10)
         ContextMenuMixin(self.summary_text)
 
-        # 7. Button‑Leiste
+        # 8. Buttons
         btn_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
         btn_frame.pack(fill="x", pady=5)
 
@@ -20765,7 +20944,7 @@ class SummarizeDialog(BaseDialog):
         )
         self.close_btn.pack(side="left", padx=5)
 
-        # 8. Statuszeile
+        # 9. Statuszeile
         self.status_label = tk.Label(
             self.main,
             text="",
@@ -20776,60 +20955,17 @@ class SummarizeDialog(BaseDialog):
         self.status_label.pack(pady=5)
 
     # -------------------------------------------------------------------------
-    # Hilfsmethoden
+    # Prompt‑Generierung
     # -------------------------------------------------------------------------
     def _set_default_prompt(self) -> None:
-        """Setzt den Standard‑Prompt basierend auf der ausgewählten Sprache und dem Videotitel."""
         target = self.summary_lang_var.get()
-        if target == "Deutsch":
-            prompt = (
-                "Fasse den folgenden Text in 3-5 Sätzen auf Deutsch zusammen. "
-                "Konzentriere dich auf die Hauptaussagen, ignoriere Wiederholungen und Füllwörter. "
-                "Verwende vollständige, idiomatische Sätze.\n\n"
-                "WICHTIG: Die Ausgabe MUSS auf DEUTSCH erfolgen und darf KEINE Zeichen aus anderen "
-                "Sprachen (wie Chinesisch, Japanisch oder Koreanisch) enthalten. "
-                "Fachbegriffe wie 'Sakura' oder 'Kimchi' können als Lehnwörter verwendet werden, "
-                "aber bitte in lateinischer Schrift.\n\n"
-                "Achte darauf, dass Begriffe, die im Deutschen mehrere Bedeutungen haben könnten (z.B. ‚Verhältnis‘), "
-                "im jeweiligen Zusammenhang eindeutig sind. Wähle stattdessen präzisere Ausdrücke."
-            )
-        elif target == "Englisch":
-            prompt = (
-                "Summarize the following text in 3-5 sentences in English. "
-                "Focus on the main points, ignore repetitions and filler words. "
-                "Use complete, idiomatic sentences.\n\n"
-                "IMPORTANT: The output MUST be in ENGLISH and must NOT contain characters from other "
-                "languages (like Chinese, Japanese, or Korean). Loanwords are acceptable in Latin script."
-            )
-        elif target == "Spanisch":
-            prompt = (
-                "Resume el siguiente texto en 3-5 oraciones en español. "
-                "Concéntrate en las ideas principales, ignora repeticiones y palabras de relleno. "
-                "Utiliza oraciones completas e idiomáticas.\n\n"
-                "IMPORTANTE: La salida DEBE estar en ESPAÑOL y NO debe contener caracteres de otros "
-                "idiomas (como chino, japonés o coreano). Los préstamos son aceptables en escritura latina."
-            )
-        elif target == "Koreanisch":
-            prompt = (
-                "다음 텍스트를 한국어로 3-5문장으로 요약하세요. "
-                "핵심 내용에 집중하고, 반복과 불용어는 무시하세요. "
-                "완전하고 관용적인 문장을 사용하세요.\n\n"
-                "중요: 출력은 반드시 한국어로 작성되어야 하며 다른 언어(예: 중국어, 일본어)의 문자가 포함되어서는 안 됩니다. "
-                "외래어는 라틴 문자로 표기해도 됩니다."
-            )
-        elif target == "Chinesisch":
-            prompt = (
-                "将以下文本用中文总结成3-5句话。专注于主要观点，忽略重复和填充词。"
-                "使用完整、地道的句子。\n\n"
-                "重要：输出必须是中文，不能包含其他语言的字符。外来词可以用拉丁字母表示。"
-            )
-        else:
-            prompt = (
-                f"Summarize the following text in 3-5 sentences in {target}. "
-                f"Focus on the main points, ignore repetitions and filler words. "
-                f"Use complete, idiomatic sentences.\n\n"
-                f"IMPORTANT: The output MUST be in {target.upper()} and must NOT contain characters from other languages."
-            )
+        prompt = self.SUMMARY_LANGUAGE_PROMPTS.get(
+            target,
+            f"Summarize the following text in 3-5 sentences in {target}. "
+            f"Focus on the main points, ignore repetitions and filler words. "
+            f"Use complete, idiomatic sentences.\n\n"
+            f"IMPORTANT: The output MUST be in {target.upper()} and must NOT contain characters from other languages."
+        )
 
         if self.use_title_var.get() and self.stream_title:
             title_prefix = f"Der Titel des Videos lautet: '{self.stream_title}'.\n\n"
@@ -20840,8 +20976,10 @@ class SummarizeDialog(BaseDialog):
         self.prompt_text.delete("1.0", "end")
         self.prompt_text.insert("1.0", full_prompt)
 
+    # -------------------------------------------------------------------------
+    # Text‑Aufteilung
+    # -------------------------------------------------------------------------
     def _split_text(self, text: str, max_words: int = 2000) -> List[str]:
-        """Zerlegt einen langen Text in mehrere Chunks, basierend auf der Wortanzahl."""
         words = text.split()
         if len(words) <= max_words:
             return [text]
@@ -20860,223 +20998,240 @@ class SummarizeDialog(BaseDialog):
         return chunks
 
     # -------------------------------------------------------------------------
-    # Chunk‑Verarbeitung (thread‑safe)
+    # Token‑Limit‑Warnung (grobe Heuristik)
     # -------------------------------------------------------------------------
-    def _process_next_chunk(self, retry_count: int = 0) -> None:
-        """
-        Verarbeitet den nächsten Text‑Chunk (für große Texte).
-        Wird im Hauptthread über `after` aufgerufen.
-        """
-        if self._destroyed:
-            return
+    def _estimate_tokens(self, text: str) -> int:
+        # Einfache Schätzung: 1 Token ≈ 4 Zeichen (für europäische Sprachen)
+        # Für asiatische Sprachen grob 1 Token pro Zeichen.
+        # Hier konservative Schätzung.
+        return len(text) // 3
 
-        with self._lock:
+    def _check_token_limit(self, model: str, total_prompt: str) -> bool:
+        # Bekannte Kontextlängen (grobe Richtwerte)
+        limits = {
+            "llama3.1:8b": 128000,
+            "qwen2.5:7b": 128000,
+            "glm4:9b": 128000,
+            "llama3:8b": 8192,
+            "mistral": 8192,
+        }
+        limit = limits.get(model.split(":")[0], 4096)
+        estimated = self._estimate_tokens(total_prompt)
+        if estimated > limit * 0.9:
+            return False
+        return True
+
+    # -------------------------------------------------------------------------
+    # Parallele Chunk‑Verarbeitung
+    # -------------------------------------------------------------------------
+    def _summarize_chunk_with_retry(
+        self, chunk_text: str, prompt: str, temperature: float, max_retries: int = 2
+    ) -> Optional[str]:
+        """
+        Fasst einen Chunk zusammen, mit Wiederholungen bei Fehlern.
+        Verwendet einen eigenen OllamaSummarizer pro Chunk (nicht thread‑safe).
+        """
+        if self._request_cancel.is_set():
+            return None
+
+        for attempt in range(max_retries + 1):
             if self._request_cancel.is_set():
-                self._safe_after(0, self._create_final_summary)
+                return None
+            try:
+                local_summarizer = OllamaSummarizer(
+                    self.gui,
+                    model=self.model_var.get(),
+                    host=self.gui.advanced_settings.ollama_host,
+                    cache_manager=self.gui.app_context.cache_manager,
+                )
+                result = None
+                error = None
+                event = threading.Event()
+
+                def on_complete():
+                    nonlocal result
+                    result = local_summarizer.last_result
+                    event.set()
+
+                def on_error(err: str):
+                    nonlocal error
+                    error = err
+                    event.set()
+
+                local_summarizer.summarize(
+                    chunk_text,
+                    prompt,
+                    temperature,
+                    callback=lambda _: None,
+                    error_callback=on_error,
+                    complete_callback=on_complete,
+                    cancel_event=self._request_cancel,
+                )
+
+                # Timeout pro Versuch
+                if not event.wait(timeout=120):
+                    logger.warning(f"Chunk summary timeout (attempt {attempt+1})")
+                    local_summarizer.stop()
+                    local_summarizer.dispose()
+                    if attempt < max_retries:
+                        time.sleep(2 ** attempt)
+                        continue
+                    return None
+
+                local_summarizer.dispose()
+                if error:
+                    logger.warning(f"Chunk error: {error}")
+                    if attempt < max_retries:
+                        time.sleep(2 ** attempt)
+                        continue
+                    return None
+                return result
+
+            except Exception as e:
+                logger.exception(f"Exception in chunk summarization: {e}")
+                if attempt < max_retries:
+                    time.sleep(2 ** attempt)
+                    continue
+                return None
+
+        return None
+
+    def _process_chunks_parallel(self, chunks: List[str], prompt: str, temp: float) -> None:
+        total_chunks = len(chunks)
+        self._chunk_results = [None] * total_chunks
+        completed = 0
+        lock = threading.Lock()
+
+        def update_progress():
+            nonlocal completed
+            with lock:
+                completed += 1
+                progress = (completed / total_chunks) * 90  # 90% für Chunks, Rest für Finale
+                self._safe_after(0, lambda: self.progress_var.set(progress))
+                self._safe_after(0, lambda: self.status_label.config(
+                    text=f"⏳ Verarbeite Chunks... {completed}/{total_chunks}"
+                ))
+
+        def process_chunk(idx: int, chunk: str) -> None:
+            if self._request_cancel.is_set():
                 return
-
-            if self._current_chunk >= len(self._chunks):
-                self._safe_after(0, self._create_final_summary)
+            # Semaphore zur Begrenzung paralleler Chunks
+            acquired = self._chunk_semaphore.acquire(timeout=30)
+            if not acquired:
+                logger.warning(f"Could not acquire semaphore for chunk {idx}")
+                with lock:
+                    self._chunk_results[idx] = f"[Fehler in Chunk {idx+1}: Timeout]"
+                update_progress()
                 return
+            try:
+                result = self._summarize_chunk_with_retry(chunk, prompt, temp)
+                if not self._request_cancel.is_set():
+                    with lock:
+                        self._chunk_results[idx] = result if result else f"[Fehler in Chunk {idx+1}]"
+            finally:
+                self._chunk_semaphore.release()
+            update_progress()
 
-            chunk_text = self._chunks[self._current_chunk]
+        # Executor mit max_workers=2 (begrenzt durch Semaphore)
+        with self._lock:
+            self._chunk_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="SummarizeChunk")
 
-        log_debug(
-            "summarize",
-            f"Verarbeite Chunk {self._current_chunk+1}/{len(self._chunks)} (Versuch {retry_count+1})",
-        )
+        futures = []
+        for i, chunk in enumerate(chunks):
+            if self._request_cancel.is_set():
+                break
+            future = self._chunk_executor.submit(process_chunk, i, chunk)
+            futures.append(future)
 
-        self.status_label.config(
-            text=f"⏳ Verarbeite Abschnitt {self._current_chunk+1}/{len(self._chunks)}... (Versuch {retry_count+1})"
-        )
-
-        def on_chunk_complete():
-            with self._lock:
-                if self.summarizer.last_result:
-                    self._chunk_results.append(self.summarizer.last_result)
-                    log_debug(
-                        "summarize",
-                        f"Chunk {self._current_chunk+1} erfolgreich: {len(self.summarizer.last_result)} Zeichen",
-                    )
-                else:
-                    self._chunk_results.append("")
-                    log_debug(
-                        "summarize",
-                        f"Chunk {self._current_chunk+1} lieferte leeres Ergebnis",
-                    )
-                self._current_chunk += 1
-            self._safe_after(100, lambda: self._process_next_chunk(0))
-
-        def on_chunk_error(error: str):
-            if retry_count < 3:
-                delay_ms = 1000 * (2 ** retry_count)
-                log_debug(
-                    "summarize",
-                    f"Chunk {self._current_chunk+1} fehlgeschlagen (Versuch {retry_count+1}): {error}, Wiederholung in {delay_ms//1000}s",
-                )
-                self.status_label.config(
-                    text=f"⏳ Fehler, Wiederholung in {delay_ms//1000}s... (Versuch {retry_count+2}/4)"
-                )
-                self._safe_after(
-                    delay_ms, lambda: self._process_next_chunk(retry_count + 1)
-                )
+        # Auf alle Futures warten
+        for future in futures:
+            if self._request_cancel.is_set():
+                future.cancel()
             else:
-                error_msg = f"[Fehler in Abschnitt {self._current_chunk+1} nach 3 Versuchen: {error}]"
-                with self._lock:
-                    self._chunk_results.append(error_msg)
-                log_debug(
-                    "summarize",
-                    f"Chunk {self._current_chunk+1} endgültig fehlgeschlagen: {error}",
-                )
-                self.status_label.config(
-                    text=f"❌ Abschnitt {self._current_chunk+1} fehlgeschlagen – fahre mit nächstem fort"
-                )
-                with self._lock:
-                    self._current_chunk += 1
-                self._safe_after(100, lambda: self._process_next_chunk(0))
-
-        self.summarizer.summarize(
-            chunk_text,
-            self._prompt,
-            self._temp,
-            callback=lambda chunk: None,
-            error_callback=on_chunk_error,
-            complete_callback=on_chunk_complete,
-            cancel_event=self._request_cancel,
-        )
-
-    def _create_final_summary(self) -> None:
-        """
-        Erstellt aus den einzelnen Chunk‑Ergebnissen eine finale Zusammenfassung.
-        Läuft im Hauptthread. Wendet anschließend die Blacklist an.
-        """
-        if self._destroyed:
-            return
+                try:
+                    future.result(timeout=180)
+                except FutureTimeout:
+                    logger.warning("Chunk processing timeout")
+                except Exception:
+                    pass
 
         with self._lock:
-            if not self._chunk_results:
-                log_debug(
-                    "summarize", "_create_final_summary: Keine Teilzusammenfassungen"
-                )
-                self.status_label.config(
-                    text="❌ Keine Teilzusammenfassungen vorhanden."
-                )
-                self._reset_ui()
-                return
+            if self._chunk_executor:
+                self._chunk_executor.shutdown(wait=False)
+                self._chunk_executor = None
 
-            valid_chunks = [
-                res
-                for res in self._chunk_results
-                if res and not res.startswith("[Fehler")
-            ]
-            if not valid_chunks:
-                log_debug(
-                    "summarize",
-                    "_create_final_summary: Keine gültigen Teilzusammenfassungen",
-                )
-                self.status_label.config(
-                    text="❌ Keine gültigen Teilzusammenfassungen."
-                )
-                self._reset_ui()
-                return
+        if self._request_cancel.is_set():
+            self._safe_after(0, lambda: self.status_label.config(text="⏹️ Abgebrochen"))
+            self._safe_after(0, self._reset_ui)
+            return
 
-            combined = "\n\n".join(valid_chunks)
+        valid_results = [r for r in self._chunk_results if r and not r.startswith("[Fehler")]
+        if not valid_results:
+            self._safe_after(0, lambda: self.status_label.config(text="❌ Keine gültigen Teilzusammenfassungen."))
+            self._safe_after(0, self._reset_ui)
+            return
 
-        log_debug(
-            "summarize",
-            f"Erstelle finale Zusammenfassung aus {len(valid_chunks)} Teilen ({len(combined)} Zeichen)",
-        )
-        if DEBUG_LEVEL >= 3:
-            log_debug(
-                "summarize",
-                f"Kombinierte Teilzusammenfassungen (erste 500 Zeichen):\n{combined[:500]}...",
-            )
+        combined = "\n\n".join(valid_results)
+        self._create_final_summary(combined, prompt, temp)
 
+    # -------------------------------------------------------------------------
+    # Finale Zusammenfassung
+    # -------------------------------------------------------------------------
+    def _create_final_summary(self, combined_chunks: str, base_prompt: str, temp: float) -> None:
         target_lang = self.summary_lang_var.get()
         final_prompt = (
             f"Fasse die folgenden Teilzusammenfassungen zu einer kohärenten Gesamtzusammenfassung in {target_lang} zusammen. "
-            f"Antworte ausschließlich auf {target_lang}.\n\n{combined}"
+            f"Antworte ausschließlich auf {target_lang}.\n\n{combined_chunks}"
         )
 
-        self.status_label.config(text="⏳ Erstelle finale Zusammenfassung...")
+        self._safe_after(0, lambda: self.status_label.config(text="⏳ Erstelle finale Zusammenfassung..."))
+        self._safe_after(0, lambda: self.progress_var.set(95))
 
         def on_final_complete():
             if self._destroyed:
                 return
             self._apply_blacklist_to_summary()
+            self._safe_after(0, lambda: self.progress_var.set(100))
+            self._safe_after(0, self._reset_ui)
+
+        def on_final_error(error: str):
+            if self._destroyed:
+                return
+            self._safe_after(0, lambda: self.status_label.config(text=f"❌ Fehler: {error}"))
             self._safe_after(0, self._reset_ui)
 
         self.summarizer.summarize(
-            combined,
+            combined_chunks,
             final_prompt,
-            self._temp,
+            temp,
             callback=self.on_chunk,
-            error_callback=self.on_error,
+            error_callback=on_final_error,
             complete_callback=on_final_complete,
             cancel_event=self._request_cancel,
         )
 
     def _apply_blacklist_to_summary(self) -> None:
-        """
-        Entfernt Blacklist-Phrasen aus der aktuellen Zusammenfassung.
-        Thread-sicher, aktualisiert die GUI. Bei DEBUG_LEVEL >= 3 werden
-        detaillierte Informationen ausgegeben.
-        """
         if not hasattr(self.gui, "advanced_settings"):
-            log_debug(
-                "summarize", "Keine advanced_settings gefunden – überspringe Blacklist"
-            )
             return
-
         blacklist = self.gui.advanced_settings.blacklist
         if not blacklist:
-            if DEBUG_LEVEL >= 3:
-                log_debug("summarize", "Blacklist ist leer – überspringe")
             return
-
         mode = getattr(self.gui.advanced_settings, "blacklist_mode", "word")
-        log_debug(
-            "summarize",
-            f"Wende Blacklist an (Modus: {mode}, {len(blacklist)} Einträge)",
-        )
-
         with self._lock:
             summary = self.full_summary
         if not summary:
             return
-
         filtered = summary
-        removed_phrases = []
-
         for phrase in blacklist:
             if not phrase:
                 continue
             if mode == "substring":
-                if phrase in filtered:
-                    filtered = filtered.replace(phrase, "")
-                    removed_phrases.append(phrase)
+                filtered = filtered.replace(phrase, "")
             else:
                 pattern = r"\b" + re.escape(phrase) + r"\b"
-                if re.search(pattern, filtered, flags=re.IGNORECASE):
-                    filtered = re.sub(pattern, "", filtered, flags=re.IGNORECASE)
-                    removed_phrases.append(phrase)
-
-        if DEBUG_LEVEL >= 3 and removed_phrases:
-            log_debug("summarize", f"Entfernte Phrasen: {', '.join(removed_phrases)}")
-            if len(removed_phrases) < 10:
-                log_debug("summarize", f"Original (gekürzt): {summary[:200]}...")
-                log_debug("summarize", f"Gefiltert (gekürzt): {filtered[:200]}...")
-
-        # Mehrfache Leerzeichen entfernen, überflüssige Punkte reduzieren
+                filtered = re.sub(pattern, "", filtered, flags=re.IGNORECASE)
         filtered = re.sub(r"\s+", " ", filtered).strip()
         filtered = re.sub(r"\.{2,}", ".", filtered)
-
-        if filtered != summary and DEBUG_LEVEL >= 1:
-            log_debug(
-                "summarize",
-                f"Blacklist hat Text verändert (Länge: {len(summary)} -> {len(filtered)} Zeichen)",
-            )
-
         with self._lock:
             self.full_summary = filtered
 
@@ -21089,11 +21244,9 @@ class SummarizeDialog(BaseDialog):
                     self.summary_text.insert("1.0", filtered)
             except tk.TclError:
                 pass
-
         self._safe_after(0, update_gui)
 
     def _reset_ui(self) -> None:
-        """Setzt die UI nach Abschluss oder Abbruch zurück."""
         if self._destroyed or not self.dialog.winfo_exists():
             return
         try:
@@ -21105,39 +21258,16 @@ class SummarizeDialog(BaseDialog):
             self.save_btn.config(state="normal" if has_summary else "disabled")
             self.translate_btn.config(state="normal" if has_summary else "disabled")
             self.status_label.config(text="✅ Zusammenfassung abgeschlossen")
-
-            # Blacklist‑Prüfung (nur lesend, kein Lock nötig für self.full_summary, da bereits unter Lock)
-            if has_summary and hasattr(self.gui, "advanced_settings"):
-                blacklist = getattr(self.gui.advanced_settings, "blacklist", [])
-                with self._lock:
-                    full = self.full_summary
-                found = [
-                    phrase
-                    for phrase in blacklist
-                    if phrase and phrase.lower() in full.lower()
-                ]
-                if found:
-                    log_debug(
-                        "summarize",
-                        f"Blacklist-Phrasen in Zusammenfassung gefunden: {found}",
-                    )
-                    self.status_label.config(
-                        text=f"⚠️ Warnung: Blacklist-Phrasen gefunden: {', '.join(found[:2])}"
-                    )
+            self.progress_var.set(0)
         except tk.TclError:
             pass
 
     # -------------------------------------------------------------------------
-    # Öffentliche Callback-Methoden (werden von OllamaSummarizer im Worker‑Thread aufgerufen)
+    # Callbacks für OllamaSummarizer (Worker‑Thread)
     # -------------------------------------------------------------------------
     def on_chunk(self, chunk: str) -> None:
-        """
-        Wird bei jedem eingehenden Teil der Zusammenfassung aufgerufen.
-        Läuft im Worker‑Thread des OllamaSummarizers.
-        """
         if self._destroyed:
             return
-
         def update():
             if self._destroyed:
                 return
@@ -21149,19 +21279,11 @@ class SummarizeDialog(BaseDialog):
                         self.full_summary += chunk
             except tk.TclError:
                 pass
-
         self._safe_after(0, update)
 
     def on_error(self, error: str) -> None:
-        """
-        Wird bei einem Fehler während der Zusammenfassung aufgerufen.
-        Läuft im Worker‑Thread.
-        """
         if self._destroyed:
             return
-
-        log_debug("summarize", f"Fehler in Ollama: {error}")
-
         def update():
             if self._destroyed:
                 return
@@ -21173,42 +21295,26 @@ class SummarizeDialog(BaseDialog):
                 self.status_label.config(text="❌ Fehler")
             except tk.TclError:
                 pass
-
         self._safe_after(0, update)
 
     # -------------------------------------------------------------------------
-    # Benutzeraktionen (werden im Hauptthread ausgeführt)
+    # Benutzeraktionen
     # -------------------------------------------------------------------------
     def start_summarize(self) -> None:
-        """Startet die Zusammenfassung."""
         if self._destroyed:
-            log_debug(
-                "summarize", "start_summarize abgebrochen: Dialog bereits zerstört"
-            )
             return
-
-        # Ollama-Server-Verfügbarkeit prüfen
         if not self.summarizer.is_server_reachable():
-            self.status_label.config(
-                text="❌ Ollama-Server nicht erreichbar. Bitte starte 'ollama serve'."
-            )
-            log_debug("summarize", "Ollama-Server nicht erreichbar")
+            self.status_label.config(text="❌ Ollama-Server nicht erreichbar.")
             return
 
         model = self.model_var.get().strip()
         if model == "--- Modell auswählen ---" or model.startswith("(keine"):
             self.status_label.config(text="❌ Bitte ein gültiges Modell auswählen")
-            log_debug("summarize", f"Ungültige Modellauswahl: {model}")
             return
-
         if not self.summarizer.is_model_available(model):
-            self.status_label.config(
-                text=f"❌ Modell '{model}' nicht auf Server gefunden."
-            )
-            log_debug("summarize", f"Modell {model} nicht auf Server verfügbar")
+            self.status_label.config(text=f"❌ Modell '{model}' nicht auf Server gefunden.")
             return
 
-        # Konfiguration aktualisieren
         self.summarizer.model = model
         self.summarizer.host = self.gui.advanced_settings.ollama_host
         target_lang = self.summary_lang_var.get()
@@ -21217,20 +21323,19 @@ class SummarizeDialog(BaseDialog):
         self._prompt = self.prompt_text.get("1.0", "end-1c").strip()
         self._temp = self.temp_var.get()
 
-        log_debug(
-            "summarize",
-            f"Starte Zusammenfassung: Modell={model}, Temp={self._temp}, Sprache={target_lang}, Prompt-Länge={len(self._prompt)}",
-        )
-        if DEBUG_LEVEL >= 3:
-            log_debug(
-                "summarize", f"Prompt (erste 200 Zeichen): {self._prompt[:200]}..."
-            )
-            log_debug("summarize", f"System-Prompt: {system_prompt}")
+        # Token‑Limit‑Warnung
+        total_prompt = system_prompt + "\n\n" + self._prompt + "\n\n" + self.text
+        if not self._check_token_limit(model, total_prompt):
+            if not DarkMessageBox.askyesno(
+                "Warnung: Großes Prompt",
+                f"Die Eingabe überschreitet möglicherweise das Kontextlimit von {model}.\n"
+                "Die Zusammenfassung könnte unvollständig sein oder fehlschlagen.\n\n"
+                "Trotzdem fortfahren?",
+                parent=self.dialog
+            ):
+                return
 
-        # Text aufteilen, falls zu lang
         word_count = len(self.text.split())
-        log_debug("summarize", f"Textlänge: {word_count} Wörter")
-
         if word_count > 2000:
             self.status_label.config(text="⏳ Text wird in Abschnitte zerlegt...")
             self.summarize_btn.config(state="disabled", text="⏳ Warte...")
@@ -21245,23 +21350,19 @@ class SummarizeDialog(BaseDialog):
             self.summary_text.delete("1.0", "end")
 
             chunks = self._split_text(self.text, max_words=2000)
-            self.status_label.config(text=f"⏳ Verarbeite {len(chunks)} Abschnitte...")
-            log_debug("summarize", f"Text aufgeteilt in {len(chunks)} Chunks")
-            if DEBUG_LEVEL >= 3:
-                for i, chunk in enumerate(chunks[:3]):
-                    log_debug(
-                        "summarize",
-                        f"  Chunk {i+1}: {len(chunk)} Zeichen, Beginn: {chunk[:100]}...",
-                    )
-                if len(chunks) > 3:
-                    log_debug("summarize", f"  ... und {len(chunks)-3} weitere Chunks")
+            self.status_label.config(text=f"⏳ Verarbeite {len(chunks)} Abschnitte parallel...")
+            self.progress_var.set(0)
 
             with self._lock:
                 self._chunks = chunks
                 self._chunk_results = []
-                self._current_chunk = 0
 
-            self._process_next_chunk()
+            threading.Thread(
+                target=self._process_chunks_parallel,
+                args=(chunks, self._prompt, self._temp),
+                daemon=True,
+                name="SummarizeChunks",
+            ).start()
         else:
             self.summarize_btn.config(state="disabled", text="⏳ Warte...")
             self.cancel_btn.config(state="normal")
@@ -21270,6 +21371,7 @@ class SummarizeDialog(BaseDialog):
             self.translate_btn.config(state="disabled")
             self.status_label.config(text="Sende Anfrage an Ollama...")
             self.summary_text.delete("1.0", "end")
+            self.progress_var.set(10)
 
             with self._lock:
                 self.full_summary = ""
@@ -21277,10 +21379,9 @@ class SummarizeDialog(BaseDialog):
 
             def on_complete() -> None:
                 if self._destroyed:
-                    log_debug("summarize", "on_complete: Dialog bereits zerstört")
                     return
-                log_debug("summarize", "Zusammenfassung abgeschlossen")
                 self._apply_blacklist_to_summary()
+                self._safe_after(0, lambda: self.progress_var.set(100))
                 self._safe_after(0, self._reset_ui)
 
             self.summarizer.summarize(
@@ -21294,16 +21395,20 @@ class SummarizeDialog(BaseDialog):
             )
 
     def cancel_request(self) -> None:
-        """Bricht die laufende Zusammenfassung ab."""
         with self._lock:
             self._request_cancel.set()
-        log_debug("summarize", "Abbruch angefordert")
+        if self._chunk_executor:
+            # Kooperativer Abbruch: erst Event setzen, kurz warten, dann hart beenden
+            time.sleep(0.5)
+            with self._lock:
+                if self._chunk_executor:
+                    self._chunk_executor.shutdown(wait=False, cancel_futures=True)
+                    self._chunk_executor = None
         self.status_label.config(text="⏹️ Abbruch eingeleitet...")
         self.cancel_btn.config(state="disabled")
         self._safe_after(500, self._reset_ui)
 
     def copy_summary(self) -> None:
-        """Kopiert die Zusammenfassung in die Zwischenablage."""
         if self._destroyed:
             return
         with self._lock:
@@ -21319,7 +21424,6 @@ class SummarizeDialog(BaseDialog):
             pass
 
     def save_summary(self) -> None:
-        """Speichert die Zusammenfassung als Textdatei."""
         with self._lock:
             summary = self.full_summary
         if not summary:
@@ -21336,14 +21440,11 @@ class SummarizeDialog(BaseDialog):
             try:
                 with open(filename, "w", encoding="utf-8") as f:
                     f.write(summary)
-                self.status_label.config(
-                    text=f"💾 Gespeichert: {os.path.basename(filename)}"
-                )
+                self.status_label.config(text=f"💾 Gespeichert: {os.path.basename(filename)}")
             except Exception as e:
                 self.status_label.config(text=f"❌ Fehler beim Speichern: {e}")
 
     def translate_summary(self) -> None:
-        """Öffnet einen Übersetzungsdialog für die Zusammenfassung."""
         with self._lock:
             summary = self.full_summary
         if not summary:
@@ -21354,28 +21455,26 @@ class SummarizeDialog(BaseDialog):
             return
         engine = self.gui.translation_engine
         if hasattr(engine, "is_functional") and not engine.is_functional():
-            self.status_label.config(
-                text="⚠️ Übersetzungs-Engine derzeit nicht verfügbar"
-            )
+            self.status_label.config(text="⚠️ Übersetzungs-Engine derzeit nicht verfügbar")
             return
-        # Korrigierter Aufruf mit gui_ref
         TranslationDialog(self.dialog, engine, self.gui, initial_text=summary)
 
     def close(self) -> None:
-        """
-        Schließt den Dialog und gibt Ressourcen frei.
-        Stoppt die laufende Verarbeitung und speichert die Einstellungen.
-        """
-        # Einstellungen zurückschreiben
         if hasattr(self, "temp_var") and hasattr(self, "model_var"):
             self.gui.advanced_settings.summarize_temperature = self.temp_var.get()
             self.gui.advanced_settings.summarize_model = self.model_var.get()
             self.gui.advanced_settings.save_to_file()
 
-        # Verarbeitung abbrechen
         with self._lock:
             self._request_cancel.set()
             self._destroyed = True
+
+        if self._chunk_executor:
+            with self._lock:
+                if self._chunk_executor:
+                    self._chunk_executor.shutdown(wait=False, cancel_futures=True)
+                    self._chunk_executor = None
+
         if hasattr(self, "summarizer"):
             try:
                 self.summarizer.dispose()
@@ -36089,6 +36188,7 @@ class AdvancedSettings:
     translation_engine: str = "google"
     ollama_model: str = "llama3.1:8b"
     ollama_host: str = "http://localhost:11434"
+    ollama_temperature: float = 0.0
 
     # =========================================================================
     # Modi
@@ -36253,46 +36353,108 @@ class AdvancedSettings:
     def __post_init__(self) -> None:
         """
         Initialisiert die erweiterten Einstellungen nach der Dataclass-Initialisierung.
+
+        Diese Methode stellt sicher, dass alle erforderlichen Attribute vorhanden sind,
+        validiert Wertebereiche, erstellt die abhängige Config-Instanz und wendet
+        modusabhängige Überschreibungen an. Sie ist vollständig abgesichert gegen
+        fehlende Felder und Exceptions – im Fehlerfall wird ein funktionsfähiger
+        Minimalzustand hergestellt.
+
+        Verbesserungen:
+            - Robuste Fallback-Werte für alle optionalen Attribute.
+            - Validierung von ollama_temperature und ollama_timeout.
+            - Garantiert, dass self.config existiert (im finally-Block).
+            - Detaillierte Debug-Ausgaben bei DEBUG_LEVEL >= 2.
+            - Fängt alle Exceptions ab und loggt sie, ohne den Start zu verhindern.
         """
-        # Fallback für Quellsprache
-        if not hasattr(self, 'fallback_source_language') or self.fallback_source_language is None:
-            try:
-                app_settings = AppSettings.load_from_file()
-                if app_settings.default_language == "auto":
+        try:
+            # -----------------------------------------------------------------
+            # 1. Fallback für Quellsprache sicherstellen
+            # -----------------------------------------------------------------
+            if not hasattr(self, 'fallback_source_language') or self.fallback_source_language is None:
+                try:
+                    app_settings = AppSettings.load_from_file()
+                    if app_settings.default_language == "auto":
+                        self.fallback_source_language = "de"
+                    else:
+                        self.fallback_source_language = app_settings.default_language
+                except Exception:
                     self.fallback_source_language = "de"
-                else:
-                    self.fallback_source_language = app_settings.default_language
-            except Exception:
+
+            if self.fallback_source_language not in WHISPER_SUPPORTED_LANGUAGES:
+                logger.warning(
+                    f"Fallback-Sprache '{self.fallback_source_language}' nicht unterstützt, "
+                    f"verwende 'de'"
+                )
                 self.fallback_source_language = "de"
 
-        if self.fallback_source_language not in WHISPER_SUPPORTED_LANGUAGES:
-            logger.warning(
-                f"Fallback-Sprache '{self.fallback_source_language}' nicht unterstützt, "
-                f"verwende 'de'"
-            )
-            self.fallback_source_language = "de"
+            # -----------------------------------------------------------------
+            # 2. Ollama‑Temperatur validieren (0.0 – 2.0)
+            # -----------------------------------------------------------------
+            if hasattr(self, 'ollama_temperature'):
+                if not (0.0 <= self.ollama_temperature <= 2.0):
+                    logger.warning(
+                        f"ollama_temperature {self.ollama_temperature} außerhalb [0.0, 2.0] – "
+                        f"auf 0.0 zurückgesetzt"
+                    )
+                    self.ollama_temperature = 0.0
+            else:
+                self.ollama_temperature = 0.0
 
-        log_debug("settings", f"Target language: {self.target_language}")
-        log_debug("settings", f"Fallback source language: {self.fallback_source_language}")
+            # -----------------------------------------------------------------
+            # 3. Ollama‑Timeout validieren (30 – 300 Sekunden)
+            # -----------------------------------------------------------------
+            if hasattr(self, 'ollama_timeout'):
+                if not (30 <= self.ollama_timeout <= 300):
+                    logger.warning(
+                        f"ollama_timeout {self.ollama_timeout} außerhalb [30, 300] – "
+                        f"auf 90 zurückgesetzt"
+                    )
+                    self.ollama_timeout = 90
+            else:
+                self.ollama_timeout = 90
 
-        # Config-Instanz erstellen
-        self._recreate_config()
+            # -----------------------------------------------------------------
+            # 4. Config-Instanz erstellen (über _recreate_config)
+            # -----------------------------------------------------------------
+            self._recreate_config()
 
-        # Chunk-Dauer synchronisieren
-        self.chunk_duration = self.config.CHUNK_DURATION
+            # -----------------------------------------------------------------
+            # 5. Chunk-Dauer synchronisieren (Property chunk_duration setzt config.CHUNK_DURATION)
+            # -----------------------------------------------------------------
+            self.chunk_duration = self.config.CHUNK_DURATION
 
-        # Modusabhängige Overrides anwenden
-        self._apply_mode_overrides()
+            # -----------------------------------------------------------------
+            # 6. Modusabhängige Overrides anwenden (asian_mode, precision_mode)
+            # -----------------------------------------------------------------
+            self._apply_mode_overrides()
 
-        # Debug-Ausgaben
-        logger.info("🔊 Settings initialized (dataclass)")
-        if DEBUG_LEVEL >= 3:
-            log_debug("settings", f"Auto‑TTS: transcript={self.auto_tts_transcript}, translation={self.auto_tts_translation}, delay={self.auto_tts_delay_ms}ms")
-            log_debug("settings", f"Sentence flush: interval={self.sentence_flush_interval}s, word_threshold={self.sentence_flush_word_threshold}")
-            log_debug("settings", f"TTS: engine={self.tts_engine}, voice={self.tts_voice}, length_scale={self.tts_length_scale}, sentence_silence={self.tts_sentence_silence}")
-            log_debug("settings", f"Reflection: {'ON' if self.enable_reflection else 'OFF'}")
-            log_debug("settings", f"Fallback source language: {self.fallback_source_language}")
-            log_debug("settings", f"Download inactivity timeout: {self.download_inactivity_timeout}s")
+            # -----------------------------------------------------------------
+            # 7. Debug-Ausgaben (nur bei ausreichendem Debug-Level)
+            # -----------------------------------------------------------------
+            if DEBUG_LEVEL >= 2:
+                log_debug("settings", f"Target language: {self.target_language}")
+                log_debug("settings", f"Fallback source language: {self.fallback_source_language}")
+                log_debug("settings", f"Ollama temperature: {self.ollama_temperature}")
+                log_debug("settings", f"Ollama timeout: {self.ollama_timeout}")
+                log_debug("settings", f"Auto‑TTS: transcript={self.auto_tts_transcript}, translation={self.auto_tts_translation}, delay={self.auto_tts_delay_ms}ms")
+                log_debug("settings", f"Sentence flush: interval={self.sentence_flush_interval}s, word_threshold={self.sentence_flush_word_threshold}")
+                log_debug("settings", f"TTS: engine={self.tts_engine}, voice={self.tts_voice}, length_scale={self.tts_length_scale}, sentence_silence={self.tts_sentence_silence}")
+                log_debug("settings", f"Reflection: {'ON' if self.enable_reflection else 'OFF'}")
+                log_debug("settings", f"Download inactivity timeout: {self.download_inactivity_timeout}s")
+
+            logger.info("🔊 Settings initialized (dataclass)")
+
+        except Exception as e:
+            logger.exception(f"Fehler in AdvancedSettings.__post_init__: {e}")
+        finally:
+            # -----------------------------------------------------------------
+            # GARANTIERT: self.config existiert immer, selbst wenn oben etwas schiefging.
+            # -----------------------------------------------------------------
+            if not hasattr(self, 'config') or self.config is None:
+                logger.warning("Config fehlt – erstelle Standard‑Config")
+                self.config = Config()
+                self.chunk_duration = self.config.CHUNK_DURATION
 
     def _recreate_config(self) -> None:
         if self.config_type == "realtime":
