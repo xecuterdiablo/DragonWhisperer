@@ -12556,10 +12556,9 @@ class FFmpegManager:
               `self.settings.live_from_start`).
             - Robustere Fehlerbehandlung und detaillierte Debug‑Ausgaben.
             - Wiederholungsversuche für verschiedene Formate im Pipe‑Modus.
-            - Sauberere Ressourcenfreigabe im Fehlerfall.
+            - Saubere Ressourcenfreigabe im Fehlerfall (insb. Slot).
             - Korrekte Handhabung von `seek_seconds` (nur bei Nicht-YouTube-VODs).
-            - Zusätzlicher Fallback bei sofortigem FFmpeg-Tod (z. B. durch
-              nicht unterstützte Optionen) durch Umschalten auf minimalen Befehl.
+            - Zusätzlicher Fallback bei sofortigem FFmpeg-Tod durch minimalen Befehl.
 
         Args:
             video_url: Die ursprüngliche Video‑/Stream‑URL.
@@ -12886,6 +12885,7 @@ class FFmpegManager:
                     logger.info(f"✅ Using pre-resolved audio URL: {audio_url[:100]}...")
                     log_debug("ffmpeg", f"Using pre-resolved URL (truncated): {audio_url[:100]}...")
 
+            # Optimierten Befehl erstellen
             cmd = self._build_ffmpeg_command_optimized(
                 audio_url,
                 seek_seconds=seek_seconds,
@@ -12919,8 +12919,7 @@ class FFmpegManager:
                         f"FFmpeg died immediately (exit {process.poll()}), stderr preview: {stderr_display}"
                     )
 
-                # ========== NEU: Fallback bei sofortigem Tod ==========
-                # Versuche einen minimalen FFmpeg-Befehl (ohne erweiterte Optionen)
+                # ========== Fallback bei sofortigem Tod ==========
                 logger.info("🔄 FFmpeg died immediately – trying fallback with minimal options...")
                 minimal_cmd = self._build_ffmpeg_minimal_command(audio_url, detected_language)
                 if DEBUG_LEVEL >= 3:
@@ -14999,22 +14998,172 @@ class FFmpegManager:
 
         return cmd
 
-    def _build_ffmpeg_pipe_command(self, fmt: Optional[str], detected_language: Optional[str]) -> List[str]:
-        profile = "realtime" if self.settings and hasattr(self.settings, "audio_profile") else "transcription"
+    def _build_ffmpeg_minimal_command(
+        self, url: str, detected_language: Optional[str] = None
+    ) -> List[str]:
+        """
+        Erstellt einen minimalen, robusten FFmpeg‑Befehl als Fallback.
+
+        Diese Methode wird aufgerufen, wenn der optimierte Befehl in
+        `_build_ffmpeg_command_optimized` sofort nach dem Start stirbt.
+        Der Befehl verzichtet auf erweiterte Optionen (z. B. `-reconnect_*`,
+        `-headers`, komplexe Audiofilter) und verwendet nur grundlegende,
+        weitgehend kompatible Parameter. Ziel ist maximale Kompatibilität
+        mit verschiedenen FFmpeg‑Versionen und Stream‑Typen.
+
+        Features:
+            - Nur essentielle Reconnect‑Flags (falls vom System unterstützt)
+            - Keine YouTube‑spezifischen Header
+            - Einfacher Audiofilter (aresample) oder gar keiner
+            - IPv4‑Präferenz nur bei expliziter Einstellung
+            - Detaillierte Debug‑Ausgaben bei DEBUG_LEVEL >= 2
+
+        Args:
+            url: Die Audio‑URL (direkter Stream oder Datei).
+            detected_language: Optional erkannte Sprache (derzeit nur für Log).
+
+        Returns:
+            Liste der Befehlsargumente für subprocess.Popen.
+        """
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel", "warning" if DEBUG_LEVEL < 3 else "info",
+        ]
+
+        # Minimale Reconnect‑Optionen – nur die, die in den meisten FFmpeg‑Builds
+        # vorhanden sind (kein -reconnect_attempts, -reconnect_delay_max etc.)
+        cmd.extend(["-reconnect", "1", "-reconnect_streamed", "1"])
+
+        # Bei Netzwerk‑Streams Timeout setzen (in Mikrosekunden)
+        if url.startswith(("http://", "https://")):
+            cmd.extend(["-timeout", "10000000"])   # 10 Sekunden
+            cmd.extend(["-rw_timeout", "30000000"]) # 30 Sekunden
+
+        # IPv4 erzwingen, falls in den Einstellungen gewünscht
+        if self.settings and getattr(self.settings, "prefer_ipv4", False):
+            cmd.append("-force_ipv4")
+
+        # Eingabe-URL
+        cmd.extend(["-i", url])
+
+        # Video deaktivieren
+        cmd.append("-vn")
+
+        # Ausgabeformat: PCM 16‑bit, Mono, 16 kHz
+        cmd.extend([
+            "-f", self.config.AUDIO_FORMAT,
+            "-acodec", "pcm_s16le",
+            "-ar", str(self.config.SAMPLE_RATE),
+            "-ac", str(self.config.CHANNELS),
+        ])
+
+        # Einfacher Resampling‑Filter (nur wenn notwendig)
+        # Verwende einen konservativen Filter ohne sprachspezifische Anpassungen
+        if self.config.SAMPLE_RATE != 16000:
+            cmd.extend(["-af", "aresample=16000"])
+            if DEBUG_LEVEL >= 2:
+                log_debug("ffmpeg", "Minimal command: added aresample filter")
+
+        # Ausgabe auf stdout
+        cmd.append("pipe:1")
+
+        if DEBUG_LEVEL >= 2:
+            log_debug(
+                "ffmpeg",
+                f"_build_ffmpeg_minimal_command: url={url[:100]}..., "
+                f"lang={detected_language}"
+            )
+        if DEBUG_LEVEL >= 3:
+            log_debug("ffmpeg", f"Minimal command: {' '.join(cmd)}")
+
+        return cmd
+
+    def _build_ffmpeg_pipe_command(
+        self, fmt: Optional[str], detected_language: Optional[str]
+    ) -> List[str]:
+        """
+        Erstellt den FFmpeg‑Befehl für den Pipe‑Modus (liest von stdin).
+
+        Diese Methode wird verwendet, wenn yt‑dlp die Audiodaten direkt an FFmpeg
+        weiterleitet (Pipe‑Zweig). Sie konfiguriert FFmpeg so, dass es von stdin
+        liest und die gewünschte PCM‑Ausgabe auf stdout schreibt.
+
+        Features:
+            - Optionale Angabe des Eingabeformats (z. B. 'webm', 'matroska')
+            - Sprach‑ und profilabhängiger Audiofilter
+            - Robuste Flags für korrupte Streams und Timestamps
+            - Detaillierte Debug‑Ausgaben bei erhöhtem Debug‑Level
+
+        Args:
+            fmt: Optionales Eingabeformat. None = automatische Erkennung.
+            detected_language: Vom Whisper‑Modell erkannte Sprache (für Audiofilter).
+
+        Returns:
+            Liste der Befehlsargumente für subprocess.Popen.
+        """
+        # Audio‑Profil basierend auf Einstellungen wählen
         if self.settings and hasattr(self.settings, "audio_profile"):
             profile = self.settings.audio_profile
-        audio_filter = self.config.get_audio_filter(language=detected_language, profile=profile)
+        else:
+            profile = "realtime"
 
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning" if DEBUG_LEVEL < 3 else "info"]
+        # Audiofilter aus Config holen (sprach- und profilabhängig)
+        audio_filter = self.config.get_audio_filter(
+            language=detected_language, profile=profile
+        )
+
+        # Basis‑Befehl
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel", "warning" if DEBUG_LEVEL < 3 else "info",
+        ]
+
+        # Eingabeformat explizit setzen, falls angegeben
         if fmt is not None:
             cmd.extend(["-f", fmt])
+
+        # Robuste Eingabe‑Optionen für Streams aus Pipe
         cmd.extend([
-            "-i", "pipe:0", "-vn", "-f", "s16le", "-acodec", "pcm_s16le",
-            "-ar", str(self.config.SAMPLE_RATE), "-ac", str(self.config.CHANNELS),
-            "-af", audio_filter, "-fflags", "+genpts+discardcorrupt",
-            "-avoid_negative_ts", "make_zero", "-max_interleave_delta", "0",
-            "-threads", "2", "-bufsize", self.config.FFMPEG_BUFSIZE, "pipe:1",
+            "-fflags", "+genpts+discardcorrupt",   # PTS generieren, korrupte Frames verwerfen
+            "-analyzeduration", "10M",             # 10 MB analysieren (für Format-Erkennung)
+            "-probesize", "10M",                   # 10 MB sondieren
+            "-i", "pipe:0",                        # Eingabe von stdin
         ])
+
+        # Video deaktivieren
+        cmd.append("-vn")
+
+        # Ausgabeformat: PCM 16‑bit, Mono, konfigurierte Samplerate
+        cmd.extend([
+            "-f", self.config.AUDIO_FORMAT,
+            "-acodec", "pcm_s16le",
+            "-ar", str(self.config.SAMPLE_RATE),
+            "-ac", str(self.config.CHANNELS),
+        ])
+
+        # Audiofilter anwenden
+        cmd.extend(["-af", audio_filter])
+
+        # Zusätzliche Flags für saubere Ausgabe
+        cmd.extend([
+            "-avoid_negative_ts", "make_zero",
+            "-max_interleave_delta", "0",
+            "-threads", "2",                       # 2 Threads für Dekodierung
+            "-bufsize", self.config.FFMPEG_BUFSIZE,
+            "pipe:1",                              # Ausgabe auf stdout
+        ])
+
+        if DEBUG_LEVEL >= 2:
+            log_debug(
+                "ffmpeg",
+                f"_build_ffmpeg_pipe_command: fmt={fmt}, lang={detected_language}, "
+                f"profile={profile}, filter='{audio_filter}'"
+            )
+        if DEBUG_LEVEL >= 3:
+            log_debug("ffmpeg", f"Pipe command: {' '.join(cmd)}")
+
         return cmd
 
     def _read_yt_stderr_worker(self, yt_process: subprocess.Popen, stop_event: threading.Event) -> None:
@@ -22078,17 +22227,20 @@ class InstallDependencyDialog(BaseDialog):
 
     Besonderheiten:
         - Plattformunabhängige Systempaket-Installation (apt, pacman, brew, winget)
+        - Fallback-Installationsmethoden (z. B. curl für ollama)
         - Python-Pakete werden immer mit `--upgrade` installiert
         - Zwei getrennte Update-Modi: „Kritische Pakete“ (schnell, sicher) und
           „Alle Pakete“ (umfassend, kann länger dauern)
         - Korrekte Piper-Stimmen-URLs und manuelle Download-Hinweise
         - Live-Streaming der Terminal-Ausgaben, Fortschrittsbalken, Cancel-Button
-        - Dezente Animationen und Statusmeldungen mit Augenzwinkern
         - Automatischer Download von `.onnx` und `.onnx.json` für Piper-Stimmen
         - Prüfung auf vollständige Installation (beide Dateien vorhanden)
+        - Sudo-Passwort-Erkennung mit Benutzerhinweis
+        - Robuste Abbruchbehandlung mit Timeout und Prozess-Kill
+        - Detaillierte Debug-Ausgaben bei `DEBUG_LEVEL >= 2`
 
     Autor: Dragon Whisperer Team
-    Version: 5.2 – „Der Paket-Drache mit JSON-Unterstützung“
+    Version: 5.3 – „Der Paket-Drache mit Fallback und Sudo‑Hinweis“
     """
 
     # -------------------------------------------------------------------------
@@ -22100,7 +22252,13 @@ class InstallDependencyDialog(BaseDialog):
         "vlc": {"apt": "vlc", "pacman": "vlc", "brew": "vlc", "winget": "VideoLAN.VLC"},
         "espeak": {"apt": "espeak", "pacman": "espeak", "brew": "espeak"},
         "piper": {"apt": "piper", "pacman": "piper", "brew": "piper"},
-        "ollama": {"apt": "ollama", "pacman": "ollama", "brew": "ollama", "winget": "Ollama.Ollama"},
+        "ollama": {
+            "apt": "ollama",
+            "pacman": "ollama",
+            "brew": "ollama",
+            "winget": "Ollama.Ollama",
+            "fallback": "curl -fsSL https://ollama.com/install.sh | sh"
+        },
     }
 
     PYTHON_PACKAGES = [
@@ -22237,7 +22395,7 @@ class InstallDependencyDialog(BaseDialog):
                 ).pack(fill="x", pady=1)
                 continue
 
-            if self.pkg_manager in pkg_data or "pip" in pkg_data:
+            if self.pkg_manager in pkg_data or "pip" in pkg_data or "fallback" in pkg_data:
                 var = tk.BooleanVar(value=True)
                 cb = tk.Checkbutton(
                     sys_frame,
@@ -22251,7 +22409,7 @@ class InstallDependencyDialog(BaseDialog):
                 )
                 cb.pack(fill="x", pady=1)
                 self.sys_vars[pkg_name] = var
-                ToolTip(cb, f"Installiert {pkg_name} über {self.pkg_manager or 'pip'}")
+                ToolTip(cb, f"Installiert {pkg_name} über {self.pkg_manager or 'Fallback'}")
 
         if self.pkg_manager == "manual":
             tk.Label(
@@ -22265,7 +22423,8 @@ class InstallDependencyDialog(BaseDialog):
         if self.pkg_manager in ("apt", "pacman", "brew") and not IS_WINDOWS:
             tk.Label(
                 sys_frame,
-                text="ℹ️ Für Systempakete wird Ihr Passwort im Terminal benötigt.",
+                text="ℹ️ Für Systempakete wird Ihr Passwort im Terminal benötigt.\n"
+                     "   Achten Sie auf das Terminal, falls eine Passwortabfrage erscheint.",
                 bg=CURRENT_THEME.BG_SECONDARY,
                 fg=CURRENT_THEME.INFO,
                 wraplength=700,
@@ -22317,7 +22476,7 @@ class InstallDependencyDialog(BaseDialog):
                     anchor="w",
                 ).pack(fill="x", pady=1)
 
-        # 3. Piper-Stimmen (verbesserte Anzeige mit Status)
+        # 3. Piper-Stimmen
         voice_frame = tk.LabelFrame(
             scrollable_frame,
             text="🎤 Piper-Stimmen (hochwertige TTS)",
@@ -22329,7 +22488,6 @@ class InstallDependencyDialog(BaseDialog):
         )
         voice_frame.pack(fill="x", pady=5, padx=5)
 
-        # Hinweis zur manuellen Installation
         info_label = tk.Label(
             voice_frame,
             text="💡 Fehlt eine Sprache? Sie können Stimmen manuell von Hugging Face herunterladen.\n"
@@ -22348,7 +22506,6 @@ class InstallDependencyDialog(BaseDialog):
                 "4. Speichern Sie beide Dateien in ~/.cache/piper/\n"
                 "Nach einem Neustart wird die Stimme erkannt.")
 
-        # Container für die Checkbuttons (mit grid)
         voice_buttons_frame = tk.Frame(voice_frame, bg=CURRENT_THEME.BG_SECONDARY)
         voice_buttons_frame.pack(fill="x")
 
@@ -22360,7 +22517,6 @@ class InstallDependencyDialog(BaseDialog):
         for voice_name, display_name in self.PIPER_VOICES.items():
             model_path = os.path.join(cache_dir, f"{voice_name}.onnx")
             json_path = os.path.join(cache_dir, f"{voice_name}.onnx.json")
-            # Vollständig installiert, wenn beide Dateien existieren und nicht leer sind
             fully_installed = (os.path.exists(model_path) and os.path.getsize(model_path) > 0 and
                                os.path.exists(json_path) and os.path.getsize(json_path) > 0)
 
@@ -22378,7 +22534,6 @@ class InstallDependencyDialog(BaseDialog):
                 )
                 cb.grid(row=row, column=col, sticky="w", padx=10, pady=2)
                 self.voice_vars[voice_name] = var
-                # Tooltip mit zusätzlicher Info
                 if os.path.exists(model_path) and os.path.getsize(model_path) > 0:
                     ToolTip(cb, "✅ Modell vorhanden, aber Konfigurationsdatei fehlt – wird nachgeladen")
                 else:
@@ -22573,13 +22728,33 @@ class InstallDependencyDialog(BaseDialog):
 
     def _install_system_package(self, pkg: str) -> bool:
         pkg_data = self.SYSTEM_PACKAGES.get(pkg, {})
+        
+        # 1. Versuch mit systemeigenem Paketmanager
         if self.pkg_manager in pkg_data:
             cmd = self._get_package_manager_command(pkg_data[self.pkg_manager])
             if cmd:
-                return self._run_subprocess(cmd, f"Installiere {pkg}")
-        elif "pip" in pkg_data:
+                self._append_output(f"📦 Installiere {pkg} über {self.pkg_manager}...\n")
+                success = self._run_subprocess(cmd, f"Installiere {pkg}")
+                if success:
+                    return True
+                else:
+                    self._append_output(f"⚠️ {self.pkg_manager} Installation fehlgeschlagen.\n")
+                    if "fallback" in pkg_data:
+                        self._append_output(f"🔄 Versuche Fallback-Methode für {pkg}...\n")
+                        return self._run_fallback_install(pkg_data["fallback"])
+                    return False
+
+        # 2. Versuch mit pip (falls angegeben)
+        if "pip" in pkg_data:
+            self._append_output(f"🐍 Installiere {pkg} über pip...\n")
             return self._install_python_packages([pkg_data["pip"]], upgrade=True)
-        self._append_output(f"Keine Installationsmethode für {pkg}.\n")
+
+        # 3. Direkter Fallback
+        if "fallback" in pkg_data:
+            self._append_output(f"🔄 Verwende Fallback-Installation für {pkg}...\n")
+            return self._run_fallback_install(pkg_data["fallback"])
+
+        self._append_output(f"❌ Keine Installationsmethode für {pkg}.\n")
         return False
 
     def _get_package_manager_command(self, package_name: str) -> List[str]:
@@ -22592,6 +22767,38 @@ class InstallDependencyDialog(BaseDialog):
         elif self.pkg_manager == "winget":
             return ["winget", "install", "-e", "--id", package_name, "--accept-package-agreements", "--accept-source-agreements"]
         return []
+
+    def _run_fallback_install(self, command: str) -> bool:
+        """Führt ein Shell-Kommando als Fallback-Installation aus."""
+        try:
+            self._append_output(f"  Führe aus: {command}\n")
+            proc = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                executable="/bin/bash" if not IS_WINDOWS else None
+            )
+            with self._process_lock:
+                self._current_process = proc
+
+            for line in proc.stdout:
+                if self._stop_event.is_set():
+                    proc.terminate()
+                    proc.kill()
+                    break
+                self._append_output(line)
+
+            proc.wait()
+            return proc.returncode == 0
+        except Exception as e:
+            self._append_output(f"Fehler bei Fallback-Installation: {e}\n")
+            return False
+        finally:
+            with self._process_lock:
+                self._current_process = None
 
     def _install_python_packages(self, packages: List[str], upgrade: bool = False) -> bool:
         python_exe = sys.executable
@@ -22606,16 +22813,11 @@ class InstallDependencyDialog(BaseDialog):
         return self._run_subprocess(cmd, "pip install", env=env)
 
     def _download_piper_voices(self, voices: List[str]) -> bool:
-        """
-        Lädt eine oder mehrere Piper-Stimmen herunter (sowohl .onnx als auch .onnx.json).
-        Verwendet requests, falls verfügbar, sonst wget/curl.
-        """
         cache_dir = os.path.expanduser("~/.cache/piper")
         os.makedirs(cache_dir, exist_ok=True)
         base_url = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
         overall_success = True
 
-        # Prüfe, ob requests verfügbar ist
         use_requests = False
         try:
             import requests
@@ -22629,29 +22831,24 @@ class InstallDependencyDialog(BaseDialog):
                 break
             self._append_output(f"\n📥 Lade Stimme {voice} herunter...\n")
 
-            # Bestimme Pfade
             model_file = f"{voice}.onnx"
             json_file = f"{voice}.onnx.json"
             model_path = os.path.join(cache_dir, model_file)
             json_path = os.path.join(cache_dir, json_file)
 
-            # Baue URL-Pfad zusammen (basierend auf Voice-Format)
-            # Erwartetes Format: de_DE-thorsten-medium -> de/de_DE/thorsten/medium/
             parts = voice.split('-')
             if len(parts) >= 3:
-                lang_full = parts[0]       # z.B. "de_DE"
-                speaker = parts[1]         # z.B. "thorsten"
-                quality = parts[2]         # z.B. "medium"
+                lang_full = parts[0]
+                speaker = parts[1]
+                quality = parts[2]
                 lang_short = lang_full.split('_')[0]
                 remote_dir = f"{lang_short}/{lang_full}/{speaker}/{quality}"
             else:
-                # Fallback: direkter Pfad (weniger wahrscheinlich)
                 remote_dir = voice
                 self._append_output(f"  ⚠️ Unerwartetes Voice-Format: {voice}, versuche direkten Pfad\n")
 
             base_remote = f"{base_url}/{remote_dir}"
 
-            # Funktion zum Herunterladen einer Datei
             def download_file(remote_file, local_path, description):
                 url = f"{base_remote}/{remote_file}"
                 self._append_output(f"  Lade {remote_file}...\n")
@@ -22666,7 +22863,6 @@ class InstallDependencyDialog(BaseDialog):
                             self._append_output(f"    Fehler: HTTP {r.status_code}\n")
                             return False
                     else:
-                        # Fallback mit wget oder curl
                         if shutil.which("wget"):
                             cmd = ["wget", "-q", "-O", local_path, url]
                         elif shutil.which("curl"):
@@ -22684,7 +22880,6 @@ class InstallDependencyDialog(BaseDialog):
                     self._append_output(f"    Fehler: {e}\n")
                     return False
 
-            # ONNX herunterladen (falls nicht vorhanden oder 0 Byte)
             need_model = (not os.path.exists(model_path) or os.path.getsize(model_path) == 0)
             if need_model:
                 self._append_output("  ⏳ Lade Modell (ca. 50-200 MB)...\n")
@@ -22694,7 +22889,6 @@ class InstallDependencyDialog(BaseDialog):
             else:
                 self._append_output(f"  ✅ Modell {model_file} bereits vorhanden.\n")
 
-            # JSON herunterladen (falls nicht vorhanden oder 0 Byte)
             need_json = (not os.path.exists(json_path) or os.path.getsize(json_path) == 0)
             if need_json:
                 if not download_file(json_file, json_path, "Konfiguration"):
@@ -22703,7 +22897,6 @@ class InstallDependencyDialog(BaseDialog):
             else:
                 self._append_output(f"  ✅ Konfiguration {json_file} bereits vorhanden.\n")
 
-            # Erfolgsmeldung
             self._append_output(f"  ✅ {voice} vollständig installiert.\n")
 
         return overall_success
@@ -22783,12 +22976,17 @@ class InstallDependencyDialog(BaseDialog):
                     text=True, bufsize=1, env=env or os.environ.copy()
                 )
             proc = self._current_process
+            sudo_warning_printed = False
             for line in proc.stdout:
                 if self._stop_event.is_set():
                     proc.terminate()
                     proc.kill()
                     break
                 self._append_output(line)
+                if not sudo_warning_printed and "password for" in line.lower():
+                    self._append_output("\n⚠️ sudo erwartet eine Passworteingabe!\n")
+                    self._append_output("👉 Bitte im Terminal (nicht hier) das Passwort eingeben.\n\n")
+                    sudo_warning_printed = True
             proc.wait()
             return proc.returncode == 0
         except Exception as e:
