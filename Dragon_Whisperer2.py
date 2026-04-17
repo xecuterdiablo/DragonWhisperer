@@ -13393,13 +13393,13 @@ class FFmpegManager:
             - **Garantierte Prozessbereinigung:** Alle jemals gestarteten Prozesse werden
               in einer Liste gesammelt und im `finally`‑Block beendet. Dadurch sind
               Zombie‑Prozesse selbst bei Exceptions ausgeschlossen.
+            - **Optimierte Format‑Auswahl:** Verwendet die verbesserte
+              `_build_yt_dlp_pipe_command` mit korrekter Audio‑only‑Priorität.
             - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` für jeden Schritt.
             - **Robuste Fehlerbehandlung:** Trennung von Start‑ und Laufzeitfehlern,
               sauberes Aufräumen zwischen Format‑Versuchen.
             - **Unterstützung für benutzerdefinierte Browser‑Cookies und Proxys**
               (wird aus `self.settings` gelesen).
-            - **Optimierte Format‑Auswahl:** Bevorzugt native Container (m4a, webm)
-              und fällt auf generische Formate zurück.
             - **Thread‑Sicherheit:** Alle Zugriffe auf gemeinsame Ressourcen erfolgen
               unter den entsprechenden Locks.
 
@@ -13423,6 +13423,7 @@ class FFmpegManager:
 
         # Formate, die nacheinander ausprobiert werden.
         # None bedeutet: yt‑dlp entscheidet automatisch (empfohlen).
+        # Die Reihenfolge ist nach Kompatibilität und Wahrscheinlichkeit sortiert.
         formats_to_try = [None, "webm", "matroska", "mp4"]
 
         yt_process: Optional[subprocess.Popen] = None
@@ -13442,7 +13443,9 @@ class FFmpegManager:
                         f"{fmt if fmt else 'auto'}"
                     )
 
+                # -----------------------------------------------------------------
                 # Vorherige Ressourcen bereinigen (falls vorhanden)
+                # -----------------------------------------------------------------
                 self._cleanup_pipe_resources(yt_process, ff_process, yt_stderr_thread, yt_stderr_stop)
 
                 # -----------------------------------------------------------------
@@ -13554,6 +13557,13 @@ class FFmpegManager:
                     with self._stats_lock:
                         self._stats["total_processes_started"] += 1
                         self._stats["total_pipe_processes"] += 1
+
+                    # Die erfolgreichen Prozesse aus all_procs entfernen, damit sie
+                    # nicht im finally‑Block beendet werden.
+                    if yt_process in all_procs:
+                        all_procs.remove(yt_process)
+                    if ff_process in all_procs:
+                        all_procs.remove(ff_process)
 
                     return ff_process
                 else:
@@ -15872,24 +15882,18 @@ class FFmpegManager:
     # -------------------------------------------------------------------------
     def _build_yt_dlp_pipe_command(self, video_url: str, is_live: bool = False) -> List[str]:
         """
-        Erstellt einen optimierten yt‑dlp‑Befehl für den Pipe‑Modus.
+        Erstellt einen maximal robusten und kompatiblen yt‑dlp‑Befehl für den Pipe‑Modus.
 
-        Dieser Befehl wird verwendet, um Audiodaten von yt‑dlp direkt an FFmpeg
-        weiterzuleiten (stdout‑Pipe). Er enthält spezielle Optionen für
-        Livestreams, wobei die `--live-from-start`-Option nur dann hinzugefügt
-        wird, wenn die Einstellung `live_from_start` aktiviert ist (Standard: deaktiviert).
+        Die Format‑Auswahl unterscheidet zwischen Livestreams und VODs:
+            - **Livestreams**: Viele HLS‑Manifeste bieten keine reinen Audio‑Container an.
+              Daher wird hier `bestaudio` (ohne Container‑Einschränkung) verwendet.
+              FFmpeg extrahiert die Audiospur anschließend über `-vn`.
+            - **VODs**: Hier können wir strikt Audio‑only‑Container bevorzugen, um das
+              Risiko von Video‑only‑Streams (z. B. Format 301) zu minimieren.
 
-        Verbesserungen:
-            - `--live-from-start` wird nur bei Bedarf hinzugefügt (gesteuert über
-              `self.settings.live_from_start`).
-            - Für YouTube‑Livestreams: `--extractor-args youtube:po_token=...`
-              und `--remote-components ejs:github` zur Umgehung von
-              YouTube‑Schutzmaßnahmen.
-            - Stabile Format‑Auswahl:
-              `bestaudio[protocol=m3u8]/bestaudio[ext=m4a]/bestaudio/best`
-            - Erhöhte Timeouts und Wiederholungsversuche.
-            - Explizite IPv4‑Erzwingung.
-            - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 3`.
+        Zusätzlich werden für Livestreams YouTube‑spezifische Extractor‑Argumente
+        (`po_token`, `formats=missing_pot`) und Remote‑Komponenten (`ejs:github`)
+        hinzugefügt, um auch geschützte Streams zuverlässig abrufen zu können.
 
         Args:
             video_url: Die ursprüngliche Video‑/Stream‑URL.
@@ -15898,12 +15902,26 @@ class FFmpegManager:
         Returns:
             Liste der Befehlsargumente für subprocess.Popen.
         """
-        # Basis‑Befehl mit robuster Format‑Auswahl
+        # ---------------------------------------------------------------------
+        # Format‑String je nach Stream‑Typ wählen
+        # ---------------------------------------------------------------------
+        if is_live:
+            # Livestream: Gemuxte Formate akzeptieren, da oft keine reinen Audio‑Container
+            format_str = "bestaudio[protocol=m3u8]/bestaudio/best"
+            if DEBUG_LEVEL >= 3:
+                log_debug("ytdlp", f"Pipe mode (LIVE): using format '{format_str}'")
+        else:
+            # VOD: Reine Audio‑Container bevorzugen
+            format_str = "bestaudio[ext=m4a]/bestaudio[acodec=opus]/bestaudio/worstaudio"
+            if DEBUG_LEVEL >= 3:
+                log_debug("ytdlp", f"Pipe mode (VOD): using format '{format_str}'")
+
+        # ---------------------------------------------------------------------
+        # Basis‑Befehl mit robusten Standardoptionen
+        # ---------------------------------------------------------------------
         cmd = [
             "yt-dlp",
-            "-f",
-            # Priorität: natives HLS (m3u8) > m4a > bestes Audio > Fallback
-            "bestaudio[protocol=m3u8]/bestaudio[ext=m4a]/bestaudio/best",
+            "-f", format_str,
             "--no-playlist",
             "--verbose",               # Detaillierte Ausgaben für Fehlersuche
             "--socket-timeout", "30",  # 30 Sekunden Timeout pro Verbindung
@@ -15912,9 +15930,9 @@ class FFmpegManager:
             "--no-warnings",
         ]
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # Livestream‑spezifische Optionen
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         if is_live:
             # Nur wenn live_from_start aktiv ist, füge --live-from-start hinzu
             if getattr(self.settings, "live_from_start", False):
@@ -15929,7 +15947,8 @@ class FFmpegManager:
                 cmd.extend([
                     "--extractor-args",
                     # PO‑Token für web, iOS und Android – notwendig für viele Livestreams
-                    "youtube:po_token=web+ios+android",
+                    # formats=missing_pot: Zeige alle Formate an, auch ohne PO‑Token
+                    "youtube:po_token=web+ios+android;formats=missing_pot",
                     "--remote-components",
                     # EJS‑Komponenten von GitHub für JavaScript‑Challenges
                     "ejs:github",
@@ -15937,14 +15956,14 @@ class FFmpegManager:
                 if DEBUG_LEVEL >= 3:
                     log_debug(
                         "ytdlp",
-                        "Added YouTube live extractor args (po_token, remote components)"
+                        "Added YouTube live extractor args (po_token, formats=missing_pot, remote components)"
                     )
             elif DEBUG_LEVEL >= 3:
                 log_debug("ytdlp", "Non-YouTube live stream")
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # Cookies aus dem Browser verwenden, falls aktiviert
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         use_cookies = getattr(self.settings, "use_browser_cookies", True)
         if use_cookies:
             browser = getattr(self.settings, "cookies_browser", "firefox")
@@ -15952,9 +15971,9 @@ class FFmpegManager:
             if DEBUG_LEVEL >= 3:
                 log_debug("ytdlp", f"Using cookies from browser: {browser}")
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # Proxy verwenden, falls aktiviert
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         if hasattr(self.settings, "proxy_enabled") and self.settings.proxy_enabled:
             proxy_url = getattr(self.settings, "proxy_url", "")
             if proxy_url:
@@ -15962,13 +15981,15 @@ class FFmpegManager:
                 if DEBUG_LEVEL >= 3:
                     log_debug("ytdlp", f"Using proxy: {proxy_url}")
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # Ausgabe auf stdout (damit FFmpeg sie über die Pipe lesen kann)
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         cmd.extend(["-o", "-", video_url])
 
+        # ---------------------------------------------------------------------
+        # Debug‑Ausgabe des vollständigen Befehls (nur bei ausreichendem Level)
+        # ---------------------------------------------------------------------
         if DEBUG_LEVEL >= 3:
-            # Vollständigen Befehl für Debugging ausgeben (sensitive Daten sind hier nicht enthalten)
             log_debug("ytdlp", f"Full yt-dlp command: {' '.join(cmd)}")
 
         return cmd
@@ -31101,6 +31122,18 @@ class DragonWhispererGUI:
         Führt eine vollständige Bereinigung aller Ressourcen durch.
         Wird beim normalen Shutdown oder bei atexit aufgerufen.
 
+        Diese Methode ist das Herzstück des kontrollierten Herunterfahrens.
+        Sie stellt sicher, dass:
+            - Alle geplanten Tkinter-Timer abgebrochen werden.
+            - Event-Bus-Abonnements entfernt werden.
+            - Der Controller und der AudioProcessor gestoppt werden.
+            - Der FFmpegManager alle Streams beendet.
+            - Alle Manager und Engines ordnungsgemäß entsorgt werden.
+            - Alle Executors heruntergefahren werden.
+            - **Alle Queues geleert werden**, um blockierte `put`-Aufrufe zu beenden.
+            - Verbleibende Nicht-Daemon-Threads gejoint werden.
+            - Ein `ForceExitWorker` als letzte Instanz einen harten Exit nach 60 s erzwingt.
+
         Args:
             emergency: Wenn True, werden aggressivere Maßnahmen ergriffen
                        (z. B. kürzere Timeouts, keine langen Wartezeiten).
@@ -31143,7 +31176,7 @@ class DragonWhispererGUI:
                             pass
                 time.sleep(0.5)
                 logger.error("💥 Hard exit after timeout")
-                sys.exit(1)
+                os._exit(1)
 
             force_thread = threading.Thread(
                 target=force_exit_worker,
@@ -31202,7 +31235,22 @@ class DragonWhispererGUI:
         safe_cleanup_step("Audio/FFmpeg stoppen", stop_audio)
 
         # ---------------------------------------------------------------------
-        # 5. Manager und Engines entsorgen
+        # 5. Alle Queues leeren (blockierende put-Aufrufe beenden)
+        # ---------------------------------------------------------------------
+        def clear_all_queues():
+            for q in (self.gui_queue, self._text_update_queue, getattr(self, "_tts_queue", None)):
+                if q is None:
+                    continue
+                try:
+                    while True:
+                        q.get_nowait()
+                except queue.Empty:
+                    pass
+                # Queue-join ignorieren, da wir nicht auf unerledigte Tasks warten wollen
+        safe_cleanup_step("Alle Queues leeren", clear_all_queues)
+
+        # ---------------------------------------------------------------------
+        # 6. Manager und Engines entsorgen
         # ---------------------------------------------------------------------
         managers = [
             ("AudioProcessor", getattr(self, "audio_processor", None)),
@@ -31226,13 +31274,13 @@ class DragonWhispererGUI:
             safe_cleanup_step(f"{name} entsorgen", dispose_manager)
 
         # ---------------------------------------------------------------------
-        # 6. Linux-Performance-Optimierer (falls vorhanden)
+        # 7. Linux-Performance-Optimierer (falls vorhanden)
         # ---------------------------------------------------------------------
         if IS_LINUX and hasattr(self, "performance_optimizer"):
             safe_cleanup_step("LinuxOptimizer entsorgen", self.performance_optimizer.dispose)
 
         # ---------------------------------------------------------------------
-        # 7. Executoren herunterfahren
+        # 8. Executoren herunterfahren
         # ---------------------------------------------------------------------
         executors_to_shutdown = [
             (getattr(self, "translation_executor", None), "Translation"),
@@ -31255,23 +31303,9 @@ class DragonWhispererGUI:
             safe_cleanup_step(f"{name} Executor herunterfahren", shutdown_executor)
 
         # ---------------------------------------------------------------------
-        # 8. TTS-Warteschlange und Worker-Thread beenden (NEU)
+        # 9. TTS-Warteschlange und Worker-Thread beenden
         # ---------------------------------------------------------------------
         safe_cleanup_step("TTS-Worker beenden", self._stop_tts_worker)
-
-        # ---------------------------------------------------------------------
-        # 9. Queues leeren (um blockierte Threads zu befreien)
-        # ---------------------------------------------------------------------
-        def clear_queues():
-            for q in (self.gui_queue, self._text_update_queue, getattr(self, "_tts_queue", None)):
-                if q is None:
-                    continue
-                try:
-                    while True:
-                        q.get_nowait()
-                except queue.Empty:
-                    pass
-        safe_cleanup_step("Queues leeren", clear_queues)
 
         # ---------------------------------------------------------------------
         # 10. Aktive Nicht-Daemon-Threads identifizieren und ggf. joinen
@@ -32122,35 +32156,67 @@ class WhisperController:
                     self._state_condition.wait()
             return True
 
-    def _handle_error(self, message: str) -> None:
+    def _handle_error(self, message: str, fatal: bool = False) -> None:
         """
         Zentrale Fehlerbehandlung für den Controller.
 
-        Setzt den Zustand auf ERROR, sendet Events an die GUI,
-        führt eine Notfallbereinigung durch und plant einen automatischen
-        Reset zurück nach IDLE (nach 500 ms), sofern kein Shutdown aktiv ist.
+        Diese Methode unterscheidet zwischen **temporären** und **fatalen** Fehlern.
+        Temporäre Fehler (z. B. ein fehlgeschlagener Reconnect) werden nur geloggt
+        und als Info an die GUI gesendet. Der Controller bleibt im Zustand PROCESSING,
+        sodass der `StreamHandler` selbstständig einen erneuten Versuch unternehmen kann.
 
-        Der Reset-Timer wird in `self._error_reset_timer` gespeichert, damit er bei
-        einem Shutdown (`dispose`) oder erneutem Start abgebrochen werden kann.
+        Fatale Fehler (z. B. nicht initialisierbare Engines, kritische Ausnahmen)
+        versetzen den Controller in den Zustand ERROR, führen eine Notfallbereinigung
+        durch und planen nach 500 ms einen automatischen Reset zurück nach IDLE.
+
+        Verbesserungen gegenüber der ursprünglichen Version:
+            - **Unterscheidung fatal / nicht‑fatal:** Verhindert das Einfrieren der GUI
+              und den Abbruch von Streams bei harmlosen, behebbaren Fehlern.
+            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
+            - **Thread‑Sicherheit:** Alle Zustandsänderungen erfolgen unter Locks.
+            - **Timer‑Management:** Der Reset‑Timer wird bei einem Shutdown nicht gestartet
+              und im `dispose` sauber abgebrochen.
 
         Args:
-            message: Die Fehlermeldung, die geloggt und an die GUI gesendet wird.
+            message: Die Fehlermeldung (wird geloggt und an die GUI gesendet).
+            fatal: Wenn `True`, wird der Controller in den ERROR‑Zustand versetzt.
+                   Bei `False` (Standard) bleibt der aktuelle Zustand erhalten.
         """
-        logger.error(f"❌ Controller error: {message}")
+        logger.error(f"❌ Controller error (fatal={fatal}): {message}")
 
-        # Events an die GUI senden
-        self.event_bus.emit("error", message)
-        self.event_bus.emit("info", f"❌ {message}")
+        # ---------------------------------------------------------------------
+        # 1. Events an die GUI senden
+        # ---------------------------------------------------------------------
+        if self.event_bus is not None:
+            self.event_bus.emit("error", message)
+            if fatal:
+                self.event_bus.emit("info", f"❌ {message}")
+            else:
+                self.event_bus.emit("info", f"⚠️ {message}")
 
-        # Notfall-Cleanup (beendet laufende Prozesse, ohne den Zustand zu verändern)
+        # ---------------------------------------------------------------------
+        # 2. Bei nicht‑fatalen Fehlern: Nur loggen, Zustand bleibt PROCESSING
+        # ---------------------------------------------------------------------
+        if not fatal:
+            if DEBUG_LEVEL >= 3:
+                log_debug("controller", f"Non-fatal error – staying in current state: {message}")
+            return
+
+        # ---------------------------------------------------------------------
+        # 3. Fataler Fehler – vollständige Bereinigung und ERROR‑Zustand
+        # ---------------------------------------------------------------------
+        if DEBUG_LEVEL >= 3:
+            log_debug("controller", f"Fatal error – entering ERROR state: {message}")
+
+        # Notfall‑Cleanup (beendet laufende Prozesse, ohne Zustand zu ändern)
         self._emergency_cleanup()
 
         # GUI zurücksetzen (Buttons, Statusleiste)
-        self.event_bus.emit("reset_gui", None)
-        self.event_bus.emit("processing_finished", None)
+        if self.event_bus is not None:
+            self.event_bus.emit("reset_gui", None)
+            self.event_bus.emit("processing_finished", None)
 
         with self._state_lock:
-            # Nur in den ERROR-Zustand wechseln, wenn wir nicht bereits IDLE sind
             if self._state != WhisperController.State.IDLE:
                 self._set_state(WhisperController.State.ERROR)
 
@@ -32158,7 +32224,7 @@ class WhisperController:
                 if not self._shutdown_event.is_set():
                     gui = self.gui_ref()
                     if gui is not None and hasattr(gui, "root") and gui.root.winfo_exists():
-                        def reset_state():
+                        def reset_state() -> None:
                             """Wird im Hauptthread ausgeführt."""
                             with self._state_lock:
                                 if self._state == WhisperController.State.ERROR:
@@ -32167,21 +32233,30 @@ class WhisperController:
 
                         # Timer über Tkinter registrieren (500 ms)
                         self._error_reset_timer = gui.root.after(500, reset_state)
+                        if DEBUG_LEVEL >= 3:
+                            log_debug("controller", "ERROR reset timer scheduled (500ms via Tkinter)")
                     else:
                         # Keine GUI verfügbar – Reset in einem separaten Thread
-                        def go_idle():
+                        def go_idle() -> None:
                             time.sleep(0.5)
                             with self._state_lock:
                                 if self._state == WhisperController.State.ERROR:
                                     self._set_state(WhisperController.State.IDLE)
                             self._error_reset_timer = None
 
-                        reset_thread = threading.Thread(target=go_idle, daemon=True, name="Controller-ErrorReset")
+                        reset_thread = threading.Thread(
+                            target=go_idle,
+                            daemon=True,
+                            name="Controller-ErrorReset"
+                        )
                         self._error_reset_timer = reset_thread
                         reset_thread.start()
+                        if DEBUG_LEVEL >= 3:
+                            log_debug("controller", "ERROR reset thread started (no GUI)")
                 else:
                     # Shutdown läuft – kein Timer nötig
-                    log_debug("controller", "Shutdown active, skipping error reset timer")
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("controller", "Shutdown active, skipping error reset timer")
 
     def _emergency_cleanup(self) -> None:
         if self._shutdown_event.is_set():
@@ -37090,10 +37165,25 @@ class AudioProcessor:
         Wird von `start_processing` gestartet.
 
         Verbesserungen:
-            - Regelmäßige Prüfung des `_stop_event` an allen potenziell blockierenden Stellen.
-            - Timeout für `queue.join()` und `executor.submit()` zur Vermeidung von Hängern.
-            - Robuste Fehlerbehandlung mit garantiertem Cleanup auch bei Exceptions.
-            - Detaillierte Debug‑Ausgaben zur Nachverfolgung der Thread‑Beendigung.
+            - **FFmpeg‑Startfehler nicht fatal:** Bei einem Fehlschlag des initialen
+              FFmpeg‑Starts wird kein `error_callback` ausgelöst, der den Controller
+              in den ERROR‑Zustand versetzt. Stattdessen wird der Fehler geloggt und
+              die Methode beendet sich sauber. Der `StreamHandler` ist für Reconnects
+              zuständig.
+            - **Regelmäßige Prüfung des `_stop_event`** an allen potenziell blockierenden
+              Stellen.
+            - **Timeout für `queue.join()` und `executor.submit()`** zur Vermeidung
+              von Hängern.
+            - **Robuste Fehlerbehandlung** mit garantiertem Cleanup auch bei Exceptions.
+            - **Detaillierte Debug‑Ausgaben** zur Nachverfolgung der Thread‑Beendigung.
+
+        Args:
+            url: Die zu verarbeitende URL (Video, Stream oder lokale Datei).
+            transcription_callback: Callback für Transkriptionsergebnisse.
+            translation_callback: Callback für Übersetzungsergebnisse.
+            info_callback: Callback für Statusmeldungen.
+            error_callback: Callback für Fehlermeldungen.
+            finished_callback: Optionaler Callback, der nach normalem Ende aufgerufen wird.
         """
         self._stream_start_time = time.time()
         callbacks = {
@@ -37135,8 +37225,12 @@ class AudioProcessor:
                 url, audio_url, detected_language, callbacks["error"]
             )
             if not process:
-                error_occurred = True
-                log_debug("processor", "FFmpeg process start failed")
+                # Kein fataler Fehler – StreamHandler wird automatisch Reconnect versuchen
+                logger.warning(
+                    "FFmpeg process start failed – relying on StreamHandler reconnect"
+                )
+                log_debug("processor", "FFmpeg process start failed, but not fatal")
+                # Kein error_occurred = True, damit der Cleanup nicht als Fehler behandelt wird
                 return
 
             # -----------------------------------------------------------------
