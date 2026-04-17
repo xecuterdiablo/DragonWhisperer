@@ -22959,10 +22959,10 @@ class InstallDependencyDialog(BaseDialog):
         scrollbar = tk.Scrollbar(self.main, orient="vertical", command=canvas.yview)
         self.scrollable_frame = tk.Frame(canvas, bg=CURRENT_THEME.BG_PRIMARY)
 
-        scrollable_frame.bind(
+        self.scrollable_frame.bind(
             "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
         )
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
         canvas.pack(side="left", fill="both", expand=True)
@@ -22984,7 +22984,7 @@ class InstallDependencyDialog(BaseDialog):
 
         # 1. Systempakete
         sys_frame = tk.LabelFrame(
-            scrollable_frame,
+            self.scrollable_frame,
             text="🖥️ Systempakete (externe Tools)",
             bg=CURRENT_THEME.BG_SECONDARY,
             fg=CURRENT_THEME.TEXT_PRIMARY,
@@ -23044,7 +23044,7 @@ class InstallDependencyDialog(BaseDialog):
 
         # 2. Python-Pakete
         py_frame = tk.LabelFrame(
-            scrollable_frame,
+            self.scrollable_frame,
             text="🐍 Python-Pakete (pip)",
             bg=CURRENT_THEME.BG_SECONDARY,
             fg=CURRENT_THEME.TEXT_PRIMARY,
@@ -23089,7 +23089,7 @@ class InstallDependencyDialog(BaseDialog):
 
         # 3. Piper-Stimmen
         voice_frame = tk.LabelFrame(
-            scrollable_frame,
+            self.scrollable_frame,
             text="🎤 Piper-Stimmen (hochwertige TTS)",
             bg=CURRENT_THEME.BG_SECONDARY,
             fg=CURRENT_THEME.TEXT_PRIMARY,
@@ -23164,7 +23164,7 @@ class InstallDependencyDialog(BaseDialog):
 
         # 4. Update-Bereich
         update_frame = tk.LabelFrame(
-            scrollable_frame,
+            self.scrollable_frame,
             text="🔄 Updates für pip-Pakete",
             bg=CURRENT_THEME.BG_SECONDARY,
             fg=CURRENT_THEME.TEXT_PRIMARY,
@@ -23213,7 +23213,7 @@ class InstallDependencyDialog(BaseDialog):
 
         # 5. Ausgabebereich
         output_frame = tk.LabelFrame(
-            scrollable_frame,
+            self.scrollable_frame,
             text="📋 Installationsausgabe",
             bg=CURRENT_THEME.BG_SECONDARY,
             fg=CURRENT_THEME.TEXT_PRIMARY,
@@ -23236,7 +23236,7 @@ class InstallDependencyDialog(BaseDialog):
         self._append_output("🐉 Bereit zum Fliegen. Wähle Pakete oder starte ein Update.\n")
 
         # 6. Steuerungs-Buttons
-        btn_frame = tk.Frame(scrollable_frame, bg=CURRENT_THEME.BG_PRIMARY)
+        btn_frame = tk.Frame(self.scrollable_frame, bg=CURRENT_THEME.BG_PRIMARY)
         btn_frame.pack(fill="x", pady=10)
 
         self.install_btn = tk.Button(
@@ -23272,7 +23272,7 @@ class InstallDependencyDialog(BaseDialog):
 
         self.status_var = tk.StringVar(value="🐉 Bereit")
         tk.Label(
-            scrollable_frame,
+            self.scrollable_frame,
             textvariable=self.status_var,
             bg=CURRENT_THEME.BG_PRIMARY,
             fg=CURRENT_THEME.TEXT_SECONDARY,
@@ -23288,7 +23288,7 @@ class InstallDependencyDialog(BaseDialog):
                 CURRENT_THEME.DRAGON_GREEN
             ))
 
-        scrollable_frame.update_idletasks()
+        self.scrollable_frame.update_idletasks()
         canvas.configure(scrollregion=canvas.bbox("all"))
 
     # -------------------------------------------------------------------------
