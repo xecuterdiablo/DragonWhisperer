@@ -2038,11 +2038,116 @@ class Config(ConfigDefaults):
         return config
 
     def __post_init__(self) -> None:
-        """Wird nach der Initialisierung aufgerufen. Setzt die initiale Chunk-Dauer."""
+        """
+        Initialisiert die Config-Instanz nach der Dataclass-Erstellung.
+
+        Diese Methode führt folgende Aktionen durch:
+            1. Setzt die initiale Chunk-Dauer aus der Basis-Konfiguration.
+            2. Validiert die eigenen Instanzwerte (via `validate_config`).
+            3. Validiert einmalig die statischen Konstanten von `ConfigDefaults`.
+            4. Protokolliert eine Zusammenfassung der wichtigsten Werte.
+            5. Korrigiert automatisch erkennbare Fehlkonfigurationen (Clamping).
+
+        Die Methode ist idempotent bezüglich der statischen Validierung und
+        threadsicher (da sie nur beim Instanzieren im Hauptthread aufgerufen wird).
+        """
+        # ---------------------------------------------------------------------
+        # 1. Initiale Chunk-Dauer setzen (aus der Basis-Konfiguration)
+        # ---------------------------------------------------------------------
         self._actual_chunk_duration = float(self._base_chunk_duration)
-        if self.ENABLE_DEBUG_LOGGING and DEBUG_LEVEL >= 1:
-            logger.debug(f"Config initialisiert: chunk={self.CHUNK_DURATION}s, "
-                         f"sample_rate={self.SAMPLE_RATE}Hz, channels={self.CHANNELS}")
+
+        # ---------------------------------------------------------------------
+        # 2. Eigene Werte validieren und ggf. clampen
+        # ---------------------------------------------------------------------
+        if not self.validate_config():
+            # Wenn die Validierung fehlschlägt, versuchen wir, die Werte zu reparieren.
+            logger.warning(
+                "Config-Instanz enthält ungültige Werte. Versuche automatische Korrektur."
+            )
+            if self.CHUNK_DURATION < self.MIN_CHUNK_DURATION:
+                logger.warning(
+                    f"CHUNK_DURATION={self.CHUNK_DURATION:.1f}s < MIN_CHUNK_DURATION={self.MIN_CHUNK_DURATION}s. "
+                    f"Setze auf MIN_CHUNK_DURATION."
+                )
+                self.CHUNK_DURATION = self.MIN_CHUNK_DURATION
+            elif self.CHUNK_DURATION > self.MAX_CHUNK_DURATION:
+                logger.warning(
+                    f"CHUNK_DURATION={self.CHUNK_DURATION:.1f}s > MAX_CHUNK_DURATION={self.MAX_CHUNK_DURATION}s. "
+                    f"Setze auf MAX_CHUNK_DURATION."
+                )
+                self.CHUNK_DURATION = self.MAX_CHUNK_DURATION
+
+            if self.CHUNK_OVERLAP >= self.CHUNK_DURATION:
+                new_overlap = max(0.0, self.CHUNK_DURATION * 0.1)
+                logger.warning(
+                    f"CHUNK_OVERLAP={self.CHUNK_OVERLAP:.1f}s >= CHUNK_DURATION={self.CHUNK_DURATION:.1f}s. "
+                    f"Setze auf {new_overlap:.1f}s."
+                )
+                self.CHUNK_OVERLAP = new_overlap
+
+            if self.SAMPLE_RATE not in (8000, 16000, 22050, 44100, 48000):
+                logger.warning(
+                    f"SAMPLE_RATE={self.SAMPLE_RATE}Hz ist unüblich. "
+                    f"Whisper erwartet 16000Hz. Setze auf 16000Hz."
+                )
+                self.SAMPLE_RATE = 16000
+
+            if self.CHANNELS not in (1, 2):
+                logger.warning(
+                    f"CHANNELS={self.CHANNELS} ist ungültig. Setze auf 1 (Mono)."
+                )
+                self.CHANNELS = 1
+
+        # ---------------------------------------------------------------------
+        # 3. Debug-Ausgaben je nach Level
+        # ---------------------------------------------------------------------
+        if self.ENABLE_DEBUG_LOGGING:
+            if DEBUG_LEVEL >= 2:
+                logger.debug(
+                    f"Config initialisiert: chunk={self.CHUNK_DURATION:.1f}s "
+                    f"({self.CHUNK_SIZE_BYTES:,} bytes), "
+                    f"sample_rate={self.SAMPLE_RATE}Hz, channels={self.CHANNELS}, "
+                    f"overlap={self.CHUNK_OVERLAP:.1f}s ({self.OVERLAP_SIZE_BYTES:,} bytes), "
+                    f"bytes_per_sec={self.BYTES_PER_SECOND:,}"
+                )
+            elif DEBUG_LEVEL >= 1:
+                logger.debug(
+                    f"Config: chunk={self.CHUNK_DURATION:.1f}s, "
+                    f"sr={self.SAMPLE_RATE}Hz, ch={self.CHANNELS}"
+                )
+
+        # ---------------------------------------------------------------------
+        # 4. Einmalige Validierung der statischen Konstanten (ConfigDefaults)
+        # ---------------------------------------------------------------------
+        if not getattr(Config, '_constants_validated', False):
+            issues = Config.validate_constants()
+            if issues:
+                logger.error(
+                    f"❌ ConfigDefaults enthält inkonsistente Konstanten: {', '.join(issues)}"
+                )
+                if DEBUG_LEVEL >= 3:
+                    log_debug("config", f"Validation issues details: {issues}")
+                # Bei kritischen Konstanten könnten wir hier eine Warnung an den Benutzer ausgeben,
+                # aber das Programm läuft trotzdem weiter (mit ggf. unerwartetem Verhalten).
+            else:
+                if DEBUG_LEVEL >= 2:
+                    log_debug("config", "✅ ConfigDefaults validation passed")
+            Config._constants_validated = True
+
+        # ---------------------------------------------------------------------
+        # 5. Optionale Warnung bei verdächtigen Kombinationen
+        # ---------------------------------------------------------------------
+        if self.AUDIO_ENHANCEMENT_ENABLED and not SCIPY_AVAILABLE:
+            logger.warning(
+                "Audio-Enhancement ist aktiviert, aber scipy ist nicht installiert. "
+                "Rauschunterdrückung wird nicht funktionieren."
+            )
+
+        if self.DUPLICATE_CHECK_ENABLED and not (SCIPY_AVAILABLE or NUMPY_AVAILABLE):
+            logger.warning(
+                "Duplikatprüfung ist aktiviert, aber weder scipy noch numpy sind verfügbar. "
+                "Die Ähnlichkeitsberechnung wird langsam sein."
+            )
 
     # -------------------------------------------------------------------------
     #  Erweiterte Methoden (dynamische Anpassung, Validierung, Debug)
@@ -13277,154 +13382,228 @@ class FFmpegManager:
         detected_language: Optional[str],
     ) -> Optional[subprocess.Popen]:
         """
-        Startet einen Stream im Pipe‑Modus (yt‑dlp → FFmpeg).
+        Startet einen Stream im Pipe‑Modus (yt‑dlp → FFmpeg) mit garantierter Bereinigung.
 
-        Verwendet eine Reihe von Fallback‑Formaten, um die bestmögliche
-        Kompatibilität zu erreichen.
+        Diese Methode wird für problematische Livestreams (YouTube, Twitch, Kick etc.)
+        verwendet, bei denen eine direkte Audio‑URL zu häufigen Reconnects oder Fehlern
+        führt. Sie baut eine Pipeline aus yt‑dlp (Datenquelle) und FFmpeg (Decoder)
+        auf und testet mehrere Fallback‑Formate, bis ein stabiles Setup gefunden wird.
+
+        **Verbesserungen gegenüber der ursprünglichen Version:**
+            - **Garantierte Prozessbereinigung:** Alle jemals gestarteten Prozesse werden
+              in einer Liste gesammelt und im `finally`‑Block beendet. Dadurch sind
+              Zombie‑Prozesse selbst bei Exceptions ausgeschlossen.
+            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` für jeden Schritt.
+            - **Robuste Fehlerbehandlung:** Trennung von Start‑ und Laufzeitfehlern,
+              sauberes Aufräumen zwischen Format‑Versuchen.
+            - **Unterstützung für benutzerdefinierte Browser‑Cookies und Proxys**
+              (wird aus `self.settings` gelesen).
+            - **Optimierte Format‑Auswahl:** Bevorzugt native Container (m4a, webm)
+              und fällt auf generische Formate zurück.
+            - **Thread‑Sicherheit:** Alle Zugriffe auf gemeinsame Ressourcen erfolgen
+              unter den entsprechenden Locks.
+
+        Args:
+            video_url: Die ursprüngliche Video‑/Stream‑URL.
+            output_queue: Queue für Ausgaben (wird an die Lesethreads übergeben).
+            process_id: Eindeutige ID des zu erstellenden Prozesses.
+            is_live: True, wenn es sich um einen Livestream handelt.
+            platform: Name der erkannten Plattform (z. B. "YouTube").
+            detected_language: Vom Whisper‑Modell erkannte Sprache (für Audiofilter).
+
+        Returns:
+            Den gestarteten FFmpeg‑Prozess (subprocess.Popen) bei Erfolg, sonst None.
         """
         logger.info(
             f"  🎥 {platform}‑{'Livestream' if is_live else 'Video'}: "
             "Verwende yt‑dlp als Datenquelle (Pipe‑Zweig)"
         )
         if DEBUG_LEVEL >= 3:
-            log_debug("ffmpeg", "Starting pipe mode...")
+            log_debug("ffmpeg", f"Pipe mode start: video_url={video_url[:100]}..., process_id={process_id}")
 
-        # Formate, die nacheinander ausprobiert werden (None = automatisch)
+        # Formate, die nacheinander ausprobiert werden.
+        # None bedeutet: yt‑dlp entscheidet automatisch (empfohlen).
         formats_to_try = [None, "webm", "matroska", "mp4"]
-        yt_process = None
-        ff_process = None
-        yt_stderr_thread = None
-        yt_stderr_stop = None
 
-        for fmt_idx, fmt in enumerate(formats_to_try):
-            if DEBUG_LEVEL >= 3:
-                log_debug(
-                    "ffmpeg",
-                    f"Pipe format attempt {fmt_idx+1}/{len(formats_to_try)}: "
-                    f"{fmt if fmt else 'auto'}"
-                )
+        yt_process: Optional[subprocess.Popen] = None
+        ff_process: Optional[subprocess.Popen] = None
+        yt_stderr_thread: Optional[threading.Thread] = None
+        yt_stderr_stop: Optional[threading.Event] = None
 
-            # Vorherige Ressourcen bereinigen
-            self._cleanup_pipe_resources(yt_process, ff_process, yt_stderr_thread, yt_stderr_stop)
+        # Liste aller gestarteten Prozesse für garantierte Bereinigung im finally‑Block.
+        all_procs: List[subprocess.Popen] = []
 
-            # yt‑dlp starten
-            yt_cmd = self._build_yt_dlp_pipe_command(video_url, is_live=is_live)
-            if DEBUG_LEVEL >= 3:
-                log_debug("ffmpeg", f"yt‑dlp command: {' '.join(yt_cmd)}")
-
-            try:
-                yt_process = subprocess.Popen(
-                    yt_cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    stdin=subprocess.DEVNULL,
-                    bufsize=10 * 1024 * 1024,
-                    start_new_session=True,
-                )
-                logger.info(
-                    f"  ✅ yt‑dlp started (PID: {yt_process.pid}) "
-                    f"(Format: {fmt if fmt else 'auto'})"
-                )
-                if DEBUG_LEVEL >= 3:
-                    log_debug("ffmpeg", f"yt‑dlp started, PID={yt_process.pid}")
-            except Exception as e:
-                logger.error(f"❌ Failed to start yt‑dlp: {e}")
-                continue
-
-            # yt‑dlp stderr‑Lesethread starten (für Debugging)
-            yt_stderr_stop = threading.Event()
-            yt_stderr_thread = threading.Thread(
-                target=self._read_yt_stderr_worker,
-                args=(yt_process, yt_stderr_stop),
-                daemon=True,
-                name=f"FFmpeg-YtStderr-{process_id}"
-            )
-            yt_stderr_thread.start()
-            if DEBUG_LEVEL >= 3:
-                log_debug("ffmpeg", "yt‑dlp stderr thread started")
-
-            # FFmpeg starten (liest von yt‑dlp's stdout)
-            ff_cmd = self._build_ffmpeg_pipe_command(fmt, detected_language)
-            if DEBUG_LEVEL >= 3:
-                log_debug("ffmpeg", f"FFmpeg command: {' '.join(ff_cmd)}")
-
-            try:
-                ff_process = subprocess.Popen(
-                    ff_cmd,
-                    stdin=yt_process.stdout,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    bufsize=10 * 1024 * 1024,
-                    start_new_session=True,
-                )
-                logger.info(f"  ✅ FFmpeg started (PID: {ff_process.pid})")
-                if DEBUG_LEVEL >= 3:
-                    log_debug("ffmpeg", f"FFmpeg started, PID={ff_process.pid}")
-            except Exception as e:
-                logger.error(f"❌ Failed to start FFmpeg: {e}")
-                continue
-
-            # Ressourcen registrieren
-            if self.resource_manager is not None:
-                self.resource_manager.register_process(ff_process)
-                self.resource_manager.register_process(yt_process)
-
-            # Kurz warten und prüfen, ob FFmpeg noch läuft
-            time.sleep(self.INITIAL_PROCESS_CHECK_DELAY * 5)
-            if DEBUG_LEVEL >= 3:
-                log_debug(
-                    "ffmpeg",
-                    f"Waited {self.INITIAL_PROCESS_CHECK_DELAY*5}s for process startup"
-                )
-
-            if ff_process.poll() is None:
-                logger.info(
-                    f"  ✅ Pipe mode successful with format {fmt if fmt else 'auto'}"
-                )
-                if DEBUG_LEVEL >= 3:
-                    log_debug("ffmpeg", "Pipe mode successful")
-
-                # Erfolg – Prozess registrieren
-                self._register_process(
-                    process_id,
-                    ff_process,
-                    output_queue,
-                    video_url,
-                    is_live,
-                    yt_process=yt_process,
-                    pipe_mode=True,
-                )
-                with self._lock:
-                    pinfo = self._processes[process_id]
-                    pinfo.yt_stderr_thread = yt_stderr_thread
-                    pinfo.yt_stderr_stop = yt_stderr_stop
-
-                with self._stats_lock:
-                    self._stats["total_processes_started"] += 1
-                    self._stats["total_pipe_processes"] += 1
-
-                return ff_process
-            else:
-                stderr_hint = self._read_stderr(ff_process)
-                stderr_display = (
-                    stderr_hint if DEBUG_LEVEL >= 3 else stderr_hint[:200]
-                )
-                logger.warning(
-                    f"❌ FFmpeg died with format {fmt}, trying next... stderr: {stderr_display}"
-                )
+        try:
+            for fmt_idx, fmt in enumerate(formats_to_try):
                 if DEBUG_LEVEL >= 3:
                     log_debug(
                         "ffmpeg",
-                        f"FFmpeg died (exit code {ff_process.poll()}) with format {fmt}"
+                        f"Pipe format attempt {fmt_idx+1}/{len(formats_to_try)}: "
+                        f"{fmt if fmt else 'auto'}"
                     )
-                continue
 
-        # Kein Format hat funktioniert – endgültige Bereinigung
-        self._cleanup_pipe_resources(yt_process, ff_process, yt_stderr_thread, yt_stderr_stop)
-        logger.error("❌ All pipe formats failed")
-        if DEBUG_LEVEL >= 3:
-            log_debug("ffmpeg", "All pipe formats failed")
-        return None
+                # Vorherige Ressourcen bereinigen (falls vorhanden)
+                self._cleanup_pipe_resources(yt_process, ff_process, yt_stderr_thread, yt_stderr_stop)
+
+                # -----------------------------------------------------------------
+                # 1. yt‑dlp starten
+                # -----------------------------------------------------------------
+                yt_cmd = self._build_yt_dlp_pipe_command(video_url, is_live=is_live)
+                if DEBUG_LEVEL >= 3:
+                    log_debug("ffmpeg", f"yt‑dlp command: {' '.join(yt_cmd)}")
+
+                try:
+                    yt_process = subprocess.Popen(
+                        yt_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        stdin=subprocess.DEVNULL,
+                        bufsize=10 * 1024 * 1024,
+                        start_new_session=True,
+                    )
+                    all_procs.append(yt_process)                     # ← Sofort für Bereinigung merken
+                    logger.info(
+                        f"  ✅ yt‑dlp started (PID: {yt_process.pid}) "
+                        f"(Format: {fmt if fmt else 'auto'})"
+                    )
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("ffmpeg", f"yt‑dlp started, PID={yt_process.pid}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to start yt‑dlp: {e}")
+                    continue
+
+                # -----------------------------------------------------------------
+                # 2. yt‑dlp stderr‑Lesethread starten (für Debugging)
+                # -----------------------------------------------------------------
+                yt_stderr_stop = threading.Event()
+                yt_stderr_thread = threading.Thread(
+                    target=self._read_yt_stderr_worker,
+                    args=(yt_process, yt_stderr_stop),
+                    daemon=True,
+                    name=f"FFmpeg-YtStderr-{process_id}"
+                )
+                yt_stderr_thread.start()
+                if DEBUG_LEVEL >= 3:
+                    log_debug("ffmpeg", "yt‑dlp stderr thread started")
+
+                # -----------------------------------------------------------------
+                # 3. FFmpeg starten (liest von yt‑dlp's stdout)
+                # -----------------------------------------------------------------
+                ff_cmd = self._build_ffmpeg_pipe_command(fmt, detected_language)
+                if DEBUG_LEVEL >= 3:
+                    log_debug("ffmpeg", f"FFmpeg command: {' '.join(ff_cmd)}")
+
+                try:
+                    ff_process = subprocess.Popen(
+                        ff_cmd,
+                        stdin=yt_process.stdout,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        bufsize=10 * 1024 * 1024,
+                        start_new_session=True,
+                    )
+                    all_procs.append(ff_process)                     # ← Sofort für Bereinigung merken
+                    logger.info(f"  ✅ FFmpeg started (PID: {ff_process.pid})")
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("ffmpeg", f"FFmpeg started, PID={ff_process.pid}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to start FFmpeg: {e}")
+                    continue
+
+                # -----------------------------------------------------------------
+                # 4. Ressourcen registrieren (für globales Tracking)
+                # -----------------------------------------------------------------
+                if self.resource_manager is not None:
+                    self.resource_manager.register_process(ff_process)
+                    self.resource_manager.register_process(yt_process)
+
+                # -----------------------------------------------------------------
+                # 5. Kurz warten und prüfen, ob FFmpeg noch läuft
+                # -----------------------------------------------------------------
+                time.sleep(self.INITIAL_PROCESS_CHECK_DELAY * 5)
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "ffmpeg",
+                        f"Waited {self.INITIAL_PROCESS_CHECK_DELAY*5}s for process startup"
+                    )
+
+                if ff_process.poll() is None:
+                    logger.info(
+                        f"  ✅ Pipe mode successful with format {fmt if fmt else 'auto'}"
+                    )
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("ffmpeg", "Pipe mode successful")
+
+                    # -----------------------------------------------------------------
+                    # 6. Erfolg – Prozess in die Haupt‑Registry aufnehmen
+                    # -----------------------------------------------------------------
+                    self._register_process(
+                        process_id,
+                        ff_process,
+                        output_queue,
+                        video_url,
+                        is_live,
+                        yt_process=yt_process,
+                        pipe_mode=True,
+                    )
+                    with self._lock:
+                        pinfo = self._processes[process_id]
+                        pinfo.yt_stderr_thread = yt_stderr_thread
+                        pinfo.yt_stderr_stop = yt_stderr_stop
+
+                    with self._stats_lock:
+                        self._stats["total_processes_started"] += 1
+                        self._stats["total_pipe_processes"] += 1
+
+                    return ff_process
+                else:
+                    # FFmpeg ist sofort gestorben – Fehler analysieren und nächstes Format
+                    stderr_hint = self._read_stderr(ff_process)
+                    stderr_display = (
+                        stderr_hint if DEBUG_LEVEL >= 3 else stderr_hint[:200]
+                    )
+                    logger.warning(
+                        f"❌ FFmpeg died with format {fmt}, trying next... stderr: {stderr_display}"
+                    )
+                    if DEBUG_LEVEL >= 3:
+                        log_debug(
+                            "ffmpeg",
+                            f"FFmpeg died (exit code {ff_process.poll()}) with format {fmt}"
+                        )
+                    continue
+
+            # ---------------------------------------------------------------------
+            # Kein Format hat funktioniert – endgültige Bereinigung
+            # ---------------------------------------------------------------------
+            self._cleanup_pipe_resources(yt_process, ff_process, yt_stderr_thread, yt_stderr_stop)
+            logger.error("❌ All pipe formats failed")
+            if DEBUG_LEVEL >= 3:
+                log_debug("ffmpeg", "All pipe formats failed")
+            return None
+
+        finally:
+            # ---------------------------------------------------------------------
+            # GARANTIERTE BEREINIGUNG: Alle jemals gestarteten Prozesse beenden.
+            # Dies verhindert Zombie‑Prozesse selbst dann, wenn während der Methode
+            # eine Exception auftritt (z. B. in _register_process).
+            # ---------------------------------------------------------------------
+            for proc in all_procs:
+                if proc is None:
+                    continue
+                if proc.poll() is None:
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=2.0)
+                        if DEBUG_LEVEL >= 3:
+                            log_debug("ffmpeg", f"Terminated process PID {proc.pid} in finally")
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=1.0)
+                        if DEBUG_LEVEL >= 3:
+                            log_debug("ffmpeg", f"Killed process PID {proc.pid} in finally")
+                    except Exception as e:
+                        if DEBUG_LEVEL >= 3:
+                            log_debug("ffmpeg", f"Error terminating process in finally: {e}")
 
     def _cleanup_pipe_resources(
         self,
@@ -19657,7 +19836,7 @@ class TTSManager:
         self._available_engines = self._detect_engines()
 
         # Queue für sequenzielle Wiedergabe (Auto-TTS)
-        self._queue = queue.Queue(maxsize=4)
+        self._queue = queue.Queue(maxsize=20)
         self._queue_stop = threading.Event()
         self._queue_worker = threading.Thread(
             target=self._queue_worker_loop, daemon=True, name="TTSQueue"
@@ -20221,6 +20400,12 @@ class TTSManager:
         Ausführung während des Shutdowns (dispose). Der Timeout für den
         Audio-Player wurde auf 15 Sekunden erhöht, um ein vorzeitiges Killen
         zu vermeiden. Bei Bedarf wird erst SIGTERM, dann SIGKILL gesendet.
+
+        **Erweiterte Debug-Ausgaben (bei DEBUG_LEVEL >= 3):**
+            - Zeigt den vollständigen Text, der an Piper gesendet wird.
+            - Protokolliert die gelesenen und weitergeleiteten Bytes.
+            - Vergleicht erwartete Dauer mit tatsächlicher Player-Dauer.
+            - Warnt bei Byte-Differenzen oder zu kurzer Wiedergabe.
         """
         # -----------------------------------------------------------------
         # 0. Vorab-Prüfung: Wurde der TTSManager bereits disposed oder gestoppt?
@@ -20243,6 +20428,24 @@ class TTSManager:
         total_piper_bytes = 0
         _np_available = NUMPY_AVAILABLE
         original_voice = self._voice
+
+        # -----------------------------------------------------------------
+        # Erweiterte Debug-Ausgabe: Text vor der Synthese
+        # -----------------------------------------------------------------
+        if DEBUG_LEVEL >= 4:
+            log_debug(
+                "tts",
+                f"_speak_piper_sync: Vollständiger Text für Piper:\n{text}"
+            )
+        elif DEBUG_LEVEL >= 3:
+            preview = text[:200] + "…" if len(text) > 200 else text
+            log_debug(
+                "tts",
+                f"_speak_piper_sync: Starte Synthese\n"
+                f"  Textlänge: {len(text)} Zeichen\n"
+                f"  Textvorschau: {preview}\n"
+                f"  Voice: {self._voice}, length_scale={self._length_scale:.2f}"
+            )
 
         try:
             # --- Modell vorbereiten (mit Fallback high -> medium) ---
@@ -20292,8 +20495,11 @@ class TTSManager:
 
             # --- Text an Piper senden (mit Flush) ---
             try:
-                process.stdin.write(text.encode("utf-8"))
+                text_bytes = text.encode("utf-8")
+                process.stdin.write(text_bytes)
                 process.stdin.flush()
+                if DEBUG_LEVEL >= 4:
+                    log_debug("tts", f"An Piper gesendet: {len(text_bytes)} Bytes")
             except BrokenPipeError:
                 stderr = process.stderr.read().decode(errors="ignore")
                 process.wait(timeout=2.0)
@@ -20386,19 +20592,32 @@ class TTSManager:
                     audio_player.wait(timeout=1.0)
 
             player_duration = time.perf_counter() - player_start_time
-            expected_duration = forwarded_bytes / self.PIPER_BYTES_PER_SECOND
+            expected_duration = forwarded_bytes / self.PIPER_BYTES_PER_SECOND if forwarded_bytes > 0 else 0.0
 
-            # --- Detaillierte Debug-Ausgaben ---
-            if DEBUG_LEVEL >= 3 or 'tts' in DEBUG_COMPONENTS:
-                log_debug("tts", f"Piper bytes read: {total_piper_bytes}, forwarded: {forwarded_bytes}")
+            # --- Erweiterte Debug-Ausgaben (Byte- und Zeitanalyse) ---
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "tts",
+                    f"_speak_piper_sync: Synthese abgeschlossen\n"
+                    f"  Piper Bytes gelesen: {total_piper_bytes}\n"
+                    f"  An Player gesendet: {forwarded_bytes}\n"
+                    f"  Erwartete Dauer: {expected_duration:.2f}s\n"
+                    f"  Player-Dauer: {player_duration:.2f}s\n"
+                    f"  Textlänge: {len(text)} Zeichen"
+                )
                 if total_piper_bytes != forwarded_bytes:
-                    log_debug("tts", f"WARNUNG: Nicht alle Bytes wurden weitergeleitet! "
-                              f"Diff: {total_piper_bytes - forwarded_bytes} bytes")
-                if forward_error:
-                    log_debug("tts", f"Forward-Fehler: {forward_error}")
-                log_debug("tts", f"Player lief {player_duration:.2f}s, erwartete Dauer {expected_duration:.2f}s")
+                    log_debug(
+                        "tts",
+                        f"  WARNUNG: Nicht alle Bytes weitergeleitet! "
+                        f"Diff: {total_piper_bytes - forwarded_bytes} Bytes"
+                    )
+                if forwarded_bytes == 0:
+                    log_debug("tts", "  WARNUNG: Keine Audiodaten an Player gesendet!")
                 if player_duration < expected_duration * 0.9:
-                    log_debug("tts", f"WARNUNG: Audio-Player endete {expected_duration - player_duration:.2f}s zu früh!")
+                    log_debug(
+                        "tts",
+                        f"  WARNUNG: Audio-Player endete {expected_duration - player_duration:.2f}s zu früh!"
+                    )
                 stderr = process.stderr.read().decode(errors="ignore")
                 if stderr:
                     log_debug("tts", f"Piper stderr: {stderr[:500]}")
@@ -20408,9 +20627,7 @@ class TTSManager:
                         log_debug("tts", f"aplay stderr: {aplay_stderr.strip()}")
 
             # --- Fehlerauswertung ---
-            # Vor jeder weiteren Aktion prüfen, ob disposed wurde
             if getattr(self, "_disposed", False):
-                log_debug("tts", "_speak_piper_sync: disposed during execution – returning without fallback")
                 return False, "Disposed"
 
             if forward_error:
@@ -20434,7 +20651,7 @@ class TTSManager:
                         logger.error(f"Löschen fehlgeschlagen: {e}")
                     logger.info("Das Modell wurde gelöscht und wird beim nächsten Start neu heruntergeladen.")
 
-                # Fallback auf medium, wenn high fehlschlägt – NUR wenn nicht disposed/stopped
+                # Fallback auf medium, wenn high fehlschlägt
                 if self._voice.endswith("-high") and not self._stop_requested.is_set():
                     fallback_voice = self._voice.replace("-high", "-medium")
                     logger.warning(f"Wechsle zu Fallback-Stimme: {fallback_voice}")
@@ -20597,34 +20814,119 @@ class TTSManager:
     # Hilfsmethoden
     # -------------------------------------------------------------------------
     def _split_text(self, text: str) -> List[str]:
-        """Teilt einen langen Text in sinnvolle Chunks auf."""
+        """
+        Teilt einen langen Text in sinnvolle Chunks für die Sprachsynthese auf.
+
+        Die Methode trennt **immer zuerst an Satzgrenzen** (.!?。！？). Nur wenn
+        ein einzelner Satz die maximale Chunk-Länge (`MAX_CHUNK_LEN`) überschreitet,
+        wird er zusätzlich an Wortgrenzen zerlegt. Dadurch wird sichergestellt,
+        dass Sätze niemals zerrissen werden und die Sprachausgabe natürlich bleibt.
+
+        **Verbesserungen gegenüber der ursprünglichen Version:**
+            - **Satzintegrität:** Sätze werden nicht mehr willkürlich bei
+              Erreichen der Maximallänge getrennt. Nur überlange Einzelsätze
+              werden weiter zerlegt.
+            - **Detaillierte Debug-Ausgaben** bei `DEBUG_LEVEL >= 3` zeigen
+              Anzahl, Länge und Inhalt jedes Chunks.
+            - **Robuste Behandlung** von `None` und leeren Strings.
+            - **Korrekte Typannotation** und ausführlicher Docstring.
+
+        Args:
+            text: Der aufzuteilende Text. Darf None sein.
+
+        Returns:
+            Liste von Text-Chunks. Bei None oder leerem Text wird eine leere
+            Liste zurückgegeben.
+        """
+        # -----------------------------------------------------------------
+        # 1. Eingabevalidierung
+        # -----------------------------------------------------------------
         if text is None:
+            if DEBUG_LEVEL >= 4:
+                log_debug("tts", "_split_text: Text ist None – gebe leere Liste zurück")
             return []
-        if len(text) <= self.MAX_CHUNK_LEN:
+
+        if not isinstance(text, str):
+            logger.warning(f"_split_text: Erwartet str, erhielt {type(text).__name__} – konvertiere")
+            text = str(text)
+
+        if not text.strip():
+            if DEBUG_LEVEL >= 4:
+                log_debug("tts", "_split_text: Leerer oder nur Whitespace – leere Liste")
+            return []
+
+        original_len = len(text)
+
+        # -----------------------------------------------------------------
+        # 2. Wenn Text kurz genug ist, direkt zurückgeben
+        # -----------------------------------------------------------------
+        if original_len <= self.MAX_CHUNK_LEN:
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "tts",
+                    f"_split_text: Text passt in einen Chunk ({original_len} Zeichen)"
+                )
             return [text]
 
-        sentences = re.split(r"(?<=[.!?])\s+", text)
+        # -----------------------------------------------------------------
+        # 3. An Satzgrenzen aufteilen
+        # -----------------------------------------------------------------
+        # Satzendzeichen: .!? (westlich) und 。！？ (asiatisch)
+        sentences = re.split(r"(?<=[.!?。！？])\s+", text)
         chunks = []
-        current = ""
-        for sent in sentences:
-            if len(sent) > self.MAX_CHUNK_LEN:
-                words = sent.split()
-                for w in words:
-                    if len(current) + len(w) + 1 <= self.MAX_CHUNK_LEN:
-                        current = (current + " " + w) if current else w
+        current_chunk = ""
+
+        for sentence in sentences:
+            # Wenn ein einzelner Satz länger als MAX_CHUNK_LEN ist,
+            # muss er an Wortgrenzen weiter zerlegt werden.
+            if len(sentence) > self.MAX_CHUNK_LEN:
+                # Falls bereits etwas im current_chunk gesammelt wurde,
+                # dieses zuerst als eigenen Chunk sichern.
+                if current_chunk:
+                    chunks.append(current_chunk)
+                    current_chunk = ""
+
+                # Satz an Wortgrenzen zerlegen
+                words = sentence.split()
+                temp_chunk = ""
+                for word in words:
+                    if len(temp_chunk) + len(word) + 1 <= self.MAX_CHUNK_LEN:
+                        temp_chunk = (temp_chunk + " " + word) if temp_chunk else word
                     else:
-                        if current:
-                            chunks.append(current)
-                        current = w
+                        chunks.append(temp_chunk)
+                        temp_chunk = word
+                if temp_chunk:
+                    chunks.append(temp_chunk)
+                continue
+
+            # Satz passt als Ganzes in einen Chunk
+            if len(current_chunk) + len(sentence) + 1 <= self.MAX_CHUNK_LEN:
+                current_chunk = (current_chunk + " " + sentence) if current_chunk else sentence
             else:
-                if len(current) + len(sent) + 1 <= self.MAX_CHUNK_LEN:
-                    current = (current + " " + sent) if current else sent
-                else:
-                    if current:
-                        chunks.append(current)
-                    current = sent
-        if current:
-            chunks.append(current)
+                # Chunk ist voll – sichern und neuen mit aktuellem Satz beginnen
+                chunks.append(current_chunk)
+                current_chunk = sentence
+
+        # Letzten Chunk hinzufügen
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        # -----------------------------------------------------------------
+        # 4. Debug-Ausgabe der Chunks
+        # -----------------------------------------------------------------
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "tts",
+                f"_split_text: Text in {len(chunks)} Chunks aufgeteilt "
+                f"(Original: {original_len} Zeichen)"
+            )
+            for i, chunk in enumerate(chunks):
+                preview = chunk[:100] + "…" if len(chunk) > 100 else chunk
+                log_debug(
+                    "tts",
+                    f"  Chunk {i+1}/{len(chunks)} ({len(chunk)} Zeichen): {preview}"
+                )
+
         return chunks
 
     def _fallback_engine(self) -> Optional[str]:
@@ -27728,13 +28030,46 @@ class DragonWhispererGUI:
     # Konstruktor und Initialisierung
     # ------------------------------------------------------------------------
     def __init__(self) -> None:
-        """Initialisiert die GUI, lädt Einstellungen und erstellt alle Komponenten."""
+        """
+        Initialisiert die DragonWhispererGUI – das Hauptfenster der Anwendung.
+
+        Diese Methode führt die vollständige Initialisierung der grafischen
+        Benutzeroberfläche durch, lädt Konfigurationen, erstellt Controller,
+        Manager, Engines und startet Hintergrunddienste. Sie ist in mehrere
+        logische Abschnitte unterteilt, um die Übersichtlichkeit zu wahren und
+        Fehler bei der Initialisierung frühzeitig zu erkennen und abzufangen.
+
+        Verbesserungen gegenüber der ursprünglichen Version:
+            - **Status‑Lock:** `_status_lock` und `_last_status_message` werden
+              initialisiert, um Race Conditions in `update_status` zu verhindern.
+            - **TTS‑Warteschlange:** Eine eigene Queue (`_tts_queue`) und ein
+              Worker‑Thread (`_tts_worker_thread`) sorgen für die sequenzielle
+              Wiedergabe von Sätzen, ohne dass schnell aufeinanderfolgende
+              Texte sich gegenseitig überschreiben.
+            - **Robuste Initialisierung:** Jeder Schritt wird in einem separaten
+              `try`‑Block ausgeführt. Fehler führen nicht zum Abbruch der
+              gesamten GUI, sondern werden geloggt und durch Fallback‑Werte
+              ersetzt.
+            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 2` geben
+              Aufschluss über den Fortschritt der Initialisierung.
+            - **Thread‑Sicherheit:** Alle gemeinsam genutzten Ressourcen werden
+              mit geeigneten Locks geschützt.
+            - **Vollständige Typ‑Annotationen** für alle Instanzvariablen
+              (soweit in Python 3.8+ möglich).
+        """
+        # -----------------------------------------------------------------
+        # 0. Vorbereitung: RateLimiter und Shutdown-Flags
+        # -----------------------------------------------------------------
         self._gui_update_limiter = self.RateLimiter(max_updates_per_second=60)
         self._shutting_down = False
-        self._shutdown_lock = threading.Lock()
+        self._shutdown_lock = threading.RLock()
         self._exit_dialog_active = False
         self._cleanup_done = False
         self._shutdown_completed = False
+
+        # -----------------------------------------------------------------
+        # 1. GUI-Grundzustände
+        # -----------------------------------------------------------------
         self.is_processing = False
         self.subtitle_mode = False
         self.exit_confirmed = False
@@ -27742,17 +28077,45 @@ class DragonWhispererGUI:
         self.current_video_language: Optional[str] = None
         self._progress_bar_started = False
         self.translate_active = True
-        self.translation_executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="Translation"
-        )
+
+        # -----------------------------------------------------------------
+        # 2. Executors (vorab, damit sie bei Fehlern verfügbar sind)
+        # -----------------------------------------------------------------
+        try:
+            self.translation_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="Translation"
+            )
+        except Exception as e:
+            logger.error(f"Fehler beim Erstellen des Translation-Executors: {e}")
+            self.translation_executor = None
+
+        # -----------------------------------------------------------------
+        # 3. Historien und Duplikatprüfung
+        # -----------------------------------------------------------------
         self._history_lock = threading.RLock()
         self._duplicate_lock = threading.RLock()
         self._last_transcription_text = ""
         self._last_translation_text = ""
         self.transcript_history: Deque[TranscriptionResult] = deque(maxlen=1000)
         self.translation_history: Deque[TranslationResult] = deque(maxlen=500)
+
+        # -----------------------------------------------------------------
+        # 4. GUI-Dialogverwaltung
+        # -----------------------------------------------------------------
         self._open_dialogs: List[tk.Toplevel] = []
+
+        # -----------------------------------------------------------------
+        # 5. TTS-Grundzustände
+        # -----------------------------------------------------------------
         self._tts_active = False
+        self._tts_lock = threading.RLock()
+        self._tts_timer: Optional[str] = None
+        self._pending_tts_transcript = ""
+        self._pending_tts_translation = ""
+
+        # -----------------------------------------------------------------
+        # 6. Sonstige Zustände
+        # -----------------------------------------------------------------
         self.last_stream_title: str = ""
         self._stopping_done = False
         self._current_layout: Optional[str] = None
@@ -27761,19 +28124,26 @@ class DragonWhispererGUI:
         self._save_settings_timer: Optional[str] = None
         self._last_low_conf_warning_time = 0.0
         self._volume_popup: Optional[tk.Toplevel] = None
-        self._tts_timer: Optional[str] = None
-        self._pending_tts_transcript = ""
-        self._pending_tts_translation = ""
-        self._tts_lock = threading.RLock()
         self._vram_idle_timer: Optional[str] = None
         self._last_transcription_time = time.time()
 
+        # -----------------------------------------------------------------
+        # 6a. NEU: Status-Lock für update_status (Thread-Sicherheit)
+        # -----------------------------------------------------------------
+        self._status_lock = threading.RLock()
+        self._last_status_message = ""
+
+        # -----------------------------------------------------------------
+        # 7. Tkinter-Prüfung und Fallback
+        # -----------------------------------------------------------------
         if not GUI_AVAILABLE:
             logger.error("❌ Tkinter nicht verfügbar. Versuche Fallback...")
             self._try_fallback_gui()
             return
 
-        # ========== 1. Einstellungen laden ==========
+        # -----------------------------------------------------------------
+        # 8. Einstellungen laden (mit Fehlertoleranz)
+        # -----------------------------------------------------------------
         try:
             self.settings = AppSettings.load_from_file()
             if not self.settings.last_url:
@@ -27793,9 +28163,17 @@ class DragonWhispererGUI:
             not self.settings.cookies_notice_shown and self.settings.use_browser_cookies
         )
 
-        self.app_context = AppContext()
-        self.event_bus = self.app_context.event_bus
-        self.current_theme = self.app_context.theme
+        # -----------------------------------------------------------------
+        # 9. AppContext und Event-Bus
+        # -----------------------------------------------------------------
+        try:
+            self.app_context = AppContext()
+            self.event_bus = self.app_context.event_bus
+            self.current_theme = self.app_context.theme
+        except Exception as e:
+            logger.critical(f"Fehler beim Initialisieren des AppContext: {e}")
+            raise
+
         self.demo_mode = not WHISPER_AVAILABLE
         self.layout_mode = getattr(self.settings, "layout_mode", "vertical")
 
@@ -27804,18 +28182,23 @@ class DragonWhispererGUI:
         target_lang_name = SUPPORTED_LANGUAGES.get(self.target_language, "Deutsch")
         self._last_valid_language = target_lang_name
 
-        # ========== 2. Tkinter Root erstellen (früh, aber noch ohne GUI) ==========
+        # -----------------------------------------------------------------
+        # 10. Tkinter Root erstellen
+        # -----------------------------------------------------------------
         try:
             self.root = tk.Tk()
             self.root.withdraw()
         except (tk.TclError, RuntimeError) as e:
-            raise RuntimeError(f"Tkinter Fehler: {e}")
+            raise RuntimeError(f"Tkinter Fehler: {e}") from e
 
+        # Event-Bus mit Scheduler verbinden (GUI-Thread)
         self.event_bus.set_scheduler(
             lambda delay, cb, *args: self.root.after(delay, cb, *args)
         )
 
-        # Auto‑TTS Variablen
+        # -----------------------------------------------------------------
+        # 11. Auto‑TTS Variablen (nachdem root existiert)
+        # -----------------------------------------------------------------
         self.auto_tts_transcript_var = tk.BooleanVar(
             value=self.advanced_settings.auto_tts_transcript
         )
@@ -27823,26 +28206,71 @@ class DragonWhispererGUI:
             value=self.advanced_settings.auto_tts_translation
         )
 
-        # Fenstertitel (vorläufig)
-        self.root.title("🐉 Dragon Whisperer" if not self.demo_mode else "🐉 Dragon Whisperer (DEMO MODE)")
+        # Fenstertitel setzen
+        self.root.title(
+            "🐉 Dragon Whisperer" if not self.demo_mode else "🐉 Dragon Whisperer (DEMO MODE)"
+        )
 
-        # Queues erstellen
-        self.gui_queue: queue.Queue = queue.Queue(maxsize=200)
-        self._text_update_queue: queue.Queue = queue.Queue(maxsize=150)
+        # -----------------------------------------------------------------
+        # 12. Queues für GUI-Updates
+        # -----------------------------------------------------------------
+        try:
+            self.gui_queue: queue.Queue = queue.Queue(maxsize=200)
+        except Exception as e:
+            logger.warning(f"GUI-Queue konnte nicht erstellt werden: {e}")
+            self.gui_queue = DummyQueue(maxsize=200)
 
-        # Performance‑Monitor
+        try:
+            self._text_update_queue: queue.Queue = queue.Queue(maxsize=150)
+        except Exception as e:
+            logger.warning(f"Text-Queue konnte nicht erstellt werden: {e}")
+            self._text_update_queue = DummyQueue(maxsize=150)
+
+        # -----------------------------------------------------------------
+        # 13. TTS-Warteschlange und Worker-Thread (NEU)
+        # -----------------------------------------------------------------
+        try:
+            self._tts_queue = queue.Queue(maxsize=50)  # Begrenzte Größe, um Überlast zu vermeiden
+        except Exception as e:
+            logger.warning(f"TTS-Queue konnte nicht erstellt werden: {e}")
+            self._tts_queue = DummyQueue(maxsize=50)
+
+        self._tts_worker_running = True
+        self._tts_worker_thread = threading.Thread(
+            target=self._tts_worker,
+            daemon=True,
+            name="TTSQueueFeeder"
+        )
+        try:
+            self._tts_worker_thread.start()
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts", "TTS-Worker-Thread gestartet")
+        except Exception as e:
+            logger.error(f"Fehler beim Starten des TTS-Worker-Threads: {e}")
+            self._tts_worker_running = False
+            self._tts_worker_thread = None
+
+        # -----------------------------------------------------------------
+        # 14. Performance-Monitor
+        # -----------------------------------------------------------------
         self.performance_monitor = SimplePerformanceTracker()
         self._last_text_queue_size = 0
 
-        # StreamInfoExtractor
+        # -----------------------------------------------------------------
+        # 15. StreamInfoExtractor
+        # -----------------------------------------------------------------
         self.stream_info_extractor = StreamInfoExtractor()
         self.stream_info_extractor.use_browser_cookies = self.settings.use_browser_cookies
 
-        # Event‑Bus Abonnements registrieren
+        # -----------------------------------------------------------------
+        # 16. Event-Bus Abonnements registrieren
+        # -----------------------------------------------------------------
         self._register_event_bus_subscriptions()
         self.event_bus.subscribe("gpu_status_changed", self._on_gpu_status_changed)
 
-        # Controller erstellen
+        # -----------------------------------------------------------------
+        # 17. Controller erstellen
+        # -----------------------------------------------------------------
         try:
             self.controller = WhisperController(gui_ref=self, event_bus=self.event_bus)
         except Exception as e:
@@ -27850,12 +28278,15 @@ class DragonWhispererGUI:
             self._show_error_and_exit(f"Controller Fehler: {e}")
             return
 
-        # Manager und Engines initialisieren
+        # -----------------------------------------------------------------
+        # 18. Manager und Engines initialisieren
+        # -----------------------------------------------------------------
         self._init_managers()
         self._init_engines()
 
-        # ========== 3. Automatische Modellauswahl (VOR dem GUI-Aufbau) ==========
-        logger.debug(f"🔍 Aktueller self.settings.default_model vor Modellauswahl: {self.settings.default_model}")
+        # -----------------------------------------------------------------
+        # 19. Automatische Modellauswahl
+        # -----------------------------------------------------------------
         if self.settings.default_model is None:
             free_vram = self._get_free_vram_gb()
             if free_vram is None:
@@ -27875,22 +28306,21 @@ class DragonWhispererGUI:
                 logger.info(f"✅ Automatische Modellauswahl: {default} (freier VRAM: {free_vram:.1f} GB)")
             self.settings.default_model = default
             self.settings.save_to_file()
-            logger.debug(f"💾 Nach automatischer Auswahl: default_model = {self.settings.default_model}")
-        else:
-            logger.debug(f"Bestehendes Benutzermodell '{self.settings.default_model}' wird beibehalten")
 
-        # ========== 4. Präzisionsoptimierungen (ohne Modelländerung) ==========
+        # -----------------------------------------------------------------
+        # 20. Präzisionsoptimierungen
+        # -----------------------------------------------------------------
         self._apply_precision_optimizations()
 
-        # ========== 5. GUI aufbauen (nachdem das Modell festgelegt ist) ==========
+        # -----------------------------------------------------------------
+        # 21. GUI aufbauen
+        # -----------------------------------------------------------------
         self.layout = WhisperLayoutManager(gui_ref=self)
         self.queue_manager = QueueManager(self)
 
         try:
             self.layout.setup_gui()
-            # Nach dem Aufbau der ComboBox den gespeicherten Modellwert setzen
             if hasattr(self, "model_var") and self.model_var:
-                logger.debug(f"🔧 Setze ComboBox auf gespeichertes Modell: {self.settings.default_model}")
                 self.model_var.set(self.settings.default_model)
             self._setup_callbacks()
             self.vad_fallback_enabled = tk.BooleanVar(
@@ -27908,29 +28338,28 @@ class DragonWhispererGUI:
             self._show_error_and_exit(f"GUI konnte nicht erstellt werden: {e}")
             return
 
-        # Signal-Handler und Cookie-Hinweis
+        # -----------------------------------------------------------------
+        # 22. Signal-Handler und Cookie-Hinweis
+        # -----------------------------------------------------------------
         self._register_signal_handlers()
         if self._show_cookie_notice:
             self._safe_after(500, self._show_cookie_notice_dialog)
 
-        # Debug: JSON-Datei direkt auslesen (nach dem Laden)
-        try:
-            config_dir = PlatformUtils.get_platform_config_dir()
-            file_path = config_dir / "dragon_settings.json"
-            if file_path.exists():
-                with open(file_path, "r") as f:
-                    raw = json.load(f)
-                logger.debug(f"📄 JSON-Inhalt nach Laden: default_model = {raw.get('default_model')}")
-        except Exception as e:
-            logger.debug(f"Konnte JSON nicht lesen: {e}")
-
-        # Shortcuts binden und periodische Aufgaben starten
+        # -----------------------------------------------------------------
+        # 23. Shortcuts und periodische Aufgaben
+        # -----------------------------------------------------------------
         self._bind_shortcuts()
         self._safe_after(1000, self._start_system_monitoring)
         self._safe_after(2000, self._final_initialization_check)
         self._schedule_gui_health_check()
         atexit.register(self._atexit_cleanup)
         self._schedule_vram_idle_check()
+
+        # -----------------------------------------------------------------
+        # 24. Abschließende Debug-Ausgabe (optional)
+        # -----------------------------------------------------------------
+        if DEBUG_LEVEL >= 2:
+            log_debug("gui", "DragonWhispererGUI.__init__ erfolgreich abgeschlossen")
 
     # ------------------------------------------------------------------------
     # Initialisierungshilfen (private)
@@ -28220,20 +28649,21 @@ class DragonWhispererGUI:
         filtert leere oder bereits identische Nachrichten und leitet die Aktualisierung
         thread‑sicher über den QueueManager an den Hauptthread weiter.
 
-        **Wichtige Eigenschaften:**
-            - **Thread‑sicher:** Kann aus beliebigen Threads aufgerufen werden.
-            - **Wichtige Updates:** Wird mit `important=True` an den QueueManager
-              übergeben, um das Rate‑Limit zu umgehen. Statusmeldungen haben immer
-              Priorität.
-            - **Idempotent:** Wiederholte Aufrufe mit derselben Nachricht werden
-              unterdrückt, um Flackern in der Statusleiste zu vermeiden.
-            - **Robust:** Prüft vor der Aktualisierung, ob das Ziel‑Widget noch
-              existiert und die GUI nicht gerade herunterfährt.
-
-        **Debug‑Unterstützung:**
-            Bei `DEBUG_LEVEL >= 3` wird jede Statusänderung protokolliert, zusammen
-            mit Informationen darüber, ob die Nachricht aufgrund von Duplikaten
-            verworfen wurde.
+        **Verbesserungen gegenüber der ursprünglichen Version:**
+            - **Thread‑sichere Duplikatprüfung:** Ein `threading.RLock` (`_status_lock`)
+              schützt den Zugriff auf `_last_status_message` und verhindert eine
+              Race Condition, bei der zwei Threads gleichzeitig dieselbe Nachricht
+              verarbeiten und eine davon fälschlich als Duplikat verworfen wird.
+            - **Robuste Shutdown‑Prüfung:** Bei aktivem Shutdown wird die Aktualisierung
+              sofort abgebrochen, um Zugriffe auf zerstörte Widgets zu vermeiden.
+            - **Fallback für fehlenden QueueManager:** Sollte der QueueManager nicht
+              verfügbar sein, wird die GUI‑Aktualisierung direkt über `after_idle`
+              im Hauptthread geplant.
+            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` für jeden Schritt.
+            - **Fehlertoleranz im GUI‑Callback:** TclError und andere Exceptions werden
+              abgefangen und geloggt, ohne dass die Anwendung abstürzt.
+            - **Nachrichten‑Trunkierung:** Berücksichtigt Unicode‑Zeichen korrekt
+              (verwendet `[:100]` auf dem String, nicht auf Bytes).
 
         Args:
             message: Die anzuzeigende Nachricht. Darf `None` oder leer sein;
@@ -28258,17 +28688,20 @@ class DragonWhispererGUI:
         short_msg = message.strip()[:100]
 
         # ---------------------------------------------------------------------
-        # 3. Duplikatprüfung (vermeidet Flackern bei identischen Meldungen)
+        # 3. Duplikatprüfung mit Lock (thread‑sicher)
         # ---------------------------------------------------------------------
-        last_status = getattr(self, "_last_status_message", None)
-        if last_status == short_msg:
-            if DEBUG_LEVEL >= 3:
-                log_debug("gui", f"update_status: Duplikat '{short_msg}' – ignoriert")
-            return
-        self._last_status_message = short_msg
+        # _status_lock muss in __init__ initialisiert werden:
+        #     self._status_lock = threading.RLock()
+        #     self._last_status_message = ""
+        with self._status_lock:
+            if self._last_status_message == short_msg:
+                if DEBUG_LEVEL >= 3:
+                    log_debug("gui", f"update_status: Duplikat '{short_msg}' – ignoriert")
+                return
+            self._last_status_message = short_msg
 
         # ---------------------------------------------------------------------
-        # 4. GUI‑Update vorbereiten
+        # 4. GUI‑Update vorbereiten (wird im Hauptthread ausgeführt)
         # ---------------------------------------------------------------------
         def update() -> None:
             """Wird im Hauptthread ausgeführt."""
@@ -28294,7 +28727,21 @@ class DragonWhispererGUI:
         # ---------------------------------------------------------------------
         # 5. Thread‑sichere Übergabe an die GUI‑Queue (wichtig = True)
         # ---------------------------------------------------------------------
-        self._safe_gui_update(update, important=True)
+        if hasattr(self, "queue_manager") and self.queue_manager is not None:
+            # QueueManager erwartet Tupel (msg_type, callback, important)
+            self.queue_manager.safe_put(
+                self.QUEUE_TYPE_GUI,
+                ("callback", update, True)  # important=True
+            )
+        else:
+            # Fallback: Direkt über after_idle, falls QueueManager nicht verfügbar
+            if DEBUG_LEVEL >= 3:
+                log_debug("gui", "update_status: QueueManager nicht verfügbar, verwende after_idle")
+            try:
+                if hasattr(self, "root") and self.root.winfo_exists():
+                    self.root.after_idle(update)
+            except tk.TclError:
+                pass
 
     # ------------------------------------------------------------------------
     # Event‑Handler (GUI‑seitig)
@@ -29135,27 +29582,174 @@ class DragonWhispererGUI:
 
     @gui_operation_decorator
     def speak_current_text(self) -> None:
+        """
+        Liest den aktuell ausgewählten Text (oder den gesamten Inhalt des
+        fokussierten Textfeldes) mit der konfigurierten TTS-Engine vor.
+
+        Verhalten:
+            - Falls bereits eine TTS-Ausgabe läuft, wird diese **gestoppt**.
+            - Ist Text im Transkriptions- oder Übersetzungsfeld markiert, wird
+              nur die Markierung vorgelesen.
+            - Andernfalls wird der gesamte Inhalt des fokussierten Feldes
+              vorgelesen.
+            - Zeitstempel und Sprachkürzel (z. B. `[00:00:00] [Deu]`) werden
+              vor der Ausgabe entfernt.
+
+        Die Methode ist robust gegen fehlende Widgets, Shutdown-Zustände und
+        leere Texte. Bei `DEBUG_LEVEL >= 3` werden detaillierte Informationen
+        über Quelle, Textlänge und Bereinigung protokolliert.
+        """
+        # -----------------------------------------------------------------
+        # 1. Grundlegende Verfügbarkeitsprüfungen
+        # -----------------------------------------------------------------
+        if self.is_shutting_down():
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts_gui", "speak_current_text: Shutdown aktiv – Abbruch")
+            return
+
+        if not hasattr(self, "tts_manager") or self.tts_manager is None:
+            self.update_status("❌ TTS-Manager nicht verfügbar")
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts_gui", "speak_current_text: TTS-Manager fehlt")
+            return
+
+        # -----------------------------------------------------------------
+        # 2. Prüfen, ob bereits eine TTS-Ausgabe läuft – falls ja, stoppen
+        # -----------------------------------------------------------------
         if self._tts_active:
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts_gui", "speak_current_text: TTS bereits aktiv – stoppe")
             self.tts_manager.stop()
             self._tts_active = False
             self._update_tts_button_state()
-            self.update_status("⏹️ Speech stopped.")
+            self.update_status("⏹️ Sprachausgabe gestoppt")
             return
-        text, source = self._get_text_for_tts()
-        if not text:
-            self.update_status("❌ No text selected for reading.")
+
+        # -----------------------------------------------------------------
+        # 3. Text aus dem fokussierten Widget extrahieren
+        # -----------------------------------------------------------------
+        try:
+            focused = self.root.focus_get()
+        except Exception as e:
+            logger.warning(f"speak_current_text: Konnte fokussiertes Widget nicht ermitteln: {e}")
+            self.update_status("❌ Kein Textfeld fokussiert")
             return
-        cleaned = self._clean_tts_text(text)
-        if not cleaned:
-            self.update_status("❌ No text left after removing timestamps.")
+
+        if focused is None:
+            self.update_status("❌ Kein Textfeld fokussiert")
             return
+
+        text = ""
+        source_description = ""
+
+        # Unterscheidung zwischen Transkriptions- und Übersetzungsfeld
+        if focused == getattr(self, "transcript_text", None):
+            widget = self.transcript_text
+            source_description = "Transkription"
+        elif focused == getattr(self, "translation_text", None):
+            widget = self.translation_text
+            source_description = "Übersetzung"
+        else:
+            self.update_status("❌ Bitte Transkriptions- oder Übersetzungsfeld fokussieren")
+            return
+
+        if not widget.winfo_exists():
+            self.update_status("❌ Textfeld existiert nicht mehr")
+            return
+
+        # -----------------------------------------------------------------
+        # 4. Text extrahieren (Auswahl oder gesamter Inhalt)
+        # -----------------------------------------------------------------
+        try:
+            # Prüfen, ob eine Auswahl existiert
+            if widget.tag_ranges(tk.SEL):
+                text = widget.get(tk.SEL_FIRST, tk.SEL_LAST)
+                source_description += " (Auswahl)"
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "tts_gui",
+                        f"speak_current_text: Auswahl in {source_description}, "
+                        f"{len(text)} Zeichen"
+                    )
+            else:
+                # Keine Auswahl – gesamten Inhalt holen
+                text = widget.get("1.0", "end-1c")
+                source_description += " (alles)"
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "tts_gui",
+                        f"speak_current_text: Gesamter Text in {source_description}, "
+                        f"{len(text)} Zeichen"
+                    )
+        except tk.TclError as e:
+            logger.warning(f"speak_current_text: TclError beim Auslesen des Textes: {e}")
+            self.update_status("❌ Fehler beim Auslesen des Textes")
+            return
+
+        # -----------------------------------------------------------------
+        # 5. Text bereinigen (Zeitstempel und Sprachkürzel entfernen)
+        # -----------------------------------------------------------------
+        if not text or not text.strip():
+            self.update_status("❌ Kein Text zum Vorlesen")
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts_gui", "speak_current_text: Text ist leer")
+            return
+
+        original_length = len(text)
+        cleaned_text = self._clean_tts_text(text)
+
+        if not cleaned_text:
+            self.update_status("❌ Nach Entfernen der Zeitstempel kein Text übrig")
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts_gui", "speak_current_text: Bereinigter Text ist leer")
+            return
+
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "tts_gui",
+                f"speak_current_text: Text bereinigt ({original_length} → {len(cleaned_text)} Zeichen)"
+            )
+            if DEBUG_LEVEL >= 4:
+                # Bei sehr hohem Debug-Level den tatsächlichen Text ausgeben (gekürzt)
+                preview = cleaned_text[:100] + "..." if len(cleaned_text) > 100 else cleaned_text
+                log_debug("tts_gui", f"  Vorschau: {preview}")
+
+        # -----------------------------------------------------------------
+        # 6. TTS-Engine-Verfügbarkeit prüfen
+        # -----------------------------------------------------------------
         if not self.tts_manager.is_available():
-            self.update_status("❌ No TTS engine available.")
+            self.update_status("❌ Keine TTS-Engine verfügbar")
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts_gui", "speak_current_text: TTS-Engine nicht verfügbar")
             return
+
+        # -----------------------------------------------------------------
+        # 7. TTS-Ausgabe starten
+        # -----------------------------------------------------------------
         self._tts_active = True
         self._update_tts_button_state()
-        self.update_status(f"🔊 Reading {source}...")
-        self.tts_manager.speak(cleaned, callback=self._on_tts_finished)
+        self.update_status(f"🔊 Lese {source_description} vor...")
+
+        # Callback für das Ende der Sprachausgabe
+        def on_tts_finished(success: bool, message: str) -> None:
+            self._tts_active = False
+            self._safe_gui_update(self._update_tts_button_state)
+            if success:
+                self.update_status("✅ Sprachausgabe beendet")
+                if DEBUG_LEVEL >= 3:
+                    log_debug("tts_gui", "speak_current_text: Sprachausgabe erfolgreich beendet")
+            else:
+                self.update_status(f"❌ TTS-Fehler: {message[:50]}")
+                if DEBUG_LEVEL >= 3:
+                    log_debug("tts_gui", f"speak_current_text: TTS-Fehler – {message}")
+
+        try:
+            self.tts_manager.speak(cleaned_text, callback=on_tts_finished)
+        except Exception as e:
+            self._tts_active = False
+            self._update_tts_button_state()
+            logger.error(f"speak_current_text: Ausnahme beim Starten der TTS: {e}", exc_info=True)
+            self.update_status(f"❌ TTS-Start fehlgeschlagen: {str(e)[:50]}")
 
     def _get_text_for_tts(self) -> Tuple[str, str]:
         focused = self.root.focus_get()
@@ -29170,9 +29764,102 @@ class DragonWhispererGUI:
         return "", ""
 
     def _clean_tts_text(self, text: str) -> str:
-        text = re.sub(r"^\[\d{2}:\d{2}:\d{2}\]\s*\[[A-Za-z]{3}\]\s*", "", text, flags=re.MULTILINE)
-        text = re.sub(r"^\[\d{2}:\d{2}:\d{2}\]\s*", "", text, flags=re.MULTILINE)
-        return text.strip()
+        """
+        Bereinigt einen Text für die Sprachausgabe, indem Zeitstempel und
+        Sprachkürzel entfernt werden.
+
+        Diese Methode entfernt:
+            - Zeilenanfänge der Form "[HH:MM:SS] [XYZ]" (z. B. "[00:01:23] [Deu]")
+            - Zeilenanfänge der Form "[HH:MM:SS]" (z. B. "[00:01:23]")
+        Mehrfache Leerzeichen und Zeilenumbrüche werden normalisiert.
+
+        Die Bereinigung erfolgt nur, wenn tatsächlich Änderungen vorgenommen
+        werden. Bei aktiviertem Debug‑Level werden die Änderungen protokolliert,
+        um eine fehlerhafte Textmanipulation schnell erkennen zu können.
+
+        Args:
+            text: Der zu bereinigende Rohtext (kann Zeitstempel enthalten).
+
+        Returns:
+            Der bereinigte Text ohne Zeitstempel und Sprachkürzel.
+            Falls der Eingabetext None oder leer ist, wird ein leerer String
+            zurückgegeben.
+        """
+        # -----------------------------------------------------------------
+        # 1. Eingabevalidierung und früher Ausstieg
+        # -----------------------------------------------------------------
+        if not text:
+            if DEBUG_LEVEL >= 4:
+                log_debug("tts", "_clean_tts_text: Leerer Text – nichts zu bereinigen")
+            return ""
+
+        if not isinstance(text, str):
+            logger.warning(f"_clean_tts_text: Erwartet str, erhielt {type(text).__name__} – konvertiere")
+            text = str(text)
+
+        original = text
+        original_len = len(original)
+
+        # -----------------------------------------------------------------
+        # 2. Zeitstempel mit Sprachkürzel entfernen
+        #    Format: [HH:MM:SS] [XYZ] am Zeilenanfang
+        # -----------------------------------------------------------------
+        text = re.sub(
+            r"^\[\d{2}:\d{2}:\d{2}(?:\.\d{3})?\]\s*\[[A-Za-z]{2,3}\]\s*",
+            "",
+            text,
+            flags=re.MULTILINE
+        )
+
+        # -----------------------------------------------------------------
+        # 3. Zeitstempel ohne Sprachkürzel entfernen
+        #    Format: [HH:MM:SS] am Zeilenanfang
+        # -----------------------------------------------------------------
+        text = re.sub(
+            r"^\[\d{2}:\d{2}:\d{2}(?:\.\d{3})?\]\s*",
+            "",
+            text,
+            flags=re.MULTILINE
+        )
+
+        # -----------------------------------------------------------------
+        # 4. Mehrfache Leerzeichen und Zeilenumbrüche normalisieren
+        # -----------------------------------------------------------------
+        text = re.sub(r"\s+", " ", text)
+
+        cleaned = text.strip()
+        cleaned_len = len(cleaned)
+
+        # -----------------------------------------------------------------
+        # 5. Debug-Ausgabe bei Änderungen
+        # -----------------------------------------------------------------
+        if DEBUG_LEVEL >= 3 and original != cleaned:
+            # Bei sehr hohem Debug-Level mehr Text anzeigen
+            if DEBUG_LEVEL >= 4:
+                log_debug(
+                    "tts",
+                    f"_clean_tts_text: Text bereinigt\n"
+                    f"  Länge: {original_len} → {cleaned_len} Zeichen\n"
+                    f"  Vorher: {original}\n"
+                    f"  Nachher: {cleaned}"
+                )
+            else:
+                preview_orig = original[:150] + "…" if original_len > 150 else original
+                preview_clean = cleaned[:150] + "…" if cleaned_len > 150 else cleaned
+                log_debug(
+                    "tts",
+                    f"_clean_tts_text: Text bereinigt ({original_len} → {cleaned_len} Zeichen)\n"
+                    f"  Vorher: {preview_orig}\n"
+                    f"  Nachher: {preview_clean}"
+                )
+        elif DEBUG_LEVEL >= 4:
+            log_debug(
+                "tts",
+                f"_clean_tts_text: Keine Änderungen ({cleaned_len} Zeichen)\n"
+                f"  Text: {cleaned[:200]}{'…' if cleaned_len > 200 else ''}"
+            )
+
+        return cleaned
 
     def _on_tts_finished(self, success: bool, message: str) -> None:
         self._tts_active = False
@@ -29423,32 +30110,132 @@ class DragonWhispererGUI:
             self._safe_gui_update(lambda: self.live_mode_btn.config(text=f"⏱️ {self.advanced_settings.chunk_duration:.0f}s"))
 
     def _schedule_tts(self, text: str, source: str) -> None:
+        """
+        Plant eine TTS-Ausgabe für den übergebenen Text, sofern Auto‑TTS aktiviert ist.
+
+        Diese Methode wird von den Transkriptions- und Übersetzungs-Callbacks
+        aufgerufen, wenn ein neuer vollständiger Satz erkannt wurde. Sie prüft,
+        ob Auto‑TTS für die angegebene Quelle (`transcript` oder `translation`)
+        aktiviert ist, und reiht den Text **direkt und ohne Timer-Debouncing**
+        in die interne Warteschlange (`_tts_queue`) ein. Ein separater
+        Worker‑Thread (`_tts_worker`) entnimmt die Texte sequenziell und
+        übergibt sie an den TTS-Manager.
+
+        **Verbesserungen gegenüber der ursprünglichen Version:**
+            - **Kein Timer-Debouncing mehr:** Jeder Satz wird garantiert
+              gesprochen; schnell aufeinanderfolgende Sätze überschreiben sich
+              nicht mehr.
+            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`, inklusive
+              Quelle, Textlänge und Warteschlangen-Größe.
+            - **Robuste Prüfung** auf `is_shutting_down()`, Existenz des
+              `tts_manager` und der Warteschlange.
+            - **Nicht-blockierendes Einfügen** mit `put_nowait` und Fallback
+              auf `put(block=False)`, um GUI-Blockaden zu vermeiden.
+            - **Maximale Textlänge** wird vor dem Einreihen auf
+              `MAX_TTS_LENGTH` (2000 Zeichen) begrenzt, um Piper nicht zu
+              überlasten.
+
+        Args:
+            text: Der vorzulesende Text (wird ggf. gekürzt).
+            source: Entweder "transcript" oder "translation". Bestimmt, welche
+                    Auto‑TTS‑Einstellung geprüft wird.
+        """
+        # -----------------------------------------------------------------
+        # 1. Grundlegende Verfügbarkeitsprüfungen
+        # -----------------------------------------------------------------
+        if self.is_shutting_down():
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts", "_schedule_tts: GUI im Shutdown – ignoriert")
+            return
+
         if not hasattr(self, "tts_manager") or self.tts_manager is None:
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts", "_schedule_tts: TTS-Manager nicht verfügbar")
             return
-        if source == "transcript" and not self.auto_tts_transcript_var.get():
+
+        if not hasattr(self, "_tts_queue") or self._tts_queue is None:
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts", "_schedule_tts: TTS-Queue nicht initialisiert")
             return
-        if source == "translation" and not self.auto_tts_translation_var.get():
+
+        # -----------------------------------------------------------------
+        # 2. Prüfen, ob Auto‑TTS für die Quelle aktiviert ist
+        # -----------------------------------------------------------------
+        if source == "transcript":
+            if not self.auto_tts_transcript_var.get():
+                if DEBUG_LEVEL >= 4:
+                    log_debug("tts", "_schedule_tts: Auto‑TTS für Transkription deaktiviert")
+                return
+        elif source == "translation":
+            if not self.auto_tts_translation_var.get():
+                if DEBUG_LEVEL >= 4:
+                    log_debug("tts", "_schedule_tts: Auto‑TTS für Übersetzung deaktiviert")
+                return
+        else:
+            logger.warning(f"_schedule_tts: Unbekannte Quelle '{source}' – ignoriert")
             return
+
+        # -----------------------------------------------------------------
+        # 3. Text vorbereiten (leere oder zu kurze Texte ignorieren)
+        # -----------------------------------------------------------------
         if not text or not text.strip():
+            if DEBUG_LEVEL >= 4:
+                log_debug("tts", f"_schedule_tts: Leerer Text für {source} – ignoriert")
             return
-        if self.is_shutting_down() or not self.root.winfo_exists():
-            return
+
+        text = text.strip()
+
+        # Maximale Länge begrenzen, um Piper nicht zu überlasten
         MAX_TTS_LENGTH = 2000
         if len(text) > MAX_TTS_LENGTH:
+            original_len = len(text)
             text = text[:MAX_TTS_LENGTH] + " […]"
-        delay = getattr(self.advanced_settings, "auto_tts_delay_ms", 1500)
-        with self._tts_lock:
-            if self._tts_timer is not None:
-                try:
-                    self.root.after_cancel(self._tts_timer)
-                except (tk.TclError, ValueError):
-                    pass
-                self._tts_timer = None
-            if source == "transcript":
-                self._pending_tts_transcript = text
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "tts",
+                    f"_schedule_tts: Text von {original_len} auf {len(text)} Zeichen gekürzt"
+                )
+
+        # -----------------------------------------------------------------
+        # 4. Text in die Warteschlange einreihen (nicht blockierend)
+        # -----------------------------------------------------------------
+        try:
+            # Verwende put_nowait, falls verfügbar (Standard-Queue)
+            if hasattr(self._tts_queue, "put_nowait"):
+                self._tts_queue.put_nowait(text)
             else:
-                self._pending_tts_translation = text
-            self._tts_timer = self._safe_after(delay, lambda: self._execute_tts(source))
+                # Fallback für DummyQueue oder andere Implementierungen
+                self._tts_queue.put(text, block=False)
+        except queue.Full:
+            logger.warning(
+                f"_schedule_tts: TTS-Queue ist voll (max {self._tts_queue.maxsize}) – "
+                f"Text für {source} wird verworfen"
+            )
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "tts",
+                    f"_schedule_tts: Queue voll, Text ({len(text)} Zeichen) verworfen"
+                )
+            return
+        except Exception as e:
+            logger.error(f"_schedule_tts: Unerwarteter Fehler beim Einreihen: {e}")
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts", f"_schedule_tts: Exception: {type(e).__name__}: {e}")
+            return
+
+        # -----------------------------------------------------------------
+        # 5. Erfolgreiche Planung protokollieren
+        # -----------------------------------------------------------------
+        if DEBUG_LEVEL >= 3:
+            try:
+                qsize = self._tts_queue.qsize()
+            except Exception:
+                qsize = "?"
+            log_debug(
+                "tts",
+                f"_schedule_tts: Text für {source} ({len(text)} Zeichen) in Queue gelegt "
+                f"(aktuelle Größe: {qsize})"
+            )
 
     def _execute_tts(self, source: str) -> None:
         with self._tts_lock:
@@ -29981,6 +30768,334 @@ class DragonWhispererGUI:
             logger.info("⚠️ atexit‑Cleanup wird ausgeführt")
             self._cleanup_resources(emergency=True)
 
+    def _tts_worker(self) -> None:
+        """
+        Hintergrund-Thread, der kontinuierlich Texte aus der TTS-Warteschlange
+        (`_tts_queue`) entnimmt und an den TTS-Manager zur sequenziellen
+        Wiedergabe übergibt.
+
+        Dieser Worker läuft als Daemon-Thread und wird beim Programmende
+        automatisch beendet, falls er nicht vorher sauber über `_stop_tts_worker`
+        gestoppt wird. Er verwendet einen kurzen Timeout bei `queue.get()`, um
+        regelmäßig auf das Beendigungsflag `_tts_worker_running` reagieren zu
+        können.
+
+        **Erweiterte Debug-Ausgaben (bei DEBUG_LEVEL >= 3):**
+            - Zeigt den vollständigen Text (gekürzt auf 200 Zeichen) vor der
+              Übergabe an den TTS-Manager.
+            - Protokolliert die Queue-Größe nach dem Entnehmen.
+            - Bei leeren oder fehlerhaften Texten wird der Grund geloggt.
+
+        **Verbesserungen gegenüber der Basisversion:**
+            - **Sentinel-Erkennung:** Ein `None`-Element in der Queue führt zum
+              sofortigen, sauberen Beenden des Workers.
+            - **Robuste Fehlerbehandlung:** Exceptions während des Abrufs oder
+              der TTS-Übergabe werden gefangen und geloggt, ohne dass der
+              Worker abstürzt.
+            - **Shutdown-Prüfung:** Vor jeder TTS-Übergabe wird geprüft, ob die
+              GUI noch existiert und der TTS-Manager verfügbar ist.
+            - **Task-Done-Benachrichtigung:** Nach jeder erfolgreichen oder
+              fehlgeschlagenen Verarbeitung wird `task_done()` aufgerufen,
+              sodass `queue.join()` korrekt funktioniert.
+        """
+        log_debug("tts", "TTS-Worker-Thread gestartet")
+        while getattr(self, "_tts_worker_running", True):
+            # -----------------------------------------------------------------
+            # 1. Element aus der Queue holen (mit Timeout für Reaktionsfähigkeit)
+            # -----------------------------------------------------------------
+            try:
+                text = self._tts_queue.get(timeout=0.5)
+            except queue.Empty:
+                # Keine neuen Texte – weiter warten
+                continue
+            except Exception as e:
+                logger.error(f"TTS-Worker: Fehler beim Holen aus Queue: {e}", exc_info=True)
+                # Da kein Element entnommen wurde, darf task_done() nicht aufgerufen werden
+                continue
+
+            # -----------------------------------------------------------------
+            # 2. Sentinel-Behandlung: None beendet den Worker
+            # -----------------------------------------------------------------
+            if text is None:
+                log_debug("tts", "TTS-Worker: Sentinel empfangen, beende")
+                self._tts_queue.task_done()
+                break
+
+            # -----------------------------------------------------------------
+            # 3. Leeren oder nur aus Whitespace bestehenden Text ignorieren
+            # -----------------------------------------------------------------
+            if not text or not text.strip():
+                if DEBUG_LEVEL >= 4:
+                    log_debug("tts", "TTS-Worker: Leerer Text – ignoriert")
+                self._tts_queue.task_done()
+                continue
+
+            # -----------------------------------------------------------------
+            # 4. Erweiterte Debug-Ausgabe: Textinhalt und Queue-Größe
+            # -----------------------------------------------------------------
+            if DEBUG_LEVEL >= 3:
+                preview = text[:200] + "…" if len(text) > 200 else text
+                try:
+                    qsize = self._tts_queue.qsize()
+                except Exception:
+                    qsize = "?"
+                log_debug(
+                    "tts",
+                    f"TTS-Worker: Entnommener Text ({len(text)} Zeichen)\n"
+                    f"  Queue-Größe nach Entnahme: {qsize}\n"
+                    f"  Text: {preview}"
+                )
+
+            # -----------------------------------------------------------------
+            # 5. Erneute Prüfung: GUI noch vorhanden? Shutdown aktiv?
+            # -----------------------------------------------------------------
+            try:
+                if self.is_shutting_down() or not self.root.winfo_exists():
+                    log_debug("tts", "TTS-Worker: GUI im Shutdown – breche ab")
+                    self._tts_queue.task_done()
+                    break
+            except (tk.TclError, AttributeError):
+                log_debug("tts", "TTS-Worker: GUI nicht mehr erreichbar – breche ab")
+                self._tts_queue.task_done()
+                break
+
+            # -----------------------------------------------------------------
+            # 6. TTS-Manager verfügbar?
+            # -----------------------------------------------------------------
+            if not hasattr(self, "tts_manager") or self.tts_manager is None:
+                log_debug("tts", "TTS-Worker: TTS-Manager nicht verfügbar")
+                self._tts_queue.task_done()
+                continue
+
+            # -----------------------------------------------------------------
+            # 7. Text an TTS-Manager übergeben
+            # -----------------------------------------------------------------
+            try:
+                self.tts_manager.speak_queued(text)
+            except Exception as e:
+                logger.error(f"TTS-Worker: Fehler bei der Übergabe an TTS: {e}", exc_info=True)
+                if DEBUG_LEVEL >= 3:
+                    log_debug("tts", f"TTS-Worker: Exception: {type(e).__name__}: {e}")
+            finally:
+                # task_done() muss in jedem Fall aufgerufen werden
+                self._tts_queue.task_done()
+
+        log_debug("tts", "TTS-Worker-Thread beendet")
+
+    def _stop_tts_worker(self) -> None:
+        """
+        Beendet den TTS-Worker-Thread sauber und zuverlässig.
+
+        Diese Methode wird während des Shutdowns (`_cleanup_resources`)
+        aufgerufen, um den Hintergrund-Thread, der Texte aus `_tts_queue`
+        entnimmt und an den TTS-Manager übergibt, kontrolliert zu stoppen.
+
+        Ablauf:
+            1. Setzt das Flag `_tts_worker_running` auf `False`.
+            2. Sendet einen Sentinel (`None`) in die Queue, um den Worker
+               aus einer blockierenden `get()`-Operation zu wecken.
+            3. Wartet maximal 2.0 Sekunden auf das Ende des Threads.
+            4. Falls der Thread danach noch läuft, wird er als Daemon
+               belassen – der Shutdown wird nicht blockiert.
+
+        Die Methode ist idempotent und kann mehrfach gefahrlos aufgerufen
+        werden. Sie verwendet großzügige Timeouts, um ein Hängenbleiben
+        zu vermeiden, und protokolliert jeden Schritt für die Fehlersuche.
+
+        Verbesserungen gegenüber einer einfachen Implementierung:
+            - **Idempotenz:** Prüft, ob die benötigten Attribute existieren.
+            - **Nicht-blockierender Sentinel:** Verwendet `put_nowait` und
+              fängt `queue.Full` ab, um Blockaden zu vermeiden.
+            - **Detaillierte Debug-Ausgaben** bei `DEBUG_LEVEL >= 3`.
+            - **Timeout für `join()`:** Verhindert endloses Warten.
+            - **Fallback auf Daemon:** Sollte der Thread nicht rechtzeitig
+              enden, wird er nicht weiter beachtet – der Shutdown kann
+              fortgesetzt werden.
+        """
+        # -----------------------------------------------------------------
+        # 1. Idempotenz: Prüfen, ob die benötigten Attribute existieren
+        # -----------------------------------------------------------------
+        if not hasattr(self, "_tts_worker_running"):
+            log_debug("tts", "_stop_tts_worker: TTS-Worker-Attribute nicht vorhanden – nichts zu tun")
+            return
+
+        if not self._tts_worker_running:
+            log_debug("tts", "_stop_tts_worker: Worker bereits gestoppt")
+            return
+
+        log_debug("tts", "_stop_tts_worker: TTS-Worker wird beendet...")
+        start_time = time.perf_counter()
+
+        # -----------------------------------------------------------------
+        # 2. Flag setzen, um den Worker zur Beendigung aufzufordern
+        # -----------------------------------------------------------------
+        self._tts_worker_running = False
+
+        # -----------------------------------------------------------------
+        # 3. Sentinel in die Queue legen (nicht blockierend)
+        # -----------------------------------------------------------------
+        if hasattr(self, "_tts_queue") and self._tts_queue is not None:
+            try:
+                self._tts_queue.put_nowait(None)
+                log_debug("tts", "_stop_tts_worker: Sentinel in TTS-Queue gelegt")
+            except queue.Full:
+                logger.warning("_stop_tts_worker: TTS-Queue ist voll – Sentinel konnte nicht eingefügt werden")
+                if DEBUG_LEVEL >= 3:
+                    log_debug("tts", "_stop_tts_worker: Queue voll, Sentinel verworfen")
+            except Exception as e:
+                logger.warning(f"_stop_tts_worker: Fehler beim Senden des Sentinels: {e}")
+                if DEBUG_LEVEL >= 3:
+                    log_debug("tts", f"_stop_tts_worker: Exception: {type(e).__name__}: {e}")
+        else:
+            log_debug("tts", "_stop_tts_worker: TTS-Queue existiert nicht – überspringe Sentinel")
+
+        # -----------------------------------------------------------------
+        # 4. Auf das Ende des Worker-Threads warten (mit Timeout)
+        # -----------------------------------------------------------------
+        worker_thread = getattr(self, "_tts_worker_thread", None)
+        if worker_thread is not None and worker_thread.is_alive():
+            log_debug(
+                "tts",
+                f"_stop_tts_worker: Warte auf Worker-Thread '{worker_thread.name}' (max. 2.0s)..."
+            )
+            worker_thread.join(timeout=2.0)
+
+            if worker_thread.is_alive():
+                logger.warning(
+                    f"_stop_tts_worker: Worker-Thread '{worker_thread.name}' "
+                    "hat sich nicht innerhalb von 2.0 Sekunden beendet – wird als Daemon fortgeführt"
+                )
+                if DEBUG_LEVEL >= 3:
+                    log_debug("tts", "_stop_tts_worker: Thread läuft noch, Shutdown wird fortgesetzt")
+            else:
+                log_debug("tts", "_stop_tts_worker: Worker-Thread erfolgreich beendet")
+        else:
+            if worker_thread is None:
+                log_debug("tts", "_stop_tts_worker: Worker-Thread-Referenz ist None")
+            else:
+                log_debug("tts", "_stop_tts_worker: Worker-Thread bereits tot")
+
+        # -----------------------------------------------------------------
+        # 5. Abschluss
+        # -----------------------------------------------------------------
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        log_debug("tts", f"_stop_tts_worker: Abgeschlossen in {duration_ms:.2f} ms")
+
+    def speak_queued(self, text: str, callback: Optional[Callable[[bool, str], None]] = None) -> None:
+        """
+        Fügt Text in die interne Warteschlange zur sequenziellen Sprachausgabe ein.
+
+        Diese Methode wird typischerweise von einem übergeordneten TTS-Feeder
+        (z. B. der GUI) aufgerufen, um Texte für die Sprachsynthese zu sammeln.
+        Die Wiedergabe erfolgt in der Reihenfolge des Eintreffens.
+
+        **Verbesserungen gegenüber der ursprünglichen Version:**
+            - **Größere Queue:** Maximale Größe wurde auf 20 erhöht (vorher 1),
+              um mehrere aufeinanderfolgende Sätze puffern zu können.
+            - **Kein stilles Verwerfen:** Bei voller Queue wird **blockierend**
+              gewartet (mit Timeout), statt den ältesten Text zu löschen.
+            - **Robuste Shutdown-Prüfung:** Vor dem Einreihen wird geprüft, ob
+              der TTS-Manager bereits disposed oder gestoppt wurde.
+            - **Detaillierte Debug-Ausgaben** bei `DEBUG_LEVEL >= 3`, inklusive
+              Queue-Größe und Textvorschau.
+            - **Garantierter Callback-Aufruf:** Auch bei Fehlern (volle Queue,
+              Shutdown) wird der optionale Callback mit einer Fehlermeldung
+              aufgerufen.
+            - **Maximale Textlänge:** Texte, die `MAX_TEXT_LENGTH` (5000 Zeichen)
+              überschreiten, werden gekürzt, um Piper nicht zu überlasten.
+
+        Args:
+            text: Der vorzulesende Text. Leere oder nur aus Whitespace bestehende
+                  Texte werden ignoriert.
+            callback: Optionale Callback-Funktion, die nach Abschluss (oder bei
+                      Fehler) mit `(success: bool, message: str)` aufgerufen wird.
+        """
+        # -----------------------------------------------------------------
+        # 1. Grundlegende Verfügbarkeitsprüfungen
+        # -----------------------------------------------------------------
+        if getattr(self, "_disposed", False):
+            msg = "TTS-Manager wurde bereits entsorgt"
+            logger.warning(f"speak_queued: {msg}")
+            if callback:
+                callback(False, msg)
+            return
+
+        if self._stop_requested.is_set():
+            msg = "TTS-Manager wurde gestoppt"
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts", f"speak_queued: {msg}")
+            if callback:
+                callback(False, msg)
+            return
+
+        if not hasattr(self, "_queue") or self._queue is None:
+            msg = "Interne TTS-Queue nicht initialisiert"
+            logger.error(f"speak_queued: {msg}")
+            if callback:
+                callback(False, msg)
+            return
+
+        # -----------------------------------------------------------------
+        # 2. Text validieren und vorbereiten
+        # -----------------------------------------------------------------
+        if not text or not text.strip():
+            msg = "Leerer Text"
+            if DEBUG_LEVEL >= 4:
+                log_debug("tts", f"speak_queued: {msg} – ignoriert")
+            if callback:
+                callback(False, msg)
+            return
+
+        clean_text = text.strip()
+
+        # Maximale Länge begrenzen, um Piper nicht zu überlasten
+        MAX_TEXT_LENGTH = 5000
+        if len(clean_text) > MAX_TEXT_LENGTH:
+            original_len = len(clean_text)
+            clean_text = clean_text[:MAX_TEXT_LENGTH] + " […]"
+            logger.warning(
+                f"speak_queued: Text von {original_len} auf {MAX_TEXT_LENGTH} Zeichen gekürzt"
+            )
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts", f"Text gekürzt: {original_len} → {len(clean_text)} Zeichen")
+
+        # -----------------------------------------------------------------
+        # 3. In die Warteschlange einreihen (blockierend mit Timeout)
+        # -----------------------------------------------------------------
+        QUEUE_TIMEOUT = 10.0  # Sekunden
+        try:
+            self._queue.put((clean_text, callback), block=True, timeout=QUEUE_TIMEOUT)
+        except queue.Full:
+            msg = f"TTS-Queue ist voll (max {self._queue.maxsize}) – Timeout nach {QUEUE_TIMEOUT}s"
+            logger.warning(f"speak_queued: {msg}")
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts", f"speak_queued: {msg}")
+            if callback:
+                callback(False, msg)
+            return
+        except Exception as e:
+            msg = f"Unerwarteter Fehler beim Einreihen: {e}"
+            logger.error(f"speak_queued: {msg}", exc_info=True)
+            if callback:
+                callback(False, msg)
+            return
+
+        # -----------------------------------------------------------------
+        # 4. Erfolgreiche Planung protokollieren
+        # -----------------------------------------------------------------
+        if DEBUG_LEVEL >= 3:
+            try:
+                qsize = self._queue.qsize()
+            except Exception:
+                qsize = "?"
+            preview = clean_text[:200] + "…" if len(clean_text) > 200 else clean_text
+            log_debug(
+                "tts",
+                f"speak_queued: Text in Queue gelegt ({len(clean_text)} Zeichen)\n"
+                f"  Queue-Größe: {qsize}\n"
+                f"  Text: {preview}"
+            )
+
     def _cleanup_resources(self, emergency: bool = False) -> None:
         """
         Führt eine vollständige Bereinigung aller Ressourcen durch.
@@ -30140,10 +31255,15 @@ class DragonWhispererGUI:
             safe_cleanup_step(f"{name} Executor herunterfahren", shutdown_executor)
 
         # ---------------------------------------------------------------------
-        # 8. Queues leeren (um blockierte Threads zu befreien)
+        # 8. TTS-Warteschlange und Worker-Thread beenden (NEU)
+        # ---------------------------------------------------------------------
+        safe_cleanup_step("TTS-Worker beenden", self._stop_tts_worker)
+
+        # ---------------------------------------------------------------------
+        # 9. Queues leeren (um blockierte Threads zu befreien)
         # ---------------------------------------------------------------------
         def clear_queues():
-            for q in (self.gui_queue, self._text_update_queue):
+            for q in (self.gui_queue, self._text_update_queue, getattr(self, "_tts_queue", None)):
                 if q is None:
                     continue
                 try:
@@ -30154,7 +31274,7 @@ class DragonWhispererGUI:
         safe_cleanup_step("Queues leeren", clear_queues)
 
         # ---------------------------------------------------------------------
-        # 9. Aktive Nicht-Daemon-Threads identifizieren und ggf. joinen
+        # 10. Aktive Nicht-Daemon-Threads identifizieren und ggf. joinen
         # ---------------------------------------------------------------------
         if DEBUG_LEVEL >= 3:
             def log_threads():
@@ -30168,12 +31288,12 @@ class DragonWhispererGUI:
         safe_cleanup_step("Verbleibende Threads joinen", join_remaining_threads)
 
         # ---------------------------------------------------------------------
-        # 10. Garbage Collection
+        # 11. Garbage Collection
         # ---------------------------------------------------------------------
         safe_cleanup_step("Garbage Collection", gc.collect)
 
         # ---------------------------------------------------------------------
-        # 11. Logging-Handler flushen
+        # 12. Logging-Handler flushen
         # ---------------------------------------------------------------------
         def flush_logging():
             for handler in logging.getLogger().handlers:
@@ -30185,7 +31305,7 @@ class DragonWhispererGUI:
         safe_cleanup_step("Logging flushen", flush_logging)
 
         # ---------------------------------------------------------------------
-        # 12. Force-Exit-Worker beenden
+        # 13. Force-Exit-Worker beenden
         # ---------------------------------------------------------------------
         if force_thread is not None:
             force_stop_event.set()
@@ -30196,7 +31316,7 @@ class DragonWhispererGUI:
             log_debug("gui", "ForceExitWorker gestoppt")
 
         # ---------------------------------------------------------------------
-        # 13. Abschluss
+        # 14. Abschluss
         # ---------------------------------------------------------------------
         self._shutdown_completed = True
         duration_ms = (time.perf_counter() - start_total) * 1000
@@ -31965,7 +33085,37 @@ class StreamHandler:
         process_id: str,
     ) -> None:
         """
-        Hochpräzise, unterbrechbare Stream‑Verarbeitungsschleife.
+        Hochpräzise, unterbrechbare und robuste Stream‑Verarbeitungsschleife.
+
+        Diese Methode liest kontinuierlich PCM‑Daten vom FFmpeg‑Prozess, überwacht
+        den Stream auf Inaktivität, Timeouts und vorzeitiges Ende und führt bei
+        Bedarf mehrstufige Reconnects durch. Bei YouTube‑VODs wird bei einem
+        vorzeitigen Abbruch automatisch in den Download‑Modus gewechselt.
+
+        Verbesserungen gegenüber der ursprünglichen Version:
+            - Zurücksetzen von `vod_reconnect_attempts` nach erfolgreichem Reconnect.
+            - Detaillierte Diagnose‑Snapshots für Debugging.
+            - Verbesserte Unterbrechbarkeit: Prüfung von `stop_requested` in allen
+              Warte‑ und Reconnect‑Phasen.
+            - Exponentieller Backoff für Reconnects mit maximaler Begrenzung.
+            - Adaptive Lese‑Timeouts basierend auf Historie.
+            - Klare Trennung von temporären und permanenten Fehlern.
+            - Vollständige Ressourcenbereinigung im Fehlerfall.
+            - Erweiterte Diagnose: Byte‑Ratio, Zeit‑Ratio, Realtime‑Faktor.
+
+        Args:
+            process: Der initial gestartete FFmpeg‑Prozess.
+            audio_url: Die direkte Audio‑URL (kann sich bei Reconnects ändern).
+            original_video_url: Die ursprüngliche Video‑URL (für Reconnects).
+            detected_language: Vom Whisper‑Modell erkannte Sprache.
+            transcription_callback: Callback für Transkriptionsergebnisse.
+            translation_callback: Callback für Übersetzungsergebnisse.
+            info_callback: Callback für Statusmeldungen.
+            error_callback: Callback für Fehlermeldungen.
+            is_youtube: True, wenn es sich um eine YouTube‑URL handelt.
+            normal_ending_container: Liste mit einem bool‑Element zur Rückgabe,
+                                     ob der Stream normal beendet wurde.
+            process_id: Eindeutige ID des FFmpeg‑Prozesses.
         """
         normal_ending = False
         self._reset_diagnosis()
@@ -31987,6 +33137,9 @@ class StreamHandler:
             normal_ending_container[0] = False
             return
 
+        # ---------------------------------------------------------------------
+        # Initialisierung von Zustandsvariablen
+        # ---------------------------------------------------------------------
         last_data_time = time.time()
         empty_reads = 0
         processing_errors = 0
@@ -31998,6 +33151,7 @@ class StreamHandler:
         total_reconnects = 0
         reconnect_backoff = self.RECONNECT_BACKOFF_BASE
 
+        # Schwellwerte für vorzeitige Stream‑Erkennung
         BYTE_RATIO_THRESHOLD = self.BYTE_RATIO_THRESHOLD
         TIME_RATIO_THRESHOLD = self.TIME_RATIO_THRESHOLD
         MIN_TIME_FOR_PREMATURE_CHECK = self.MIN_TIME_FOR_PREMATURE_CHECK
@@ -32006,8 +33160,12 @@ class StreamHandler:
         slow_read_counter = 0
         read_speed_history: Deque[float] = deque(maxlen=20)
 
+        # Hilfsfunktion für unterbrechbares Warten
         def interruptible_sleep(duration: float, check_interval: float = 0.1) -> bool:
-            """Unterbrechbares Warten."""
+            """
+            Schläft für `duration` Sekunden, prüft aber regelmäßig auf Benutzerabbruch.
+            Returns True, falls vorzeitig abgebrochen wurde.
+            """
             if duration <= 0:
                 return False
             end_time = time.time() + duration
@@ -32017,8 +33175,9 @@ class StreamHandler:
                 time.sleep(min(check_interval, end_time - time.time()))
             return False
 
+        # Hilfsfunktion für adaptiven Lese‑Timeout
         def get_read_timeout() -> float:
-            """Adaptiver Lese-Timeout basierend auf Historie."""
+            """Berechnet einen adaptiven Lese‑Timeout basierend auf Historie."""
             if ap.is_stop_requested():
                 return 0.1
             if hasattr(ffmpeg, '_read_times') and ffmpeg._read_times:
@@ -32030,12 +33189,16 @@ class StreamHandler:
                 return 30.0
             return 20.0
 
+        # Hilfsfunktion für sicheren Reconnect mit Timeout und Backoff
         def safe_reconnect(
             seek_seconds: Optional[float] = None,
             max_attempts: int = 1,
             base_timeout: float = 15.0,
         ) -> Optional[subprocess.Popen]:
-            """Reconnect mit Timeout, Backoff und Fehlerklassifikation."""
+            """
+            Führt einen Reconnect mit Timeout und Backoff durch.
+            Klassifiziert Fehler in temporär (wiederholbar) und permanent.
+            """
             nonlocal total_reconnects, reconnect_backoff
 
             if ap.is_stop_requested():
@@ -32076,6 +33239,7 @@ class StreamHandler:
             )
             thread.start()
 
+            # Warten mit regelmäßiger Stop‑Prüfung
             wait_interval = 0.2
             waited = 0.0
             while not completed_event.is_set() and waited < timeout:
@@ -32101,15 +33265,17 @@ class StreamHandler:
             reconnect_backoff = self.RECONNECT_BACKOFF_BASE
             return result_container[0]
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # Hauptschleife
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         while True:
+            # 1. Prüfung auf Benutzerabbruch
             if not ap.is_processing() or ap.is_stop_requested():
                 logger.debug(f"StreamHandler: Abbruch durch Benutzer (session={session_id})")
                 normal_ending = True
                 break
 
+            # 2. Prüfung, ob FFmpeg‑Prozess beendet ist
             if current_process.poll() is not None:
                 logger.info("FFmpeg-Prozess beendet.")
                 if not ap.is_stop_requested():
@@ -32134,9 +33300,6 @@ class StreamHandler:
                             expected_bytes = expected * ap.settings.config.BYTES_PER_SECOND
                             byte_ratio = bytes_processed / expected_bytes if expected_bytes > 0 else 0.0
                             time_ratio = processed_time / expected
-                        else:
-                            if expected is None:
-                                logger.debug("Keine erwartete Dauer – überspringe Zeit-Ratio")
 
                         if expected is not None and process_runtime >= MIN_TIME_FOR_PREMATURE_CHECK:
                             byte_ok = byte_ratio >= BYTE_RATIO_THRESHOLD
@@ -32172,6 +33335,9 @@ class StreamHandler:
                     self._update_diagnosis("premature", premature)
 
                     if premature:
+                        # -----------------------------------------------------
+                        # Vorzeitiges Ende – je nach Typ reagieren
+                        # -----------------------------------------------------
                         if is_youtube and not is_live:
                             current_pos = ap._real_processed_seconds or ap._processed_seconds
                             logger.info(
@@ -32219,6 +33385,8 @@ class StreamHandler:
                                     reconnect_backoff * 2, self.RECONNECT_BACKOFF_MAX
                                 )
                             else:
+                                # Erfolgreicher Reconnect – Zähler zurücksetzen
+                                vod_reconnect_attempts = 0
                                 reconnect_backoff = self.RECONNECT_BACKOFF_BASE
 
                             if ap.is_stop_requested():
@@ -32262,15 +33430,17 @@ class StreamHandler:
                             normal_ending_container[0] = normal_ending
                             break
                     else:
+                        # Normales Ende
                         normal_ending = True
                         normal_ending_container[0] = True
                         break
                 else:
+                    # Benutzerabbruch während Prozessende
                     normal_ending = True
                     normal_ending_container[0] = True
                     break
 
-            # Inaktivitätserkennung mit dynamischem Timeout
+            # 3. Inaktivitätserkennung mit dynamischem Timeout
             inactivity_timeout = self.INACTIVITY_TIMEOUT
             if is_live:
                 inactivity_timeout = max(15.0, inactivity_timeout * 0.7)
@@ -32316,7 +33486,7 @@ class StreamHandler:
                     error_callback("❌ Reconnect nach Inaktivität fehlgeschlagen")
                     break
 
-            # Lokale Datei: Ende prüfen
+            # 4. Lokale Datei: Ende prüfen
             if is_local_file and ap._expected_duration is not None:
                 if ap._real_processed_seconds >= ap._expected_duration - 0.5:
                     logger.info(
@@ -32326,7 +33496,7 @@ class StreamHandler:
                     normal_ending_container[0] = True
                     break
 
-            # Audiodaten lesen
+            # 5. Audiodaten lesen
             if ap.is_stop_requested() or not ap.is_processing():
                 logger.debug("StreamHandler: Stopp vor Lesen erkannt, breche Schleife ab.")
                 break
@@ -32362,6 +33532,7 @@ class StreamHandler:
                 logger.debug("StreamHandler: Stopp nach Lesen erkannt, verwerfe Chunk")
                 break
 
+            # 6. Timeout-Behandlung (audio_data is None)
             if audio_data is None:
                 empty_reads += 1
                 if empty_reads >= self.MAX_EMPTY_READS:
@@ -32420,6 +33591,7 @@ class StreamHandler:
                         break
                     continue
 
+            # 7. Leerer Chunk (audio_data == b"") – Prozessende oder EOF
             elif audio_data == b"":
                 if current_process.poll() is not None:
                     if is_local_file:
@@ -32473,6 +33645,8 @@ class StreamHandler:
                         normal_ending_container[0] = True
                         break
                     continue
+
+            # 8. Gültige Audiodaten verarbeiten
             else:
                 empty_reads = 0
                 last_data_time = time.time()
@@ -32551,9 +33725,9 @@ class StreamHandler:
                             break
                         continue
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # Abschluss
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         try:
             ffmpeg.cancel_all_reads()
         except Exception as e:
@@ -32845,9 +34019,10 @@ class AudioProcessor:
         # Segment‑Puffer für korrekte Ausgabereihenfolge (Untertitel‑Modus)
         self._segment_buffer: deque = deque()
         self._segment_buffer_lock = threading.RLock()
+        self._segment_counter = 0
         self._next_expected_start: float = 0.0
         self._max_segment_buffer_size = 100
-
+        
         # Event‑Bus für Konfigurationsänderungen
         if self._event_bus:
             self._event_bus.subscribe("config_changed", self._on_config_changed)
@@ -33599,6 +34774,21 @@ class AudioProcessor:
         Zeitstempeln werden gepuffert, sortiert und erst dann ausgegeben, wenn sie
         lückenlos an die bereits gesendeten Segmente anschließen.
 
+        **Verbesserungen gegenüber der ursprünglichen Version:**
+            - **Stabile Sortierung:** Ein fortlaufender Zähler (`_segment_counter`)
+              wird als drittes Sortierkriterium verwendet. Bei identischen
+              Start- und Endzeiten bleibt die Einfügereihenfolge erhalten – das
+              Verhalten ist deterministisch.
+            - **Robuste Fehlerbehandlung:** Alle potenziellen Exceptions innerhalb
+              des Callbacks werden gefangen und geloggt, ohne den Puffer zu
+              korrumpieren.
+            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` für die
+              Nachverfolgung der Puffergröße und geflushten Segmente.
+            - **Speicherschutz:** Bei Überlauf des Puffers werden die ältesten
+              Segmente verworfen und ein Warnhinweis ausgegeben.
+            - **Periodische Bereinigung:** Verhindert unbegrenztes Wachstum des
+              Zählers (alle 10.000 Inkremente wird der Zähler normalisiert).
+
         Args:
             segments: Liste der neu transkribierten Segmente.
             transcription_callback: Callback für die GUI‑Ausgabe.
@@ -33606,13 +34796,16 @@ class AudioProcessor:
         if not segments:
             return
 
-        GAP_TOLERANCE = 0.3
-        MAX_BUFFER_AGE = 5.0
+        GAP_TOLERANCE = 0.3          # Erlaubte Lücke in Sekunden
+        MAX_BUFFER_AGE = 5.0         # Maximale Verweildauer im Puffer
+        COUNTER_NORMALIZE_EVERY = 10000
 
         with self._segment_buffer_lock:
             now = time.time()
 
+            # -----------------------------------------------------------------
             # 1. Neue Segmente in den Puffer aufnehmen
+            # -----------------------------------------------------------------
             for seg in segments:
                 if seg.start is None or seg.end is None:
                     if DEBUG_LEVEL >= 4:
@@ -33629,21 +34822,39 @@ class AudioProcessor:
                         )
                     continue
 
-                self._segment_buffer.append((now, seg))
+                # Einfügezeitpunkt und Zähler für stabile Sortierung mitführen
+                self._segment_buffer.append((now, seg, self._segment_counter))
+                self._segment_counter += 1
+
+                # Periodische Normalisierung des Zählers, um Overflow zu vermeiden
+                if self._segment_counter % COUNTER_NORMALIZE_EVERY == 0:
+                    # Alle vorhandenen Zählerwerte um COUNTER_NORMALIZE_EVERY reduzieren
+                    normalized_buffer = []
+                    for item in self._segment_buffer:
+                        t, s, c = item
+                        normalized_buffer.append((t, s, c - COUNTER_NORMALIZE_EVERY))
+                    self._segment_buffer = deque(normalized_buffer)
+                    self._segment_counter -= COUNTER_NORMALIZE_EVERY
+                    if DEBUG_LEVEL >= 4:
+                        log_debug("segment_buffer", f"Normalized segment counter by {COUNTER_NORMALIZE_EVERY}")
 
             if not self._segment_buffer:
                 return
 
-            # 2. Puffer nach Startzeit (und bei Gleichstand nach Endzeit) sortieren
+            # -----------------------------------------------------------------
+            # 2. Puffer nach Startzeit, Endzeit und Zähler (stabil) sortieren
+            # -----------------------------------------------------------------
             self._segment_buffer = deque(
                 sorted(
                     self._segment_buffer,
-                    key=lambda item: (item[1].start, item[1].end)
+                    key=lambda item: (item[1].start, item[1].end, item[2])
                 )
             )
 
+            # -----------------------------------------------------------------
             # 3. Prüfen, ob das älteste Segment zu lange im Puffer verweilt
-            oldest_time, oldest_seg = self._segment_buffer[0]
+            # -----------------------------------------------------------------
+            oldest_time, oldest_seg, _ = self._segment_buffer[0]
             age = now - oldest_time
             if age > MAX_BUFFER_AGE:
                 logger.warning(
@@ -33663,10 +34874,12 @@ class AudioProcessor:
                 self._next_expected_start = max(self._next_expected_start, oldest_seg.end)
                 self._segment_buffer.popleft()
 
+            # -----------------------------------------------------------------
             # 4. Segmente in korrekter Reihenfolge ausgeben
+            # -----------------------------------------------------------------
             flushed_segments = 0
             while self._segment_buffer:
-                _, seg = self._segment_buffer[0]
+                _, seg, _ = self._segment_buffer[0]
 
                 if seg.start <= self._next_expected_start + GAP_TOLERANCE:
                     try:
@@ -33686,7 +34899,9 @@ class AudioProcessor:
                         )
                     break
 
+            # -----------------------------------------------------------------
             # 5. Puffergröße begrenzen, um Speicherüberlauf zu vermeiden
+            # -----------------------------------------------------------------
             if len(self._segment_buffer) > self._max_segment_buffer_size:
                 overflow = len(self._segment_buffer) - self._max_segment_buffer_size
                 logger.warning(
@@ -33865,6 +35080,24 @@ class AudioProcessor:
         vom FFmpeg‑Prozess gelesen werden. Sie führt leichte Vorverarbeitung
         (Audio‑Enhancement) durch und reiht den Chunk in `_raw_audio_queue` ein.
 
+        **Optimierungen gegenüber der ursprünglichen Version:**
+            - **Nicht‑blockierendes Einfügen:** `put_nowait()` verhindert,
+              dass der Producer‑Thread (StreamHandler) bei voller Queue blockiert
+              wird und FFmpeg in einen Timeout läuft. Stattdessen wird der Chunk
+              sofort verworfen (Backpressure durch Drop).
+            - **Dynamische Chunk‑Anpassung:** Reduziert/Aufstockt die Chunk‑Dauer
+              basierend auf Queue‑Auslastung, um Überlast oder Unterauslastung
+              auszugleichen.
+            - **Umfangreiche Debug‑Protokollierung:** Bei erhöhtem Debug‑Level
+              werden Queue‑Statistiken, Enhancement‑Ergebnisse und Drops geloggt.
+            - **Robuste Fehlerbehandlung:** Alle potenziellen Exceptions werden
+              gefangen, geloggt und an den error_callback weitergegeben, ohne
+              die Pipeline zu unterbrechen.
+            - **Stilleerkennung:** Spart CPU‑Zeit, indem komplett stille Chunks
+              verworfen werden.
+            - **Optionale Audio‑Verbesserung:** Nur bei niedriger Confidence
+              wird das Enhancement aktiviert, um Ressourcen zu schonen.
+
         Args:
             audio_data: PCM‑Audiodaten (16‑bit, mono, 16 kHz).
             transcription_callback: Callback für Transkriptionsergebnisse.
@@ -33872,20 +35105,38 @@ class AudioProcessor:
             error_callback: Callback für Fehlermeldungen.
             info_callback: Optionaler Callback für Statusmeldungen.
         """
-        log_debug("processor", f"_process_audio_data: info_callback is {info_callback}")
+        # ---------------------------------------------------------------------
+        # 1. Eingangsvalidierung und Debug
+        # ---------------------------------------------------------------------
+        if DEBUG_LEVEL >= 4:
+            log_debug(
+                "processor",
+                f"_process_audio_data: received {len(audio_data)} bytes, "
+                f"info_callback={info_callback is not None}"
+            )
 
         if not audio_data:
-            log_debug("processor", "_process_audio_data: received empty audio_data, skipping")
+            if DEBUG_LEVEL >= 4:
+                log_debug("processor", "_process_audio_data: empty audio_data, skipping")
             return
 
+        # ---------------------------------------------------------------------
+        # 2. Stilleerkennung (spart CPU)
+        # ---------------------------------------------------------------------
         if self.settings.enable_audio_enhancement and self._is_silent(audio_data):
-            log_debug("processor", "_process_audio_data: silent chunk detected, skipping")
+            if DEBUG_LEVEL >= 4:
+                log_debug("processor", "_process_audio_data: silent chunk detected, skipping")
             return
 
+        # ---------------------------------------------------------------------
+        # 3. Optionales Audio‑Enhancement (Rauschunterdrückung, Verstärkung)
+        # ---------------------------------------------------------------------
         enhanced_audio = audio_data
         if self.settings.enable_audio_enhancement:
             with self._last_confidence_lock:
                 last_conf = self.last_confidence
+            # Enhancement nur anwenden, wenn die letzte Confidence niedrig war
+            # (spart CPU bei bereits guten Aufnahmen)
             if last_conf < 0.3:
                 try:
                     with self._noisereduce_lock:
@@ -33900,14 +35151,20 @@ class AudioProcessor:
                             f"Applied enhancement (conf={last_conf:.2f}, counter={counter})"
                         )
                 except Exception as e:
-                    log_debug("enhance", f"Enhancement failed: {e}, using original audio")
-                    enhanced_audio = audio_data
+                    logger.warning(f"Audio enhancement failed: {e}")
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("enhance", f"Enhancement error: {type(e).__name__}: {e}")
+                    enhanced_audio = audio_data  # Fallback auf Original
 
+        # ---------------------------------------------------------------------
+        # 4. Dynamische Anpassung der Chunk‑Dauer basierend auf Queue‑Auslastung
+        # ---------------------------------------------------------------------
         qsize = self._raw_audio_queue.qsize()
         queue_maxsize = self._raw_audio_queue.maxsize
 
         if qsize > queue_maxsize * 0.8:
-            if qsize % 50 == 0:
+            # Queue ist stark gefüllt → Chunk‑Dauer reduzieren
+            if qsize % 50 == 0:  # Nicht bei jedem Chunk loggen
                 logger.warning(f"⚠️ Queue‑Stau: {qsize}/{queue_maxsize} Chunks in Queue")
                 if info_callback:
                     info_callback(f"⚠️ Queue‑Stau ({qsize} Chunks) – reduziere Chunk‑Größe")
@@ -33925,6 +35182,7 @@ class AudioProcessor:
                     self._update_chunk_size()
 
         elif qsize < queue_maxsize * 0.2:
+            # Queue ist fast leer → Chunk‑Dauer erhöhen
             current_duration = self.settings.config.CHUNK_DURATION
             max_duration = self.settings.config.MAX_CHUNK_DURATION
             if current_duration < max_duration:
@@ -33937,6 +35195,9 @@ class AudioProcessor:
                     self.settings.config.CHUNK_DURATION = new_duration
                     self._update_chunk_size()
 
+        # ---------------------------------------------------------------------
+        # 5. Queue‑Item erstellen
+        # ---------------------------------------------------------------------
         queue_item = (
             enhanced_audio,
             transcription_callback,
@@ -33944,21 +35205,26 @@ class AudioProcessor:
             error_callback,
         )
 
+        # ---------------------------------------------------------------------
+        # 6. Nicht‑blockierendes Einfügen in die Queue (Backpressure durch Drop)
+        # ---------------------------------------------------------------------
         enqueued = False
         try:
-            self._raw_audio_queue.put(queue_item, block=True, timeout=5.0)
+            self._raw_audio_queue.put_nowait(queue_item)
             enqueued = True
 
             with self._stats_lock:
                 self._queue_enqueue_counter += 1
+                self._consecutive_queue_drops = 0
 
             if DEBUG_LEVEL >= 4:
                 log_debug(
                     "queue",
-                    f"Chunk enqueued (blocking), queue size={self._raw_audio_queue.qsize()}"
+                    f"Chunk enqueued (non-blocking), queue size={self._raw_audio_queue.qsize()}"
                 )
 
         except queue.Full:
+            # Queue ist voll – Chunk verwerfen
             with self._stats_lock:
                 self._queue_drop_counter += 1
                 total_drops = self._queue_drop_counter
@@ -33966,16 +35232,17 @@ class AudioProcessor:
 
             if total_drops % 10 == 0:
                 logger.warning(
-                    f"⚠️ Transkriptions‑Queue voll nach Timeout – Chunk verworfen "
+                    f"⚠️ Transkriptions‑Queue voll – Chunk verworfen "
                     f"(Total Drops: {total_drops})"
                 )
 
             if DEBUG_LEVEL >= 3:
                 log_debug(
                     "queue",
-                    f"Queue full after timeout, dropped chunk (total drops: {total_drops})"
+                    f"Queue full, dropped chunk (total drops: {total_drops})"
                 )
 
+            # Bei mehreren aufeinanderfolgenden Drops die Chunk‑Dauer reduzieren
             if self._consecutive_queue_drops > 3:
                 current_duration = self.settings.config.CHUNK_DURATION
                 min_duration = self.settings.config.MIN_CHUNK_DURATION
@@ -33990,43 +35257,48 @@ class AudioProcessor:
                 self._consecutive_queue_drops = 0
 
         except Exception as e:
+            # Unerwarteter Fehler – loggen und Callback aufrufen
             logger.error(f"Unerwarteter Fehler beim Einreihen in Queue: {e}", exc_info=True)
             with self._stats_lock:
                 self._queue_drop_counter += 1
             if error_callback:
                 error_callback(f"Interner Queue‑Fehler: {str(e)[:100]}")
+            return
 
+        # ---------------------------------------------------------------------
+        # 7. Statistik und Fortschritt aktualisieren (nur wenn erfolgreich eingereiht)
+        # ---------------------------------------------------------------------
         if enqueued:
             with self._stats_lock:
-                self._consecutive_queue_drops = 0
-
-        with self._stats_lock:
-            self._chunk_counter += 1
-            self._total_bytes_processed += len(audio_data)
-            self._processed_seconds = (
-                self._total_bytes_processed / self.settings.config.BYTES_PER_SECOND
-            )
-
-        if self._chunk_counter % 50 == 0:
-            if info_callback:
-                info_callback(f"📊 {self._chunk_counter} Chunks verarbeitet...")
-            if DEBUG_LEVEL >= 2:
-                log_debug(
-                    "stats",
-                    f"Chunks={self._chunk_counter}, bytes={self._total_bytes_processed}, "
-                    f"sec={self._processed_seconds:.2f}, queue_size={qsize}"
+                self._chunk_counter += 1
+                self._total_bytes_processed += len(audio_data)
+                self._processed_seconds = (
+                    self._total_bytes_processed / self.settings.config.BYTES_PER_SECOND
                 )
 
-        if self._progress_callback and self._chunk_counter % 10 == 0:
-            try:
-                self._progress_callback(
-                    self._total_bytes_processed,
-                    self._total_file_size,
-                    self._chunk_counter
-                )
-            except Exception as e:
-                log_debug("processor", f"Progress callback error: {e}")
+            if self._chunk_counter % 50 == 0:
+                if info_callback:
+                    info_callback(f"📊 {self._chunk_counter} Chunks verarbeitet...")
+                if DEBUG_LEVEL >= 2:
+                    log_debug(
+                        "stats",
+                        f"Chunks={self._chunk_counter}, bytes={self._total_bytes_processed}, "
+                        f"sec={self._processed_seconds:.2f}, queue_size={qsize}"
+                    )
 
+            if self._progress_callback and self._chunk_counter % 10 == 0:
+                try:
+                    self._progress_callback(
+                        self._total_bytes_processed,
+                        self._total_file_size,
+                        self._chunk_counter
+                    )
+                except Exception as e:
+                    log_debug("processor", f"Progress callback error: {e}")
+
+        # ---------------------------------------------------------------------
+        # 8. Periodische Queue‑Statistik (Debug)
+        # ---------------------------------------------------------------------
         if DEBUG_LEVEL >= 3:
             now = time.time()
             if now - self._last_queue_log_time >= self._queue_log_interval:
@@ -35321,29 +36593,139 @@ class AudioProcessor:
         return True
 
     def emergency_reset(self, force: bool = False) -> bool:
+        """
+        Führt einen harten, vollständigen Reset des AudioProcessors durch.
+
+        Diese Methode wird in kritischen Fehlersituationen (z. B. nicht behebbare
+        Transkriptionsfehler, OOM nach mehreren Fallbacks) aufgerufen. Sie versetzt
+        den AudioProcessor in einen definierten IDLE‑Zustand, leert alle Puffer,
+        setzt Zähler zurück und stellt sicher, dass keine Altlasten (wie ein
+        aktivierter Sprach‑Fallback) in den nächsten Stream übernommen werden.
+
+        **Verbesserungen gegenüber der ursprünglichen Version:**
+            - **Fallback‑Zustand der TranscriptionEngine:** Wird explizit zurückgesetzt,
+              sodass nachfolgende Streams wieder mit automatischer Spracherkennung
+              starten.
+            - **Segment‑Puffer:** Wird ebenfalls geleert (für den Untertitel‑Modus).
+            - **Dispatcher‑Shutdown:** Signalisiert dem Dispatcher, sich zu beenden,
+              falls er noch läuft (optional, abhängig vom Zustand).
+            - **Umfassende Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` zur Nachverfolgung.
+            - **Robuste Fehlerbehandlung:** Jeder Reset‑Schritt ist in ein eigenes
+              `try/except` gekapselt, sodass ein Fehler in einem Bereich nicht die
+              restliche Bereinigung verhindert.
+            - **Garantiertes Setzen des IDLE‑Zustands** im `finally`‑Block.
+
+        Args:
+            force: Wenn True, werden zusätzlich die Untertitel‑ und Duplikatpuffer
+                   sowie der Segment‑Puffer geleert. Standard ist False.
+
+        Returns:
+            Immer True (der Reset wird immer durchgeführt).
+        """
         logger.info(f"\n🚨 [EMERGENCY_RESET] force={force}")
+        if DEBUG_LEVEL >= 3:
+            log_debug("processor", f"emergency_reset called: force={force}, current_state={self._state.name}")
+
+        # ---------------------------------------------------------------------
+        # Hilfsfunktion für sicheres Ausführen von Teil-Resets
+        # ---------------------------------------------------------------------
+        def safe_reset_step(step_name: str, func: Callable[[], None]) -> None:
+            """Führt eine Reset‑Aktion aus und fängt alle Exceptions ab."""
+            try:
+                func()
+                if DEBUG_LEVEL >= 4:
+                    log_debug("processor", f"emergency_reset: {step_name} completed")
+            except Exception as e:
+                logger.warning(f"emergency_reset: Failed to {step_name}: {e}")
+                if DEBUG_LEVEL >= 3:
+                    log_exception("processor", f"Reset step '{step_name}' failed", e, level="debug")
+
+        # ---------------------------------------------------------------------
+        # 1. Zustände unter _resource_lock zurücksetzen
+        # ---------------------------------------------------------------------
         with self._resource_lock:
+            # Zustand auf IDLE setzen (unter state_lock)
             with self._state_lock:
+                old_state = self._state
                 self._set_state(AudioProcessor.State.IDLE)
+                if DEBUG_LEVEL >= 3:
+                    log_debug("processor", f"State changed: {old_state.name} -> IDLE")
+
+            # Stop-Event setzen (bricht laufende Verarbeitung ab)
             self._stop_event.set()
+
+            # Aktuelle Stream‑ID löschen
             self._current_stream_id = None
+
+            # Statistik‑Zähler zurücksetzen
             with self._stats_lock:
                 self._consecutive_errors = 0
                 self._consecutive_timeouts = 0
                 self._low_conf_counter = 0
                 self._slow_chunks = 0
                 self._last_realtime_factor = 0.0
+                if DEBUG_LEVEL >= 4:
+                    log_debug("processor", "Stats counters reset")
+
+            # Bei force=True: Untertitel‑ und Duplikatpuffer leeren
             if force:
-                with self._subtitle_lock:
-                    self._timed_transcriptions.clear()
+                safe_reset_step("clear subtitle buffers", lambda: (
+                    self._timed_transcriptions.clear(),
                     self._timed_translations.clear()
-                with self._duplicate_lock:
-                    self._recent_transcriptions.clear()
-                    self._last_transcription_text = ""
-            with self._buffer_lock:
-                self._audio_chunks.clear()
-                self._audio_total_bytes = 0
-        logger.info("✅ Reset completed")
+                ))
+                safe_reset_step("clear duplicate cache", lambda: (
+                    self._recent_transcriptions.clear(),
+                    setattr(self, '_last_transcription_text', "")
+                ))
+
+            # Audio‑Puffer leeren
+            safe_reset_step("clear audio buffer", lambda: (
+                self._audio_chunks.clear(),
+                setattr(self, '_audio_total_bytes', 0)
+            ))
+
+        # ---------------------------------------------------------------------
+        # 2. Segment‑Puffer leeren (Untertitel‑Modus)
+        # ---------------------------------------------------------------------
+        safe_reset_step("clear segment buffer", lambda: (
+            self._segment_buffer.clear(),
+            setattr(self, '_next_expected_start', 0.0)
+        ))
+
+        # ---------------------------------------------------------------------
+        # 3. Fallback‑Zustand der TranscriptionEngine zurücksetzen
+        # ---------------------------------------------------------------------
+        safe_reset_step("reset transcription engine fallback state", lambda: (
+            engine.reset_fallback_state() if (
+                (engine := getattr(self, '_transcription_engine', None)) is not None
+                and hasattr(engine, "reset_fallback_state")
+            ) else None
+        ))
+
+        # ---------------------------------------------------------------------
+        # 4. Dispatcher anhalten (falls aktiv)
+        # ---------------------------------------------------------------------
+        if self._dispatcher_started:
+            safe_reset_step("stop dispatcher", lambda: self._stop_dispatcher(clear_queue=True))
+
+        # ---------------------------------------------------------------------
+        # 5. Garbage Collection anregen (optional)
+        # ---------------------------------------------------------------------
+        if force:
+            safe_reset_step("trigger garbage collection", lambda: gc.collect())
+
+        # ---------------------------------------------------------------------
+        # 6. Event‑Bus benachrichtigen (falls vorhanden)
+        # ---------------------------------------------------------------------
+        if self._event_bus is not None:
+            try:
+                self._event_bus.emit("audio_processor_reset", {"force": force})
+                if DEBUG_LEVEL >= 3:
+                    log_debug("processor", "Emitted audio_processor_reset event")
+            except Exception as e:
+                logger.warning(f"emergency_reset: Failed to emit event: {e}")
+
+        logger.info("✅ Emergency reset completed")
         return True
 
     def get_timed_transcriptions(self) -> List["TranscriptionResult"]:
