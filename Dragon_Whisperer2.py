@@ -33169,6 +33169,9 @@ class StreamHandler:
 
         Verbesserungen gegenüber der ursprünglichen Version:
             - Zurücksetzen von `vod_reconnect_attempts` nach erfolgreichem Reconnect.
+            - Intelligente Abbruchprüfung: Vor einem Reconnect bei Nicht‑Livestreams
+              wird über `_is_stream_still_alive` geprüft, ob der Stream überhaupt
+              noch existiert. Falls nicht, wird die Schleife normal beendet.
             - Detaillierte Diagnose‑Snapshots für Debugging.
             - Verbesserte Unterbrechbarkeit: Prüfung von `stop_requested` in allen
               Warte‑ und Reconnect‑Phasen.
@@ -33263,6 +33266,31 @@ class StreamHandler:
             if is_live or ".m3u8" in audio_url.lower():
                 return 30.0
             return 20.0
+
+        # Hilfsfunktion: Prüft, ob ein Nicht‑Livestream noch aktiv ist
+        def _is_stream_still_alive(url: str) -> bool:
+            """
+            Prüft mit yt‑dlp --dump‑json, ob der Stream noch existiert.
+            Gibt True zurück, wenn die Abfrage erfolgreich ist und das Feld
+            'is_live' True ist oder der Stream anderweitig verfügbar scheint.
+            Bei Fehlern wird konservativ True zurückgegeben.
+            """
+            if is_live or is_local_file:
+                return True
+            try:
+                # Kurzer Timeout, um die Schleife nicht zu blockieren
+                data = YtDlpHelper.get_json(url, timeout=8, use_cookies=False)
+                if data is None:
+                    return True  # Im Zweifel lieber reconnecten
+                # Wenn das Video als beendet markiert ist, ist es nicht mehr live
+                if data.get("is_live") is False:
+                    return False
+                # Auch prüfen, ob das Video möglicherweise gelöscht/privat ist
+                if data.get("availability") in ("private", "deleted"):
+                    return False
+                return True
+            except Exception:
+                return True
 
         # Hilfsfunktion für sicheren Reconnect mit Timeout und Backoff
         def safe_reconnect(
@@ -33425,6 +33453,13 @@ class StreamHandler:
                             normal_ending_container[0] = True
                             break
 
+                        # Vor einem Reconnect prüfen, ob der Stream überhaupt noch existiert
+                        if not _is_stream_still_alive(original_video_url):
+                            logger.info("Stream ist nicht mehr verfügbar – beende normal")
+                            normal_ending = True
+                            normal_ending_container[0] = True
+                            break
+
                         if vod_reconnect_attempts < self.MAX_VOD_RECONNECT_ATTEMPTS:
                             if ap.is_stop_requested():
                                 logger.debug("StreamHandler: Benutzerabbruch vor VOD-Reconnect erkannt.")
@@ -33530,6 +33565,13 @@ class StreamHandler:
                     normal_ending_container[0] = True
                     break
 
+                # Vor einem Reconnect prüfen, ob der Stream überhaupt noch existiert
+                if not _is_stream_still_alive(original_video_url):
+                    logger.info("Stream ist nicht mehr verfügbar – beende normal")
+                    normal_ending = True
+                    normal_ending_container[0] = True
+                    break
+
                 current_position = ap._real_processed_seconds
                 new_process = safe_reconnect(
                     seek_seconds=current_position,
@@ -33620,6 +33662,13 @@ class StreamHandler:
                         normal_ending_container[0] = True
                         break
 
+                    # Vor einem Reconnect prüfen, ob der Stream überhaupt noch existiert
+                    if not _is_stream_still_alive(original_video_url):
+                        logger.info("Stream ist nicht mehr verfügbar – beende normal")
+                        normal_ending = True
+                        normal_ending_container[0] = True
+                        break
+
                     if is_youtube and not is_live:
                         logger.info("YouTube VOD – timeouts detected, switching to download mode")
                         info_callback("📥 Lade restliches Video herunter (temporär)...")
@@ -33680,6 +33729,13 @@ class StreamHandler:
 
                         if ap.is_stop_requested():
                             logger.debug("StreamHandler: Benutzerabbruch nach Prozessende erkannt.")
+                            normal_ending = True
+                            normal_ending_container[0] = True
+                            break
+
+                        # Vor einem Reconnect prüfen, ob der Stream überhaupt noch existiert
+                        if not _is_stream_still_alive(original_video_url):
+                            logger.info("Stream ist nicht mehr verfügbar – beende normal")
                             normal_ending = True
                             normal_ending_container[0] = True
                             break
@@ -33759,6 +33815,13 @@ class StreamHandler:
 
                         if ap.is_stop_requested():
                             logger.debug("StreamHandler: Benutzerabbruch vor Reconnect nach Fehlern erkannt.")
+                            normal_ending = True
+                            normal_ending_container[0] = True
+                            break
+
+                        # Vor einem Reconnect prüfen, ob der Stream überhaupt noch existiert
+                        if not _is_stream_still_alive(original_video_url):
+                            logger.info("Stream ist nicht mehr verfügbar – beende normal")
                             normal_ending = True
                             normal_ending_container[0] = True
                             break
