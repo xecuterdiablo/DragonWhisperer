@@ -13218,152 +13218,187 @@ class FFmpegManager:
         self, url: str, seek_seconds: Optional[float] = None, detected_language: Optional[str] = None
     ) -> List[str]:
         """
-        Erstellt eine optimierte FFmpeg‑Befehlszeile mit robusten, weitgehend kompatiblen Optionen.
+        Erstellt eine optimierte, robuste und maximal kompatible FFmpeg‑Befehlszeile.
 
-        Verwendet nur Optionen, die in FFmpeg 4.x+ verfügbar sind (kein `-reconnect_attempts`,
-        `-reconnect_delay_max`, `-reconnect_at_eof` etc., da diese nicht in allen Versionen
-        einheitlich unterstützt werden).
+        Die Methode analysiert den Stream‑Typ (Live / VOD) und die Plattform (YouTube etc.)
+        und wählt gezielt Optionen, die auf einer breiten Palette von FFmpeg‑Versionen
+        (4.x bis 7.x) stabil funktionieren. Nicht allgemein unterstützte Flags werden
+        vermieden, und Reconnect‑Optionen werden **nur für Livestreams** aktiviert,
+        da sie bei VODs und lokalen Dateien zu Fehlern oder endlosen Hängern führen.
 
-        Die Methode erkennt den Stream-Typ (Live/VOD) und die Plattform (YouTube, etc.) und
-        wählt entsprechend optimierte Parameter (Header, Reconnect, Puffer).
-
-        Verbesserungen:
-            - Entfernt nicht-kompatible Optionen (`-reconnect_attempts`, `-reconnect_delay_max`, `-reconnect_at_eof`).
-            - Behält stabile Optionen wie `-reconnect`, `-reconnect_streamed`, `-reconnect_on_network_error`.
-            - Setzt großzügige Timeouts (`-timeout`, `-rw_timeout`) in Mikrosekunden.
-            - Fügt YouTube-spezifische Header und User-Agent hinzu.
-            - Unterstützt Seeking bei VODs (außer YouTube, da dies zu PCM-Korruption führen kann).
-            - Wählt Audiofilter basierend auf Profil und erkannter Sprache.
-            - Detaillierte Debug-Ausgaben bei `DEBUG_LEVEL >= 3`.
+        Features:
+            - Kein `-reconnect` für VODs oder lokale Dateien (verhindert Hänger)
+            - Explizite Absicherung für `file://`‑URLs
+            - YouTube‑spezifische Header und User‑Agent für googlevideo.com‑URLs
+            - Robuste Timeouts (`-timeout`, `-rw_timeout`) in Mikrosekunden
+            - Seeking für lokale Dateien und Nicht‑YouTube‑VODs (vermeidet PCM‑Korruption)
+            - Sprach‑ und profilabhängiger Audiofilter
+            - Kompatibilitätsflags (`-fflags`, `-avoid_negative_ts`)
+            - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 2`
 
         Args:
-            url: Die Audio-URL (direkter Stream oder Datei).
-            seek_seconds: Startposition in Sekunden (nur bei Nicht-YouTube-VODs).
-            detected_language: Vom Whisper-Modell erkannte Sprache (für sprachspezifische Filter).
+            url: Die Audio‑URL (direkter Stream oder Datei).
+            seek_seconds: Startposition in Sekunden (nur für Nicht‑YouTube‑VODs).
+            detected_language: Vom Whisper‑Modell erkannte Sprache (für Audiofilter).
 
         Returns:
             Liste der Befehlsargumente für subprocess.Popen.
         """
         log_debug("ffmpeg", f"_build_ffmpeg_command_optimized: url={url[:100]}...")
 
-        # Stream-Typ und Plattform erkennen
+        # ---------------------------------------------------------------------
+        # Stream‑Typ und Plattform ermitteln
+        # ---------------------------------------------------------------------
         is_live, platform = self._detect_stream_type(url)
+
+        # Explizite Absicherung für lokale Dateien – Reconnect ist hier nie erlaubt
+        if url.startswith("file://"):
+            if is_live:
+                logger.warning("Lokale Datei als Live erkannt – korrigiere zu VOD")
+            is_live = False
+            platform = "Local File"
+
         stream_type = "LIVE" if is_live else "VIDEO"
         logger.info(f"\n🎬 Building FFmpeg command for {platform} ({stream_type})")
-
         if DEBUG_LEVEL >= 3:
             logger.info(f"  📍 URL: {url}")
         else:
             logger.info(f"  📍 URL: {url[:80]}...")
 
-        is_youtube = any(domain in url.lower() for domain in ["youtube.com", "youtu.be", "googlevideo.com"])
+        is_youtube = any(
+            domain in url.lower()
+            for domain in ["youtube.com", "youtu.be", "googlevideo.com"]
+        )
 
-        # -----------------------------------------------------------------
-        # Basis-Befehl mit stabilen Reconnect-Optionen (kompatibel mit FFmpeg 4.x/5.x/6.x/7.x/8.x)
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # Basis‑Befehl (stabile Optionen für alle FFmpeg‑Versionen)
+        # ---------------------------------------------------------------------
         cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "warning",
-            "-reconnect", "1",                     # Bei Verbindungsabbruch neu verbinden
-            "-reconnect_streamed", "1",            # Auch bei gestreamten Inhalten reconnecten
-            "-timeout", "20000000",                # 20 Sekunden für Verbindungsaufbau (Mikrosekunden)
-            "-rw_timeout", "60000000",             # 60 Sekunden Lese-Timeout (Mikrosekunden)
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel", "warning",
         ]
 
-        # -----------------------------------------------------------------
-        # YouTube-spezifische Header (User-Agent, Referer, Origin)
-        # -----------------------------------------------------------------
+        # Reconnect **NUR** für Livestreams – verhindert Hänger bei VODs und
+        # den Fehler "Option reconnect not found" bei lokalen Dateien.
+        if is_live:
+            logger.info("  📡 LIVE: Using reconnect options")
+            cmd.extend([
+                "-reconnect", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_on_network_error", "1",
+            ])
+        else:
+            logger.info("  🎬 VIDEO: Reconnect options disabled (avoid hangs/errors)")
+
+        # Timeouts (in Mikrosekunden) – immer sinnvoll
+        cmd.extend([
+            "-timeout", "20000000",       # 20 s für Verbindungsaufbau
+            "-rw_timeout", "60000000",    # 60 s Lese‑Timeout
+        ])
+
+        # ---------------------------------------------------------------------
+        # YouTube‑spezifische Header (User‑Agent, Referer, Origin)
+        # ---------------------------------------------------------------------
         if is_youtube:
             logger.info("  🎯 YouTube erkannt – verwende optimierte Header")
             cmd.extend([
-                "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "-user_agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "-referer", "https://www.youtube.com/",
                 "-headers", self._get_youtube_headers_string(self.config),
             ])
 
-        # -----------------------------------------------------------------
-        # Live-Stream-spezifische Parameter (HLS, DASH)
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # Live‑spezifische Parameter (HLS / DASH)
+        # ---------------------------------------------------------------------
         if is_live:
-            logger.info("  📡 LIVE: Using optimized HLS/Live parameters")
             cmd.extend([
-                "-reconnect_on_network_error", "1",  # Bei Netzwerkfehlern reconnecten
-                "-seekable", "0",                    # Nicht seekbar (Live)
+                "-seekable", "0",
                 "-fflags", "+discardcorrupt+fastseek+genpts",
-                "-analyzeduration", "10M",           # Größere Analyse für Live-Streams
+                "-analyzeduration", "10M",
                 "-probesize", "10M",
-                "-live_start_index", "0",            # Starte mit erstem verfügbarem Segment
+                "-live_start_index", "0",
             ])
             if seek_seconds is not None:
-                logger.warning(f"⚠️ seek_seconds={seek_seconds} wird bei Live-Stream ignoriert")
+                logger.warning(
+                    f"⚠️ seek_seconds={seek_seconds} wird bei Live‑Stream ignoriert"
+                )
         else:
             # -----------------------------------------------------------------
-            # VOD (Video-on-Demand) – schneller Zugriff, ggf. Seeking
+            # VOD – schneller Zugriff, ggf. Seeking
             # -----------------------------------------------------------------
-            logger.info("  🎬 VIDEO: Fast access for non-live content")
+            logger.info("  🎬 VIDEO: Fast access for non‑live content")
             cmd.extend([
-                "-accurate_seek",                    # Präzises Seeking
+                "-accurate_seek",
                 "-fflags", "+genpts+discardcorrupt+fastseek",
             ])
             if seek_seconds is not None and seek_seconds > 0:
-                # Bei YouTube führt Seek zu PCM-Korruption – daher nur für andere Plattformen
+                # Bei YouTube führt Seek oft zu PCM‑Korruption, daher nur für andere
                 if not is_youtube:
                     logger.info(f"  ⏩ Seeking to {seek_seconds}s")
                     cmd.extend(["-ss", str(seek_seconds)])
                 else:
-                    logger.warning(f"  ⚠️ seek_seconds={seek_seconds} wird bei YouTube ignoriert (führt zu fehlerhaften PCM-Daten)")
+                    logger.warning(
+                        f"  ⚠️ seek_seconds={seek_seconds} bei YouTube ignoriert "
+                        "(führt zu fehlerhaften PCM‑Daten)"
+                    )
 
-        # -----------------------------------------------------------------
         # IPv4 bevorzugen (falls in den Einstellungen aktiviert)
-        # -----------------------------------------------------------------
         if self.settings and getattr(self.settings, "prefer_ipv4", False):
             cmd.append("-force_ipv4")
 
-        # -----------------------------------------------------------------
-        # Eingabe-URL
-        # -----------------------------------------------------------------
+        # Eingabe‑URL
         cmd.extend(["-i", url])
 
-        # -----------------------------------------------------------------
-        # Audiofilter basierend auf Profil und Sprache
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # Audiofilter – profil‑ und sprachabhängig
+        # ---------------------------------------------------------------------
         profile = "realtime" if is_live else "transcription"
         if self.settings and hasattr(self.settings, "audio_profile"):
             profile = self.settings.audio_profile
-        audio_filter = self.config.get_audio_filter(language=detected_language, profile=profile)
+        audio_filter = self.config.get_audio_filter(
+            language=detected_language, profile=profile
+        )
         logger.info(f"  🎚️ Using audio filter (profile={profile}): {audio_filter}")
 
-        # -----------------------------------------------------------------
-        # Ausgabeformat: PCM 16-bit, Mono, 16 kHz
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # Ausgabeformat – PCM 16‑bit, Mono, konfigurierte Samplerate
+        # ---------------------------------------------------------------------
         cmd.extend([
             "-vn",                                   # Video deaktivieren
-            "-f", "s16le",                           # Roh-Audioformat signed 16-bit little-endian
-            "-acodec", "pcm_s16le",                  # PCM-Codec
+            "-f", "s16le",                           # Roh‑Audio signed 16‑bit little‑endian
+            "-acodec", "pcm_s16le",                  # PCM‑Codec
             "-ar", str(self.config.SAMPLE_RATE),     # Abtastrate (16000 Hz)
             "-ac", str(self.config.CHANNELS),        # Mono (1 Kanal)
             "-af", audio_filter,                     # Audiofilter
-            "-fflags", "+genpts+discardcorrupt",
-            "-avoid_negative_ts", "make_zero",
-            "-max_interleave_delta", "0",
+            "-fflags", "+genpts+discardcorrupt",     # Korrupte Frames verwerfen
+            "-avoid_negative_ts", "make_zero",       # Negative Timestamps vermeiden
+            "-max_interleave_delta", "0",            # Keine Interleaving‑Verzögerung
             "-threads", "2",                         # 2 Threads für Dekodierung
             "-bufsize", self.config.FFMPEG_BUFSIZE,  # Puffergröße (z. B. 2048k)
             "pipe:1",                                # Ausgabe auf stdout
         ])
 
-        # -----------------------------------------------------------------
-        # Debug-Ausgaben (vollständiger Befehl bei Level 3, sonst gekürzt)
-        # -----------------------------------------------------------------
-        if logger.isEnabledFor(logging.DEBUG):
-            if DEBUG_LEVEL >= 3:
-                logger.debug(f"FFmpeg command: {' '.join(cmd)}")
-            else:
-                logger.debug(f"FFmpeg command: {' '.join(cmd[:5])} ... {' '.join(cmd[-5:])}")
+        # ---------------------------------------------------------------------
+        # Debug‑Ausgaben
+        # ---------------------------------------------------------------------
+        if DEBUG_LEVEL >= 2:
+            log_debug(
+                "ffmpeg",
+                f"  ↪ Stream type: {'live' if is_live else 'vod'}, platform={platform}"
+            )
+            if detected_language:
+                log_debug("ffmpeg", f"  ↪ Detected language: {detected_language}")
+            if seek_seconds and not is_youtube:
+                log_debug("ffmpeg", f"  ↪ Seek position: {seek_seconds}s")
 
-        log_debug("ffmpeg", f"  ↪ Stream type: {'live' if is_live else 'vod'}, platform={platform}")
-        if detected_language:
-            log_debug("ffmpeg", f"  ↪ Detected language: {detected_language}")
-        if seek_seconds and not is_youtube:
-            log_debug("ffmpeg", f"  ↪ Seek position: {seek_seconds}s")
+        if DEBUG_LEVEL >= 3:
+            log_debug("ffmpeg", f"FFmpeg command: {' '.join(cmd)}")
+        else:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"FFmpeg command: {' '.join(cmd[:5])} ... {' '.join(cmd[-5:])}")
 
         return cmd
 
@@ -31417,7 +31452,7 @@ class AudioProcessor:
         # 4. Transkription mit Timeout (benannter Thread, kein Executor)
         # -----------------------------------------------------------------
         try:
-            segments = self._transcribe_with_timeout(audio_data, timeout=45.0)
+            segments = self._transcribe_with_timeout(audio_data, timeout=90.0)
         except TimeoutError:
             logger.error(
                 f"Transkription timeout nach 45s für Chunk ({len(audio_data)} bytes) – wird übersprungen"
@@ -33605,7 +33640,13 @@ class AudioProcessor:
     ) -> None:
         """
         Haupt‑Stream‑Verarbeitungsloop. Läuft in einem eigenen Thread.
-        Wird von start_processing gestartet.
+        Wird von `start_processing` gestartet.
+
+        Verbesserungen:
+            - Regelmäßige Prüfung des `_stop_event` an allen potenziell blockierenden Stellen.
+            - Timeout für `queue.join()` und `executor.submit()` zur Vermeidung von Hängern.
+            - Robuste Fehlerbehandlung mit garantiertem Cleanup auch bei Exceptions.
+            - Detaillierte Debug‑Ausgaben zur Nachverfolgung der Thread‑Beendigung.
         """
         self._stream_start_time = time.time()
         callbacks = {
@@ -33623,6 +33664,12 @@ class AudioProcessor:
         )
 
         try:
+            # -----------------------------------------------------------------
+            # 1. Audio‑URL extrahieren
+            # -----------------------------------------------------------------
+            if self._stop_event.is_set():
+                log_debug("processor", "Stop event set before audio URL extraction")
+                return
             audio_url = self._extract_audio_url(url, callbacks["error"])
             if not audio_url:
                 error_occurred = True
@@ -33631,6 +33678,12 @@ class AudioProcessor:
 
             detected_language = None
 
+            # -----------------------------------------------------------------
+            # 2. FFmpeg‑Prozess starten
+            # -----------------------------------------------------------------
+            if self._stop_event.is_set():
+                log_debug("processor", "Stop event set before FFmpeg start")
+                return
             process = self._start_ffmpeg_process(
                 url, audio_url, detected_language, callbacks["error"]
             )
@@ -33639,6 +33692,9 @@ class AudioProcessor:
                 log_debug("processor", "FFmpeg process start failed")
                 return
 
+            # -----------------------------------------------------------------
+            # 3. Stream‑Loop ausführen
+            # -----------------------------------------------------------------
             log_debug("processor", "Starting stream loop...")
             self._run_stream_loop(
                 process,
@@ -33661,13 +33717,39 @@ class AudioProcessor:
             )
 
         finally:
+            # -----------------------------------------------------------------
+            # 4. Cleanup nach Stream (garantiert)
+            # -----------------------------------------------------------------
             log_debug("processor", "Entering cleanup after stream...")
-            self._cleanup_after_stream(
-                normal_ending_container[0], error_occurred, callbacks
-            )
-            self._guaranteed_cleanup()
+            try:
+                self._cleanup_after_stream(
+                    normal_ending_container[0], error_occurred, callbacks
+                )
+            except Exception as e:
+                logger.exception(f"Error in _cleanup_after_stream: {e}")
+            finally:
+                # -----------------------------------------------------------------
+                # 5. Garantierte finale Bereinigung
+                # -----------------------------------------------------------------
+                try:
+                    self._guaranteed_cleanup()
+                except Exception as e:
+                    logger.exception(f"Error in _guaranteed_cleanup: {e}")
+
+            # -----------------------------------------------------------------
+            # 6. Thread‑Referenz freigeben und Beendigung signalisieren
+            # -----------------------------------------------------------------
             self._processing_thread = None
             log_debug("processor", "Processing loop finished")
+
+            # Explizit den Thread‑Namen loggen, um Hänger zu identifizieren
+            if DEBUG_LEVEL >= 3:
+                current_thread = threading.current_thread()
+                log_debug(
+                    "processor",
+                    f"Thread '{current_thread.name}' (id={current_thread.ident}) "
+                    "exiting _process_loop_enhanced"
+                )
 
     def _extract_audio_url(
         self, url: str, error_callback: ErrorCallback
