@@ -17677,7 +17677,7 @@ class StreamInfoExtractor:
                 "--dump-json",
                 "--no-warnings",
                 "--no-check-certificate",
-                "--socket-timeout", "15",
+                "--socket-timeout", "30",
                 "--playlist-items", "1",
             ]
             if use_cookies:
@@ -17724,7 +17724,7 @@ class StreamInfoExtractor:
 
             result = None
             try:
-                for future in as_completed(futures, timeout=12):
+                for future in as_completed(futures, timeout=20):
                     task_name = futures[future]
                     try:
                         info = future.result()
@@ -17832,7 +17832,7 @@ class StreamInfoExtractor:
 
             with ThreadPoolExecutor(max_workers=3) as executor:
                 title_future = executor.submit(
-                    YtDlpHelper.run_command, cmd_title, 15, "direct_title"
+                    YtDlpHelper.run_command, cmd_title, 30, "direct_title"
                 )
                 uploader_future = executor.submit(
                     YtDlpHelper.run_command, cmd_uploader, 15, "direct_uploader"
