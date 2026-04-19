@@ -38815,14 +38815,14 @@ class AudioProcessor:
                 # 4a. Auf Verarbeitungsthread warten
                 # -------------------------------------------------------------
                 if hasattr(self, '_processing_thread') and self._processing_thread is not None:
-                    if self._processing_thread.is_alive():
+                    if self._processing_thread and self._processing_thread.is_alive():
                         log_debug(
                             "processor",
                             f"IdleWaiter: joining processing thread "
                             f"(timeout={join_timeout}s)..."
                         )
                         self._processing_thread.join(timeout=join_timeout)
-                        if self._processing_thread.is_alive():
+                        if self._processing_thread and self._processing_thread.is_alive():
                             logger.warning(
                                 f"Processing thread still alive after {join_timeout}s"
                             )
@@ -39389,10 +39389,10 @@ class AudioProcessor:
         # 5. Verarbeitungs-Thread (falls noch aktiv) beenden
         # -----------------------------------------------------------------
         if hasattr(self, "_processing_thread") and self._processing_thread is not None:
-            if self._processing_thread.is_alive():
+            if self._processing_thread and self._processing_thread.is_alive():
                 log_debug("shutdown", "Waiting for processing thread...")
                 self._processing_thread.join(timeout=2.0)
-                if self._processing_thread.is_alive():
+                if self._processing_thread and self._processing_thread.is_alive():
                     logger.warning("Processing thread still alive after timeout")
                 else:
                     log_debug("shutdown", "Processing thread joined")
