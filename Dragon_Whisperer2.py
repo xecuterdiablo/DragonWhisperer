@@ -35490,6 +35490,7 @@ class AudioProcessor:
         self._stop_event = threading.Event()           # Wird bei Benutzerabbruch gesetzt
         self._processing_completed = threading.Event() # Wird bei normalem Stream-Ende gesetzt
         self._stop_lock = threading.RLock()            # Schützt die Stop-Flags
+        self._idle_waiter_lock = threading.RLock()     # 🆕 Schützt den IdleWaiter-Thread
 
         # Weitere Flags
         self._current_stream_id: Optional[str] = None
