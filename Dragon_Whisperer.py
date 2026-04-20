@@ -27510,6 +27510,18 @@ class AdvancedSettingsDialog:
         adv.translation_max_lines = self.transl_lines_var.get()
         adv.asian_mode = self.asian_var.get()
         adv.precision_mode = self.precision_var.get()
+
+        # ---------------------------------------------------------------------
+        # NEU: Overrides zurücksetzen, falls beide Modi deaktiviert sind
+        # ---------------------------------------------------------------------
+        if not adv.asian_mode and not adv.precision_mode:
+            adv.restore_mode_overrides()
+        else:
+            # Wenn mindestens ein Modus aktiv ist, Overrides anwenden
+            # (Cache leeren, damit die aktuellen Werte neu gesichert werden)
+            adv._original_values.clear()
+            adv._apply_mode_overrides()
+
         adv.adaptive_chunk = self.adaptive_chunk_var.get()
         adv.live_from_start = self.live_from_start_var.get()
         adv.download_inactivity_timeout = self.download_inactivity_var.get()
@@ -28456,7 +28468,7 @@ class DragonWhispererGUI:
         # -----------------------------------------------------------------
         # 6. Sonstige Zustände
         # -----------------------------------------------------------------
-        self.last_stream_title: str = ""
+        self.last_completed_stream_title: str = ""
         self._stopping_done = False
         self._current_layout: Optional[str] = None
         self._event_subscriptions: List[Tuple[str, Callable]] = []
@@ -43441,6 +43453,10 @@ class AdvancedSettings:
         default=Config.BASE_CHUNK_DURATION, init=False, repr=False
     )
 
+    # 🔥 NEU: Felder für die Verwaltung von Modus-Overrides
+    _original_values: Dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _mode_overrides_applied: bool = field(default=False, init=False, repr=False)
+
     # -------------------------------------------------------------------------
     # Property chunk_duration mit Setter, der config.CHUNK_DURATION aktualisiert
     # -------------------------------------------------------------------------
@@ -43577,8 +43593,6 @@ class AdvancedSettings:
             # -----------------------------------------------------------------
             # 9. Chunk-Dauer synchronisieren (Property chunk_duration setzt config.CHUNK_DURATION)
             # -----------------------------------------------------------------
-            # (Die Property wird bereits durch self.chunk_duration gesetzt,
-            #  aber wir rufen explizit den Setter auf, um sicher zu gehen)
             self.chunk_duration = self._chunk_duration
 
             # -----------------------------------------------------------------
