@@ -9859,56 +9859,67 @@ class TranscriptionEngine:
     def _load_faster_whisper(self, model_size: str) -> Any:
         """
         Lädt faster-whisper mit automatischem Fallback über verschiedene compute_types.
+
         Verwendet die optimierte Priorisierungsliste basierend auf GPU-Generation.
+        Unterstützt die Konfiguration der CPU-Threads über `AdvancedSettings.cpu_threads`.
         """
         try:
             WhisperModel = FastLazyLoader.load("faster_whisper")
-            compute_types = self._get_optimal_compute_types()
-            compute_types = list(dict.fromkeys(compute_types))
+        except ImportError as e:
+            logger.error(f"❌ faster-whisper nicht installiert: {e}")
+            return None
 
-            for ct in compute_types:
-                logger.info(f"🔄 Versuche {model_size} mit device={self.device}, compute_type={ct}")
-                try:
-                    model = WhisperModel(
-                        model_size,
-                        device=self.device,
-                        compute_type=ct,
-                        cpu_threads=4,
-                        num_workers=1,
-                    )
-                    self.compute_type = ct
-                    logger.info(f"✅ faster-whisper '{model_size}' geladen (compute_type={ct})")
-                    return model
-                except RuntimeError as e:
-                    error_msg = str(e).lower()
-                    if "out of memory" in error_msg or "no kernel image" in error_msg:
-                        logger.warning(f"⚠️ Compute-Typ {ct} fehlgeschlagen: {e}")
-                        if self.device == "cuda" and self._torch:
-                            self._torch.cuda.empty_cache()
-                        continue
-                    else:
-                        logger.exception(f"❌ faster-whisper RuntimeError: {e}")
-                        return None
+        # Compute-Typen nach GPU-Generation priorisieren
+        compute_types = self._get_optimal_compute_types()
+        compute_types = list(dict.fromkeys(compute_types))  # Duplikate entfernen
 
-            # Fallback auf CPU
-            logger.warning("⚠️ Alle Compute-Typen auf GPU fehlgeschlagen, versuche CPU-Fallback...")
+        # CPU-Threads aus den erweiterten Einstellungen lesen
+        cpu_threads = getattr(self.settings, "cpu_threads", 0)
+        if cpu_threads <= 0:
+            cpu_threads = os.cpu_count() or 4
+        cpu_threads = max(1, min(cpu_threads, 32))  # sinnvolles Limit
+
+        for ct in compute_types:
+            logger.info(f"🔄 Versuche {model_size} mit device={self.device}, compute_type={ct}")
+            try:
+                model = WhisperModel(
+                    model_size,
+                    device=self.device,
+                    compute_type=ct,
+                    cpu_threads=cpu_threads,
+                    num_workers=1,
+                )
+                self.compute_type = ct
+                logger.info(f"✅ faster-whisper '{model_size}' geladen (compute_type={ct}, cpu_threads={cpu_threads})")
+                return model
+
+            except RuntimeError as e:
+                error_msg = str(e).lower()
+                if "out of memory" in error_msg or "no kernel image" in error_msg:
+                    logger.warning(f"⚠️ Compute-Typ {ct} fehlgeschlagen: {e}")
+                    if self.device == "cuda" and self._torch:
+                        self._torch.cuda.empty_cache()
+                    continue
+                else:
+                    logger.exception(f"❌ faster-whisper RuntimeError: {e}")
+                    return None
+
+        # Fallback auf CPU, falls alle GPU-Versuche fehlschlagen
+        logger.warning("⚠️ Alle Compute-Typen auf GPU fehlgeschlagen, versuche CPU-Fallback...")
+        try:
             model = WhisperModel(
                 model_size,
                 device="cpu",
                 compute_type="int8",
-                cpu_threads=4,
+                cpu_threads=cpu_threads,
                 num_workers=1,
             )
-            logger.info(f"✅ faster-whisper '{model_size}' auf CPU geladen (Fallback)")
+            logger.info(f"✅ faster-whisper '{model_size}' auf CPU geladen (Fallback, cpu_threads={cpu_threads})")
             self.device = "cpu"
             self.compute_type = "int8"
             return model
-
-        except ImportError as e:
-            logger.error(f"❌ faster-whisper nicht installiert: {e}")
-            return None
         except Exception as e:
-            logger.exception(f"⚠️ Unerwarteter Fehler beim Laden von {model_size}: {e}")
+            logger.exception(f"❌ faster-whisper CPU-Fallback fehlgeschlagen: {e}")
             return None
 
     def _load_openai_whisper(self, model_size: str) -> Any:
@@ -25925,6 +25936,9 @@ class AdvancedSettingsDialog:
             value=getattr(self.gui.advanced_settings, "enable_audio_enhancement", False)
         )
 
+        # 🔥 NEU: CPU-Threads Variable
+        self.cpu_threads_var = tk.IntVar(value=getattr(self.gui.advanced_settings, "cpu_threads", 0))
+
         self._profile_mapping = {
             "chunk_duration": self.chunk_var,
             "vad_filter": self.vad_filter_var,
@@ -25965,6 +25979,7 @@ class AdvancedSettingsDialog:
             "enable_audio_enhancement": self.audio_enhancement_var,
             "live_from_start": self.live_from_start_var,
             "download_inactivity_timeout": self.download_inactivity_var,
+            "cpu_threads": self.cpu_threads_var,
         }
 
         # ========== 5a. Dynamische Piper-Stimmen Liste ==========
@@ -25984,7 +25999,8 @@ class AdvancedSettingsDialog:
             "settings",
             f"AdvancedSettingsDialog loaded: chunk={self.chunk_var.get()}, "
             f"live_from_start={self.live_from_start_var.get()}, "
-            f"tts_length_scale={self.tts_length_scale_var.get()}"
+            f"tts_length_scale={self.tts_length_scale_var.get()}, "
+            f"cpu_threads={self.cpu_threads_var.get()}"
         )
 
     # =========================================================================
@@ -26540,6 +26556,22 @@ class AdvancedSettingsDialog:
     #  Sektion: Modell & Inferenz
     # -------------------------------------------------------------------------
     def _create_model_section(self, row: int) -> None:
+        """
+        Erstellt die Sektion "Modell & Inferenz" im AdvancedSettingsDialog.
+
+        Enthält Einstellungen für:
+            - Beam Size
+            - Temperature
+            - GPU Acceleration
+            - CPU Threads (für Whisper-Inferenz)
+            - Aktuell geladenes Modell (Anzeige)
+            - Hotwords (für faster-whisper)
+
+        Alle Widgets sind mit Tooltips versehen, die die Auswirkungen der
+        jeweiligen Einstellung erklären. Das Layout ist robust gegenüber
+        Theme‑Änderungen und verwendet die konfigurierbaren Konstanten
+        `SPINBOX_WIDTH` und `SCALE_LENGTH`.
+        """
         model_frame = tk.LabelFrame(
             self.settings_frame,
             text="🤖 Modell & Inferenz",
@@ -26553,6 +26585,9 @@ class AdvancedSettingsDialog:
         model_frame.columnconfigure(1, weight=1)
         model_frame.columnconfigure(3, weight=1)
 
+        # -----------------------------------------------------------------
+        # Zeile 0: Beam Size (links) und Temperature (rechts)
+        # -----------------------------------------------------------------
         tk.Label(
             model_frame,
             text="Beam Size:",
@@ -26561,6 +26596,7 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=0, column=0, sticky="w", pady=1)
+
         self.beam_spin = tk.Spinbox(
             model_frame,
             from_=1,
@@ -26573,6 +26609,11 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         self.beam_spin.grid(row=0, column=1, sticky="w", pady=1)
+        ToolTip(
+            self.beam_spin,
+            "Anzahl der parallel untersuchten Transkriptionspfade.\n"
+            "Höhere Werte verbessern die Genauigkeit, kosten aber mehr Rechenzeit."
+        )
 
         tk.Label(
             model_frame,
@@ -26582,6 +26623,7 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=0, column=2, sticky="w", pady=1)
+
         self.temp_scale = tk.Scale(
             model_frame,
             from_=0.0,
@@ -26597,7 +26639,16 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         self.temp_scale.grid(row=0, column=3, sticky="ew", pady=1)
+        ToolTip(
+            self.temp_scale,
+            "Kreativität der Transkription (0.0 = deterministisch).\n"
+            "Höhere Werte können bei schlechter Audioqualität helfen, "
+            "führen aber zu mehr Variation."
+        )
 
+        # -----------------------------------------------------------------
+        # Zeile 1: GPU Acceleration (Checkbox) und Current Model (Anzeige)
+        # -----------------------------------------------------------------
         self.gpu_var = tk.BooleanVar(
             value=getattr(self.gui.advanced_settings, "gpu_acceleration", True)
         )
@@ -26612,6 +26663,11 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         self.gpu_cb.grid(row=1, column=0, columnspan=2, sticky="w", pady=1)
+        ToolTip(
+            self.gpu_cb,
+            "Aktiviert die GPU-Beschleunigung (CUDA / ROCm / MPS).\n"
+            "Falls deaktiviert, wird die CPU verwendet."
+        )
 
         tk.Label(
             model_frame,
@@ -26621,6 +26677,7 @@ class AdvancedSettingsDialog:
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
         ).grid(row=1, column=2, sticky="w", pady=1)
+
         try:
             current_model = self.gui.transcription_engine.get_current_model()
         except Exception:
@@ -26635,7 +26692,51 @@ class AdvancedSettingsDialog:
             font=("Segoe UI", 8),
         )
         model_label.grid(row=1, column=3, sticky="w", pady=1)
+        ToolTip(
+            model_label,
+            "Das aktuell geladene Whisper-Modell.\n"
+            "Kann in der Haupt-GUI geändert werden."
+        )
 
+        # -----------------------------------------------------------------
+        # Zeile 2: CPU Threads (Spinbox)
+        # -----------------------------------------------------------------
+        tk.Label(
+            model_frame,
+            text="CPU Threads:",
+            anchor="w",
+            bg=self.gui.current_theme.BG_SECONDARY,
+            fg=self.gui.current_theme.TEXT_PRIMARY,
+            font=("Segoe UI", 8),
+        ).grid(row=2, column=0, sticky="w", pady=1)
+
+        self.cpu_threads_var = tk.IntVar(
+            value=getattr(self.gui.advanced_settings, "cpu_threads", 0)
+        )
+        self.cpu_threads_spin = tk.Spinbox(
+            model_frame,
+            from_=0,
+            to=32,
+            textvariable=self.cpu_threads_var,
+            width=self.SPINBOX_WIDTH,
+            bg=self.gui.current_theme.BG_TERTIARY,
+            fg=self.gui.current_theme.TEXT_PRIMARY,
+            buttonbackground=self.gui.current_theme.BG_TERTIARY,
+            font=("Segoe UI", 8),
+        )
+        self.cpu_threads_spin.grid(row=2, column=1, sticky="w", pady=1)
+        ToolTip(
+            self.cpu_threads_spin,
+            "Anzahl der CPU-Threads für die Whisper-Transkription.\n"
+            "• 0 = Automatisch (alle verfügbaren Kerne)\n"
+            "• 1-2 = Empfohlen für schwache/ältere CPUs\n"
+            "• Höhere Werte können die Leistung auf modernen Systemen verbessern,\n"
+            "  aber auf schwacher Hardware zu Überlastung und Timeouts führen."
+        )
+
+        # -----------------------------------------------------------------
+        # Zeile 3: Hotwords (Entry)
+        # -----------------------------------------------------------------
         tk.Label(
             model_frame,
             text="Hotwords:",
@@ -26643,7 +26744,8 @@ class AdvancedSettingsDialog:
             bg=self.gui.current_theme.BG_SECONDARY,
             fg=self.gui.current_theme.TEXT_PRIMARY,
             font=("Segoe UI", 8),
-        ).grid(row=2, column=0, sticky="w", pady=1)
+        ).grid(row=3, column=0, sticky="w", pady=1)
+
         self.hotwords_entry = tk.Entry(
             model_frame,
             textvariable=self.hotwords_var,
@@ -26653,9 +26755,13 @@ class AdvancedSettingsDialog:
             insertbackground=self.gui.current_theme.TEXT_PRIMARY,
         )
         self.hotwords_entry.grid(
-            row=2, column=1, columnspan=3, sticky="ew", pady=1, padx=5
+            row=3, column=1, columnspan=3, sticky="ew", pady=1, padx=5
         )
-        ToolTip(self.hotwords_entry, "Kommagetrennte Hotwords für faster-whisper")
+        ToolTip(
+            self.hotwords_entry,
+            "Kommagetrennte Liste von Wörtern, die bei der Transkription "
+            "bevorzugt werden sollen (faster-whisper)."
+        )
 
     # -------------------------------------------------------------------------
     #  Sektion: Transkriptions‑Filter
@@ -28092,6 +28198,10 @@ class AdvancedSettingsDialog:
         self.sentence_interval_var.set(default.sentence_flush_interval)
         self.sentence_words_var.set(default.sentence_flush_word_threshold)
         self.reflection_var.set(default.enable_reflection)
+        self.cpu_threads_var.set(getattr(default, "cpu_threads", 0))
+        self.audio_enhancement_var.set(
+            getattr(default, "enable_audio_enhancement", False)
+        )
         log_debug("settings", "Defaults applied")
 
     def _load_current_settings(self) -> None:
@@ -28143,6 +28253,10 @@ class AdvancedSettingsDialog:
         self.reflection_var.set(adv.enable_reflection)
         self.live_from_start_var.set(adv.live_from_start)
         self.download_inactivity_var.set(adv.download_inactivity_timeout)
+        self.cpu_threads_var.set(getattr(adv, "cpu_threads", 0))
+        self.audio_enhancement_var.set(
+            getattr(self.gui.advanced_settings, "enable_audio_enhancement", False)
+        )
 
         # Browser-Auswahl aus AppSettings laden
         self.cookies_browser_var.set(self.gui.settings.cookies_browser)
@@ -28166,7 +28280,7 @@ class AdvancedSettingsDialog:
             self.allowed_dirs_text.insert("1.0", "\n".join(allowed_dirs))
 
         self._fetch_ollama_models()
-        log_debug("settings", f"Loaded current settings: live_from_start={self.live_from_start_var.get()}, download_inactivity={self.download_inactivity_var.get()}")
+        log_debug("settings", f"Loaded current settings: live_from_start={self.live_from_start_var.get()}, download_inactivity={self.download_inactivity_var.get()}, cpu_threads={self.cpu_threads_var.get()}")
 
     def save_settings(self) -> None:
         """
@@ -28295,6 +28409,7 @@ class AdvancedSettingsDialog:
             self.gui.advanced_settings.enable_reflection = self.reflection_var.get()
             self.gui.advanced_settings.live_from_start = self.live_from_start_var.get()
             self.gui.advanced_settings.download_inactivity_timeout = self.download_inactivity_var.get()
+            self.gui.advanced_settings.cpu_threads = self.cpu_threads_var.get()
 
             # ========== Zielsprache aus GUI synchronisieren ==========
             try:
@@ -29481,27 +29596,59 @@ class DragonWhispererGUI:
         self._init_engines()
 
         # -----------------------------------------------------------------
-        # 19. Automatische Modellauswahl
+        # 19. Automatische Modellauswahl (VRAM oder RAM)
         # -----------------------------------------------------------------
         if self.settings.default_model is None:
+            # 1. Versuche VRAM‑basierte Auswahl (für NVIDIA/AMD GPUs)
             free_vram = self._get_free_vram_gb()
-            if free_vram is None:
-                default = "medium"
-                logger.warning("VRAM konnte nicht ermittelt werden. Verwende Standardmodell 'medium'.")
-            else:
-                if free_vram < 2.0:
-                    default = "tiny" if free_vram < 1.5 else "base"
-                elif free_vram < 3.0:
+            if free_vram is not None:
+                if free_vram < 1.5:
+                    default = "tiny"
+                elif free_vram < 2.5:
+                    default = "base"
+                elif free_vram < 4.0:
                     default = "small"
-                elif free_vram < 6.0:
+                elif free_vram < 7.0:
                     default = "medium"
-                elif free_vram < 8.0:
-                    default = "large-v3-turbo"
                 else:
                     default = "large-v3-turbo"
-                logger.info(f"✅ Automatische Modellauswahl: {default} (freier VRAM: {free_vram:.1f} GB)")
+                reason = f"freier VRAM: {free_vram:.1f} GB"
+                logger.info(f"✅ Automatische Modellauswahl (GPU): '{default}' ({reason})")
+                self.update_status(f"🤖 Modell '{default}' gewählt ({reason})")
+            else:
+                # 2. Fallback: RAM‑basierte Auswahl (für CPU‑Betrieb)
+                try:
+                    import psutil
+                    ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+                    if ram_gb < 4.0:
+                        default = "tiny"
+                    elif ram_gb < 8.0:
+                        default = "base"
+                    elif ram_gb < 16.0:
+                        default = "small"
+                    elif ram_gb < 32.0:
+                        default = "medium"
+                    else:
+                        default = "large-v3-turbo"
+                    reason = f"RAM: {ram_gb:.1f} GB"
+                    logger.info(f"✅ Automatische Modellauswahl (CPU): '{default}' ({reason})")
+                    self.update_status(f"🤖 Modell '{default}' gewählt ({reason})")
+                except ImportError:
+                    default = "base"
+                    reason = "psutil nicht verfügbar – Fallback"
+                    logger.warning(f"⚠️ psutil fehlt – verwende Standardmodell '{default}'")
+                    self.update_status(f"⚠️ Modell '{default}' (RAM unbekannt)")
+                except Exception as e:
+                    default = "base"
+                    reason = f"Fehler bei RAM‑Ermittlung: {e}"
+                    logger.error(f"❌ RAM‑Ermittlung fehlgeschlagen: {e}")
+                    self.update_status(f"⚠️ Modell '{default}' (RAM‑Fehler)")
+
+            # Speichern und GUI‑Variable setzen
             self.settings.default_model = default
             self.settings.save_to_file()
+            if hasattr(self, "model_var") and self.model_var is not None:
+                self.model_var.set(default)
 
         # -----------------------------------------------------------------
         # 20. Präzisionsoptimierungen
@@ -36924,72 +37071,74 @@ class AudioProcessor:
     def _transcribe_with_timeout(
         self,
         audio_data: bytes,
-        timeout: float = 45.0
+        timeout: Optional[float] = None
     ) -> List[TranscriptionResult]:
         """
-        Führt die Transkription mit einem Timeout durch – ohne pro Chunk einen
-        neuen Thread zu erzeugen.
-
-        Verwendet einen wiederverwendbaren ThreadPoolExecutor
-        (`_transcribe_timeout_executor`), um die Thread‑Erzeugungskosten zu
-        eliminieren. Bei Timeout wird die Aufgabe **explizit abgebrochen**
-        (sofern sie noch nicht gestartet wurde) und die Future wird verworfen.
-        Die Methode ist robust gegen Executor‑Shutdown und liefert im Fehlerfall
-        eine aussagekräftige Exception.
-
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - **Explizites `future.cancel()`** im Timeout‑Fall, um die Ausführung
-              zu stoppen, falls die Aufgabe noch in der Warteschlange steht.
-            - **Prüfung auf Executor‑Zustand** vor dem Absenden der Aufgabe.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
-            - **Robuste Behandlung von `RuntimeError`** beim `submit` (falls der
-              Executor bereits heruntergefahren wurde).
-            - **Sofortiger Abbruch** bei leerem `audio_data` oder deaktivierter
-              Engine.
+        Führt die Transkription mit einem dynamischen Timeout durch.
+    
+        Das Timeout wird automatisch aus der Chunk‑Dauer und dem zuletzt gemessenen
+        Echtzeitfaktor (`_last_realtime_factor`) berechnet. Dadurch erhalten langsame
+        Systeme mehr Zeit, während schnelle GPUs nicht unnötig blockiert werden.
 
         Args:
             audio_data: PCM‑Audiodaten (16‑bit, mono, 16 kHz).
-            timeout: Maximale Wartezeit in Sekunden.
+            timeout: Optionaler fester Timeout (überschreibt dynamische Berechnung).
 
         Returns:
-            Liste der Transkriptionssegmente (wie `transcribe_audio(..., include_timestamps=True)`).
+            Liste der Transkriptionssegmente.
 
         Raises:
-            TimeoutError: Wenn die Transkription länger als `timeout` dauert.
-            TranscriptionError: Bei Fehlern während der Transkription.
-            RuntimeError: Wenn keine Transkriptions-Engine verfügbar ist oder
-                          der Executor nicht bereit ist.
+            TimeoutError: Wenn die Transkription länger als das Timeout dauert.
+            TranscriptionError: Bei Fehlern während der Transkription oder wenn die
+                                Engine nicht verfügbar ist.
         """
         # -----------------------------------------------------------------
-        # 1. Eingangsvalidierung und Engine holen
+        # 1. Eingangsvalidierung
         # -----------------------------------------------------------------
         if not audio_data:
-            if DEBUG_LEVEL >= 3:
-                log_debug("transcribe", "_transcribe_with_timeout: Leeres audio_data – überspringe")
+            if DEBUG_LEVEL >= 4:
+                log_debug("transcribe", "Leeres audio_data – überspringe")
             return []
 
-        with self._engine_lock:
-            engine = self._transcription_engine
-
-        if engine is None:
-            raise TranscriptionError("Transcription engine not set")
+        chunk_duration = len(audio_data) / self.settings.config.BYTES_PER_SECOND
 
         # -----------------------------------------------------------------
-        # 2. Prüfen, ob der Timeout-Executor bereit ist
+        # 2. Engine thread‑sicher holen
+        # -----------------------------------------------------------------
+        with self._engine_lock:
+            engine = self._transcription_engine
+            if engine is None:
+                raise TranscriptionError("Transcription engine not set")
+
+        # -----------------------------------------------------------------
+        # 3. Dynamisches Timeout berechnen
+        # -----------------------------------------------------------------
+        if timeout is None:
+            # Mindestens 60 Sekunden, maximal 600 Sekunden (10 Minuten)
+            with self._stats_lock:
+                rt_factor = max(1.0, self._last_realtime_factor)
+            # Sicherheitsfaktor: 5 × Chunk‑Dauer × Realtime‑Faktor
+            dynamic_timeout = max(60.0, min(600.0, chunk_duration * 5.0 * rt_factor))
+        else:
+            dynamic_timeout = timeout
+
+        # -----------------------------------------------------------------
+        # 4. Executor‑Verfügbarkeit prüfen
         # -----------------------------------------------------------------
         executor = getattr(self, "_transcribe_timeout_executor", None)
         if executor is None:
-            raise RuntimeError("TranscribeTimeout executor not initialized")
+            raise TranscriptionError("TranscribeTimeout executor not initialized")
 
         if DEBUG_LEVEL >= 3:
             log_debug(
                 "transcribe",
-                f"_transcribe_with_timeout: Submitting task with timeout={timeout}s, "
-                f"audio_size={len(audio_data)} bytes"
+                f"Submitting task: timeout={dynamic_timeout:.1f}s, "
+                f"chunk_duration={chunk_duration:.2f}s, "
+                f"rt_factor={rt_factor if timeout is None else 'fixed'}"
             )
 
         # -----------------------------------------------------------------
-        # 3. Aufgabe an den Timeout‑Executor übergeben
+        # 5. Aufgabe an Executor übergeben
         # -----------------------------------------------------------------
         try:
             future = executor.submit(
@@ -36999,62 +37148,53 @@ class AudioProcessor:
             )
             self._register_timeout_future(future)
         except RuntimeError as e:
-            # Executor wurde bereits heruntergefahren (z. B. während Shutdown)
-            logger.warning(f"Timeout-Executor nicht verfügbar: {e}")
-            if DEBUG_LEVEL >= 3:
-                log_debug("transcribe", f"Executor submit failed: {e}")
+            # Executor wurde heruntergefahren (z. B. während Shutdown)
+            logger.warning(f"Executor submit failed (shutdown): {e}")
             raise TranscriptionError("Transcription executor is shut down") from e
+        except Exception as e:
+            logger.error(f"Unexpected error during executor submit: {e}", exc_info=True)
+            raise TranscriptionError(f"Failed to submit transcription task: {e}") from e
 
         # -----------------------------------------------------------------
-        # 4. Auf Ergebnis warten (mit Timeout)
+        # 6. Auf Ergebnis warten (mit Timeout)
         # -----------------------------------------------------------------
         try:
-            result = future.result(timeout=timeout)
-            if result is None:
+            result = future.result(timeout=dynamic_timeout)
+            if not result:
                 if DEBUG_LEVEL >= 3:
-                    log_debug("transcribe", "_transcribe_with_timeout: Result is None")
+                    log_debug("transcribe", "Transcription returned empty result")
                 return []
             if DEBUG_LEVEL >= 3:
-                log_debug(
-                    "transcribe",
-                    f"_transcribe_with_timeout: Task completed successfully, "
-                    f"{len(result)} segments"
-                )
+                log_debug("transcribe", f"Task completed: {len(result)} segments")
             return result
 
         except FutureTimeout as e:
             # -----------------------------------------------------------------
-            # Timeout: Versuche, die Aufgabe abzubrechen (wirkt nur vor Start)
+            # Timeout: Versuche, die Aufgabe abzubrechen
             # -----------------------------------------------------------------
             cancelled = future.cancel()
             if cancelled:
-                log_debug(
-                    "transcribe",
-                    f"_transcribe_with_timeout: Task cancelled before execution "
-                    f"(timeout={timeout}s)"
-                )
+                log_debug("transcribe", f"Task cancelled before execution (timeout={dynamic_timeout:.1f}s)")
             else:
-                log_debug(
-                    "transcribe",
-                    f"_transcribe_with_timeout: Timeout after {timeout}s – "
-                    f"task already running and cannot be cancelled"
-                )
+                log_debug("transcribe", f"Timeout after {dynamic_timeout:.1f}s – task already running")
 
-            if DEBUG_LEVEL >= 3:
-                log_debug(
-                    "transcribe",
-                    f"_transcribe_with_timeout: Timeout after {timeout}s for chunk "
-                    f"({len(audio_data)} bytes)"
-                )
+            # Bei Timeout den Realtime‑Faktor erhöhen, um zukünftige Timeouts zu vermeiden
+            with self._stats_lock:
+                self._last_realtime_factor = max(self._last_realtime_factor, dynamic_timeout / chunk_duration)
+
             raise TimeoutError(
-                f"Transcription timed out after {timeout}s for chunk ({len(audio_data)} bytes)"
+                f"Transcription timed out after {dynamic_timeout:.1f}s "
+                f"(chunk={chunk_duration:.2f}s, rt_factor={dynamic_timeout/chunk_duration:.1f})"
             ) from e
 
         except Exception as e:
-            # Fehler in der Transkription weiterreichen
-            logger.error(f"Transcription failed in _transcribe_with_timeout: {e}", exc_info=True)
-            if DEBUG_LEVEL >= 3:
-                log_debug("transcribe", f"_transcribe_with_timeout: Exception details: {type(e).__name__}: {e}")
+            # -----------------------------------------------------------------
+            # Andere Fehler (z. B. OOM, Modellfehler)
+            # -----------------------------------------------------------------
+            logger.error(f"Transcription failed: {type(e).__name__}: {e}", exc_info=DEBUG_LEVEL >= 3)
+            # Nicht abbrechbare Futures explizit canceln, um Ressourcen zu sparen
+            if not future.done():
+                future.cancel()
             raise TranscriptionError(f"Transcription failed: {e}") from e
 
     # =========================================================================
@@ -37848,19 +37988,13 @@ class AudioProcessor:
         direkt an den normalen Verarbeitungsfluss (`_process_audio_data`).
 
         Verbesserungen gegenüber der ursprünglichen Version:
-            - **Korrekte Stop‑Prüfung:** Verwendet `self.is_stop_requested()` statt
-              der nicht existierenden `_get_ap()`-Methode (Fehler behoben).
-            - **Regelmäßige Abbruchprüfung** während der gesamten Leseschleife.
-            - **Inaktivitäts‑Timer:** Bricht den Download ab, wenn für eine
-              konfigurierbare Zeit keine Daten mehr empfangen werden.
-            - **Robuste Ressourcenfreigabe:** Garantiert, dass alle Subprozesse
-              auch bei Exceptions beendet werden.
-            - **Windows‑Sicherheit:** Schließt Pipes in separaten Daemon‑Threads,
-              um Blockaden beim Schließen zu vermeiden.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` für jeden
-              Schritt (Start, Fortschritt, Fehler, Ende).
-            - **Exponentieller Backoff bei Lesefehlern** (bis zu einem Maximum).
-            - **Globale Timeout‑Prüfung** für den gesamten Vorgang.
+            - **Dynamisches Timeout:** Berechnet aus erwarteter Restdauer und
+              Realtime‑Faktor, begrenzt auf 60–1800 Sekunden.
+            - **Robuste Leseschleife:** Exponentieller Backoff bei Pipe‑Fehlern.
+            - **Sichere Prozess‑Terminierung:** Nutzt `PlatformUtils.terminate_process`
+              für garantierte Beendigung aller Kindprozesse.
+            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
+            - **Abbruchmöglichkeit** über `cancel_event` während des gesamten Vorgangs.
 
         Args:
             yt_cmd: Vollständiger yt‑dlp‑Befehl als Liste von Strings.
@@ -37871,6 +38005,7 @@ class AudioProcessor:
             seek: Falls True oder float, wird ffmpeg angewiesen, an dieser
                   Position (in Sekunden) zu starten.
             timeout: Maximale Gesamtdauer für den Download in Sekunden.
+                     Wenn None, wird dynamisch berechnet.
             cancel_event: Externes Event, das den Vorgang vorzeitig abbrechen kann.
 
         Returns:
@@ -37896,10 +38031,30 @@ class AudioProcessor:
                 info_cb("⏹️ Download abgebrochen")
             return 0
 
+        # ---------------------------------------------------------------------
+        # Dynamisches Timeout berechnen (falls nicht explizit übergeben)
+        # ---------------------------------------------------------------------
+        if timeout is None:
+            # Erwartete Restdauer schätzen
+            if self._expected_duration is not None:
+                remaining = max(1.0, self._expected_duration - self._real_processed_seconds)
+            else:
+                remaining = 300.0  # Fallback: 5 Minuten
+
+            # Realtime‑Faktor aus Stats holen
+            with self._stats_lock:
+                rt_factor = max(1.0, self._last_realtime_factor)
+
+            # Dynamisches Timeout: Restdauer × Realtime‑Faktor × 2 (Sicherheit)
+            # Begrenzt auf 60–1800 Sekunden (1–30 Minuten)
+            dynamic_timeout = max(60.0, min(1800.0, remaining * rt_factor * 2.0))
+        else:
+            dynamic_timeout = timeout
+
         if DEBUG_LEVEL >= 3:
             log_debug(
                 "download",
-                f"_run_ffmpeg_pipe: START - seek={seek}, timeout={timeout}, "
+                f"_run_ffmpeg_pipe: START - seek={seek}, timeout={dynamic_timeout:.1f}s, "
                 f"chunk_size={self.settings.config.CHUNK_SIZE_BYTES} bytes"
             )
             log_debug("download", f"yt-dlp command: {' '.join(yt_cmd)}")
@@ -37927,7 +38082,7 @@ class AudioProcessor:
         # Nach yt-dlp-Start erneut auf Abbruch prüfen
         if is_stop_requested():
             logger.info("Download abgebrochen nach yt-dlp-Start")
-            self._safe_terminate_process(yt_proc)
+            PlatformUtils.terminate_process(yt_proc)
             if info_cb:
                 info_cb("⏹️ Download abgebrochen")
             return 0
@@ -37970,7 +38125,7 @@ class AudioProcessor:
                 log_debug("download", f"ffmpeg started (PID: {ff_proc.pid})")
         except Exception as e:
             logger.error(f"Failed to start ffmpeg: {e}")
-            self._safe_terminate_process(yt_proc)
+            PlatformUtils.terminate_process(yt_proc)
             if error_cb:
                 error_cb(f"ffmpeg start failed: {str(e)[:100]}")
             return 0
@@ -37978,8 +38133,8 @@ class AudioProcessor:
         # Nach ffmpeg-Start erneut auf Abbruch prüfen
         if is_stop_requested():
             logger.info("Download abgebrochen nach ffmpeg-Start")
-            self._safe_terminate_process(ff_proc)
-            self._safe_terminate_process(yt_proc)
+            PlatformUtils.terminate_process(ff_proc)
+            PlatformUtils.terminate_process(yt_proc)
             if info_cb:
                 info_cb("⏹️ Download abgebrochen")
             return 0
@@ -38028,6 +38183,7 @@ class AudioProcessor:
 
         consec_errors = 0
         MAX_CONSECUTIVE_ERRORS = 5
+        backoff_delay = 0.1  # Startwert für exponentiellen Backoff
 
         # Zähler für regelmäßige Stop‑Prüfung (alle 20 Chunks)
         stop_check_counter = 0
@@ -38046,13 +38202,12 @@ class AudioProcessor:
                     break
 
                 # 5.2 Globaler Timeout
-                if timeout is not None:
-                    elapsed_total = time.perf_counter() - start_total
-                    if elapsed_total > timeout:
-                        logger.warning(
-                            f"Global timeout ({timeout}s) exceeded, aborting download."
-                        )
-                        break
+                elapsed_total = time.perf_counter() - start_total
+                if elapsed_total > dynamic_timeout:
+                    logger.warning(
+                        f"Global timeout ({dynamic_timeout:.1f}s) exceeded, aborting download."
+                    )
+                    break
 
                 # 5.3 Daten lesen
                 try:
@@ -38060,11 +38215,24 @@ class AudioProcessor:
                 except (ValueError, OSError) as e:
                     log_debug("download", f"Read error (pipe closed): {e}")
                     break
+                except Exception as e:
+                    logger.warning(f"Unexpected read error: {e}")
+                    consec_errors += 1
+                    if consec_errors >= MAX_CONSECUTIVE_ERRORS:
+                        logger.error("Too many read errors, aborting download.")
+                        break
+                    time.sleep(backoff_delay)
+                    backoff_delay = min(backoff_delay * 2, 2.0)
+                    continue
 
                 # 5.4 Keine Daten -> EOF
                 if not data:
                     log_debug("download", "ffmpeg stdout closed (EOF)")
                     break
+
+                # Erfolgreicher Lesevorgang – Backoff zurücksetzen
+                backoff_delay = 0.1
+                consec_errors = 0
 
                 # 5.5 Inaktivitätstimer zurücksetzen
                 last_data_time = time.perf_counter()
@@ -38081,7 +38249,6 @@ class AudioProcessor:
                         error_callback=error_cb,
                         info_callback=info_cb,
                     )
-                    consec_errors = 0
                 except Exception as e:
                     consec_errors += 1
                     logger.error(
@@ -38096,6 +38263,7 @@ class AudioProcessor:
                             f"Too many consecutive processing errors ({consec_errors}). Aborting download."
                         )
                         break
+                    continue
 
                 chunk_count += 1
 
@@ -38156,24 +38324,24 @@ class AudioProcessor:
             close_pipe_safe(ff_proc.stdout)
 
             # -----------------------------------------------------------------
-            # 8. Prozesse terminieren (erst SIGTERM, dann SIGKILL)
+            # 8. Prozesse sauber terminieren (nutzt PlatformUtils)
             # -----------------------------------------------------------------
             for proc, name in ((ff_proc, "ffmpeg"), (yt_proc, "yt-dlp")):
                 if proc.poll() is None:
                     if DEBUG_LEVEL >= 3:
                         log_debug("download", f"Terminating {name} (PID {proc.pid})...")
                     try:
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=2.0)
-                            if DEBUG_LEVEL >= 3:
-                                log_debug("download", f"{name} terminated gracefully")
-                        except subprocess.TimeoutExpired:
-                            logger.warning(f"{name} did not terminate, sending SIGKILL")
-                            proc.kill()
-                            proc.wait(timeout=1.0)
-                            if DEBUG_LEVEL >= 3:
-                                log_debug("download", f"{name} killed")
+                        PlatformUtils.terminate_process(
+                            proc,
+                            child_terminate_timeout=2.0,
+                            child_kill_wait=1.0,
+                            parent_terminate_timeout=3.0,
+                            parent_kill_wait=1.0,
+                            fallback_terminate_timeout=3.0,
+                            fallback_kill_wait=1.0,
+                        )
+                        if DEBUG_LEVEL >= 3:
+                            log_debug("download", f"{name} terminated")
                     except Exception as e:
                         logger.error(f"Error terminating {name}: {e}")
 
@@ -40172,17 +40340,18 @@ class AudioProcessor:
 
     def _wait_for_pending_tasks(self) -> None:
         """
-        Wartet darauf, dass alle ausstehenden Transkriptions-Tasks abgeschlossen werden.
+        Wartet dynamisch auf den Abschluss aller ausstehenden Transkriptions‑Tasks.
 
-        Diese Methode wird während des Stream-Cleanups aufgerufen, nachdem der
-        Dispatcher angewiesen wurde, keine neuen Tasks mehr anzunehmen, aber bevor
-        er endgültig gestoppt wird. Sie stellt sicher, dass alle bereits in der
-        Warteschlange befindlichen und aktuell laufenden Transkriptionen vollständig
-        abgeschlossen sind, bevor der Cleanup fortgesetzt wird. Andernfalls könnten
-        Ergebnisse verloren gehen oder die GUI unvollständig bleiben.
+        Die maximale Wartezeit wird aus der Anzahl der offenen Tasks, der
+        durchschnittlichen Chunk‑Dauer und dem letzten gemessenen Echtzeitfaktor
+        berechnet. Dadurch erhalten langsame Systeme ausreichend Zeit, während
+        schnelle GPUs nicht unnötig blockiert werden.
+
+        Die Methode ist thread‑sicher und reagiert auf Benutzerabbrüche sowie
+        einen unerwarteten Abbruch des Dispatcher‑Threads.
         """
         # -----------------------------------------------------------------
-        # 1. Aktuelle Anzahl ausstehender Tasks ermitteln (unter Lock)
+        # 1. Aktuelle Anzahl ausstehender Tasks ermitteln
         # -----------------------------------------------------------------
         with self._pending_tasks_lock:
             pending = self._pending_tasks
@@ -40192,9 +40361,19 @@ class AudioProcessor:
             return
 
         # -----------------------------------------------------------------
-        # 2. Initialisierung der Wartezeit
+        # 2. Dynamische Timeout‑Berechnung
         # -----------------------------------------------------------------
-        MAX_WAIT_SECONDS = 120.0
+        # Basis: geschätzte Verarbeitungszeit pro Task
+        chunk_duration = self.settings.config.CHUNK_DURATION
+        with self._stats_lock:
+            rt_factor = max(1.0, self._last_realtime_factor)
+
+        # Sicherheitsfaktor: 2 × die erwartete Zeit für alle Tasks
+        estimated_seconds = pending * chunk_duration * rt_factor * 2.0
+
+        # Absolute Grenzen: mindestens 60 s, maximal 1200 s (20 Minuten)
+        MAX_WAIT_SECONDS = max(60.0, min(1200.0, estimated_seconds))
+
         CHECK_INTERVAL = 1.0          # Timeout für _tasks_done_event.wait()
         LOG_INTERVAL = 2.0            # Fortschrittsmeldungen nur alle 2 Sekunden
 
@@ -40204,7 +40383,8 @@ class AudioProcessor:
 
         log_debug(
             "processor",
-            f"  Waiting for {pending} pending transcription tasks (max {MAX_WAIT_SECONDS:.1f}s)..."
+            f"  Waiting for {pending} pending task(s) "
+            f"(max {MAX_WAIT_SECONDS:.1f}s, est={estimated_seconds:.1f}s, rt_factor={rt_factor:.2f})"
         )
 
         # -----------------------------------------------------------------
@@ -40216,14 +40396,13 @@ class AudioProcessor:
                 log_debug("processor", "  Stop event set – aborting wait for pending tasks")
                 break
 
-            # 3.2 Dispatcher-Status prüfen (nur warnen, wenn er wirklich tot ist)
+            # 3.2 Dispatcher‑Status prüfen (nur warnen, wenn er wirklich tot ist)
             if (self._dispatcher_thread is not None
                     and not self._dispatcher_thread.is_alive()
                     and not self._dispatcher_shutdown.is_set()):
-                # Dispatcher wurde nicht ordnungsgemäß beendet – das ist ein kritisches Problem
                 logger.warning(
-                    "⚠️ Dispatcher‑Thread ist unerwartet gestorben – "
-                    "breche Wartezeit auf ausstehende Tasks ab"
+                    "⚠️ Dispatcher‑Thread is unexpectedly dead – "
+                    "aborting wait for pending tasks"
                 )
                 break
 
@@ -40235,26 +40414,36 @@ class AudioProcessor:
             if current_pending == 0:
                 break
 
-            # 3.5 Timeout prüfen
+            # 3.5 Dynamische Timeout‑Anpassung (falls neue Tasks hinzugekommen sind)
+            if current_pending > last_pending:
+                # Zähler ist gestiegen – Timeout erhöhen
+                additional = current_pending - last_pending
+                MAX_WAIT_SECONDS += additional * chunk_duration * rt_factor * 2.0
+                MAX_WAIT_SECONDS = min(1200.0, MAX_WAIT_SECONDS)
+                log_debug(
+                    "processor",
+                    f"  Pending tasks increased to {current_pending} – "
+                    f"timeout extended to {MAX_WAIT_SECONDS:.1f}s"
+                )
+
+            # 3.6 Timeout prüfen
             elapsed = time.perf_counter() - wait_start
             if elapsed >= MAX_WAIT_SECONDS:
                 logger.warning(
-                    f"⚠️ Timeout ({MAX_WAIT_SECONDS:.1f}s) beim Warten auf Tasks – "
-                    f"{current_pending} noch ausstehend"
+                    f"⚠️ Timeout ({MAX_WAIT_SECONDS:.1f}s) reached while waiting – "
+                    f"{current_pending} task(s) still pending"
                 )
                 break
 
-            # 3.6 Warten auf das nächste Signal (unterbrechbar)
-            #     Das Event wird immer dann gesetzt, wenn ein Task abgeschlossen wird
-            #     und der Zähler dekrementiert wurde.
+            # 3.7 Warten auf das nächste Signal (unterbrechbar)
             self._tasks_done_event.wait(timeout=CHECK_INTERVAL)
 
-            # 3.7 Fortschritt loggen (gedrosselt)
+            # 3.8 Fortschritt loggen (gedrosselt)
             now = time.perf_counter()
             if current_pending != last_pending or (now - last_log_time) >= LOG_INTERVAL:
                 log_debug(
                     "processor",
-                    f"    Still waiting for {current_pending} tasks ({elapsed:.1f}s elapsed)"
+                    f"    Still waiting for {current_pending} task(s) ({elapsed:.1f}s elapsed)"
                 )
                 last_pending = current_pending
                 last_log_time = now
@@ -40270,10 +40459,10 @@ class AudioProcessor:
             log_debug("processor", f"  ✅ All transcription tasks finished after {elapsed:.2f}s")
         else:
             # -----------------------------------------------------------------
-            # 5. Fehlerfall: Zähler manuell zurücksetzen, um Blockade zu lösen
+            # 5. Fehlerfall: Zähler manuell zurücksetzen, um Deadlock zu lösen
             # -----------------------------------------------------------------
             logger.warning(
-                f"⚠️ Wait for pending tasks aborted with {final_pending} tasks remaining. "
+                f"⚠️ Wait for pending tasks aborted with {final_pending} task(s) remaining. "
                 "Forcing counter reset to prevent deadlock."
             )
             with self._pending_tasks_lock:
@@ -44024,6 +44213,7 @@ class AdvancedSettings:
     # =========================================================================
     transcription_workers: int = 2
     translation_workers: int = 1
+    cpu_threads: int = 0
 
     # =========================================================================
     # Text-to-Speech
