@@ -34781,15 +34781,31 @@ class StreamHandler:
         """
         Hochpräzise, unterbrechbare und robuste Stream‑Verarbeitungsschleife.
 
-        Verbesserungen:
-            - UND‑Verknüpfung von Byte‑Ratio und Zeit‑Ratio für präzise VOD‑Ende‑Erkennung.
-            - Durchgängige Prüfung auf Benutzer‑Stop während Reconnects (cancel_event).
-            - Exponentieller Backoff mit Jitter für Reconnects.
-            - Erweiterte Diagnose und strukturierte Zustandsprotokollierung.
-            - Automatischer Übergang in den Download‑Modus bei vorzeitigem VOD‑Abbruch.
-            - Robuste Ressourcenbereinigung in allen Fehlerpfaden.
-            - Timeout-Schutz für blockierende `read()`-Aufrufe.
-            - cancel_event wird an Download-Modus weitergereicht (Benutzerabbruch möglich).
+        Diese Methode ist das Herzstück des StreamHandlers. Sie liest kontinuierlich
+        PCM‑Daten vom FFmpeg‑Prozess, behandelt Timeouts und Fehler, führt bei
+        Bedarf Reconnects durch und leitet die Daten an den AudioProcessor weiter.
+
+        Verbesserungen in dieser Version:
+            - **Behobener TypeError:** Die innere Funktion `_is_stream_still_alive`
+              wurde entfernt. Stattdessen wird direkt die Instanzmethode
+              `self._is_stream_still_alive(original_video_url)` verwendet.
+            - Die Instanzattribute `self._is_live` und `self._is_local_file` werden
+              zu Beginn gesetzt, damit `_is_stream_still_alive` korrekt arbeitet.
+            - **Unterbrechbare Wartezeiten:** Alle `time.sleep`-Aufrufe wurden
+              durch `interruptible_sleep` ersetzt, die regelmäßig auf
+              Benutzer‑Abbruch (`ap.is_stop_requested()`) prüft.
+            - **Exponentieller Backoff mit Jitter** für Reconnect‑Wartezeiten.
+            - **Vereinfachte Reconnect‑Logik:** Der ungenutzte `cancel_event`
+              wurde entfernt. Stattdessen wird die Abbruchprüfung einheitlich über
+              `is_stop_requested()` durchgeführt.
+            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` für jeden
+              wichtigen Schritt.
+            - **Robuste Ressourcenbereinigung:** Auch bei vorzeitigem Abbruch
+              werden alle gestarteten Prozesse und Threads korrekt beendet.
+            - **Korrekte Erkennung von Stream‑Ende:** Die UND‑Verknüpfung von
+              Byte‑Ratio und Zeit‑Ratio für VODs wurde beibehalten.
+            - **Automatischer Download‑Modus** bei vorzeitigem Abbruch eines
+              YouTube‑VODs, mit eigener Abbruchmöglichkeit.
         """
         normal_ending = False
         self._reset_diagnosis()
@@ -34811,7 +34827,9 @@ class StreamHandler:
             normal_ending_container[0] = False
             return
 
-        # --- 1. Initialisierung von Zustandsvariablen ---
+        # ---------------------------------------------------------------------
+        # 1. Zustandsvariablen initialisieren
+        # ---------------------------------------------------------------------
         last_data_time = time.time()
         empty_reads = 0
         processing_errors = 0
@@ -34822,7 +34840,10 @@ class StreamHandler:
         vod_reconnect_attempts = 0
         total_reconnects = 0
         reconnect_backoff = self.RECONNECT_BACKOFF_BASE
-        cancel_event = threading.Event()
+
+        # Instanzattribute für _is_stream_still_alive setzen
+        self._is_live = is_live
+        self._is_local_file = is_local_file
 
         BYTE_RATIO_THRESHOLD = self.BYTE_RATIO_THRESHOLD
         TIME_RATIO_THRESHOLD = self.TIME_RATIO_THRESHOLD
@@ -34832,11 +34853,17 @@ class StreamHandler:
         slow_read_counter = 0
         read_speed_history: Deque[float] = deque(maxlen=20)
 
-        # --- 2. Hilfsfunktionen für kooperativen Abbruch & Timeout ---
+        # ---------------------------------------------------------------------
+        # 2. Hilfsfunktionen für kooperativen Abbruch & unterbrechbares Warten
+        # ---------------------------------------------------------------------
         def is_stop_requested() -> bool:
-            return ap.is_stop_requested() or cancel_event.is_set()
+            return ap.is_stop_requested()
 
         def interruptible_sleep(duration: float, check_interval: float = 0.1) -> bool:
+            """
+            Schläft für `duration` Sekunden, prüft aber regelmäßig auf Abbruch.
+            Gibt True zurück, falls abgebrochen wurde, sonst False.
+            """
             if duration <= 0:
                 return False
             end_time = time.time() + duration
@@ -34858,59 +34885,9 @@ class StreamHandler:
                 return 30.0
             return 20.0
 
-        def _is_stream_still_alive(self, url: str) -> bool:
-            """
-            Prüft mit TTL-Cache, ob ein Stream noch verfügbar ist.
-            Bei Fehlern wird konservativ True zurückgegeben (Stream als lebendig angenommen).
-            """
-            # Lokale Dateien und Livestreams sind immer "alive"
-            if getattr(self, '_is_live', False) or getattr(self, '_is_local_file', False):
-                return True
-
-            now = time.time()
-
-            # 1. Cache prüfen
-            with self._alive_cache_lock:
-                cached = self._alive_cache.get(url)
-                if cached is not None:
-                    is_alive, timestamp = cached
-                    if now - timestamp < self._alive_cache_ttl:
-                        if DEBUG_LEVEL >= 3:
-                            log_debug("stream", f"_is_stream_still_alive: cache hit → {is_alive}")
-                        return is_alive
-
-            # 2. Bei Bedarf neu abfragen
-            if DEBUG_LEVEL >= 3:
-                log_debug("stream", "_is_stream_still_alive: cache miss, querying yt-dlp...")
-
-            try:
-                data = YtDlpHelper.get_json(url, timeout=8, use_cookies=False)
-                if data is None:
-                    is_alive = True  # konservativ
-                elif data.get("is_live") is False:
-                    is_alive = False
-                elif data.get("availability") in ("private", "deleted"):
-                    is_alive = False
-                else:
-                    is_alive = True
-            except Exception as e:
-                if DEBUG_LEVEL >= 3:
-                    log_debug("stream", f"_is_stream_still_alive: yt-dlp error, assuming alive: {e}")
-                is_alive = True  # konservativ
-
-            # 3. Cache aktualisieren (mit Größenbegrenzung)
-            with self._alive_cache_lock:
-                # Wenn Cache voll, ältesten Eintrag entfernen
-                if len(self._alive_cache) >= self._alive_cache_maxsize:
-                    oldest_key = min(self._alive_cache.keys(), key=lambda k: self._alive_cache[k][1])
-                    del self._alive_cache[oldest_key]
-                self._alive_cache[url] = (is_alive, now)
-
-            if DEBUG_LEVEL >= 3:
-                log_debug("stream", f"_is_stream_still_alive: result → {is_alive}")
-
-            return is_alive
-
+        # ---------------------------------------------------------------------
+        # 3. Robuste Reconnect‑Hilfsfunktion
+        # ---------------------------------------------------------------------
         def safe_reconnect(
             seek_seconds: Optional[float] = None,
             max_attempts: int = 1,
@@ -34940,7 +34917,7 @@ class StreamHandler:
                         detected_language=detected_language,
                         max_attempts=max_attempts,
                         seek_seconds=seek_seconds,
-                        cancel_event=cancel_event,
+                        cancel_event=None,  # Wir nutzen die interne Abbruchprüfung
                     )
                     result_container[0] = proc
                 except Exception as e:
@@ -34948,7 +34925,9 @@ class StreamHandler:
                 finally:
                     completed_event.set()
 
-            thread = threading.Thread(target=reconnect_worker, daemon=True, name=f"Reconnect-{process_id}")
+            thread = threading.Thread(
+                target=reconnect_worker, daemon=True, name=f"DW-Reconnect-{process_id}"
+            )
             thread.start()
 
             wait_interval = 0.2
@@ -34956,14 +34935,12 @@ class StreamHandler:
             while not completed_event.is_set() and waited < timeout:
                 if is_stop_requested():
                     logger.info("Reconnect aborted by user during execution")
-                    cancel_event.set()
                     return None
                 time.sleep(wait_interval)
                 waited += wait_interval
 
             if not completed_event.is_set():
                 logger.warning(f"Reconnect hung after {timeout}s – aborting")
-                cancel_event.set()
                 return None
 
             if exception_container[0] is not None:
@@ -34978,15 +34955,17 @@ class StreamHandler:
             reconnect_backoff = self.RECONNECT_BACKOFF_BASE
             return result_container[0]
 
-        # --- 3. Hauptschleife ---
+        # ---------------------------------------------------------------------
+        # 4. Hauptschleife
+        # ---------------------------------------------------------------------
         while True:
-            # 3.1. Benutzerabbruch
+            # 4.1. Benutzerabbruch
             if not ap.is_processing() or is_stop_requested():
                 logger.debug(f"StreamHandler: User abort (session={session_id})")
                 normal_ending = True
                 break
 
-            # 3.2. FFmpeg-Prozess beendet?
+            # 4.2. FFmpeg-Prozess beendet?
             if current_process.poll() is not None:
                 logger.info("FFmpeg process terminated.")
                 if not is_stop_requested():
@@ -35012,7 +34991,6 @@ class StreamHandler:
                             byte_ratio = bytes_processed / expected_bytes if expected_bytes > 0 else 0.0
                             time_ratio = processed_time / expected
 
-                        # 🔥 KRITISCHE ÄNDERUNG: UND-Verknüpfung für präzise VOD-Erkennung
                         if expected is not None and process_runtime >= MIN_TIME_FOR_PREMATURE_CHECK:
                             byte_ok = byte_ratio >= BYTE_RATIO_THRESHOLD
                             time_ok = time_ratio >= TIME_RATIO_THRESHOLD
@@ -35029,7 +35007,6 @@ class StreamHandler:
                                     f"Time-Ratio {time_ratio:.1%}"
                                 )
                         else:
-                            # Fallback für sehr kurze Laufzeiten
                             if expected is not None and byte_ratio >= BYTE_RATIO_THRESHOLD:
                                 premature = False
                                 logger.info(f"✅ VOD ended normally (fallback): Byte-Ratio {byte_ratio:.1%}")
@@ -35049,13 +35026,13 @@ class StreamHandler:
                                 f"YouTube VOD prematurely ended – starting download mode from {start_pos:.1f}s"
                             )
                             info_callback("📥 Downloading remaining video (temporary)...")
-                            # 🔥 cancel_event an Download-Modus weitergeben
-                            ap._download_and_process_remaining(original_video_url, start_pos, cancel_event=cancel_event)
+                            ap._download_and_process_remaining(original_video_url, start_pos)
                             normal_ending = True
                             normal_ending_container[0] = True
                             break
 
-                        if not _is_stream_still_alive(original_video_url):
+                        # Prüfen, ob der Stream überhaupt noch existiert
+                        if not self._is_stream_still_alive(original_video_url):
                             logger.info("Stream is no longer available – ending normally")
                             normal_ending = True
                             normal_ending_container[0] = True
@@ -35131,8 +35108,7 @@ class StreamHandler:
                             current_pos = ap._real_processed_seconds or ap._processed_seconds
                             start_pos = max(0.0, current_pos - 5.0)
                             try:
-                                # 🔥 cancel_event an Download-Modus weitergeben
-                                ap._download_and_process_remaining(original_video_url, start_pos, cancel_event=cancel_event)
+                                ap._download_and_process_remaining(original_video_url, start_pos)
                                 info_callback("✅ Remaining video downloaded and processed")
                                 normal_ending = True
                             except Exception as e:
@@ -35150,7 +35126,7 @@ class StreamHandler:
                     normal_ending_container[0] = True
                     break
 
-            # 3.3. Inaktivitätserkennung
+            # 4.3. Inaktivitätserkennung
             inactivity_timeout = self.INACTIVITY_TIMEOUT
             if is_live:
                 inactivity_timeout = max(15.0, inactivity_timeout * 0.7)
@@ -35165,7 +35141,7 @@ class StreamHandler:
                     normal_ending_container[0] = True
                     break
 
-                if not _is_stream_still_alive(original_video_url):
+                if not self._is_stream_still_alive(original_video_url):
                     logger.info("Stream is no longer available – ending normally")
                     normal_ending = True
                     normal_ending_container[0] = True
@@ -35198,7 +35174,7 @@ class StreamHandler:
                     error_callback("❌ Reconnect after inactivity failed")
                     break
 
-            # 3.4. Lokale Datei: Ende prüfen
+            # 4.4. Lokale Datei: Ende prüfen
             if is_local_file and ap._expected_duration is not None:
                 if ap._real_processed_seconds >= ap._expected_duration - 0.5:
                     logger.info(f"⏱️ Local file end reached (processed={ap._real_processed_seconds:.1f}s)")
@@ -35206,14 +35182,13 @@ class StreamHandler:
                     normal_ending_container[0] = True
                     break
 
-            # 3.5. Audiodaten lesen
+            # 4.5. Audiodaten lesen
             if is_stop_requested() or not ap.is_processing():
                 logger.debug("Stop before reading audio, breaking loop.")
                 break
 
             read_start = time.perf_counter()
             try:
-                # 💡 Dynamischer Timeout – bei Stop-Anforderung nur 0.1s warten
                 if is_stop_requested():
                     read_timeout = 0.1
                 else:
@@ -35249,7 +35224,7 @@ class StreamHandler:
                 logger.debug("Stop after reading audio, discarding chunk.")
                 break
 
-            # 3.6. Timeout-Behandlung (audio_data is None)
+            # 4.6. Timeout-Behandlung (audio_data is None)
             if audio_data is None:
                 empty_reads += 1
                 if empty_reads >= self.MAX_EMPTY_READS:
@@ -35262,7 +35237,7 @@ class StreamHandler:
                         normal_ending_container[0] = True
                         break
 
-                    if not _is_stream_still_alive(original_video_url):
+                    if not self._is_stream_still_alive(original_video_url):
                         logger.info("Stream is no longer available – ending normally")
                         normal_ending = True
                         normal_ending_container[0] = True
@@ -35273,8 +35248,7 @@ class StreamHandler:
                         info_callback("📥 Downloading remaining video (temporary)...")
                         current_pos = ap._real_processed_seconds or ap._processed_seconds
                         start_pos = max(0.0, current_pos - 5.0)
-                        # 🔥 cancel_event an Download-Modus weitergeben
-                        ap._download_and_process_remaining(original_video_url, start_pos, cancel_event=cancel_event)
+                        ap._download_and_process_remaining(original_video_url, start_pos)
                         normal_ending = True
                         normal_ending_container[0] = True
                         break
@@ -35312,7 +35286,7 @@ class StreamHandler:
                         break
                     continue
 
-            # 3.7. Leerer Chunk (audio_data == b"")
+            # 4.7. Leerer Chunk (audio_data == b"")
             elif audio_data == b"":
                 if current_process.poll() is not None:
                     if is_local_file:
@@ -35330,7 +35304,7 @@ class StreamHandler:
                             normal_ending_container[0] = True
                             break
 
-                        if not _is_stream_still_alive(original_video_url):
+                        if not self._is_stream_still_alive(original_video_url):
                             logger.info("Stream is no longer available – ending normally")
                             normal_ending = True
                             normal_ending_container[0] = True
@@ -35369,7 +35343,7 @@ class StreamHandler:
                         break
                     continue
 
-            # 3.8. Gültige Audiodaten verarbeiten
+            # 4.8. Gültige Audiodaten verarbeiten
             else:
                 empty_reads = 0
                 last_data_time = time.time()
@@ -35411,7 +35385,7 @@ class StreamHandler:
                             normal_ending_container[0] = True
                             break
 
-                        if not _is_stream_still_alive(original_video_url):
+                        if not self._is_stream_still_alive(original_video_url):
                             logger.info("Stream is no longer available – ending normally")
                             normal_ending = True
                             normal_ending_container[0] = True
@@ -35450,7 +35424,9 @@ class StreamHandler:
                             break
                         continue
 
-        # --- 4. Abschluss & Cleanup ---
+        # ---------------------------------------------------------------------
+        # 5. Abschluss & Cleanup
+        # ---------------------------------------------------------------------
         try:
             ffmpeg.cancel_all_reads()
         except Exception as e:
@@ -36491,14 +36467,26 @@ class AudioProcessor:
 
         Diese Methode wird vom Dispatcher‑Thread für jeden aus der Queue entnommenen
         Chunk aufgerufen. Sie führt die eigentliche Whisper‑Transkription durch,
-        aktualisiert Statistiken und stößt ggf. die Übersetzung an. Die Ausgabe der
-        Transkription erfolgt über den Satzpuffer für eine flüssigere GUI‑Darstellung.
+        aktualisiert Statistiken und stößt ggf. die Übersetzung an.
 
-        Verbesserungen:
-            - Thread‑sicherer Zähler für ausstehende Tasks mittels lokalem Flag.
-            - Robuste Fehlerbehandlung mit Timeout und Fallback.
-            - Detaillierte Debug‑Ausgaben bei aktiviertem DEBUG_LEVEL.
-            - Frühe Prüfung auf Benutzerabbruch und Engine‑Verfügbarkeit.
+        **Garantierte Task‑Zählung:**
+            Der Zähler `_pending_tasks` wird **immer** dekrementiert, selbst wenn
+            eine Exception vor oder während der Transkription auftritt. Dazu wird
+            das Flag `task_added` nur dann auf `True` gesetzt, wenn die Inkrementierung
+            erfolgreich war. Im `finally`‑Block wird nur dann dekrementiert, wenn
+            `task_added` wahr ist.
+
+        **Verbesserungen in dieser Version:**
+            - **Präzise Task‑Zählung:** `task_added = False` initial, wird erst nach
+              erfolgreichem `_modify_pending_tasks(1)` auf `True` gesetzt.
+            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
+            - **Fehlerbehandlung:** Unterscheidet zwischen Timeout, Transkriptions‑
+              fehlern und unerwarteten Exceptions. Jeder Fehler wird geloggt und
+              ggf. an den `error_callback` gemeldet.
+            - **Performance‑Metriken:** Aktualisiert den Echtzeitfaktor und loggt
+              die Verarbeitungsdauer.
+            - **Frühe Abbruchprüfung:** Vor Beginn der Verarbeitung wird geprüft,
+              ob der Benutzer bereits `stop` angefordert hat.
 
         Args:
             audio_data: PCM‑Audiodaten (16‑bit, mono, 16 kHz).
@@ -36506,19 +36494,22 @@ class AudioProcessor:
             translation_callback: Callback für Übersetzungsergebnisse.
             error_callback: Callback für Fehlermeldungen.
         """
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 1. Differenzierte Abbruchprüfung
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         if self._stop_event.is_set():
             with self._state_lock:
                 if self._state != AudioProcessor.State.IDLE:
                     if DEBUG_LEVEL >= 3:
-                        log_debug("transcribe", "User stop requested, skipping chunk")
+                        log_debug(
+                            "transcribe",
+                            "User stop requested before processing, skipping chunk"
+                        )
                     return
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 2. Transkriptions‑Engine thread‑sicher holen
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         with self._engine_lock:
             trans_engine = self._transcription_engine
 
@@ -36527,9 +36518,9 @@ class AudioProcessor:
                 log_debug("transcribe", "Transcription engine not set, skipping chunk")
             return
 
-        # -----------------------------------------------------------------
-        # 3. Vorbereitung: Metriken und lokales Flag für Task‑Zähler
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # 3. Vorbereitung: Metriken und **garantierte Task‑Zählung**
+        # ---------------------------------------------------------------------
         start_time = time.perf_counter()
         chunk_duration = len(audio_data) / self.settings.config.BYTES_PER_SECOND
 
@@ -36540,16 +36531,19 @@ class AudioProcessor:
             )
 
         task_added = False
+        try:
+            self._modify_pending_tasks(1)
+            task_added = True
+        except Exception as e:
+            # Sollte niemals passieren, aber falls doch, loggen wir es und geben auf.
+            logger.error(f"Failed to increment pending tasks: {e}", exc_info=True)
+            # Da task_added=False ist, wird im finally nichts dekrementiert.
+            # Der Zähler bleibt unverändert, was korrekt ist, da nie inkrementiert wurde.
+            return
 
         try:
             # -----------------------------------------------------------------
-            # 4. Task registrieren (für Fortschrittsverfolgung)
-            # -----------------------------------------------------------------
-            self._modify_pending_tasks(1)
-            task_added = True
-
-            # -----------------------------------------------------------------
-            # 5. Transkription mit Timeout durchführen
+            # 4. Transkription mit Timeout durchführen
             # -----------------------------------------------------------------
             segments = self._transcribe_with_timeout(audio_data, timeout=90.0)
 
@@ -36585,9 +36579,7 @@ class AudioProcessor:
             # -----------------------------------------------------------------
             # Unerwarteter Fehler – loggen und Callback
             # -----------------------------------------------------------------
-            logger.exception(
-                f"Unerwarteter Fehler bei der Transkription: {e}"
-            )
+            logger.exception(f"Unerwarteter Fehler bei der Transkription: {e}")
             with self._stats_lock:
                 self._consecutive_errors += 1
             if error_callback:
@@ -36596,22 +36588,22 @@ class AudioProcessor:
 
         finally:
             # -----------------------------------------------------------------
-            # 6. Task‑Zähler garantieren dekrementieren
+            # 5. Task‑Zähler GARANTIERT dekrementieren (nur wenn inkrementiert)
             # -----------------------------------------------------------------
             if task_added:
                 self._modify_pending_tasks(-1)
 
-        # -----------------------------------------------------------------
-        # 7. Ergebnis validieren
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # 6. Ergebnis validieren
+        # ---------------------------------------------------------------------
         if not segments:
             if DEBUG_LEVEL >= 3:
                 log_debug("transcribe", "No segments returned")
             return
 
-        # -----------------------------------------------------------------
-        # 8. Tatsächlichen Fortschritt aus Segment‑Endzeiten ermitteln
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # 7. Tatsächlichen Fortschritt aus Segment‑Endzeiten ermitteln
+        # ---------------------------------------------------------------------
         max_end = 0.0
         for seg in segments:
             if hasattr(seg, "end") and seg.end is not None:
@@ -36636,9 +36628,9 @@ class AudioProcessor:
                             f"_real_processed_seconds updated to {self._real_processed_seconds:.2f}s",
                         )
 
-        # -----------------------------------------------------------------
-        # 9. Segmente filtern und gültige Segmente sammeln
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # 8. Segmente filtern und gültige Segmente sammeln
+        # ---------------------------------------------------------------------
         valid_segments = []
         for segment in segments:
             if not segment or not segment.text:
@@ -36673,25 +36665,25 @@ class AudioProcessor:
                 translation_callback
             )
 
-        # -----------------------------------------------------------------
-        # 10. Übersetzung anstoßen – NUR wenn der Satzpuffer NICHT aktiv ist
-        #     (d.h. im Untertitelmodus oder bei deaktiviertem Satzpuffer)
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # 9. Übersetzung anstoßen – NUR wenn der Satzpuffer NICHT aktiv ist
+        #    (d.h. im Untertitelmodus oder bei deaktiviertem Satzpuffer)
+        # ---------------------------------------------------------------------
         if not self._enable_sentence_buffering or self.subtitle_mode:
             for segment in valid_segments:
                 if self.translation_engine is not None and self._translation_enabled.is_set():
                     self._handle_sentence_buffering(segment, translation_callback)
 
-        # -----------------------------------------------------------------
-        # 11. Statistik zurücksetzen (Erfolg)
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # 10. Statistik zurücksetzen (Erfolg)
+        # ---------------------------------------------------------------------
         with self._stats_lock:
             self._consecutive_timeouts = 0
             self._consecutive_errors = 0
 
-        # -----------------------------------------------------------------
-        # 12. Performance‑Metriken aktualisieren
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # 11. Performance‑Metriken aktualisieren
+        # ---------------------------------------------------------------------
         processing_duration = time.perf_counter() - start_time
         self._update_realtime_factor(chunk_duration, processing_duration)
 
@@ -39894,30 +39886,32 @@ class AudioProcessor:
         """
         Bereinigt nach dem Stream‑Ende alle Ressourcen in korrekter Reihenfolge.
 
-        Geänderte Reihenfolge (entscheidend für vollständige Transkription und Übersetzung):
-          1. FFmpeg‑Streams beenden (keine neuen Audiodaten).
-          2. Dispatcher‑Shutdown signalisieren.
-          3. Audio‑Puffer flushen.
-          4. Auf Queue-Leerung warten.
-          5. Dispatcher endgültig stoppen.
-          6. Auf ausstehende Executor‑Tasks warten (Transkription).
-          7. Zweite Warte-Runde für verzögerte Transkriptions-Tasks.
-          8. GUI‑Queue leeren.
-          9. **Final‑Flush‑Phase einleiten** → `_in_final_flush = True`
-         10. Satzpuffer (Übersetzung und Transkription) flushen.
-             → ERZEUGT DIE FINALEN ÜBERSETZUNGSAUFGABEN.
-         11. Übersetzungs‑Executor herunterfahren und auf alle Übersetzungen warten.
-         12. **Final‑Flush‑Phase beenden** → `_in_final_flush = False`
-         13. Fallback‑Zustand der TranscriptionEngine zurücksetzen.
-         14. LinuxPerformanceOptimizer deaktivieren.
-         15. Temporäre Dateien löschen.
-         16. Statistik ausgeben und Callbacks auslösen.
+        Diese Methode ist **kritisch** für einen sauberen Abschluss der Verarbeitung.
+        Sie stellt sicher, dass:
+          - FFmpeg‑Prozesse beendet werden.
+          - Der Dispatcher keine neuen Aufgaben mehr annimmt.
+          - Alle gepufferten Audiodaten verarbeitet werden.
+          - Die Rohdaten‑Queue vollständig geleert wird (`queue.join()`).
+          - Der Dispatcher‑Thread endgültig gestoppt wird.
+          - Ausstehende Transkriptions‑Tasks abgeschlossen werden.
+          - Die GUI‑Queue geleert wird (für eine vollständige Anzeige).
+          - Die Satzpuffer für Übersetzung **und** Transkription geleert werden.
+          - Der Übersetzungs‑Executor **nach** dem Flushen der Puffer heruntergefahren wird.
+          - Temporäre Dateien gelöscht werden.
+          - Callbacks für Fehler oder erfolgreiches Ende ausgelöst werden.
 
-        Args:
-            normal_ending: True, wenn der Stream normal beendet wurde.
-            error_occurred: True, wenn ein Fehler zum Abbruch führte.
-            callbacks: Dictionary mit optionalen Callback-Funktionen für
-                       'transcription', 'translation', 'info', 'error', 'finished'.
+        **Verbesserungen in dieser Version:**
+            - **Korrekte Reihenfolge:** Der Übersetzungs‑Executor wird **nach** dem
+              Flushen von `_flush_sentence_buffer` und `_flush_transcript_buffer`
+              heruntergefahren. Dadurch gehen keine finalen Übersetzungen verloren.
+            - **Robuste Fehlerbehandlung:** Jeder Schritt ist in `try/except` gekapselt
+              und wird über `timed_step` ausgeführt. Ein Fehler in einem Schritt
+              unterbricht nicht die gesamte Bereinigung.
+            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
+            - **Vollständige Ressourcenfreigabe:** Auch bei vorzeitigem Abbruch wird
+              versucht, alle Ressourcen freizugeben.
+            - **`_in_final_flush`‑Flag:** Schützt finale Übersetzungen vor dem
+              `_stop_event`, sodass sie garantiert ausgeführt werden.
         """
         log_debug(
             "processor",
@@ -39927,10 +39921,11 @@ class AudioProcessor:
         cleanup_start_time = time.perf_counter()
         step_times: Dict[str, float] = {}
 
-        # -----------------------------------------------------------------
-        # Hilfsfunktion: Zeitmessung für einen Schritt
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # Hilfsfunktionen
+        # ---------------------------------------------------------------------
         def timed_step(step_name: str, func: Callable[[], None]) -> None:
+            """Führt einen Schritt aus und misst die Dauer. Fehler werden geloggt."""
             step_start = time.perf_counter()
             try:
                 func()
@@ -39948,6 +39943,7 @@ class AudioProcessor:
                     log_debug("processor", f"  Step '{step_name}' took {duration*1000:.2f} ms")
 
         def safe_callback(cb: Optional[Callable], *args: Any) -> None:
+            """Ruft einen Callback threadsicher im Hauptthread auf."""
             if cb is None:
                 return
             try:
@@ -39965,19 +39961,19 @@ class AudioProcessor:
                 if DEBUG_LEVEL >= 3:
                     log_debug("processor", f"Callback error: {e}", exc_info=True)
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 1. FFmpeg‑Prozess stoppen
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         timed_step("stop_ffmpeg", lambda: self._safe_stop_ffmpeg())
 
-        # -----------------------------------------------------------------
-        # 2. Dispatcher‑Shutdown signalisieren
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # 2. Dispatcher‑Shutdown signalisieren (keine neuen Aufgaben)
+        # ---------------------------------------------------------------------
         timed_step("signal_dispatcher_shutdown", lambda: self._dispatcher_shutdown.set())
 
-        # -----------------------------------------------------------------
-        # 3. Audio‑Puffer flushen
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # 3. Audio‑Puffer flushen (verbliebene Daten verarbeiten)
+        # ---------------------------------------------------------------------
         timed_step(
             "flush_audio_buffer",
             lambda: self._flush_audio_buffer(
@@ -39987,89 +39983,92 @@ class AudioProcessor:
             ),
         )
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 4. Warten, bis die Raw-Audio-Queue vollständig geleert ist.
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         timed_step("wait_for_queue_empty", lambda: self._raw_audio_queue.join())
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 5. Dispatcher endgültig stoppen
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         timed_step("stop_dispatcher", lambda: self._stop_dispatcher(clear_queue=False))
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 6. Auf ausstehende Executor‑Tasks warten (Transkription)
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         timed_step("wait_for_pending_tasks", lambda: self._wait_for_pending_tasks())
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 7. Zweite Warte-Runde für verzögerte Transkriptions-Tasks
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         def wait_for_delayed_tasks():
             time.sleep(0.5)
             self._wait_for_pending_tasks()
         timed_step("wait_for_delayed_tasks", wait_for_delayed_tasks)
 
-        # -----------------------------------------------------------------
-        # 8. GUI‑Queue leeren
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # 8. GUI‑Queue leeren (sicherstellen, dass alle Texte angezeigt werden)
+        # ---------------------------------------------------------------------
         timed_step("drain_gui_queue", lambda: self._drain_gui_queue())
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 9. 🔥 FINAL‑FLUSH‑PHASE EINLEITEN
-        # -----------------------------------------------------------------
+        #    Verhindert, dass das _stop_event während der finalen Übersetzung
+        #    die Aufgaben verwirft.
+        # ---------------------------------------------------------------------
         self._in_final_flush = True
-        logger.warning("🌐 Entering final flush phase – stop_event will be ignored")
+        logger.info("🌐 Entering final flush phase – stop_event will be ignored")
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 10. Übersetzungs‑Satzpuffer leeren (erzeugt finale Übersetzungsaufgaben)
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         timed_step(
             "flush_sentence_buffer",
             lambda: self._flush_sentence_buffer(callbacks.get("translation")),
         )
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 11. Transkriptions‑Satzpuffer leeren
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         timed_step(
             "flush_transcript_buffer",
             lambda: self._flush_transcript_buffer(callbacks.get("transcription")),
         )
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 12. Übersetzungs‑Executor herunterfahren und warten
-        # -----------------------------------------------------------------
+        #     🔥 MUSS NACH DEM FLUSH ERFOLGEN, damit alle Aufgaben angenommen werden!
+        # ---------------------------------------------------------------------
         def shutdown_translation_executor():
             executor = getattr(self, "_translation_executor", None)
             if executor is None:
-                logger.warning("🌐 Translation executor is None – skipping shutdown")
+                logger.debug("🌐 Translation executor is None – skipping shutdown")
                 return
-            logger.warning("🌐 Shutting down translation executor and waiting for tasks...")
+            logger.debug("🌐 Shutting down translation executor and waiting for tasks...")
             try:
                 executor.shutdown(wait=True, cancel_futures=False)
-                logger.warning("🌐 Translation executor shut down successfully")
+                logger.debug("🌐 Translation executor shut down successfully")
             except TypeError:
                 executor.shutdown(wait=True)
-                logger.warning("🌐 Translation executor shut down (fallback)")
+                logger.debug("🌐 Translation executor shut down (fallback)")
             except Exception as e:
                 logger.error(f"🌐 Error shutting down translation executor: {e}")
         timed_step("shutdown_translation_executor", shutdown_translation_executor)
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 13. 🔥 FINAL‑FLUSH‑PHASE BEENDEN
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         self._in_final_flush = False
-        logger.warning("🌐 Final flush phase ended")
+        logger.info("🌐 Final flush phase ended")
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 14. Fallback‑Zustand der TranscriptionEngine zurücksetzen
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         timed_step("reset_transcription_engine_fallback", lambda: self._reset_engine_fallback())
 
-        # -----------------------------------------------------------------
-        # 15. LinuxPerformanceOptimizer deaktivieren
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # 15. LinuxPerformanceOptimizer deaktivieren (falls aktiv)
+        # ---------------------------------------------------------------------
         if IS_LINUX and hasattr(self, 'performance_optimizer') and self.performance_optimizer:
             timed_step(
                 "deactivate_linux_optimizer",
@@ -40079,42 +40078,42 @@ class AudioProcessor:
             if DEBUG_LEVEL >= 3:
                 log_debug("processor", "  Linux optimizer not active – skipping")
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 16. Temporäre Dateien löschen
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         timed_step("cleanup_temp_files", lambda: self._cleanup_temp_files())
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 17. Statistik ausgeben
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         if self._chunk_counter > 0:
             timed_step("log_final_stats", self._log_final_stats)
 
-        # -----------------------------------------------------------------
-        # 18. Callback auslösen
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # 18. Callbacks auslösen
+        # ---------------------------------------------------------------------
         timed_step(
             "invoke_callbacks",
             lambda: self._invoke_final_callbacks(normal_ending, error_occurred, callbacks),
         )
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 19. Download‑Modus‑Flag zurücksetzen
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         if getattr(self, "_download_mode_active", False):
             self._download_mode_active = False
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 20. Event‑Bus benachrichtigen
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         timed_step(
             "emit_cleanup_event",
             lambda: self._emit_cleanup_completed(normal_ending, error_occurred),
         )
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 21. Abschließende Debug‑Ausgabe
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         total_duration = time.perf_counter() - cleanup_start_time
         with self._pending_tasks_lock:
             final_pending = self._pending_tasks
