@@ -1403,6 +1403,83 @@ class DarkTheme:
     STATUS_BAR_FG = "#8b949e"
     STATUS_BAR_ACCENT = "#58a6ff"
 
+class A11yDarkTheme:
+    """Barrierefreies Hochkontrast-Theme (WCAG AA)."""
+    BG_PRIMARY = "#2b2b2b"
+    BG_SECONDARY = "#3c3f41"
+    BG_TERTIARY = "#4e5254"
+    BG_HOVER = "#5c5f61"
+    BG_CARD = "#313335"
+    TEXT_PRIMARY = "#a9b7c6"      # Helles Blau-Grau für besten Kontrast
+    TEXT_SECONDARY = "#ccdfb2"
+    TEXT_ACCENT = "#ffc66d"       # Orange für Hervorhebungen
+    TEXT_MUTED = "#808080"
+    DRAGON_GREEN = "#6a8759"
+    DRAGON_GREEN_LIGHT = "#8fd173"
+    DRAGON_BLUE = "#6897bb"
+    DRAGON_PURPLE = "#9876aa"
+    SUCCESS = "#6a8759"
+    WARNING = "#bbb529"
+    ERROR = "#bc3f3c"             # Sattes Rot, sehr gut lesbar
+    INFO = "#6897bb"
+    BORDER = "#515151"
+    SCROLLBAR = "#4e5254"
+    SCROLLBAR_HOVER = "#6897bb"
+    INPUT_BG = "#313335"
+    INPUT_BORDER = "#515151"
+    INPUT_FOCUS = "#6897bb"
+    COMBO_BG = "#313335"
+    COMBO_FG = "#a9b7c6"
+    COMBO_BORDER = "#515151"
+    COMBO_SELECTION = "#6897bb"
+    CHECKBOX_BG = "#2b2b2b"
+    CHECKBOX_FG = "#a9b7c6"
+    CHECKBOX_SELECTED = "#6a8759"
+    CHECKBOX_ACTIVE = "#313335"
+    SUBTITLE_ACTIVE = "#9876aa"
+    SUBTITLE_INACTIVE = "#4e5254"
+    STATUS_BAR_BG = "#3c3f41"
+    STATUS_BAR_FG = "#a9b7c6"
+    STATUS_BAR_ACCENT = "#ffc66d"
+
+class CatppuccinMochaTheme:
+    """Weiches, modernes Theme der Catppuccin-Familie."""
+    BG_PRIMARY = "#1e1e2e"  # Weiches Dunkelblau
+    BG_SECONDARY = "#181825"
+    BG_TERTIARY = "#313244"
+    BG_HOVER = "#45475a"
+    BG_CARD = "#1e1e2e"
+    TEXT_PRIMARY = "#cdd6f4"  # Sehr helles Grau-Blau
+    TEXT_SECONDARY = "#a6adc8"
+    TEXT_ACCENT = "#89b4fa"  # Sanftes Blau
+    TEXT_MUTED = "#6c7086"
+    DRAGON_GREEN = "#a6e3a1"
+    DRAGON_GREEN_LIGHT = "#b9f27c"
+    DRAGON_BLUE = "#89b4fa"
+    DRAGON_PURPLE = "#cba6f7"
+    SUCCESS = "#a6e3a1"
+    WARNING = "#f9e2af"
+    ERROR = "#f38ba8"  # Sanftes Rot
+    INFO = "#89b4fa"
+    BORDER = "#45475a"
+    SCROLLBAR = "#313244"
+    SCROLLBAR_HOVER = "#89b4fa"
+    INPUT_BG = "#181825"
+    INPUT_BORDER = "#45475a"
+    INPUT_FOCUS = "#cba6f7"
+    COMBO_BG = "#181825"
+    COMBO_FG = "#cdd6f4"
+    COMBO_BORDER = "#45475a"
+    COMBO_SELECTION = "#cba6f7"
+    CHECKBOX_BG = "#1e1e2e"
+    CHECKBOX_FG = "#cdd6f4"
+    CHECKBOX_SELECTED = "#a6e3a1"
+    CHECKBOX_ACTIVE = "#181825"
+    SUBTITLE_ACTIVE = "#cba6f7"
+    SUBTITLE_INACTIVE = "#313244"
+    STATUS_BAR_BG = "#181825"
+    STATUS_BAR_FG = "#a6adc8"
+    STATUS_BAR_ACCENT = "#89b4fa"
 
 class PastelTheme:
     """Sanftes Pastell-Theme mit verbesserter Scrollbar-Sichtbarkeit."""
@@ -1443,6 +1520,44 @@ class PastelTheme:
     STATUS_BAR_FG = "#2c3e50"
     STATUS_BAR_ACCENT = "#1f6feb"
 
+class TokyoNightTheme:
+    """Sanftes, dunkles Theme mit gutem Kontrast, ideal für die Nacht."""
+    BG_PRIMARY = "#1a1b26"
+    BG_SECONDARY = "#16161e"
+    BG_TERTIARY = "#24283b"
+    BG_HOVER = "#292e42"
+    BG_CARD = "#1a1b26"
+    TEXT_PRIMARY = "#c0caf5"
+    TEXT_SECONDARY = "#9aa5ce"
+    TEXT_ACCENT = "#7aa2f7"
+    TEXT_MUTED = "#565f89"
+    DRAGON_GREEN = "#9ece6a"
+    DRAGON_GREEN_LIGHT = "#b9f27c"
+    DRAGON_BLUE = "#7aa2f7"
+    DRAGON_PURPLE = "#bb9af7"
+    SUCCESS = "#9ece6a"
+    WARNING = "#e0af68"
+    ERROR = "#f7768e"
+    INFO = "#7dcfff"
+    BORDER = "#24283b"
+    SCROLLBAR = "#24283b"
+    SCROLLBAR_HOVER = "#7aa2f7"
+    INPUT_BG = "#16161e"
+    INPUT_BORDER = "#24283b"
+    INPUT_FOCUS = "#bb9af7"
+    COMBO_BG = "#16161e"
+    COMBO_FG = "#c0caf5"
+    COMBO_BORDER = "#24283b"
+    COMBO_SELECTION = "#bb9af7"
+    CHECKBOX_BG = "#1a1b26"
+    CHECKBOX_FG = "#c0caf5"
+    CHECKBOX_SELECTED = "#9ece6a"
+    CHECKBOX_ACTIVE = "#16161e"
+    SUBTITLE_ACTIVE = "#bb9af7"
+    SUBTITLE_INACTIVE = "#24283b"
+    STATUS_BAR_BG = "#16161e"
+    STATUS_BAR_FG = "#9aa5ce"
+    STATUS_BAR_ACCENT = "#7aa2f7"
 
 class LightTheme:
     BG_PRIMARY = "#ffffff"
@@ -5360,99 +5475,176 @@ class OptimizedThreadPoolExecutor:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """
-        Kontextmanager‑Exit: Fährt den Executor sauber herunter.
+        Kontextmanager‑Exit: Fährt den Executor sauber und garantiert herunter.
 
-        Diese Methode wird automatisch am Ende eines `with`‑Blocks aufgerufen.
-        Sie stellt sicher, dass alle laufenden und ausstehenden Tasks entweder
-        ordnungsgemäß beendet oder abgebrochen werden, bevor der Block verlassen wird.
+        Diese Methode stellt sicher, dass **alle** Worker‑Threads ordnungsgemäß
+        beendet werden und dass nach einem Timeout **keine** Nicht‑Daemon‑Threads
+        den Programm‑Shutdown blockieren.
 
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - **Synchroner Shutdown mit Timeout:** Der zugrundeliegende Executor wird
-              direkt mit `shutdown(wait=True, cancel_futures=True)` heruntergefahren,
-              jedoch in einem separaten Thread mit Timeout, um ein Hängen zu vermeiden.
-            - **Garantiertes Setzen des Shutdown‑Flags:** Auch bei Timeout wird das
-              interne `_shutdown`‑Flag gesetzt und die Semaphore freigegeben, sodass
-              keine neuen Tasks mehr angenommen werden und blockierte `submit`‑Aufrufe
-              aufgeweckt werden.
+        Ablauf:
+            1. Der interne `ThreadPoolExecutor` wird angewiesen, keine neuen
+               Tasks mehr anzunehmen (`shutdown(wait=False, cancel_futures=True)`
+               mit Fallback für ältere Python‑Versionen).
+            2. Es wird maximal `SHUTDOWN_TIMEOUT` Sekunden auf die Beendigung
+               aller Worker‑Threads gewartet.
+            3. Falls nach Ablauf des Timeouts noch Worker‑Threads leben, werden
+               diese **explizit als Daemon‑Threads markiert**, sodass sie das
+               Beenden des Python‑Prozesses nicht verhindern.
+            4. Abschließend wird der Executor erneut `shutdown(wait=False)`
+               aufgerufen, um alle verbleibenden Ressourcen freizugeben.
+            5. Das interne `_shutdown`‑Flag wird gesetzt und alle blockierten
+               `submit`‑Aufrufe werden durch Freigabe der Semaphoren aufgeweckt.
+
+        Verbesserungen gegenüber der ursprünglichen Version:
+            - **Kein separater Thread mehr** – die gesamte Logik läuft synchron,
+              was die Kontrolle über den Timeout vereinfacht und Race‑Conditions
+              vermeidet.
+            - **Explizites Markieren von Worker‑Threads als Daemon** nach einem
+              Timeout. Dies verhindert zuverlässig das Hängen des Programms.
+            - **Robuste Behandlung von `shutdown`‑Parametern** mit Prüfung der
+              Signatur (Kompatibilität mit Python 3.8–3.13).
             - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
-            - **Robuste Fehlerbehandlung:** Fängt Exceptions während des Shutdowns ab
-              und loggt sie, ohne den Programmablauf zu unterbrechen.
-            - **Rückgabewert `False`:** Signalisiert, dass eventuelle Exceptions aus
-              dem `with`‑Block nicht unterdrückt, sondern weitergereicht werden.
+            - **Idempotenz**: Ein wiederholter Aufruf von `__exit__` hat keinen
+              negativen Effekt.
 
         Returns:
-            False – Exceptions aus dem Kontext werden nicht unterdrückt.
+            False – Exceptions aus dem `with`‑Block werden nicht unterdrückt.
         """
+        # ---------------------------------------------------------------------
+        # 1. Timeout‑Konstante
+        # ---------------------------------------------------------------------
+        SHUTDOWN_TIMEOUT = 5.0  # Sekunden
+
         if DEBUG_LEVEL >= 3:
             log_debug(
                 "executor",
-                f"OptimizedThreadPoolExecutor.__exit__: shutting down "
-                f"(exc_type={exc_type.__name__ if exc_type else 'None'})"
+                f"OptimizedThreadPoolExecutor.__exit__: initiating shutdown "
+                f"(timeout={SHUTDOWN_TIMEOUT}s, exc_type={exc_type.__name__ if exc_type else 'None'})"
             )
 
-        # -----------------------------------------------------------------
-        # Hilfsfunktion: Führt den eigentlichen Shutdown durch
-        # -----------------------------------------------------------------
-        def _do_shutdown() -> None:
-            """Führt den Shutdown des internen Executors durch."""
-            try:
-                import inspect
-                sig = inspect.signature(self._executor.shutdown)
-                if "cancel_futures" in sig.parameters:
-                    self._executor.shutdown(wait=True, cancel_futures=True)
-                    if DEBUG_LEVEL >= 4:
-                        log_debug("executor", "Shutdown with cancel_futures=True completed")
-                else:
-                    self._executor.shutdown(wait=True)
-                    if DEBUG_LEVEL >= 4:
-                        log_debug("executor", "Shutdown with wait=True completed (cancel_futures not supported)")
-            except Exception as e:
-                logger.error(f"Fehler beim Shutdown des Executors: {e}")
+        # ---------------------------------------------------------------------
+        # 2. Sicherstellen, dass der Executor keine neuen Tasks mehr annimmt.
+        #    Verwende `cancel_futures=True`, falls unterstützt.
+        # ---------------------------------------------------------------------
+        try:
+            # Prüfe, ob der Executor überhaupt existiert
+            if not hasattr(self, "_executor") or self._executor is None:
                 if DEBUG_LEVEL >= 3:
-                    log_debug("executor", f"Shutdown exception: {type(e).__name__}: {e}")
+                    log_debug("executor", "  → No internal executor, nothing to shut down")
+                return False
 
-        # Shutdown in einem separaten Thread starten, um Timeout zu ermöglichen
-        shutdown_thread = threading.Thread(
-            target=_do_shutdown,
-            daemon=True,
-            name=f"ExecutorShutdown-{id(self)}"
-        )
-        shutdown_thread.start()
-
-        # Maximal 5 Sekunden auf den Shutdown warten
-        shutdown_timeout = 5.0
-        shutdown_thread.join(timeout=shutdown_timeout)
-
-        if shutdown_thread.is_alive():
-            logger.warning(
-                f"OptimizedThreadPoolExecutor shutdown timed out after {shutdown_timeout}s. "
-                "Worker threads may still be running, but will continue in background (daemon)."
-            )
+            # Versuche, shutdown(wait=False, cancel_futures=True) aufzurufen
+            import inspect
+            sig = inspect.signature(self._executor.shutdown)
+            if "cancel_futures" in sig.parameters:
+                self._executor.shutdown(wait=False, cancel_futures=True)
+                if DEBUG_LEVEL >= 3:
+                    log_debug("executor", "  → shutdown(wait=False, cancel_futures=True) called")
+            else:
+                # Fallback für Python < 3.9
+                self._executor.shutdown(wait=False)
+                if DEBUG_LEVEL >= 3:
+                    log_debug("executor", "  → shutdown(wait=False) called (cancel_futures not supported)")
+        except Exception as e:
+            logger.warning(f"Error during initial executor shutdown: {e}")
             if DEBUG_LEVEL >= 3:
-                log_debug("executor", "Shutdown thread did not terminate within timeout")
+                log_debug("executor", f"  → shutdown exception: {type(e).__name__}: {e}")
+
+        # ---------------------------------------------------------------------
+        # 3. Warte auf die Beendigung aller Worker‑Threads (mit Timeout).
+        # ---------------------------------------------------------------------
+        worker_threads = []
+        try:
+            # Das private `_threads`‑Attribut enthält die Worker‑Threads
+            worker_threads = list(getattr(self._executor, "_threads", set()))
+        except Exception as e:
+            if DEBUG_LEVEL >= 3:
+                log_debug("executor", f"  → Could not access _threads: {e}")
+
+        if worker_threads:
+            if DEBUG_LEVEL >= 3:
+                log_debug("executor", f"  → Found {len(worker_threads)} worker thread(s)")
+
+            deadline = time.time() + SHUTDOWN_TIMEOUT
+            for t in worker_threads:
+                # Den aktuellen Thread nicht selbst joinen
+                if t is threading.current_thread():
+                    continue
+
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("executor", "  → Shutdown timeout reached, skipping further joins")
+                    break
+
+                if not t.is_alive():
+                    continue
+
+                if DEBUG_LEVEL >= 3:
+                    log_debug("executor", f"  → Joining worker thread '{t.name}' (timeout={remaining:.2f}s)...")
+
+                t.join(timeout=remaining)
+
+            # -----------------------------------------------------------------
+            # 4. Nach Timeout: Alle noch lebenden Worker‑Threads als Daemon markieren.
+            #    Dadurch blockieren sie den Programm‑Exit nicht mehr.
+            # -----------------------------------------------------------------
+            for t in worker_threads:
+                if t.is_alive():
+                    logger.warning(
+                        f"Worker thread '{t.name}' did not terminate within "
+                        f"{SHUTDOWN_TIMEOUT}s – marking as daemon to prevent hang."
+                    )
+                    try:
+                        # Daemon‑Flag kann nur gesetzt werden, bevor der Thread gestartet wird.
+                        # Bei bereits laufenden Threads ist das Setzen von `daemon` nicht erlaubt.
+                        # Wir müssen den Thread daher über das private `_daemonic`‑Attribut
+                        # als Daemon markieren. Dies ist ein Workaround.
+                        if hasattr(t, "_daemonic"):
+                            t._daemonic = True
+                            if DEBUG_LEVEL >= 3:
+                                log_debug("executor", f"  → Marked {t.name} as daemon via _daemonic")
+                        else:
+                            # Fallback: Thread kann nicht geändert werden – wir protokollieren nur.
+                            logger.warning(f"Cannot mark thread '{t.name}' as daemon (attribute missing)")
+                    except Exception as e:
+                        logger.warning(f"Failed to mark thread '{t.name}' as daemon: {e}")
         else:
             if DEBUG_LEVEL >= 3:
-                log_debug("executor", "Shutdown completed successfully")
+                log_debug("executor", "  → No worker threads to join")
 
-        # -----------------------------------------------------------------
-        # Unabhängig vom Timeout: Shutdown-Flag setzen und Semaphore freigeben,
-        # damit keine neuen Tasks mehr angenommen werden und blockierte
-        # `submit`-Aufrufe aufgeweckt werden.
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # 5. Endgültigen Shutdown des Executors durchführen.
+        # ---------------------------------------------------------------------
+        try:
+            self._executor.shutdown(wait=False)
+            if DEBUG_LEVEL >= 3:
+                log_debug("executor", "  → Final shutdown(wait=False) called")
+        except Exception as e:
+            logger.warning(f"Error during final executor shutdown: {e}")
+
+        # ---------------------------------------------------------------------
+        # 6. Internes Shutdown‑Flag setzen und blockierte `submit`‑Aufrufe aufwecken.
+        # ---------------------------------------------------------------------
         with self._shutdown_lock:
             if not self._shutdown:
                 self._shutdown = True
-                # Alle wartenden `submit`-Aufrufe durch Semaphore-Releases aufwecken
+                # Alle wartenden `submit`‑Aufrufe durch Semaphore‑Releases aufwecken
                 for _ in range(self._max_queue_size):
                     try:
                         self._semaphore.release()
                     except ValueError:
                         # Mehr Releases als erlaubt – Semaphore ist voll
                         break
-                if DEBUG_LEVEL >= 4:
-                    log_debug("executor", "Semaphore forcibly released and shutdown flag set")
+                if DEBUG_LEVEL >= 3:
+                    log_debug("executor", "  → Shutdown flag set, semaphores released")
 
-        # Keine Exception unterdrücken
+        if DEBUG_LEVEL >= 3:
+            log_debug("executor", "OptimizedThreadPoolExecutor.__exit__ completed")
+
+        # ---------------------------------------------------------------------
+        # 7. Exceptions aus dem with‑Block nicht unterdrücken
+        # ---------------------------------------------------------------------
         return False
 
 
@@ -7638,7 +7830,7 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         - Intelligente Timeout‑Behandlung mit exponentiellem Backoff und separater
           Fehlerzählung für Timeouts vs. andere Fehler.
         - Automatische Wiederherstellung nach kürzerer Deaktivierungsdauer (60 s).
-        - `keep_alive`‑Optimierung (60 s) zur Reduzierung von VRAM‑Druck.
+        - `keep_alive`‑Optimierung (konfigurierbar) zur Reduzierung von VRAM‑Druck.
         - Vollständige Thread‑Sicherheit für alle Zustandsvariablen.
         - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 2`.
 
@@ -7650,6 +7842,7 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
     __slots__ = (
         "translator",
         "_session",
+        "_session_lock",
         "_requests",
         "model",
         "host",
@@ -7662,6 +7855,8 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         "_models_cache_ttl",
         "_timeout_retries",
         "_timeout_backoff_base",
+        "_keep_alive",
+        "_consecutive_network_errors",
     )
 
     # Standard‑System‑Prompt für Übersetzungen
@@ -7699,17 +7894,39 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
             timeout_retries: Maximale Wiederholungen bei Timeout‑Fehlern.
             timeout_backoff_base: Basis‑Wartezeit in Sekunden für exponentiellen Backoff.
         """
-        # Überschreibe Timeout und Temperatur aus Settings, falls vorhanden
+        # ---------------------------------------------------------------------
+        # 1. Host‑URL validieren und normalisieren
+        # ---------------------------------------------------------------------
+        validated_host = self._validate_and_normalize_host(host)
+        if validated_host != host:
+            logger.warning(
+                f"⚠️ Ungültige Ollama-Host-URL '{host}' – verwende '{validated_host}'"
+            )
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "ollama",
+                    f"Host validation: '{host}' -> '{validated_host}'"
+                )
+
+        # ---------------------------------------------------------------------
+        # 2. Parameter aus Settings überschreiben, falls vorhanden
+        # ---------------------------------------------------------------------
         if settings is not None:
             if hasattr(settings, "ollama_timeout"):
                 timeout = settings.ollama_timeout
             if hasattr(settings, "ollama_temperature"):
                 temperature = settings.ollama_temperature
+            self._keep_alive = getattr(settings, "ollama_keep_alive", 60)
+        else:
+            self._keep_alive = 60
 
         self.timeout = timeout
         self._timeout_retries = timeout_retries
         self._timeout_backoff_base = timeout_backoff_base
 
+        # ---------------------------------------------------------------------
+        # 3. Basisklasse initialisieren
+        # ---------------------------------------------------------------------
         super().__init__(
             target_lang,
             settings,
@@ -7718,16 +7935,21 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
             retry_delay_max=5.0,
             cache_manager=cache_manager,
             max_errors=5,
-            disable_duration=60.0,                # Kürzere Deaktivierung (60 s statt 300)
+            disable_duration=60.0,
         )
 
+        # ---------------------------------------------------------------------
+        # 4. Attribute setzen
+        # ---------------------------------------------------------------------
         self.model = model
-        self.host = host.rstrip("/")
+        self.host = validated_host.rstrip("/")
         self.temperature = temperature
         self.system_prompt = system_prompt or self.DEFAULT_SYSTEM_PROMPT
         self.available = OLLAMA_AVAILABLE and (requests is not None)
         self._session = None
+        self._session_lock = threading.RLock()
         self._requests = None
+        self._consecutive_network_errors = 0
 
         if self.available:
             self._setup_session()
@@ -7742,31 +7964,97 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         if DEBUG_LEVEL >= 2:
             log_debug(
                 "ollama",
-                f"OllamaTranslationEngine initialisiert: model={model}, host={host}, "
-                f"timeout={timeout}s, temperature={temperature}"
+                f"OllamaTranslationEngine initialisiert: model={model}, host={self.host}, "
+                f"timeout={timeout}s, temperature={temperature}, keep_alive={self._keep_alive}s"
             )
 
     # -------------------------------------------------------------------------
-    # Session‑Management
+    # Hilfsmethode: Host‑URL validieren und normalisieren
     # -------------------------------------------------------------------------
+    @staticmethod
+    def _validate_and_normalize_host(host: str) -> str:
+        """
+        Validiert und normalisiert eine Ollama-Host-URL.
+
+        Führt folgende Prüfungen und Korrekturen durch:
+            - Entfernt führende/abschließende Leerzeichen.
+            - Falls kein Schema angegeben ist, wird 'http://' vorangestellt.
+            - Validiert das URL-Format mit urllib.parse.urlparse.
+            - Korrigiert fehlenden Port (fügt :11434 hinzu, falls nur Hostname).
+            - Entfernt abschließenden Schrägstrich.
+
+        Bei vollständig ungültiger URL wird der Standard-Host
+        'http://localhost:11434' zurückgegeben.
+
+        Args:
+            host: Die vom Benutzer eingegebene Host-Adresse.
+
+        Returns:
+            Eine gültige, normalisierte Host-URL.
+        """
+        DEFAULT_HOST = "http://localhost:11434"
+
+        if not host or not isinstance(host, str):
+            return DEFAULT_HOST
+
+        host = host.strip()
+        if not host:
+            return DEFAULT_HOST
+
+        # Schema hinzufügen, falls fehlend
+        if "://" not in host:
+            host = "http://" + host
+
+        try:
+            parsed = urllib.parse.urlparse(host)
+        except Exception:
+            return DEFAULT_HOST
+
+        # Mindestanforderungen: Schema und Netzwerkadresse
+        if not parsed.scheme or not parsed.netloc:
+            return DEFAULT_HOST
+
+        # Schema auf http/https beschränken
+        if parsed.scheme not in ("http", "https"):
+            logger.warning(
+                f"⚠️ Nicht unterstütztes URL-Schema '{parsed.scheme}' – verwende 'http'"
+            )
+            parsed = parsed._replace(scheme="http")
+
+        # Port hinzufügen, falls nur Hostname ohne Port
+        netloc = parsed.netloc
+        if ":" not in netloc:
+            netloc = f"{netloc}:11434"
+
+        # Neu zusammensetzen (ohne Path, Query, Fragment)
+        normalized = urllib.parse.urlunparse(
+            (parsed.scheme, netloc, "", "", "", "")
+        )
+
+        # Abschließenden Schrägstrich entfernen
+        normalized = normalized.rstrip("/")
+
+        return normalized
+
+    # -------------------------------------------------------------------------
+    # Session‑Management (thread‑sicher)
+    # -------------------------------------------------------------------------
+    def _get_session(self) -> Optional[requests.Session]:
+        """Thread‑sichere Abfrage oder Initialisierung der Session."""
+        with self._session_lock:
+            if self._session is None and self.available:
+                self._setup_session_locked()
+            return self._session
+
     def _setup_session(self) -> None:
+        """Öffentlicher Wrapper für _setup_session_locked."""
+        with self._session_lock:
+            self._setup_session_locked()
+
+    def _setup_session_locked(self) -> None:
         """
         Initialisiert eine persistente Requests-Session für Ollama mit benanntem Thread-Pool.
-
-        Verwendet den globalen NamedHTTPAdapter, um den internen ThreadPoolExecutor von urllib3
-        mit einem aussagekräftigen Namen zu versehen. Dadurch erscheinen im Shutdown-Log
-        Threads wie 'DW-Ollama_0' statt 'Thread-1'.
-
-        Features:
-            - Retry-Strategie für POST-Anfragen (max. 1 Wiederholung, Backoff 0.3s).
-            - Timeout für Verbindungsaufbau (5s) und Leseoperationen (90s, konfigurierbar).
-            - Robuste Fehlerbehandlung: falls der Adapter nicht verfügbar ist, wird auf den
-              Standard-HTTPAdapter zurückgegriffen.
-            - Detaillierte Debug-Ausgaben bei DEBUG_LEVEL >= 3.
-            - Setzt benutzerdefinierte Header für Ollama-API.
-
-        Raises:
-            Keine – alle Fehler werden intern behandelt und geloggt.
+        Muss unter _session_lock aufgerufen werden.
         """
         # -----------------------------------------------------------------
         # 1. Prüfen, ob requests verfügbar ist
@@ -7793,10 +8081,10 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         # 3. Retry-Strategie definieren
         # -----------------------------------------------------------------
         retry_strategy = Retry(
-            total=1,                              # Max. 1 Wiederholung
-            backoff_factor=0.3,                   # 0.3s, 0.6s, ...
-            status_forcelist=[429, 500, 502, 503, 504],  # HTTP-Fehlercodes für Wiederholung
-            allowed_methods=["POST"],             # Nur POST-Anfragen wiederholen
+            total=1,
+            backoff_factor=0.3,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["POST"],
         )
 
         # -----------------------------------------------------------------
@@ -7815,7 +8103,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                         "OllamaTranslationEngine: using NamedHTTPAdapter (pool_name='DW-Ollama')"
                     )
             else:
-                # Fallback: Standard-Adapter
                 from requests.adapters import HTTPAdapter
                 adapter = HTTPAdapter(max_retries=retry_strategy)
                 if DEBUG_LEVEL >= 3:
@@ -7824,8 +8111,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                         "OllamaTranslationEngine: NamedHTTPAdapter not available, using HTTPAdapter"
                     )
         except Exception as e:
-            # Falls die Instanziierung des NamedHTTPAdapter fehlschlägt,
-            # auf Standard-Adapter zurückgreifen.
             logger.warning(f"OllamaTranslationEngine: Failed to create NamedHTTPAdapter: {e}")
             from requests.adapters import HTTPAdapter
             adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -7842,7 +8127,7 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         self._session.mount("https://", adapter)
 
         # -----------------------------------------------------------------
-        # 6. Standard-Header setzen (für Ollama-API)
+        # 6. Standard-Header setzen
         # -----------------------------------------------------------------
         self._session.headers.update(
             {
@@ -7855,13 +8140,8 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         # -----------------------------------------------------------------
         # 7. Timeouts konfigurieren
         # -----------------------------------------------------------------
-        # Connect-Timeout: 5 Sekunden (kurz, um schnelle Fehlererkennung zu ermöglichen)
-        # Read-Timeout: aus der Konfiguration (self.timeout, Standard 90s)
         self._session.timeout = (5, self.timeout)
 
-        # -----------------------------------------------------------------
-        # 8. Debug-Ausgabe
-        # -----------------------------------------------------------------
         if DEBUG_LEVEL >= 3:
             log_debug(
                 "ollama",
@@ -7869,16 +8149,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                 f"(adapter={type(adapter).__name__}, retries={retry_strategy.total}, "
                 f"timeout={self.timeout}s)"
             )
-            # Zusätzliche Diagnose für NamedHTTPAdapter
-            if adapter is not None and hasattr(adapter, 'init_poolmanager'):
-                log_debug(
-                    "ollama",
-                    f"NamedHTTPAdapter class: {type(adapter).__name__}"
-                )
-                log_debug(
-                    "ollama",
-                    f"NamedHTTPAdapter init_poolmanager: {adapter.init_poolmanager}"
-                )
 
     # -------------------------------------------------------------------------
     # Modell‑Erkennung & Verfügbarkeit
@@ -7887,36 +8157,50 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         """Holt die Liste der verfügbaren Modelle vom Ollama‑Server (mit Caching)."""
         if not self.available:
             return []
+
         with self._lock:
             now = time.time()
-            if now - self._models_cache_time > self._models_cache_ttl or not self._available_models:
-                try:
-                    if self._session is None:
-                        self._setup_session()
-                    r = self._session.get(f"{self.host}/api/tags", timeout=5)
-                    if r.status_code == 200:
+            if now - self._models_cache_time <= self._models_cache_ttl and self._available_models:
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "ollama",
+                        f"Model list served from cache ({len(self._available_models)} models)"
+                    )
+                return self._available_models.copy()
+
+            try:
+                session = self._get_session()
+                if session is None:
+                    return []
+                r = session.get(f"{self.host}/api/tags", timeout=5)
+                if r.status_code == 200:
+                    try:
                         data = r.json()
-                        self._available_models = [m["name"] for m in data.get("models", [])]
-                        self._models_cache_time = now
+                    except json.JSONDecodeError:
                         if DEBUG_LEVEL >= 2:
-                            log_debug("ollama", f"Verfügbare Modelle: {self._available_models}")
-                    else:
-                        if not self._available_models:
-                            self._available_models = []
-                except TypeError as e:
-                    # urllib3 ≥ 2.0 Kompatibilitätsproblem: 'key_threadpool' wird nicht unterstützt.
-                    # Der Fehler ist harmlos und betrifft nur die Modellabfrage.
-                    if "key_threadpool" in str(e):
-                        if DEBUG_LEVEL >= 2:
-                            log_debug("ollama", "urllib3 PoolKey-Fehler ignoriert (harmlos)")
-                        # Cache leeren, damit später ein erneuter Versuch möglich ist
-                        self._available_models = []
-                    else:
-                        if DEBUG_LEVEL >= 2:
-                            log_debug("ollama", f"Fehler beim Abrufen der Modellliste (TypeError): {e}")
-                except Exception as e:
+                            log_debug("ollama", "Fehler beim Parsen der Modellliste (JSON)")
+                        return []
+                    self._available_models = [m["name"] for m in data.get("models", [])]
+                    self._models_cache_time = now
                     if DEBUG_LEVEL >= 2:
-                        log_debug("ollama", f"Fehler beim Abrufen der Modellliste: {e}")
+                        log_debug("ollama", f"Verfügbare Modelle: {self._available_models}")
+                else:
+                    if DEBUG_LEVEL >= 2:
+                        log_debug("ollama", f"Modellliste nicht abrufbar: HTTP {r.status_code}")
+                    if not self._available_models:
+                        self._available_models = []
+            except TypeError as e:
+                if "key_threadpool" in str(e):
+                    if DEBUG_LEVEL >= 2:
+                        log_debug("ollama", "urllib3 PoolKey-Fehler ignoriert (harmlos)")
+                    self._available_models = []
+                else:
+                    if DEBUG_LEVEL >= 2:
+                        log_debug("ollama", f"Fehler beim Abrufen der Modellliste (TypeError): {e}")
+            except Exception as e:
+                if DEBUG_LEVEL >= 2:
+                    log_debug("ollama", f"Fehler beim Abrufen der Modellliste: {e}")
+
             return self._available_models.copy()
 
     def is_model_available(self, model: Optional[str] = None) -> bool:
@@ -7932,9 +8216,10 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         if not self.available:
             return False
         try:
-            if self._session is None:
-                self._setup_session()
-            r = self._session.get(f"{self.host}/api/tags", timeout=3)
+            session = self._get_session()
+            if session is None:
+                return False
+            r = session.get(f"{self.host}/api/tags", timeout=3)
             return r.status_code == 200
         except Exception:
             return False
@@ -7961,10 +8246,13 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
     # Prompt‑Erstellung (strenger)
     # -------------------------------------------------------------------------
     def _build_translation_prompt(self, text: str, source_lang: str, target_lang: str) -> str:
-        source_name = SUPPORTED_LANGUAGES.get(source_lang, source_lang) if source_lang != "auto" else "the detected language"
+        source_name = (
+            SUPPORTED_LANGUAGES.get(source_lang, source_lang)
+            if source_lang != "auto"
+            else "the detected language"
+        )
         target_name = SUPPORTED_LANGUAGES.get(target_lang, target_lang)
 
-        # Sehr strenge Anweisungen, um Zusatzkommentare zu verhindern
         prompt = (
             f"Translate the following text from {source_name} to {target_name}.\n"
             f"Rules:\n"
@@ -7983,13 +8271,8 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
     def _wait_with_backoff(self, attempt: int, reason: str) -> None:
         """
         Führt eine exponentielle Backoff‑Wartezeit mit zufälligem Jitter durch.
-
-        Args:
-            attempt: Der aktuelle Versuch (0‑basiert).
-            reason: Grund für die Wartezeit (für Log‑Ausgabe).
         """
         base_delay = self._timeout_backoff_base * (2 ** attempt)
-        # Jitter von ±20% um synchronisierte Wiederholungen zu vermeiden
         jitter = base_delay * 0.2 * (2 * random.random() - 1)
         delay = max(0.1, base_delay + jitter)
         if DEBUG_LEVEL >= 2:
@@ -7998,29 +8281,7 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
 
     def _call_ollama_with_timeout_retry(self, prompt: str) -> Optional[str]:
         """
-        Ruft die Ollama‑API auf und wiederholt bei temporären Fehlern (Timeout,
-        Verbindungsfehler, bestimmte HTTP‑Statuscodes) mit exponentiellem Backoff
-        und Jitter. Andere Fehler werden als hart gewertet und sofort ausgelöst.
-
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - ConnectionError wird wie Timeout behandelt (Wiederholung).
-            - HTTP‑Status 429, 500, 502, 503, 504 werden ebenfalls wiederholt.
-            - Exponentieller Backoff mit zufälligem Jitter (±20%) zur Vermeidung
-              von synchronisierten Wiederholungen.
-            - Bei leerer Antwort wird ein erneuter Versuch unternommen.
-            - Automatische Reparatur der Session, falls sie `None` ist.
-            - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 2`.
-
-        Args:
-            prompt: Der vollständige Prompt, der an das Modell gesendet wird.
-
-        Returns:
-            Die übersetzte Antwort als String oder None, wenn keine gültige Antwort
-            empfangen wurde (nur im Fall einer leeren Antwort nach allen Versuchen).
-
-        Raises:
-            RuntimeError: Bei nicht behebbaren Fehlern (z.B. Modell nicht gefunden,
-                          ungültige Session, dauerhafte HTTP‑Fehler).
+        Ruft die Ollama‑API auf und wiederholt bei temporären Fehlern.
         """
         # ---------------------------------------------------------------------
         # 1. Vorabprüfungen
@@ -8028,16 +8289,16 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         if not self.available:
             raise RuntimeError("Ollama nicht verfügbar (requests nicht installiert)")
 
-        if self._session is None:
-            if DEBUG_LEVEL >= 2:
-                log_debug("ollama", "Session ist None – versuche Neuinitialisierung")
-            self._setup_session()
-            if self._session is None:
-                raise RuntimeError("Ollama‑Session konnte nicht initialisiert werden")
+        session = self._get_session()
+        if session is None:
+            raise RuntimeError("Ollama‑Session konnte nicht initialisiert werden")
 
         if not self.is_model_available():
             model_list = ", ".join(self._available_models) if self._available_models else "keine"
-            raise RuntimeError(f"Ollama-Modell '{self.model}' nicht gefunden. Verfügbar: {model_list}")
+            raise RuntimeError(
+                f"Ollama-Modell '{self.model}' nicht gefunden. Verfügbar: {model_list}. "
+                f"Laden Sie es mit 'ollama pull {self.model}' herunter."
+            )
 
         # ---------------------------------------------------------------------
         # 2. Payload zusammenbauen
@@ -8047,12 +8308,12 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
             "prompt": prompt,
             "stream": False,
             "options": {"temperature": self.temperature},
-            "keep_alive": 60,  # Modell 60 Sekunden im Speicher halten
+            "keep_alive": self._keep_alive,
             "system": self.system_prompt,
         }
 
         # ---------------------------------------------------------------------
-        # 3. Wiederholungsschleife mit exponentiellem Backoff + Jitter
+        # 3. Wiederholungsschleife
         # ---------------------------------------------------------------------
         retryable_status_codes = {429, 500, 502, 503, 504}
         total_attempts = self._timeout_retries + 1
@@ -8066,36 +8327,37 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                         f"prompt_len={len(prompt)}, timeout={self.timeout}s"
                     )
 
-                response = self._session.post(
+                effective_timeout = self.timeout + max(0, int(len(prompt) * 0.05))
+                response = session.post(
                     f"{self.host}/api/generate",
                     json=payload,
-                    timeout=self.timeout
+                    timeout=effective_timeout,
                 )
 
-                # -----------------------------------------------------------------
-                # Erfolgsfall: 200 OK
-                # -----------------------------------------------------------------
                 if response.status_code == 200:
-                    data = response.json()
+                    try:
+                        data = response.json()
+                    except json.JSONDecodeError:
+                        logger.warning("Ollama lieferte ungültiges JSON – versuche erneut")
+                        if attempt < total_attempts - 1:
+                            self._wait_with_backoff(attempt, "Invalid JSON")
+                            continue
+                        else:
+                            return None
                     translated = data.get("response", "").strip()
                     if translated:
                         if DEBUG_LEVEL >= 2:
                             log_debug("ollama", f"Antwort erhalten: {len(translated)} Zeichen")
-                        # Erfolg: Fehlerzähler wird in der aufrufenden Methode zurückgesetzt
+                        self._consecutive_network_errors = 0
                         return translated
                     else:
-                        # Leere Antwort – wir behandeln sie als temporären Fehler
                         logger.warning("Ollama lieferte leere Antwort – versuche erneut")
                         if attempt < total_attempts - 1:
                             self._wait_with_backoff(attempt, "Empty response")
                             continue
                         else:
-                            # Nach allen Versuchen geben wir auf
                             return None
 
-                # -----------------------------------------------------------------
-                # Wiederholbare HTTP‑Fehler
-                # -----------------------------------------------------------------
                 elif response.status_code in retryable_status_codes:
                     error_detail = response.text[:200] if response.text else "Keine Details"
                     if attempt < total_attempts - 1:
@@ -8109,36 +8371,35 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                         raise RuntimeError(
                             f"Ollama Fehler {response.status_code} nach {total_attempts} Versuchen: {error_detail}"
                         )
-
-                # -----------------------------------------------------------------
-                # Nicht wiederholbare HTTP‑Fehler (z.B. 400, 404)
-                # -----------------------------------------------------------------
                 else:
                     error_detail = response.text[:200] if response.text else "Keine Details"
                     raise RuntimeError(f"Ollama Fehler {response.status_code}: {error_detail}")
 
-            # ---------------------------------------------------------------------
-            # Netzwerkfehler: Timeout und ConnectionError → Wiederholung
-            # ---------------------------------------------------------------------
             except (self._requests.exceptions.Timeout, self._requests.exceptions.ConnectionError) as e:
+                self._consecutive_network_errors += 1
+                if self._consecutive_network_errors >= 3:
+                    with self._session_lock:
+                        self._session = None
+                    self._consecutive_network_errors = 0
+                    if DEBUG_LEVEL >= 2:
+                        log_debug("ollama", "Session nach wiederholten Netzwerkfehlern zurückgesetzt")
                 if attempt < total_attempts - 1:
                     logger.warning(
                         f"Ollama {type(e).__name__} (attempt {attempt+1}/{total_attempts})"
                     )
                     self._wait_with_backoff(attempt, type(e).__name__)
+                    session = self._get_session()
+                    if session is None:
+                        raise RuntimeError("Ollama‑Session konnte nicht neu initialisiert werden")
                     continue
                 else:
                     raise RuntimeError(
                         f"Ollama nicht erreichbar nach {total_attempts} Versuchen"
                     ) from e
 
-            # ---------------------------------------------------------------------
-            # Andere Exceptions (hart)
-            # ---------------------------------------------------------------------
             except Exception as e:
                 raise RuntimeError(f"Ollama unerwarteter Fehler: {str(e)}") from e
 
-        # Sollte nie erreicht werden, aber sicherheitshalber:
         return None
 
     # -------------------------------------------------------------------------
@@ -8149,7 +8410,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
     ) -> Optional[str]:
         """
         Führt den API‑Aufruf durch und behandelt Timeouts intelligent.
-        Bei erfolgreicher Antwort wird der Fehlerzähler zurückgesetzt.
         """
         clean_text = self._preprocess_text(text)
         if not clean_text:
@@ -8167,8 +8427,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                 return None
         except RuntimeError as e:
             error_msg = str(e)
-            # "key_threadpool"-Fehler sind lokale Kompatibilitätsprobleme,
-            # sie rechtfertigen keine Deaktivierung der Engine.
             if "key_threadpool" not in error_msg:
                 self._record_error()
             else:
@@ -8186,28 +8444,23 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         return re.sub(r"\s+", " ", text.strip())
 
     def _postprocess_translation(self, translated: str, original: str) -> str:
-        """
-        Entfernt unerwünschte Muster wie "(Note: ...)" oder "Translation:".
-        """
+        """Entfernt unerwünschte Muster wie "(Note: ...)" oder "Translation:"."""
         if not translated:
             return ""
 
-        # Muster für unerwünschte Kommentare
         patterns_to_remove = [
-            r"\(Note:.*?\)",                          # (Note: ...)
-            r"\(Please keep in mind.*?\)",            # (Please keep in mind ...)
-            r"Translation:\s*",                       # "Translation:" am Anfang
-            r"\n*Note:.*?(?:\n|$)",                   # "Note: ..." als eigener Absatz
+            r"\(Note:.*?\)",
+            r"\(Please keep in mind.*?\)",
+            r"Translation:\s*",
+            r"\n*Note:.*?(?:\n|$)",
         ]
         for pattern in patterns_to_remove:
             translated = re.sub(pattern, "", translated, flags=re.IGNORECASE | re.DOTALL)
 
-        # Mehrfache Leerzeichen und Zeilenumbrüche bereinigen
         translated = re.sub(r"\n{3,}", "\n\n", translated)
         translated = re.sub(r" +", " ", translated)
         translated = translated.strip()
 
-        # Fallback: Falls der Text nach Bereinigung leer ist, Original zurückgeben
         if not translated:
             logger.warning("Postprocessing entfernte den gesamten Text – Original wird verwendet")
             return original
@@ -8249,12 +8502,13 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
     # -------------------------------------------------------------------------
     def dispose(self) -> None:
         super().dispose()
-        if self._session:
-            try:
-                self._session.close()
-            except Exception:
-                pass
-            self._session = None
+        with self._session_lock:
+            if self._session:
+                try:
+                    self._session.close()
+                except Exception:
+                    pass
+                self._session = None
         self._available_models.clear()
         if DEBUG_LEVEL >= 2:
             log_debug("ollama", "OllamaTranslationEngine disposed")
@@ -9956,29 +10210,77 @@ class TranscriptionEngine:
 
     def _load_faster_whisper(self, model_size: str) -> Any:
         """
-        Lädt faster-whisper mit automatischem Fallback über verschiedene compute_types.
+        Lädt faster-whisper mit maximaler Robustheit, automatischem Fallback und
+        detailliertem Debugging.
 
-        Verwendet die optimierte Priorisierungsliste basierend auf GPU-Generation.
-        Unterstützt die Konfiguration der CPU-Threads über `AdvancedSettings.cpu_threads`.
+        Diese Methode ist die zentrale Laderoutine für das faster-whisper-Backend.
+        Sie implementiert:
+
+            - Prüfung auf Mock-Modul (verhindert Absturz bei fehlender Installation)
+            - Mehrstufige Fallback-Strategie für Compute-Typen (int8 → float16 → float32)
+            - Automatischen CPU-Fallback, falls alle GPU-Versuche fehlschlagen
+            - GPU-Cache-Bereinigung nach OOM-Fehlern
+            - Detaillierte Log-Ausgaben bei jedem Schritt (abhängig vom DEBUG_LEVEL)
+            - Unterstützung für benutzerdefinierte CPU-Threads aus den Einstellungen
+
+        Args:
+            model_size: Name des zu ladenden Modells (z.B. 'large-v3-turbo').
+
+        Returns:
+            Das geladene WhisperModel-Objekt oder None bei vollständigem Fehlschlag.
         """
+        # -----------------------------------------------------------------
+        # 1. faster-whisper importieren und auf Mock prüfen
+        # -----------------------------------------------------------------
         try:
             WhisperModel = FastLazyLoader.load("faster_whisper")
         except ImportError as e:
             logger.error(f"❌ faster-whisper nicht installiert: {e}")
             return None
 
-        # Compute-Typen nach GPU-Generation priorisieren
-        compute_types = self._get_optimal_compute_types()
-        compute_types = list(dict.fromkeys(compute_types))  # Duplikate entfernen
+        # Kritische Prüfung: Falls faster-whisper fehlt, liefert der LazyLoader
+        # ein Mock-Objekt zurück, das nicht aufrufbar ist. Dies verhindert einen
+        # unschönen TypeError.
+        if getattr(WhisperModel, "_is_mock", False):
+            logger.error(
+                "❌ faster-whisper ist nicht installiert (Mock-Modul). "
+                "Bitte installieren Sie es mit: pip install faster-whisper"
+            )
+            return None
 
-        # CPU-Threads aus den erweiterten Einstellungen lesen
+        # -----------------------------------------------------------------
+        # 2. Compute-Typen für die aktuelle GPU ermitteln
+        # -----------------------------------------------------------------
+        # _get_optimal_compute_types liefert eine priorisierte Liste, abhängig
+        # von GPU-Generation und Benutzereinstellungen.
+        compute_types = self._get_optimal_compute_types()
+        # Duplikate entfernen, falls die Methode welche zurückgibt
+        seen = set()
+        compute_types = [ct for ct in compute_types if not (ct in seen or seen.add(ct))]
+
+        # -----------------------------------------------------------------
+        # 3. CPU-Threads aus den Einstellungen lesen
+        # -----------------------------------------------------------------
         cpu_threads = getattr(self.settings, "cpu_threads", 0)
         if cpu_threads <= 0:
             cpu_threads = os.cpu_count() or 4
         cpu_threads = max(1, min(cpu_threads, 32))  # sinnvolles Limit
 
+        # -----------------------------------------------------------------
+        # 4. Jeden Compute-Typ der Reihe nach versuchen
+        # -----------------------------------------------------------------
+
         for ct in compute_types:
-            logger.info(f"🔄 Versuche {model_size} mit device={self.device}, compute_type={ct}")
+            logger.info(
+                f"🔄 Versuche faster-whisper '{model_size}' mit "
+                f"device={self.device}, compute_type={ct}"
+            )
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "model",
+                    f"  → cpu_threads={cpu_threads}, num_workers=1"
+                )
+
             try:
                 model = WhisperModel(
                     model_size,
@@ -9987,23 +10289,58 @@ class TranscriptionEngine:
                     cpu_threads=cpu_threads,
                     num_workers=1,
                 )
+                # Erfolg: Compute-Typ für spätere Verwendung merken
                 self.compute_type = ct
-                logger.info(f"✅ faster-whisper '{model_size}' geladen (compute_type={ct}, cpu_threads={cpu_threads})")
+                logger.info(
+                    f"✅ faster-whisper '{model_size}' geladen "
+                    f"(compute_type={ct}, cpu_threads={cpu_threads})"
+                )
                 return model
 
             except RuntimeError as e:
                 error_msg = str(e).lower()
+
+                # -----------------------------------------------------------------
+                # OOM oder "no kernel image" → GPU-Cache leeren und nächsten Typ
+                # -----------------------------------------------------------------
                 if "out of memory" in error_msg or "no kernel image" in error_msg:
-                    logger.warning(f"⚠️ Compute-Typ {ct} fehlgeschlagen: {e}")
-                    if self.device == "cuda" and self._torch:
-                        self._torch.cuda.empty_cache()
+                    logger.warning(
+                        f"⚠️ Compute-Typ {ct} fehlgeschlagen (OOM oder inkompatibel): {e}"
+                    )
+                    if self.device == "cuda" and self._torch is not None:
+                        try:
+                            self._torch.cuda.empty_cache()
+                            if DEBUG_LEVEL >= 3:
+                                log_debug("model", "GPU-Cache geleert")
+                        except Exception as cache_err:
+                            logger.debug(f"Fehler beim Leeren des GPU-Caches: {cache_err}")
+                    # Weiter mit nächstem Compute-Typ
                     continue
+
+                # -----------------------------------------------------------------
+                # Anderer RuntimeError – nicht wiederholbar, sofort abbrechen
+                # -----------------------------------------------------------------
                 else:
                     logger.exception(f"❌ faster-whisper RuntimeError: {e}")
                     return None
 
-        # Fallback auf CPU, falls alle GPU-Versuche fehlschlagen
-        logger.warning("⚠️ Alle Compute-Typen auf GPU fehlgeschlagen, versuche CPU-Fallback...")
+            except Exception as e:
+                logger.exception(f"❌ Unerwarteter Fehler beim Laden von faster-whisper: {e}")
+                return None
+
+        # -----------------------------------------------------------------
+        # 5. Alle GPU-Versuche fehlgeschlagen → CPU-Fallback
+        # -----------------------------------------------------------------
+        logger.warning(
+            f"⚠️ Alle Compute-Typen auf {self.device} fehlgeschlagen. "
+            f"Wechsle zu CPU (compute_type=int8)."
+        )
+        if self.device == "cuda" and self._torch is not None:
+            try:
+                self._torch.cuda.empty_cache()
+            except Exception:
+                pass
+
         try:
             model = WhisperModel(
                 model_size,
@@ -10012,10 +10349,15 @@ class TranscriptionEngine:
                 cpu_threads=cpu_threads,
                 num_workers=1,
             )
-            logger.info(f"✅ faster-whisper '{model_size}' auf CPU geladen (Fallback, cpu_threads={cpu_threads})")
+            # Erfolgreicher CPU-Fallback: Geräteeinstellungen aktualisieren
             self.device = "cpu"
             self.compute_type = "int8"
+            logger.info(
+                f"✅ faster-whisper '{model_size}' auf CPU geladen "
+                f"(Fallback, compute_type=int8, cpu_threads={cpu_threads})"
+            )
             return model
+
         except Exception as e:
             logger.exception(f"❌ faster-whisper CPU-Fallback fehlgeschlagen: {e}")
             return None
@@ -15353,6 +15695,11 @@ class FFmpegManager:
         vermeiden. Bereits erfolgreich gestartete Threads werden gestoppt und die
         internen Datenstrukturen in einem konsistenten Zustand hinterlassen.
 
+        **Wichtig:** Die Freigabe des zuvor akquirierten Semaphor‑Slots erfolgt
+        **ausschließlich** im `finally`‑Block der aufrufenden Methode
+        `_start_stream_internal`. Diese Methode gibt den Slot **niemals** selbst frei,
+        um doppelte Freigaben und Semaphor‑Korruption zu verhindern.
+
         Args:
             process_id: Eindeutige ID des Streams.
             process: Der gestartete FFmpeg‑Prozess (darf nicht None sein).
@@ -15596,12 +15943,12 @@ class FFmpegManager:
                 if yt_process and yt_process.pid in self._pid_tracking:
                     del self._pid_tracking[yt_process.pid]
 
-            # 5.4 WICHTIG: skip_semaphore_release zurücksetzen und Slot manuell freigeben
+            # 5.4 WICHTIG: skip_semaphore_release zurücksetzen, aber Slot NICHT hier freigeben.
+            # Die Freigabe erfolgt ausschließlich im finally von _start_stream_internal.
             if old_pinfo is not None:
                 old_pinfo._skip_semaphore_release = False
-                self._release_slot()
                 if DEBUG_LEVEL >= 3:
-                    log_debug("ffmpeg", f"Slot für überschriebenen Prozess {process_id} nach Fehler freigegeben")
+                    log_debug("ffmpeg", f"Überschriebener Prozess {process_id} – Slot-Freigabe erfolgt durch Aufrufer")
 
             # 5.5 Exception weiterwerfen, damit der Aufrufer reagieren kann
             raise RuntimeError(f"Registrierung von Prozess {process_id} fehlgeschlagen: {e}") from e
@@ -27168,7 +27515,7 @@ class AdvancedSettingsDialog:
                  ).grid(row=2, column=0, sticky="w", pady=5)
         theme_combo = ttk.Combobox(
             text_frame, textvariable=self.theme_var,
-            values=["dark", "light", "pastel", "highcontrast", "dracula", "nord", "solarized", "gruvbox", "onedark", "monokai"],
+            values=["dark", "light", "pastel", "highcontrast", "dracula", "nord", "solarized", "gruvbox", "onedark", "monokai", "a11y-dark", "catppuccin", "tokyonight"],
             width=12, state="readonly", style="Dark.TCombobox"
         )
         theme_combo.grid(row=2, column=1, sticky="w", pady=5, padx=5)
@@ -27464,7 +27811,32 @@ class AdvancedSettingsDialog:
             self._pending_blacklist = adv.blacklist.copy() if adv.blacklist else []
 
     def save_settings(self) -> None:
-        """Übernimmt alle aktuellen Werte in die Einstellungsobjekte und speichert sie."""
+        """
+        Übernimmt alle aktuellen Werte aus dem Dialog in die Einstellungsobjekte
+        und speichert sie persistent.
+
+        **Wichtig:** Vor dem Setzen der Modus‑abhängigen Felder (`asian_mode`,
+        `precision_mode`) werden die ursprünglichen Werte mit
+        `restore_mode_overrides()` wiederhergestellt. Dadurch wird verhindert,
+        dass die Overrides kumulativ angewendet werden.
+
+        Verbesserungen:
+            - Garantiertes Zurücksetzen der Overrides **vor** der Aktualisierung
+              der Modus‑Variablen.
+            - Robuste Fehlerbehandlung: Falls `restore_mode_overrides()` eine
+              Exception wirft, wird der Speichervorgang nicht abgebrochen,
+              sondern nur geloggt.
+            - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 2`.
+            - Validierung der Proxy‑URL vor dem Speichern.
+            - Atomares Speichern der Einstellungen (erst temporäre Datei, dann
+              umbenennen) für maximale Datensicherheit.
+            - Automatisches Aktualisieren der Laufzeit‑Komponenten (Theme,
+              StreamManager, TranscriptionEngine, TTSManager) nach erfolgreichem
+              Speichern.
+        """
+        # ---------------------------------------------------------------------
+        # 1. Validierungsfehler prüfen
+        # ---------------------------------------------------------------------
         if self._validation_errors:
             DarkMessageBox.showerror(
                 "Ungültige Eingaben",
@@ -27473,7 +27845,9 @@ class AdvancedSettingsDialog:
             )
             return
 
-        # Proxy-URL validieren
+        # ---------------------------------------------------------------------
+        # 2. Proxy‑URL validieren
+        # ---------------------------------------------------------------------
         proxy_enabled = self.proxy_enabled_var.get()
         proxy_url = self.proxy_var.get().strip()
         if proxy_enabled and proxy_url:
@@ -27487,7 +27861,30 @@ class AdvancedSettingsDialog:
                 DarkMessageBox.showerror("Fehler", f"Ungültige Proxy‑URL:\n{e}", self.parent)
                 return
 
+        # ---------------------------------------------------------------------
+        # 3. Referenz auf die erweiterten Einstellungen
+        # ---------------------------------------------------------------------
         adv = self.gui.advanced_settings
+
+        # ---------------------------------------------------------------------
+        # 4. 🔥 KRITISCH: Vor dem Setzen der Modus‑abhängigen Werte die
+        #    ursprünglichen Werte wiederherstellen. Dies verhindert kumulative
+        #    Overrides beim Wechsel zwischen `asian_mode` und `precision_mode`.
+        # ---------------------------------------------------------------------
+        try:
+            adv.restore_mode_overrides()
+            if DEBUG_LEVEL >= 2:
+                log_debug("settings", "restore_mode_overrides() called before applying new mode values")
+        except Exception as e:
+            # Fehler beim Zurücksetzen sind unkritisch für das Speichern, aber
+            # wir loggen sie, um mögliche Probleme zu erkennen.
+            logger.warning(f"Failed to restore mode overrides: {e}", exc_info=True)
+            if DEBUG_LEVEL >= 3:
+                log_debug("settings", f"restore_mode_overrides exception: {type(e).__name__}: {e}")
+
+        # ---------------------------------------------------------------------
+        # 5. Werte aus den GUI‑Elementen in das AdvancedSettings‑Objekt übernehmen
+        # ---------------------------------------------------------------------
         adv.chunk_duration = self.chunk_var.get()
         adv.audio_profile = self.profile_var_audio.get()
         adv.vad_filter = self.vad_filter_var.get()
@@ -27508,20 +27905,23 @@ class AdvancedSettingsDialog:
         adv.tts_sentence_silence = self.tts_sentence_silence_var.get()
         adv.transcript_max_lines = self.trans_lines_var.get()
         adv.translation_max_lines = self.transl_lines_var.get()
+
+        # ---------------------------------------------------------------------
+        # 6. Modus‑Variablen setzen (nachdem restore_mode_overrides aufgerufen wurde)
+        # ---------------------------------------------------------------------
         adv.asian_mode = self.asian_var.get()
         adv.precision_mode = self.precision_var.get()
 
-        # ---------------------------------------------------------------------
-        # NEU: Overrides zurücksetzen, falls beide Modi deaktiviert sind
-        # ---------------------------------------------------------------------
-        if not adv.asian_mode and not adv.precision_mode:
-            adv.restore_mode_overrides()
-        else:
-            # Wenn mindestens ein Modus aktiv ist, Overrides anwenden
-            # (Cache leeren, damit die aktuellen Werte neu gesichert werden)
-            adv._original_values.clear()
-            adv._apply_mode_overrides()
+        # Overrides basierend auf den neuen Modus‑Werten anwenden
+        adv._apply_mode_overrides()
 
+        # Falls beide Modi deaktiviert sind, bleiben die Originalwerte erhalten.
+        # Die Methode `_apply_mode_overrides` wendet nur dann Änderungen an,
+        # wenn mindestens ein Modus aktiv ist.
+
+        # ---------------------------------------------------------------------
+        # 7. Weitere Einstellungen übernehmen
+        # ---------------------------------------------------------------------
         adv.adaptive_chunk = self.adaptive_chunk_var.get()
         adv.live_from_start = self.live_from_start_var.get()
         adv.download_inactivity_timeout = self.download_inactivity_var.get()
@@ -27552,7 +27952,9 @@ class AdvancedSettingsDialog:
         adv.auto_tts_transcript = self.auto_tts_transcript_var.get()
         adv.auto_tts_translation = self.auto_tts_translation_var.get()
 
-        # Fallback-Sprache konvertieren
+        # ---------------------------------------------------------------------
+        # 8. Fallback‑Sprache konvertieren (Anzeigename → ISO‑Code)
+        # ---------------------------------------------------------------------
         fallback_name = self.fallback_lang_var.get()
         try:
             fallback_code = DISPLAY_NAME_TO_CODE.get(fallback_name, "de")
@@ -27561,50 +27963,87 @@ class AdvancedSettingsDialog:
             fallback_code = fallback_map.get(fallback_name, "de")
         adv.fallback_source_language = fallback_code
 
-        # Textfelder: Entweder aus Widgets oder aus Pending-Variablen
+        # ---------------------------------------------------------------------
+        # 9. Textfelder auslesen (erlaubte Verzeichnisse & Blacklist)
+        # ---------------------------------------------------------------------
         if hasattr(self, "allowed_dirs_text") and self.allowed_dirs_text is not None:
-            adv.allowed_dirs = [line.strip() for line in self.allowed_dirs_text.get("1.0", "end-1c").split("\n") if line.strip()]
+            adv.allowed_dirs = [
+                line.strip()
+                for line in self.allowed_dirs_text.get("1.0", "end-1c").split("\n")
+                if line.strip()
+            ]
         elif self._pending_allowed_dirs is not None:
             adv.allowed_dirs = self._pending_allowed_dirs
         else:
             adv.allowed_dirs = []
 
         if hasattr(self, "blacklist_text") and self.blacklist_text is not None:
-            adv.blacklist = [line.strip() for line in self.blacklist_text.get("1.0", "end-1c").split("\n") if line.strip()]
+            adv.blacklist = [
+                line.strip()
+                for line in self.blacklist_text.get("1.0", "end-1c").split("\n")
+                if line.strip()
+            ]
         elif self._pending_blacklist is not None:
             adv.blacklist = self._pending_blacklist
         else:
             adv.blacklist = []
 
-        # GUI‑Einstellungen
+        # ---------------------------------------------------------------------
+        # 10. GUI‑Einstellungen (AppSettings) übernehmen
+        # ---------------------------------------------------------------------
         self.gui.settings.theme = self.theme_var.get()
         self.gui.settings.auto_save_on_completion = self.auto_save_var.get()
         self.gui.settings.enable_plugins = self.plugin_var.get()
         self.gui.settings.use_browser_cookies = self.cookies_var.get()
         self.gui.settings.cookies_browser = self.cookies_browser_var.get()
 
-        # Speichern
-        adv.save_to_file()
-        self.gui.settings.save_to_file()
+        # ---------------------------------------------------------------------
+        # 11. Persistente Speicherung beider Einstellungsobjekte
+        # ---------------------------------------------------------------------
+        try:
+            adv.save_to_file()
+            self.gui.settings.save_to_file()
+            if DEBUG_LEVEL >= 2:
+                log_debug("settings", "Advanced settings and app settings saved successfully")
+        except Exception as e:
+            DarkMessageBox.showerror(
+                "Fehler beim Speichern",
+                f"Die Einstellungen konnten nicht gespeichert werden:\n{e}",
+                self.parent
+            )
+            logger.error(f"Failed to save settings: {e}", exc_info=True)
+            return
 
+        # ---------------------------------------------------------------------
+        # 12. Laufzeit‑Komponenten aktualisieren
+        # ---------------------------------------------------------------------
         # Theme sofort anwenden (falls geändert)
         if hasattr(self.gui, "_apply_theme"):
             self.gui._apply_theme(self.gui.settings.theme)
 
-        # Laufzeit‑Anpassungen
+        # StreamManager über Proxy‑ und Cookie‑Änderungen informieren
         if hasattr(self.gui, "stream_manager"):
             self.gui.stream_manager.use_browser_cookies = self.gui.settings.use_browser_cookies
             self.gui.stream_manager.set_proxy(adv.proxy_url, adv.proxy_enabled)
+
+        # GPU‑Acceleration in der TranscriptionEngine umschalten
         if hasattr(self.gui, "transcription_engine"):
             self.gui.transcription_engine.set_gpu_acceleration(adv.gpu_acceleration)
+
+        # TTS‑Manager aktualisieren
         if hasattr(self.gui, "tts_manager"):
             self.gui.tts_manager.set_engine(adv.tts_engine)
             self.gui.tts_manager.set_voice(adv.tts_voice)
             self.gui.tts_manager.length_scale = adv.tts_length_scale
             self.gui.tts_manager.sentence_silence = adv.tts_sentence_silence
 
+        # ---------------------------------------------------------------------
+        # 13. Erfolgsmeldung und Dialog schließen
+        # ---------------------------------------------------------------------
         self.dialog.destroy()
         self.gui.update_status("✅ Settings saved")
+        if DEBUG_LEVEL >= 2:
+            log_debug("settings", "AdvancedSettingsDialog closed after successful save")
 
     def reset_to_defaults(self) -> None:
         """Setzt alle Einstellungen auf die Standardwerte zurück."""
@@ -28868,6 +29307,9 @@ class DragonWhispererGUI:
             "gruvbox": GruvboxDarkTheme,
             "onedark": OneDarkTheme,
             "monokai": MonokaiTheme,
+            "a11y-dark": A11yDarkTheme, # Ersetzt das alte "highcontrast"
+            "catppuccin": CatppuccinMochaTheme, # NEU
+            "tokyonight": TokyoNightTheme,
         }
         theme_class = theme_map.get(theme_name, DarkTheme)
         self.current_theme = theme_class()
@@ -29386,37 +29828,62 @@ class DragonWhispererGUI:
     @gui_error_handler
     def handle_translation(self, result: TranslationResult) -> None:
         """
-        Ultimative Verarbeitung eines Übersetzungsergebnisses.
+        Verarbeitet ein Übersetzungsergebnis und gibt es in der GUI aus.
 
-        Diese Methode vereint alle Optimierungen für eine exzellente GUI‑Ausgabe:
-        - Duplikaterkennung (verhindert unmittelbare Wiederholungen)
-        - Blacklist‑Filter (entfernt konfigurierte Störphrasen)
-        - Satzkontext‑abhängige Zeitstempel (Systemuhrzeit im Normalmodus)
-        - Unterschiedliche Darstellung für Normal‑ und Untertitelmodus
-        - Thread‑sichere Historienführung
+        Diese Methode wird vom Event‑Bus aufgerufen, sobald eine Übersetzung
+        vorliegt. Sie formatiert den Text (mit oder ohne Zeitstempel, je nach
+        Untertitel‑Modus), prüft auf Duplikate, wendet Blacklist‑Filter an,
+        stößt ggf. TTS an und stellt den Text in die GUI‑Queue ein.
+
+        Verbesserungen:
+            - Explizite WARNING‑Logs zur Diagnose (auch ohne DEBUG‑LEVEL).
+            - Fallback-Direktinsertion per root.after, falls QueueManager nicht
+              verfügbar oder GUI im Shutdown.
+            - Prüfung auf GUI‑Shutdown vor jeder GUI‑Operation.
+            - Robuste Behandlung von None‑Werten und leeren Texten.
+            - Korrekte Handhabung von asiatischen Sprachen (kein überflüssiges
+              Leerzeichen am Satzanfang).
+            - Thread‑Sicherheit durch Verwendung des QueueManagers und root.after.
 
         Args:
-            result: Das von der Übersetzungs‑Engine gelieferte Ergebnisobjekt.
+            result: Das Übersetzungsergebnis von der Engine.
         """
         # -----------------------------------------------------------------
-        # 1. Eingangsvalidierung
+        # 1. Eingangsdiagnose (immer sichtbar)
         # -----------------------------------------------------------------
-        if not result or not result.translated:
-            if DEBUG_LEVEL >= 4:
-                log_debug("gui", "handle_translation: empty result or translated text")
+        if result is None:
+            logger.warning("🌐 handle_translation: result is None")
+            return
+        if not result.translated:
+            logger.warning("🌐 handle_translation: result.translated is empty")
+            return
+
+        logger.warning(f"🌐 handle_translation ENTERED: '{result.translated[:80]}...'")
+
+        # -----------------------------------------------------------------
+        # 2. GUI‑Zustand prüfen
+        # -----------------------------------------------------------------
+        if self.is_shutting_down():
+            logger.warning("🌐 GUI is shutting down – will attempt direct insert")
+            # Wir versuchen dennoch, den Text direkt anzuzeigen (Fallback)
+            shutdown_active = True
+        else:
+            shutdown_active = False
+
+        if not hasattr(self, "root") or not self.root.winfo_exists():
+            logger.warning("🌐 GUI root window destroyed – cannot display translation")
             return
 
         current_text = result.translated.strip()
         if not current_text:
-            if DEBUG_LEVEL >= 4:
-                log_debug("gui", "handle_translation: translated text is whitespace only")
+            logger.warning("🌐 Translated text is empty after stripping")
             return
 
         target_lang = getattr(result, "target_lang", "de")
         video_timestamp = getattr(result, "start", None)
 
         # -----------------------------------------------------------------
-        # 2. Duplikaterkennung
+        # 3. Duplikaterkennung
         # -----------------------------------------------------------------
         with self._duplicate_lock:
             if current_text == self._last_translation_text:
@@ -29425,15 +29892,15 @@ class DragonWhispererGUI:
                 return
 
         # -----------------------------------------------------------------
-        # 3. Blacklist‑Filter (optional, auch auf Übersetzungen anwendbar)
+        # 4. Blacklist‑Filter
         # -----------------------------------------------------------------
+        logger.warning(f"🌐 handle_translation BEFORE blacklist: '{current_text[:100]}'")
         if self._apply_blacklist_filter(current_text, "unknown"):
-            if DEBUG_LEVEL >= 3:
-                log_debug("gui", "handle_translation: blacklisted text ignored")
+            logger.warning("🌐 handle_translation: BLOCKED BY BLACKLIST")
             return
 
         # -----------------------------------------------------------------
-        # 4. Statistiken & Auto‑TTS
+        # 5. Statistiken & Auto‑TTS
         # -----------------------------------------------------------------
         self._schedule_tts(current_text, "translation")
         self.performance_monitor.log_translation()
@@ -29442,10 +29909,14 @@ class DragonWhispererGUI:
             self.translation_history.append(result)
 
         # -----------------------------------------------------------------
-        # 5. Untertitelmodus: unveränderte Einzelausgabe
+        # 6. Untertitelmodus: unveränderte Einzelausgabe
         # -----------------------------------------------------------------
         if self.subtitle_mode:
-            timestamp = self._format_timestamp(video_timestamp) if video_timestamp is not None else ""
+            timestamp = (
+                self._format_timestamp(video_timestamp)
+                if video_timestamp is not None
+                else datetime.now().strftime("%H:%M:%S")
+            )
             lang_code = LANGUAGE_SHORT_CODES.get(target_lang, target_lang[:3].upper())
             formatted = f"[{timestamp}] [{lang_code}] {current_text}\n"
 
@@ -29453,10 +29924,11 @@ class DragonWhispererGUI:
                 self._last_translation_text = current_text
                 self._last_output_translation = current_text
 
-            self.queue_manager.safe_put(
-                self.QUEUE_TYPE_TEXT,
-                (self.UPDATE_TYPE_TRANSLATION, formatted)
-            )
+            if DEBUG_LEVEL >= 3:
+                log_debug("gui", f"handle_translation (subtitle): '{formatted[:100]}...'")
+
+            # Einfügen in Queue oder direkt
+            self._insert_translation_text(formatted, shutdown_active)
             return
 
         # =================================================================
@@ -29465,8 +29937,8 @@ class DragonWhispererGUI:
         with self._duplicate_lock:
             # Bestimme, ob ein neuer Block begonnen werden muss
             start_new_block = (
-                not self._last_output_translation or
-                self._last_output_translation[-1] in ".!?。！？"
+                not self._last_output_translation
+                or self._last_output_translation[-1] in ".!?。！？"
             )
 
             if start_new_block:
@@ -29477,23 +29949,81 @@ class DragonWhispererGUI:
             else:
                 prefix = ""
 
-            suffix = "\n" if current_text[-1] in ".!?。！？" else " "
+            # Für asiatische Sprachen kein Leerzeichen zwischen Sätzen
+            asian_langs = {"zh", "ja", "ko", "th", "vi", "yue"}
+            if target_lang in asian_langs:
+                suffix = "\n" if current_text[-1] in ".!?。！？" else ""
+            else:
+                suffix = "\n" if current_text[-1] in ".!?。！？" else " "
+
             formatted = f"{prefix}{current_text}{suffix}"
 
             # Ausgegebenen Text für Satzkontext und Duplikaterkennung speichern
             self._last_output_translation = current_text
             self._last_translation_text = current_text
 
-        if DEBUG_LEVEL >= 4:
-            log_debug("gui", f"handle_translation: formatted='{formatted[:100]}...'")
+        if DEBUG_LEVEL >= 3:
+            log_debug("gui", f"handle_translation (normal): '{formatted[:100]}...'")
 
         # -----------------------------------------------------------------
-        # 6. Thread‑sichere Übergabe an die Text‑Queue
+        # 7. Einfügen in Queue oder direkt
         # -----------------------------------------------------------------
-        self.queue_manager.safe_put(
-            self.QUEUE_TYPE_TEXT,
-            (self.UPDATE_TYPE_TRANSLATION, formatted)
+        self._insert_translation_text(formatted, shutdown_active)
+
+    # ---------------------------------------------------------------------
+    # Hilfsmethode: Text in GUI einfügen (Queue oder Direkt-Fallback)
+    # ---------------------------------------------------------------------
+    def _insert_translation_text(self, formatted: str, force_direct: bool = False) -> None:
+        """
+        Fügt den formatierten Übersetzungstext in die GUI ein.
+        Bevorzugt den QueueManager; falls dieser nicht verfügbar ist oder
+        force_direct=True gesetzt ist, wird der Text direkt per root.after
+        in das Übersetzungs‑Widget geschrieben.
+
+        Args:
+            formatted: Der formatierte Text, der eingefügt werden soll.
+            force_direct: Wenn True, wird der QueueManager umgangen.
+        """
+        # Prüfen, ob QueueManager verfügbar ist
+        qm_available = (
+            hasattr(self, "queue_manager")
+            and self.queue_manager is not None
+            and not force_direct
+            and not self.is_shutting_down()
         )
+
+        if qm_available:
+            success = self.queue_manager.safe_put(
+                self.QUEUE_TYPE_TEXT,
+                (self.UPDATE_TYPE_TRANSLATION, formatted)
+            )
+            logger.warning(f"🌐 safe_put via QueueManager: success={success}, text_len={len(formatted)}")
+            if success:
+                return
+            else:
+                logger.warning("🌐 QueueManager safe_put failed – falling back to direct insert")
+
+        # Fallback: direkte GUI-Manipulation
+        logger.warning("🌐 Using direct root.after fallback for translation")
+        if not hasattr(self, "root") or not self.root.winfo_exists():
+            logger.warning("🌐 root window not available – cannot insert translation")
+            return
+
+        def direct_insert():
+            try:
+                if not hasattr(self, "translation_text") or self.translation_text is None:
+                    return
+                if not self.translation_text.winfo_exists():
+                    return
+                self.translation_text.insert("end", formatted)
+                self.translation_text.see("end")
+                logger.warning("🌐 Direct translation insert succeeded")
+            except tk.TclError as e:
+                logger.warning(f"🌐 Direct insert TclError: {e}")
+            except Exception as e:
+                logger.error(f"🌐 Direct insert unexpected error: {e}")
+
+        self.root.after(0, direct_insert)
 
     @gui_error_handler
     def handle_info(self, info_msg: str) -> None:
@@ -30905,9 +31435,92 @@ class DragonWhispererGUI:
         if DEBUG_LEVEL >= 2:
             log_debug("gui", f"toggle_live_mode erfolgreich: {new_duration:.1f}s")
 
+    @gui_operation_decorator
     def _update_live_mode_button(self) -> None:
-        if hasattr(self, "live_mode_btn") and self.live_mode_btn.winfo_exists():
-            self._safe_gui_update(lambda: self.live_mode_btn.config(text=f"⏱️ {self.advanced_settings.chunk_duration:.0f}s"))
+        """
+        Aktualisiert die Beschriftung des Live‑Mode‑Buttons mit der aktuellen
+        Chunk‑Dauer. Thread‑sicher durch Bindung des Werts an das Lambda.
+
+        Verbesserungen:
+            - Wert wird im Hauptthread gelesen (keine Race Condition).
+            - Lambda mit Default‑Argument fixiert den Wert für die spätere Ausführung.
+            - Debug‑Ausgabe bei Änderungen (DEBUG_LEVEL >= 3).
+            - Fallback für fehlende Einstellungen oder Widgets.
+
+        Die Methode ist idempotent und kann aus beliebigen Threads aufgerufen werden.
+        """
+        # ---------------------------------------------------------------------
+        # 1. Prüfung der Widget‑Existenz
+        # ---------------------------------------------------------------------
+        if not hasattr(self, "live_mode_btn") or self.live_mode_btn is None:
+            if DEBUG_LEVEL >= 3:
+                log_debug("gui", "_update_live_mode_button: live_mode_btn nicht vorhanden")
+            return
+
+        try:
+            if not self.live_mode_btn.winfo_exists():
+                if DEBUG_LEVEL >= 3:
+                    log_debug("gui", "_update_live_mode_button: live_mode_btn existiert nicht mehr")
+                return
+        except tk.TclError:
+            if DEBUG_LEVEL >= 3:
+                log_debug("gui", "_update_live_mode_button: TclError bei winfo_exists")
+            return
+
+        # ---------------------------------------------------------------------
+        # 2. Aktuellen Wert thread‑sicher ermitteln
+        # ---------------------------------------------------------------------
+        # Da diese Methode im Hauptthread aufgerufen wird, ist der Zugriff
+        # auf self.advanced_settings ohne zusätzlichen Lock sicher.
+        # Sollte sie dennoch aus einem Hintergrundthread aufgerufen werden,
+        # sorgt das Lambda-Default dafür, dass der gelesene Wert fixiert wird.
+        try:
+            duration = self.advanced_settings.chunk_duration
+        except AttributeError:
+            # Fallback, falls advanced_settings nicht verfügbar ist
+            duration = 20.0
+            if DEBUG_LEVEL >= 2:
+                log_debug("gui", "_update_live_mode_button: advanced_settings nicht verfügbar, verwende 20.0s")
+
+        # ---------------------------------------------------------------------
+        # 3. Sicherstellen, dass der Wert im gültigen Bereich liegt
+        # ---------------------------------------------------------------------
+        min_dur = getattr(self.advanced_settings.config, "MIN_CHUNK_DURATION", 2.0)
+        max_dur = getattr(self.advanced_settings.config, "MAX_CHUNK_DURATION", 30.0)
+        if not (min_dur <= duration <= max_dur):
+            old = duration
+            duration = max(min_dur, min(duration, max_dur))
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "gui",
+                    f"_update_live_mode_button: chunk_duration {old:.1f}s außerhalb "
+                    f"[{min_dur}, {max_dur}], geklemmt auf {duration:.1f}s"
+                )
+
+        # ---------------------------------------------------------------------
+        # 4. Debug‑Ausgabe bei signifikanter Änderung
+        # ---------------------------------------------------------------------
+        if DEBUG_LEVEL >= 3:
+            if not hasattr(self, "_last_displayed_chunk_duration"):
+                self._last_displayed_chunk_duration = None
+            if self._last_displayed_chunk_duration != duration:
+                log_debug(
+                    "gui",
+                    f"_update_live_mode_button: Anzeige aktualisiert "
+                    f"{self._last_displayed_chunk_duration} → {duration:.1f}s"
+                )
+                self._last_displayed_chunk_duration = duration
+
+        # ---------------------------------------------------------------------
+        # 5. GUI‑Update über QueueManager einreihen (thread‑sicher)
+        # ---------------------------------------------------------------------
+        # Das Lambda bindet den aktuellen Wert von 'duration' über ein
+        # Default‑Argument. Dadurch wird der Wert zum Zeitpunkt der
+        # Lambda‑Erstellung fixiert und nicht erst bei dessen Ausführung
+        # aus self.advanced_settings gelesen.
+        self._safe_gui_update(
+            lambda d=duration: self.live_mode_btn.config(text=f"⏱️ {d:.0f}s")
+        )
 
     def _schedule_tts(self, text: str, source: str) -> None:
         """
@@ -33435,77 +34048,109 @@ class WhisperController:
 
     def _set_source_language(self, gui, src_lang_name: str) -> None:
         """
-        Setzt die Quellsprache für die Whisper-Transkription.
-        Verwendet die originalen ISO-Codes, KEINE Mapping-Tabelle.
-        Bei ungültigen Codes wird auf Auto-Erkennung zurückgefallen.
-        Synchronisiert die Engine mit dem AudioProcessor.
+        Setzt die Quellsprache für die Whisper‑Transkription.
+
+        Diese Methode validiert den aus dem Anzeigenamen abgeleiteten Sprachcode
+        gegen die Menge der von Whisper tatsächlich unterstützten Sprachen
+        (`WHISPER_SUPPORTED_LANGUAGES`). Ungültige oder nicht unterstützte Codes
+        führen zu einem Fallback auf automatische Spracherkennung (`None`).
+
+        Verbesserungen:
+            - Explizite Prüfung gegen `WHISPER_SUPPORTED_LANGUAGES`.
+            - Robuste Behandlung von fehlenden oder ungültigen Sprachcodes.
+            - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 3`.
+            - Thread‑sichere Synchronisation mit dem `AudioProcessor` über
+              `_sync_audio_processor_engine`.
+            - Absicherung gegen fehlende Engine‑Referenzen.
+
+        Args:
+            gui: Referenz auf die `DragonWhispererGUI`.
+            src_lang_name: Der lesbare Name der Quellsprache (z. B. "Deutsch")
+                           oder "Automatisch" für Auto‑Erkennung.
         """
-        try:
-            if not hasattr(gui, "transcription_engine"):
-                if DEBUG_LEVEL >= 1:
-                    logger.warning("_set_source_language: Keine TranscriptionEngine verfügbar")
-                return
+        # ---------------------------------------------------------------------
+        # 1. Vorabprüfungen
+        # ---------------------------------------------------------------------
+        if not hasattr(gui, "transcription_engine") or gui.transcription_engine is None:
+            if DEBUG_LEVEL >= 2:
+                log_debug("language", "_set_source_language: No transcription engine available")
+            return
 
-            engine = gui.transcription_engine
+        engine = gui.transcription_engine
 
-            if src_lang_name != "Automatisch":
-                # Sprachcode aus dem Anzeigenamen ermitteln
-                code = None
-                for name, c in SORTED_LANGUAGES:
-                    if name == src_lang_name:
-                        code = c
-                        break
-
-                if code is None:
-                    logger.warning(f"Unbekannter Sprachname '{src_lang_name}', verwende Auto-Erkennung")
-                    engine.forced_language = None
-                    if self.event_bus:
-                        self.event_bus.emit("info", f"⚠️ Unbekannte Sprache '{src_lang_name}' – automatische Erkennung")
-                    # Auch AudioProcessor synchronisieren
-                    self._sync_audio_processor_engine(engine)
-                    return
-
-                # Prüfen, ob der Code von Whisper unterstützt wird
-                if code not in WHISPER_SUPPORTED_LANGUAGES:
-                    logger.warning(
-                        f"Sprachcode '{code}' wird von Whisper nicht unterstützt. "
-                        f"Falle zurück auf Auto-Erkennung."
-                    )
-                    engine.forced_language = None
-                    if self.event_bus:
-                        self.event_bus.emit(
-                            "info",
-                            f"⚠️ Sprache '{src_lang_name}' wird von Whisper nicht unterstützt. Automatische Erkennung aktiviert."
-                        )
-                    self._sync_audio_processor_engine(engine)
-                    return
-
-                # Alles ok – setze die Sprache (ohne Mapping!)
-                engine.forced_language = code
-                logger.info(f"🔤 Quellsprache manuell gesetzt: {code} ({src_lang_name})")
-                if DEBUG_LEVEL >= 3:
-                    log_debug("language", f"Whisper forced_language = {code}")
-
-            else:
-                # Auto-Erkennung
-                engine.forced_language = None
-                logger.info("🔤 Quellsprache: Automatisch (Whisper-Erkennung)")
-                if DEBUG_LEVEL >= 3:
-                    log_debug("language", "Whisper forced_language = None (auto)")
-
-            # ========== Engine mit AudioProcessor synchronisieren ==========
+        # ---------------------------------------------------------------------
+        # 2. Auto‑Erkennung
+        # ---------------------------------------------------------------------
+        if src_lang_name == "Automatisch":
+            engine.forced_language = None
+            logger.info("🔤 Quellsprache: Automatisch (Whisper-Erkennung)")
+            if DEBUG_LEVEL >= 3:
+                log_debug("language", "Whisper forced_language = None (auto)")
             self._sync_audio_processor_engine(engine)
+            return
 
-            # Event-Bus benachrichtigen (optional, für andere Komponenten)
+        # ---------------------------------------------------------------------
+        # 3. Sprachcode aus dem Anzeigenamen ermitteln
+        # ---------------------------------------------------------------------
+        code = None
+        for name, c in SORTED_LANGUAGES:
+            if name == src_lang_name:
+                code = c
+                break
+
+        if code is None:
+            logger.warning(
+                f"Unbekannter Sprachname '{src_lang_name}' – verwende Auto-Erkennung."
+            )
             if self.event_bus:
-                self.event_bus.emit("source_language_changed", engine.forced_language)
+                self.event_bus.emit(
+                    "info",
+                    f"⚠️ Unbekannte Sprache '{src_lang_name}' – automatische Erkennung aktiviert."
+                )
+            engine.forced_language = None
+            self._sync_audio_processor_engine(engine)
+            return
 
-        except Exception as e:
-            logger.exception(f"❌ Kritischer Fehler in _set_source_language: {e}")
-            # Im Fehlerfall auf Auto-Erkennung zurückfallen
-            if hasattr(gui, "transcription_engine"):
-                gui.transcription_engine.forced_language = None
-                self._sync_audio_processor_engine(gui.transcription_engine)
+        # Normalisierung: sicherstellen, dass der Code in Kleinbuchstaben vorliegt
+        code = code.lower()
+
+        # ---------------------------------------------------------------------
+        # 4. Validierung gegen die von Whisper unterstützten Sprachen
+        # ---------------------------------------------------------------------
+        if code not in WHISPER_SUPPORTED_LANGUAGES:
+            logger.warning(
+                f"Sprachcode '{code}' (ausgewählt als '{src_lang_name}') wird von Whisper "
+                f"nicht unterstützt. Falle zurück auf Auto-Erkennung."
+            )
+            if self.event_bus:
+                self.event_bus.emit(
+                    "info",
+                    f"⚠️ Sprache '{src_lang_name}' wird von Whisper nicht unterstützt. "
+                    f"Automatische Erkennung aktiviert."
+                )
+            engine.forced_language = None
+            self._sync_audio_processor_engine(engine)
+            return
+
+        # ---------------------------------------------------------------------
+        # 5. Alles gültig – Sprache setzen
+        # ---------------------------------------------------------------------
+        engine.forced_language = code
+        logger.info(f"🔤 Quellsprache manuell gesetzt: {code} ({src_lang_name})")
+        if DEBUG_LEVEL >= 3:
+            log_debug("language", f"Whisper forced_language = {code}")
+
+        self._sync_audio_processor_engine(engine)
+
+        # ---------------------------------------------------------------------
+        # 6. Event‑Bus benachrichtigen (optional)
+        # ---------------------------------------------------------------------
+        if self.event_bus:
+            try:
+                self.event_bus.emit("source_language_changed", engine.forced_language)
+            except Exception as e:
+                if DEBUG_LEVEL >= 3:
+                    log_debug("language", f"Failed to emit source_language_changed event: {e}")
 
     def _sync_audio_processor_engine(self, engine) -> None:
         """Hilfsmethode: Synchronisiert die Engine mit dem AudioProcessor."""
@@ -33582,17 +34227,49 @@ class WhisperController:
         )
 
     def _processing_finished(self) -> None:
-        """Wird aufgerufen, wenn die Verarbeitung im AudioProcessor abgeschlossen ist."""
-        self._processing_thread = None
+        """
+        Wird aufgerufen, wenn die Verarbeitung im AudioProcessor abgeschlossen ist.
+
+        Setzt den Zustand des Controllers auf IDLE und benachrichtigt den Event‑Bus
+        über das Ende der Verarbeitung. Diese Methode wird erst ausgeführt, nachdem
+        der AudioProcessor vollständig aufgeräumt hat – inklusive aller Transkriptions‑
+        und Übersetzungs‑Tasks.
+
+        Verbesserungen:
+            - Explizite WARNING‑Logs zur Diagnose.
+            - Thread‑Sicherheit durch Verwendung von `_state_lock`.
+            - Setzt `_processing_thread` auf None.
+            - Emittiert `processing_finished` und `processing_state_changed` nur dann,
+              wenn der Zustand zuvor nicht bereits IDLE war.
+            - Robuste Fehlerbehandlung beim Emittieren von Events.
+        """
+        logger.warning("🌐 WhisperController._processing_finished ENTERED")
 
         with self._state_lock:
-            if self._state != WhisperController.State.IDLE:
+            old_state = self._state
+            if old_state != WhisperController.State.IDLE:
                 self._set_state(WhisperController.State.IDLE)
+                logger.warning(f"🌐 Controller state changed: {old_state.name} -> IDLE")
             else:
-                logger.debug("_processing_finished: bereits IDLE – kein Wechsel nötig")
+                logger.warning("🌐 Controller already IDLE – skipping state change")
 
-        self.event_bus.emit("processing_finished", None)
-        self.event_bus.emit("processing_state_changed", False)
+        # Referenz auf den Verarbeitungsthread freigeben
+        self._processing_thread = None
+
+        # Event‑Bus benachrichtigen (nur wenn zuvor nicht bereits IDLE war)
+        if old_state != WhisperController.State.IDLE:
+            try:
+                self.event_bus.emit("processing_finished", None)
+                self.event_bus.emit("processing_state_changed", False)
+                logger.warning("🌐 Emitted processing_finished and processing_state_changed")
+            except Exception as e:
+                logger.error(f"🌐 Failed to emit processing_finished events: {e}")
+                if DEBUG_LEVEL >= 3:
+                    log_exception("controller", "Event emission failed", e, level="error")
+        else:
+            logger.warning("🌐 Skipping event emission (already IDLE)")
+
+        logger.warning("🌐 WhisperController._processing_finished COMPLETED")
 
     def _stop_audio_resources(self) -> None:
         """
@@ -34926,18 +35603,18 @@ class AudioProcessor:
             STOPPING = auto()
             ERROR = auto()
 
-        self.State = State  # lokal für Methoden verfügbar machen
+        self.State = State
         self._state = State.IDLE
         self._state_lock = threading.RLock()
         self._state_condition = threading.Condition(self._state_lock)
 
         # -----------------------------------------------------------------
-        # 4. Stop‑Event‑Logik (ersetzt einfaches _stop_event)
+        # 4. Stop‑Event‑Logik
         # -----------------------------------------------------------------
-        self._stop_event = threading.Event()           # Wird bei Benutzerabbruch gesetzt
-        self._processing_completed = threading.Event() # Wird bei normalem Stream-Ende gesetzt
-        self._stop_lock = threading.RLock()            # Schützt die Stop-Flags
-        self.processing_completed_event = threading.Event()  # Signalisiert Ende des Verarbeitungs-Threads
+        self._stop_event = threading.Event()
+        self._processing_completed = threading.Event()
+        self._stop_lock = threading.RLock()
+        self.processing_completed_event = threading.Event()
         self._idle_waiter_thread: Optional[threading.Thread] = None
         self._idle_waiter_lock = threading.RLock()
 
@@ -34983,7 +35660,7 @@ class AudioProcessor:
         self._smoothed_word_count: Optional[float] = None
         self._last_chunk_duration = self.settings.config.CHUNK_DURATION
         self._chunk_stable_counter = 0
-        self._chunk_adjust_count = 0          # NEU: Zähler für Anpassungen
+        self._chunk_adjust_count = 0
 
         # -----------------------------------------------------------------
         # 9. Performance‑Messung
@@ -34991,8 +35668,8 @@ class AudioProcessor:
         self._slow_chunks = 0
         self._last_realtime_factor = 0.0
         self._last_chunk_processing_time = 0.0
-        self._last_rt_warning_time = 0.0      # für gedrosselte Warnungen
-        self._last_logged_rt = 0.0            # für Debug-Drosselung
+        self._last_rt_warning_time = 0.0
+        self._last_logged_rt = 0.0
 
         # -----------------------------------------------------------------
         # 10. Statistik (mit eigenem Lock)
@@ -35060,13 +35737,13 @@ class AudioProcessor:
         # -----------------------------------------------------------------
         # 13. Transkriptions‑Satzpuffer (für flüssigere GUI-Ausgabe)
         # -----------------------------------------------------------------
+        self._enable_sentence_buffering = getattr(
+            self.settings, "enable_sentence_buffering", True
+        )
         self._transcript_parts: List[str] = []
         self._transcript_segments: List[TranscriptionResult] = []
         self._transcript_last_flush = 0.0
         self._transcript_sentence_lock = threading.RLock()
-        self._enable_sentence_buffering = getattr(
-            self.settings, "enable_sentence_buffering", True
-        )
         self._transcript_flush_interval = getattr(
             self.settings, "transcript_flush_interval", 10.0
         )
@@ -35212,7 +35889,12 @@ class AudioProcessor:
             self._event_bus.subscribe("config_changed", self._on_config_changed)
 
         # -----------------------------------------------------------------
-        # 28. Initialisierungsprotokoll
+        # 28. Flag für den finalen Flush (schützt Übersetzungen vor Stop‑Event)
+        # -----------------------------------------------------------------
+        self._in_final_flush = False
+
+        # -----------------------------------------------------------------
+        # 29. Initialisierungsprotokoll
         # -----------------------------------------------------------------
         logger.info("✅ AudioProcessor initialized (optimized):")
         logger.info(f"   Config Type: {self._get_config_type()}")
@@ -35810,7 +36492,13 @@ class AudioProcessor:
         Diese Methode wird vom Dispatcher‑Thread für jeden aus der Queue entnommenen
         Chunk aufgerufen. Sie führt die eigentliche Whisper‑Transkription durch,
         aktualisiert Statistiken und stößt ggf. die Übersetzung an. Die Ausgabe der
-        Transkription erfolgt nun über den Satzpuffer für eine flüssigere GUI‑Darstellung.
+        Transkription erfolgt über den Satzpuffer für eine flüssigere GUI‑Darstellung.
+
+        Verbesserungen:
+            - Thread‑sicherer Zähler für ausstehende Tasks mittels lokalem Flag.
+            - Robuste Fehlerbehandlung mit Timeout und Fallback.
+            - Detaillierte Debug‑Ausgaben bei aktiviertem DEBUG_LEVEL.
+            - Frühe Prüfung auf Benutzerabbruch und Engine‑Verfügbarkeit.
 
         Args:
             audio_data: PCM‑Audiodaten (16‑bit, mono, 16 kHz).
@@ -35829,7 +36517,7 @@ class AudioProcessor:
                     return
 
         # -----------------------------------------------------------------
-        # 2. Transkriptions‑Engine holen
+        # 2. Transkriptions‑Engine thread‑sicher holen
         # -----------------------------------------------------------------
         with self._engine_lock:
             trans_engine = self._transcription_engine
@@ -35840,10 +36528,8 @@ class AudioProcessor:
             return
 
         # -----------------------------------------------------------------
-        # 3. Task registrieren (für Fortschrittsverfolgung)
+        # 3. Vorbereitung: Metriken und lokales Flag für Task‑Zähler
         # -----------------------------------------------------------------
-        self._modify_pending_tasks(1)
-
         start_time = time.perf_counter()
         chunk_duration = len(audio_data) / self.settings.config.BYTES_PER_SECOND
 
@@ -35853,36 +36539,70 @@ class AudioProcessor:
                 f"Processing chunk: {len(audio_data)} bytes, {chunk_duration:.2f}s",
             )
 
-        # -----------------------------------------------------------------
-        # 4. Transkription mit Timeout durchführen
-        # -----------------------------------------------------------------
+        task_added = False
+
         try:
+            # -----------------------------------------------------------------
+            # 4. Task registrieren (für Fortschrittsverfolgung)
+            # -----------------------------------------------------------------
+            self._modify_pending_tasks(1)
+            task_added = True
+
+            # -----------------------------------------------------------------
+            # 5. Transkription mit Timeout durchführen
+            # -----------------------------------------------------------------
             segments = self._transcribe_with_timeout(audio_data, timeout=90.0)
-        except TimeoutError:
+
+        except TimeoutError as e:
+            # -----------------------------------------------------------------
+            # Timeout – Chunk überspringen, aber Statistik führen
+            # -----------------------------------------------------------------
             logger.error(
                 f"Transkription timeout nach 90s für Chunk ({len(audio_data)} bytes) – wird übersprungen"
             )
+            if DEBUG_LEVEL >= 3:
+                log_debug("transcribe", f"TimeoutError details: {e}")
             with self._stats_lock:
                 self._consecutive_timeouts += 1
             if error_callback:
                 error_callback("Transkription timeout – Chunk übersprungen")
             return
+
+        except TranscriptionError as e:
+            # -----------------------------------------------------------------
+            # Fehler in der Transkriptions-Engine (z. B. OOM, Modellfehler)
+            # -----------------------------------------------------------------
+            logger.error(f"Transkription fehlgeschlagen: {e}")
+            if DEBUG_LEVEL >= 3:
+                log_debug("transcribe", f"TranscriptionError: {e}")
+            with self._stats_lock:
+                self._consecutive_errors += 1
+            if error_callback:
+                error_callback(f"Transkription fehlgeschlagen: {str(e)[:100]}")
+            return
+
         except Exception as e:
-            logger.error(
-                f"Unerwarteter Fehler bei der Transkription: {e}",
-                exc_info=DEBUG_LEVEL >= 3,
+            # -----------------------------------------------------------------
+            # Unerwarteter Fehler – loggen und Callback
+            # -----------------------------------------------------------------
+            logger.exception(
+                f"Unerwarteter Fehler bei der Transkription: {e}"
             )
             with self._stats_lock:
                 self._consecutive_errors += 1
             if error_callback:
                 error_callback(f"Transkription fehlgeschlagen: {str(e)[:100]}")
             return
+
         finally:
-            # Task‑Zähler immer dekrementieren
-            self._modify_pending_tasks(-1)
+            # -----------------------------------------------------------------
+            # 6. Task‑Zähler garantieren dekrementieren
+            # -----------------------------------------------------------------
+            if task_added:
+                self._modify_pending_tasks(-1)
 
         # -----------------------------------------------------------------
-        # 5. Ergebnis validieren
+        # 7. Ergebnis validieren
         # -----------------------------------------------------------------
         if not segments:
             if DEBUG_LEVEL >= 3:
@@ -35890,7 +36610,7 @@ class AudioProcessor:
             return
 
         # -----------------------------------------------------------------
-        # 6. Tatsächlichen Fortschritt aus Segment‑Endzeiten ermitteln
+        # 8. Tatsächlichen Fortschritt aus Segment‑Endzeiten ermitteln
         # -----------------------------------------------------------------
         max_end = 0.0
         for seg in segments:
@@ -35917,7 +36637,7 @@ class AudioProcessor:
                         )
 
         # -----------------------------------------------------------------
-        # 7. Segmente filtern und gültige Segmente sammeln
+        # 9. Segmente filtern und gültige Segmente sammeln
         # -----------------------------------------------------------------
         valid_segments = []
         for segment in segments:
@@ -35947,11 +36667,15 @@ class AudioProcessor:
             valid_segments.append(segment)
 
         if valid_segments:
-            self._buffer_and_flush_segments(valid_segments, transcription_callback, translation_callback)
+            self._buffer_and_flush_segments(
+                valid_segments,
+                transcription_callback,
+                translation_callback
+            )
 
         # -----------------------------------------------------------------
-        # 8. Übersetzung anstoßen – NUR wenn der Satzpuffer NICHT aktiv ist
-        #    (d.h. im Untertitelmodus oder bei deaktiviertem Satzpuffer)
+        # 10. Übersetzung anstoßen – NUR wenn der Satzpuffer NICHT aktiv ist
+        #     (d.h. im Untertitelmodus oder bei deaktiviertem Satzpuffer)
         # -----------------------------------------------------------------
         if not self._enable_sentence_buffering or self.subtitle_mode:
             for segment in valid_segments:
@@ -35959,17 +36683,18 @@ class AudioProcessor:
                     self._handle_sentence_buffering(segment, translation_callback)
 
         # -----------------------------------------------------------------
-        # 9. Statistik zurücksetzen (Erfolg)
+        # 11. Statistik zurücksetzen (Erfolg)
         # -----------------------------------------------------------------
         with self._stats_lock:
             self._consecutive_timeouts = 0
             self._consecutive_errors = 0
 
         # -----------------------------------------------------------------
-        # 10. Performance‑Metriken aktualisieren
+        # 12. Performance‑Metriken aktualisieren
         # -----------------------------------------------------------------
         processing_duration = time.perf_counter() - start_time
         self._update_realtime_factor(chunk_duration, processing_duration)
+
         if DEBUG_LEVEL >= 3:
             log_debug(
                 "transcribe",
@@ -36738,83 +37463,140 @@ class AudioProcessor:
     # ---------------------------------------------------------------------
     def _join_queue_with_timeout(self, timeout: float) -> bool:
         """
-        Führt `queue.join()` mit Timeout durch und prüft regelmäßig auf
-        Benutzerabbruch sowie den Zustand des Dispatchers.
+        Wartet darauf, dass die interne Rohdaten‑Queue vollständig abgearbeitet ist
+        (queue.join()), jedoch mit einem echten Timeout.
 
-        Falls die Queue die `join()`-Methode nicht unterstützt (z. B. eine
-        Dummy-Implementierung), wird auf eine zeitbasierte Heuristik
-        zurückgegriffen.
+        Diese Methode behebt das Problem, dass `queue.Queue.join()` keinen
+        Timeout‑Parameter besitzt und bei fehlenden `task_done()`‑Aufrufen für
+        immer blockieren würde (Deadlock). Sie verwendet einen separaten Thread,
+        um `join()` auszuführen, und wartet mit `threading.Event.wait(timeout)`.
+
+        Features:
+            - Echter Timeout durch Auslagerung von `join()` in eigenen Thread.
+            - Sofortige Rückkehr `True`, wenn die Queue leer ist.
+            - Fallback auf `_wait_for_queue_idle()`, falls die Queue keine
+              `join()`‑Methode besitzt (z. B. DummyQueue).
+            - Robust gegen Exceptions im `join()`‑Thread (fängt alle ab und
+              signalisiert dennoch das Ende).
+            - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 3`.
+            - Thread‑sicher durch atomare Prüfung der Queue‑Größe vor Start.
 
         Args:
             timeout: Maximale Wartezeit in Sekunden.
 
         Returns:
-            True, wenn die Queue erfolgreich geleert wurde, sonst False.
+            True, wenn die Queue innerhalb des Timeouts vollständig geleert wurde,
+            andernfalls False.
         """
-        start_time = time.perf_counter()
-        last_log_time = start_time
-        log_interval = 5.0            # Fortschrittsmeldung alle 5 Sekunden
+        # ---------------------------------------------------------------------
+        # 1. Fallback für Queues ohne join()‑Methode (z. B. DummyQueue)
+        # ---------------------------------------------------------------------
+        if not hasattr(self._raw_audio_queue, 'join'):
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "processor",
+                    f"_join_queue_with_timeout: Queue without join(), "
+                    f"falling back to idle wait (timeout={timeout}s)"
+                )
+            return self._wait_for_queue_idle(timeout)
+
+        # ---------------------------------------------------------------------
+        # 2. Optimierung: Wenn die Queue bereits leer ist, sofort Erfolg melden.
+        #    Dies vermeidet unnötiges Thread‑Starten.
+        # ---------------------------------------------------------------------
+        try:
+            if self._raw_audio_queue.empty():
+                if DEBUG_LEVEL >= 4:
+                    log_debug(
+                        "processor",
+                        "_join_queue_with_timeout: Queue already empty, returning True"
+                    )
+                return True
+        except Exception as e:
+            # Falls empty() nicht implementiert ist oder eine Exception wirft,
+            # ignorieren wir es und fahren mit dem normalen Ablauf fort.
+            if DEBUG_LEVEL >= 3:
+                log_debug("processor", f"Queue.empty() raised exception: {e}")
+
+        # ---------------------------------------------------------------------
+        # 3. Starte einen separaten Thread, der queue.join() ausführt.
+        # ---------------------------------------------------------------------
+        join_completed = threading.Event()
+        join_error: Optional[Exception] = None
+
+        def do_join() -> None:
+            """
+            Führt queue.join() aus und signalisiert danach das Event.
+            Fängt alle Exceptions ab, um das Event in jedem Fall zu setzen.
+            """
+            nonlocal join_error
+            try:
+                self._raw_audio_queue.join()
+                if DEBUG_LEVEL >= 4:
+                    log_debug("processor", "Queue join thread completed successfully")
+            except Exception as e:
+                join_error = e
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "processor",
+                        f"Queue join thread caught exception: {type(e).__name__}: {e}"
+                    )
+            finally:
+                join_completed.set()
+
+        join_thread = threading.Thread(
+            target=do_join,
+            daemon=True,
+            name=f"QueueJoin-{id(self):x}"
+        )
+        join_thread.start()
 
         if DEBUG_LEVEL >= 3:
             log_debug(
                 "processor",
-                f"_join_queue_with_timeout: Starte join() mit timeout={timeout}s, "
-                f"initial qsize={self._raw_audio_queue.qsize()}"
+                f"Started queue join thread (timeout={timeout}s, "
+                f"thread={join_thread.name})"
             )
 
-        # Prüfen, ob die Queue überhaupt `join` unterstützt
-        if not hasattr(self._raw_audio_queue, 'join'):
-            logger.warning("Queue unterstützt kein join() – verwende zeitbasierte Heuristik")
-            return self._wait_for_queue_idle(timeout)
+        # ---------------------------------------------------------------------
+        # 4. Warte auf das Event, aber maximal `timeout` Sekunden.
+        # ---------------------------------------------------------------------
+        success = join_completed.wait(timeout)
 
-        # -----------------------------------------------------------------
-        # Hauptschleife: periodisch join() aufrufen, um Timeout zu ermöglichen
-        # -----------------------------------------------------------------
-        while True:
-            if self.is_stop_requested():
-                log_debug("processor", "_join_queue_with_timeout: Abbruch durch Benutzer")
-                return False
-
-            if (self._dispatcher_thread is not None and
-                not self._dispatcher_thread.is_alive()):
-                logger.warning("Dispatcher-Thread unerwartet beendet – breche join() ab")
-                return False
-
-            elapsed = time.perf_counter() - start_time
-            if elapsed >= timeout:
+        if success:
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "processor",
+                    f"Queue join completed within {timeout}s"
+                )
+            if join_error is not None:
+                # Obwohl join() eine Exception warf, wurde das Event gesetzt.
+                # Wir behandeln dies als Fehler, da die Queue möglicherweise
+                # nicht korrekt abgearbeitet wurde.
                 logger.warning(
-                    f"_join_queue_with_timeout: Timeout nach {elapsed:.1f}s – "
-                    f"Queue hat noch {self._raw_audio_queue.qsize()} Elemente"
+                    f"Queue join thread finished with error: {join_error}"
                 )
                 return False
-
-            try:
-                self._raw_audio_queue.join()
-                elapsed = time.perf_counter() - start_time
-                if DEBUG_LEVEL >= 3:
-                    log_debug(
-                        "processor",
-                        f"_join_queue_with_timeout: join() erfolgreich nach {elapsed:.2f}s"
-                    )
-                return True
-            except Exception as e:
-                if DEBUG_LEVEL >= 3:
-                    log_debug("processor", f"_join_queue_with_timeout: join()-Exception: {e}")
-                time.sleep(0.1)
-                continue
-
-            # Fortschritt loggen
-            now = time.perf_counter()
-            if now - last_log_time >= log_interval:
+            return True
+        else:
+            # Timeout erreicht – der join()-Thread hängt noch.
+            logger.warning(
+                f"Queue join timed out after {timeout}s – "
+                f"the queue may be stuck (unfinished_tasks > 0)"
+            )
+            if DEBUG_LEVEL >= 3:
+                # Versuche, die Anzahl unerledigter Tasks zu ermitteln (nur für Debug)
                 try:
-                    qsize = self._raw_audio_queue.qsize()
+                    with self._raw_audio_queue.mutex:
+                        unfinished = self._raw_audio_queue.unfinished_tasks
                 except Exception:
-                    qsize = -1
-                logger.debug(
-                    f"  ⏳ Warte auf Queue-Drain: qsize={qsize}, "
-                    f"{elapsed:.1f}s / {timeout}s"
+                    unfinished = "unknown"
+                log_debug(
+                    "processor",
+                    f"Queue state after timeout: unfinished_tasks={unfinished}, "
+                    f"qsize={self._raw_audio_queue.qsize()}"
                 )
-                last_log_time = now
+            return False
 
     # ---------------------------------------------------------------------
     # Fallback: Warten auf Queue-Leerung ohne join() (für Dummy-Queues)
@@ -39112,20 +39894,24 @@ class AudioProcessor:
         """
         Bereinigt nach dem Stream‑Ende alle Ressourcen in korrekter Reihenfolge.
 
-        Geänderte Reihenfolge (entscheidend für vollständige Transkription):
+        Geänderte Reihenfolge (entscheidend für vollständige Transkription und Übersetzung):
           1. FFmpeg‑Streams beenden (keine neuen Audiodaten).
-          2. Dispatcher‑Shutdown signalisieren (er soll nach Queue-Leerung enden).
-          3. Audio‑Puffer flushen (letzte gesammelte Audiodaten verarbeiten).
-          4. Auf Queue-Leerung warten (`queue.join()`) – der Dispatcher läuft noch.
-          5. Dispatcher endgültig stoppen (verhindert neue Executor‑Tasks).
-          6. Auf ausstehende Executor‑Tasks warten (alle bereits gestarteten).
-          7. Zweite Warte-Runde für verzögerte Tasks aus der Executor-Queue.
-          8. GUI‑Queue leeren (letzte GUI‑Updates anzeigen).
-          9. Satzpuffer (Übersetzung und Transkription) leeren.
-         10. Fallback‑Zustand der TranscriptionEngine zurücksetzen.
-         11. LinuxPerformanceOptimizer deaktivieren (falls aktiv).
-         12. Temporäre Dateien löschen.
-         13. Statistik ausgeben und Callbacks auslösen.
+          2. Dispatcher‑Shutdown signalisieren.
+          3. Audio‑Puffer flushen.
+          4. Auf Queue-Leerung warten.
+          5. Dispatcher endgültig stoppen.
+          6. Auf ausstehende Executor‑Tasks warten (Transkription).
+          7. Zweite Warte-Runde für verzögerte Transkriptions-Tasks.
+          8. GUI‑Queue leeren.
+          9. **Final‑Flush‑Phase einleiten** → `_in_final_flush = True`
+         10. Satzpuffer (Übersetzung und Transkription) flushen.
+             → ERZEUGT DIE FINALEN ÜBERSETZUNGSAUFGABEN.
+         11. Übersetzungs‑Executor herunterfahren und auf alle Übersetzungen warten.
+         12. **Final‑Flush‑Phase beenden** → `_in_final_flush = False`
+         13. Fallback‑Zustand der TranscriptionEngine zurücksetzen.
+         14. LinuxPerformanceOptimizer deaktivieren.
+         15. Temporäre Dateien löschen.
+         16. Statistik ausgeben und Callbacks auslösen.
 
         Args:
             normal_ending: True, wenn der Stream normal beendet wurde.
@@ -39141,11 +39927,10 @@ class AudioProcessor:
         cleanup_start_time = time.perf_counter()
         step_times: Dict[str, float] = {}
 
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         # Hilfsfunktion: Zeitmessung für einen Schritt
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         def timed_step(step_name: str, func: Callable[[], None]) -> None:
-            """Führt func aus und misst die Dauer. Fängt Exceptions ab."""
             step_start = time.perf_counter()
             try:
                 func()
@@ -39162,9 +39947,6 @@ class AudioProcessor:
                 if DEBUG_LEVEL >= 3:
                     log_debug("processor", f"  Step '{step_name}' took {duration*1000:.2f} ms")
 
-        # ---------------------------------------------------------------------
-        # Hilfsfunktion: Sicherer Callback-Aufruf (im Hauptthread)
-        # ---------------------------------------------------------------------
         def safe_callback(cb: Optional[Callable], *args: Any) -> None:
             if cb is None:
                 return
@@ -39179,25 +39961,23 @@ class AudioProcessor:
                 else:
                     cb(*args)
             except Exception as e:
-                logger.error(
-                    f"Fehler im Callback {getattr(cb, '__name__', 'unknown')}: {e}"
-                )
+                logger.error(f"Fehler im Callback: {e}")
                 if DEBUG_LEVEL >= 3:
-                    log_debug("processor", f"Callback error details: {e}", exc_info=True)
+                    log_debug("processor", f"Callback error: {e}", exc_info=True)
 
-        # ---------------------------------------------------------------------
-        # 1. FFmpeg‑Prozess stoppen (kritisch, aber Fehler ignorieren)
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 1. FFmpeg‑Prozess stoppen
+        # -----------------------------------------------------------------
         timed_step("stop_ffmpeg", lambda: self._safe_stop_ffmpeg())
 
-        # ---------------------------------------------------------------------
-        # 2. Dispatcher‑Shutdown signalisieren (damit er nach Queue-Leerung endet)
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 2. Dispatcher‑Shutdown signalisieren
+        # -----------------------------------------------------------------
         timed_step("signal_dispatcher_shutdown", lambda: self._dispatcher_shutdown.set())
 
-        # ---------------------------------------------------------------------
-        # 3. Audio‑Puffer flushen (BEVOR die Queue geleert wird)
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 3. Audio‑Puffer flushen
+        # -----------------------------------------------------------------
         timed_step(
             "flush_audio_buffer",
             lambda: self._flush_audio_buffer(
@@ -39207,64 +39987,89 @@ class AudioProcessor:
             ),
         )
 
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         # 4. Warten, bis die Raw-Audio-Queue vollständig geleert ist.
-        #    Der Dispatcher läuft noch und verarbeitet alle verbleibenden Chunks.
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         timed_step("wait_for_queue_empty", lambda: self._raw_audio_queue.join())
 
-        # ---------------------------------------------------------------------
-        # 5. Dispatcher endgültig stoppen (nachdem alle Chunks verarbeitet wurden)
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 5. Dispatcher endgültig stoppen
+        # -----------------------------------------------------------------
         timed_step("stop_dispatcher", lambda: self._stop_dispatcher(clear_queue=False))
 
-        # ---------------------------------------------------------------------
-        # 6. Auf ausstehende Executor‑Tasks warten (die bereits gestartet wurden)
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 6. Auf ausstehende Executor‑Tasks warten (Transkription)
+        # -----------------------------------------------------------------
         timed_step("wait_for_pending_tasks", lambda: self._wait_for_pending_tasks())
 
-        # ---------------------------------------------------------------------
-        # 7. Zweite Warte-Runde für verzögerte Tasks aus der Executor-Queue.
-        #    Nachdem die erste Runde abgeschlossen ist, könnten weitere Tasks
-        #    aus der internen Queue des Executors nachgerückt sein (weil der
-        #    Worker vorher blockiert war). Wir warten kurz und prüfen erneut.
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 7. Zweite Warte-Runde für verzögerte Transkriptions-Tasks
+        # -----------------------------------------------------------------
         def wait_for_delayed_tasks():
-            # Kurze Pause, damit nachrückende Tasks gestartet werden können
             time.sleep(0.5)
-            # Erneut auf Abschluss aller pending tasks warten
             self._wait_for_pending_tasks()
         timed_step("wait_for_delayed_tasks", wait_for_delayed_tasks)
 
-        # ---------------------------------------------------------------------
-        # 8. GUI‑Queue vollständig leeren (nach Dispatcher‑Stop)
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 8. GUI‑Queue leeren
+        # -----------------------------------------------------------------
         timed_step("drain_gui_queue", lambda: self._drain_gui_queue())
 
-        # ---------------------------------------------------------------------
-        # 9. Übersetzungs‑Satzpuffer leeren (letzte Übersetzungen anstoßen)
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 9. 🔥 FINAL‑FLUSH‑PHASE EINLEITEN
+        # -----------------------------------------------------------------
+        self._in_final_flush = True
+        logger.warning("🌐 Entering final flush phase – stop_event will be ignored")
+
+        # -----------------------------------------------------------------
+        # 10. Übersetzungs‑Satzpuffer leeren (erzeugt finale Übersetzungsaufgaben)
+        # -----------------------------------------------------------------
         timed_step(
             "flush_sentence_buffer",
             lambda: self._flush_sentence_buffer(callbacks.get("translation")),
         )
 
-        # ---------------------------------------------------------------------
-        # 10. Transkriptions‑Satzpuffer leeren (letzte Sätze ausgeben)
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 11. Transkriptions‑Satzpuffer leeren
+        # -----------------------------------------------------------------
         timed_step(
             "flush_transcript_buffer",
             lambda: self._flush_transcript_buffer(callbacks.get("transcription")),
         )
 
-        # ---------------------------------------------------------------------
-        # 11. Fallback‑Zustand der TranscriptionEngine zurücksetzen
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 12. Übersetzungs‑Executor herunterfahren und warten
+        # -----------------------------------------------------------------
+        def shutdown_translation_executor():
+            executor = getattr(self, "_translation_executor", None)
+            if executor is None:
+                logger.warning("🌐 Translation executor is None – skipping shutdown")
+                return
+            logger.warning("🌐 Shutting down translation executor and waiting for tasks...")
+            try:
+                executor.shutdown(wait=True, cancel_futures=False)
+                logger.warning("🌐 Translation executor shut down successfully")
+            except TypeError:
+                executor.shutdown(wait=True)
+                logger.warning("🌐 Translation executor shut down (fallback)")
+            except Exception as e:
+                logger.error(f"🌐 Error shutting down translation executor: {e}")
+        timed_step("shutdown_translation_executor", shutdown_translation_executor)
+
+        # -----------------------------------------------------------------
+        # 13. 🔥 FINAL‑FLUSH‑PHASE BEENDEN
+        # -----------------------------------------------------------------
+        self._in_final_flush = False
+        logger.warning("🌐 Final flush phase ended")
+
+        # -----------------------------------------------------------------
+        # 14. Fallback‑Zustand der TranscriptionEngine zurücksetzen
+        # -----------------------------------------------------------------
         timed_step("reset_transcription_engine_fallback", lambda: self._reset_engine_fallback())
 
-        # ---------------------------------------------------------------------
-        # 12. LinuxPerformanceOptimizer deaktivieren (falls aktiv)
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 15. LinuxPerformanceOptimizer deaktivieren
+        # -----------------------------------------------------------------
         if IS_LINUX and hasattr(self, 'performance_optimizer') and self.performance_optimizer:
             timed_step(
                 "deactivate_linux_optimizer",
@@ -39274,42 +40079,42 @@ class AudioProcessor:
             if DEBUG_LEVEL >= 3:
                 log_debug("processor", "  Linux optimizer not active – skipping")
 
-        # ---------------------------------------------------------------------
-        # 13. Temporäre Dateien löschen
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 16. Temporäre Dateien löschen
+        # -----------------------------------------------------------------
         timed_step("cleanup_temp_files", lambda: self._cleanup_temp_files())
 
-        # ---------------------------------------------------------------------
-        # 14. Statistik ausgeben (wenn Chunks verarbeitet wurden)
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 17. Statistik ausgeben
+        # -----------------------------------------------------------------
         if self._chunk_counter > 0:
             timed_step("log_final_stats", self._log_final_stats)
 
-        # ---------------------------------------------------------------------
-        # 15. Callback auslösen
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 18. Callback auslösen
+        # -----------------------------------------------------------------
         timed_step(
             "invoke_callbacks",
             lambda: self._invoke_final_callbacks(normal_ending, error_occurred, callbacks),
         )
 
-        # ---------------------------------------------------------------------
-        # 16. Download‑Modus‑Flag zurücksetzen
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 19. Download‑Modus‑Flag zurücksetzen
+        # -----------------------------------------------------------------
         if getattr(self, "_download_mode_active", False):
             self._download_mode_active = False
 
-        # ---------------------------------------------------------------------
-        # 17. Event‑Bus benachrichtigen
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 20. Event‑Bus benachrichtigen
+        # -----------------------------------------------------------------
         timed_step(
             "emit_cleanup_event",
             lambda: self._emit_cleanup_completed(normal_ending, error_occurred),
         )
 
-        # ---------------------------------------------------------------------
-        # 18. Abschließende Debug‑Ausgabe
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 21. Abschließende Debug‑Ausgabe
+        # -----------------------------------------------------------------
         total_duration = time.perf_counter() - cleanup_start_time
         with self._pending_tasks_lock:
             final_pending = self._pending_tasks
@@ -39328,35 +40133,121 @@ class AudioProcessor:
         """
         Leert den Transkriptions‑Satzpuffer und gibt den finalen kombinierten Satz aus.
 
-        Diese Methode wird während des Cleanups aufgerufen, um sicherzustellen,
-        dass keine unvollständigen Sätze im Puffer verbleiben.
+        Diese Methode wird während des Cleanups (`_cleanup_after_stream`) aufgerufen,
+        um sicherzustellen, dass keine unvollständigen Sätze im Puffer verbleiben.
+        Sie sendet den kombinierten Satz sowohl an die GUI als auch an die
+        Übersetzungs‑Engine (sofern aktiviert).
+
+        Verbesserungen:
+            - Explizite Prüfung der Callbacks und der Übersetzungs‑Engine.
+            - Detaillierte Debug‑Ausgaben auf WARNING‑Ebene für kritische Pfade
+              (immer sichtbar, unabhängig vom DEBUG‑LEVEL).
+            - Robuste Fehlerbehandlung – einzelne Callback‑Fehler unterbrechen nicht
+              die gesamte Bereinigung.
+            - Thread‑Sicherheit durch Verwendung von `_transcript_sentence_lock`.
+            - Garantiertes Leeren des Puffers im `finally`‑Block.
+            - Prüfung auf `None` und leere Puffer.
+
+        Args:
+            transcription_callback: Callback für die GUI‑Ausgabe. Falls None,
+                                    wird keine Ausgabe erzeugt.
         """
-        if not transcription_callback:
-            return
-
-        with self._transcript_sentence_lock:
-            if not self._transcript_parts:
-                if DEBUG_LEVEL >= 4:
-                    log_debug("transcript_buffer", "Transcript buffer empty, nothing to flush")
-                return
-
-            if DEBUG_LEVEL >= 3:
-                log_debug(
-                    "transcript_buffer",
-                    f"Flushing transcript buffer: {len(self._transcript_parts)} parts, "
-                    f"{sum(len(p) for p in self._transcript_parts)} total chars",
-                )
-
-            combined_seg = self._create_combined_transcript_segment()
-            try:
-                transcription_callback(combined_seg)
-                if DEBUG_LEVEL >= 3:
-                    log_debug("transcript_buffer", "Final transcript sentence delivered")
-            except Exception as e:
-                logger.error(f"Error in final transcript flush callback: {e}")
-            finally:
+        # ---------------------------------------------------------------------
+        # 1. Schneller Rückweg bei fehlendem Callback
+        # ---------------------------------------------------------------------
+        if transcription_callback is None:
+            logger.warning("🌐 _flush_transcript_buffer: transcription_callback is None – skipping flush")
+            # Puffer trotzdem leeren, um Speicher freizugeben
+            with self._transcript_sentence_lock:
+                if self._transcript_parts:
+                    logger.warning(f"🌐 Discarding {len(self._transcript_parts)} buffered transcript parts")
                 self._transcript_parts.clear()
                 self._transcript_segments.clear()
+            return
+
+        # ---------------------------------------------------------------------
+        # 2. Kritischer Abschnitt: Zugriff auf den Puffer
+        # ---------------------------------------------------------------------
+        with self._transcript_sentence_lock:
+            if not self._transcript_parts:
+                logger.warning("🌐 _flush_transcript_buffer: Transcript buffer empty, nothing to flush")
+                return
+
+            num_parts = len(self._transcript_parts)
+            total_chars = sum(len(p) for p in self._transcript_parts)
+            logger.warning(
+                f"🌐 Flushing final transcript buffer: {num_parts} parts, "
+                f"{total_chars} total chars"
+            )
+
+            # -----------------------------------------------------------------
+            # 3. Kombiniertes Segment erstellen
+            # -----------------------------------------------------------------
+            try:
+                combined_seg = self._create_combined_transcript_segment()
+            except Exception as e:
+                logger.error(
+                    f"🌐 Failed to create combined transcript segment: {e}",
+                    exc_info=True
+                )
+                # Puffer dennoch leeren, um Blockaden zu vermeiden
+                self._transcript_parts.clear()
+                self._transcript_segments.clear()
+                return
+
+            # -----------------------------------------------------------------
+            # 4. Callbacks auslösen (GUI und Übersetzung)
+            # -----------------------------------------------------------------
+            try:
+                # 4a. GUI‑Ausgabe
+                transcription_callback(combined_seg)
+                logger.warning(
+                    f"🌐 Final transcript sentence delivered to GUI "
+                    f"({len(combined_seg.text)} chars)"
+                )
+
+                # 4b. Übersetzung anstoßen, falls Engine verfügbar und aktiviert
+                translation_cb = getattr(self, "_translation_callback", None)
+                engine = self.translation_engine if hasattr(self, "translation_engine") else None
+                enabled = self._translation_enabled.is_set() if hasattr(self, "_translation_enabled") else False
+
+                logger.warning(
+                    f"🌐 Translation prerequisites: engine={engine is not None}, "
+                    f"enabled={enabled}, callback={translation_cb is not None}"
+                )
+
+                if engine is not None and enabled and translation_cb is not None:
+                    source_lang = getattr(combined_seg, "language", "unknown")
+                    target_lang = engine.default_target_lang
+
+                    if source_lang != "auto" and source_lang == target_lang:
+                        logger.warning(
+                            f"🌐 Source language equals target ({target_lang}) – skipping translation"
+                        )
+                    else:
+                        self._handle_sentence_buffering(combined_seg, translation_cb)
+                        logger.warning("🌐 Final transcript sentence sent to translation")
+                else:
+                    if engine is None:
+                        logger.warning("🌐 Skipping translation: no translation engine")
+                    elif not enabled:
+                        logger.warning("🌐 Skipping translation: translation disabled")
+                    else:
+                        logger.warning("🌐 Skipping translation: no translation callback")
+
+            except Exception as e:
+                logger.error(
+                    f"🌐 Error during final transcript flush callbacks: {e}",
+                    exc_info=True
+                )
+
+            finally:
+                # -----------------------------------------------------------------
+                # 5. Puffer in JEDEM Fall leeren (garantiert)
+                # -----------------------------------------------------------------
+                self._transcript_parts.clear()
+                self._transcript_segments.clear()
+                logger.warning("🌐 Transcript buffer cleared")
 
     # -------------------------------------------------------------------------
     # Hilfsmethoden für _cleanup_after_stream
@@ -41113,87 +42004,144 @@ class AudioProcessor:
         result: Union[TranscriptionResult, Any],
         translation_callback: TranslationCallback,
     ) -> None:
+        """
+        Puffert ein Transkriptionssegment für die Übersetzung und löst die Übersetzung
+        aus, sobald ein vollständiger Satz erkannt wird, ein Timeout erreicht ist oder
+        ein Sprachwechsel stattfindet.
+
+        Verbesserungen:
+            - Während des finalen Flushs (`_in_final_flush == True`) wird das
+              `_stop_event` **ignoriert**, sodass die letzten Sätze garantiert
+              übersetzt werden.
+            - Explizite WARNING‑Logs für jeden kritischen Pfad.
+            - Korrekte Weitergabe von Zeitstempeln (start/end).
+        """
+        logger.warning("🌐 _handle_sentence_buffering ENTERED")
+
+        if translation_callback is None:
+            logger.warning("🌐 translation_callback is None – skipping")
+            return
+
+        if not self._translation_enabled.is_set():
+            logger.warning("🌐 Translation disabled – skipping")
+            return
+
+        with self._engine_lock:
+            engine = self._translation_engine
+        if engine is None:
+            logger.warning("🌐 Translation engine not set – skipping")
+            return
+
         text = result.text.strip()
+        if not text:
+            logger.warning("🌐 Empty text in segment – skipping")
+            return
+
         detected_lang = getattr(result, "language", "unknown")
+        start_time = getattr(result, "start", None)
+        end_time = getattr(result, "end", None)
+
+        logger.warning(
+            f"🌐 Buffering segment: text='{text[:50]}...', lang={detected_lang}, "
+            f"start={start_time}, end={end_time}"
+        )
 
         with self._sentence_lock:
             now = time.time()
 
-            if self._stop_event.is_set():
-                if self._sentence_parts:
-                    combined_parts = self._sentence_parts + [text]
-                    sentence = " ".join(combined_parts).strip()
-                    lang = (
-                        self._sentence_segments[-1].language
-                        if self._sentence_segments else detected_lang
-                    )
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("translate", f"Stop-Event: flushing {len(sentence)} chars")
-                    self._translate_and_send_async(sentence, lang, translation_callback)
-                self._sentence_parts.clear()
-                self._sentence_segments.clear()
-                return
-
-            if self._sentence_segments and detected_lang != self._sentence_segments[-1].language:
-                sentence = " ".join(self._sentence_parts).strip()
-                lang = self._sentence_segments[-1].language
-                if DEBUG_LEVEL >= 3:
-                    log_debug(
-                        "translate",
-                        f"Language change ({lang} → {detected_lang}): flushing {len(sentence)} chars"
-                    )
-                self._translate_and_send_async(sentence, lang, translation_callback)
-                self._sentence_parts.clear()
-                self._sentence_segments.clear()
-                self._last_sentence_time = now
-
-            if (self._sentence_parts and
-                    (now - self._last_sentence_time) > self._sentence_flush_interval):
-                sentence = " ".join(self._sentence_parts).strip()
+            def flush_buffer(reason: str) -> None:
+                if not self._sentence_parts:
+                    logger.warning(f"🌐 flush_buffer called with empty buffer (reason: {reason})")
+                    return
+                combined_text = " ".join(self._sentence_parts).strip()
                 lang = (
                     self._sentence_segments[-1].language
-                    if self._sentence_segments else detected_lang
+                    if self._sentence_segments
+                    else detected_lang
                 )
-                if DEBUG_LEVEL >= 3:
-                    log_debug(
-                        "translate",
-                        f"Timeout ({self._sentence_flush_interval}s): flushing {len(sentence)} chars"
-                    )
-                self._translate_and_send_async(sentence, lang, translation_callback)
+                first_seg = self._sentence_segments[0] if self._sentence_segments else None
+                last_seg = self._sentence_segments[-1] if self._sentence_segments else None
+
+                logger.warning(
+                    f"🌐 Flushing sentence buffer: reason={reason}, "
+                    f"parts={len(self._sentence_parts)}, chars={len(combined_text)}, lang={lang}"
+                )
+
+                self._translate_and_send_async(
+                    combined_text,
+                    lang,
+                    translation_callback,
+                    start=first_seg.start if first_seg else None,
+                    end=last_seg.end if last_seg else None,
+                )
+
                 self._sentence_parts.clear()
                 self._sentence_segments.clear()
                 self._last_sentence_time = now
 
+            # -----------------------------------------------------------------
+            # Stop‑Event NUR dann verwerfen, wenn wir NICHT im finalen Flush sind
+            # -----------------------------------------------------------------
+            in_final_flush = getattr(self, "_in_final_flush", False)
+            if self._stop_event.is_set() and not in_final_flush:
+                if not self._sentence_parts:
+                    logger.warning(
+                        "🌐 Stop event set and buffer empty – discarding current segment"
+                    )
+                    self._translate_and_send_async(
+                        text, detected_lang, translation_callback,
+                        start=start_time, end=end_time
+                    )
+                    return
+                else:
+                    logger.warning(
+                        "🌐 Stop event set but buffer has data – will flush normally"
+                    )
+
+            # -----------------------------------------------------------------
+            # Sprachwechsel
+            # -----------------------------------------------------------------
+            if self._sentence_segments and detected_lang != self._sentence_segments[-1].language:
+                logger.warning(
+                    f"🌐 Language change detected ({self._sentence_segments[-1].language} → {detected_lang})"
+                )
+                flush_buffer("language_change")
+
+            # -----------------------------------------------------------------
+            # Timeout
+            # -----------------------------------------------------------------
+            if self._sentence_parts and (now - self._last_sentence_time) > self._sentence_flush_interval:
+                logger.warning(
+                    f"🌐 Sentence buffer timeout ({self._sentence_flush_interval}s) – flushing"
+                )
+                flush_buffer("timeout")
+
+            # -----------------------------------------------------------------
+            # Aktuelles Segment anhängen
+            # -----------------------------------------------------------------
             self._sentence_parts.append(text)
             self._sentence_segments.append(result)
             self._last_sentence_time = now
 
-            if text and text[-1] in ".!?。！？":
-                sentence = " ".join(self._sentence_parts).strip()
-                lang = detected_lang
-                if DEBUG_LEVEL >= 3:
-                    log_debug(
-                        "translate",
-                        f"Punctuation '{text[-1]}': flushing {len(sentence)} chars"
-                    )
-                self._translate_and_send_async(sentence, lang, translation_callback)
-                self._sentence_parts.clear()
-                self._sentence_segments.clear()
-                self._last_sentence_time = time.time()
+            # -----------------------------------------------------------------
+            # Satzende oder Wortanzahl
+            # -----------------------------------------------------------------
+            should_flush = False
+            flush_reason = ""
 
-            elif len(self._sentence_parts) > self._sentence_flush_word_threshold:
-                sentence = " ".join(self._sentence_parts).strip()
-                lang = detected_lang
-                if DEBUG_LEVEL >= 3:
-                    log_debug(
-                        "translate",
-                        f"Word limit ({self._sentence_flush_word_threshold}): "
-                        f"flushing {len(sentence)} chars"
-                    )
-                self._translate_and_send_async(sentence, lang, translation_callback)
-                self._sentence_parts.clear()
-                self._sentence_segments.clear()
-                self._last_sentence_time = time.time()
+            if text and text[-1] in ".!?。！？":
+                should_flush = True
+                flush_reason = "punctuation"
+
+            if not should_flush:
+                word_count = sum(len(part.split()) for part in self._sentence_parts)
+                if word_count >= self._sentence_flush_word_threshold:
+                    should_flush = True
+                    flush_reason = f"word_threshold({word_count})"
+
+            if should_flush:
+                logger.warning(f"🌐 Flush triggered by: {flush_reason}")
+                flush_buffer(flush_reason)
 
     def _handle_transcript_segment(
         self,
@@ -41216,6 +42164,7 @@ class AudioProcessor:
             - Timeout-basierte Ausgabe (konfigurierbar, Standard 10.0 Sekunden)
             - Wortanzahl-Schwellwert (verhindert überlange Sätze)
             - Automatische Trennung bei Sprachwechsel
+            - Korrekte Übersetzungsauslösung auch im Satzpuffer-Modus
             - Thread-sicher durch internes Lock
             - Deaktivierbar über `self._enable_sentence_buffering`
             - Im Untertitel-Modus automatisch deaktiviert (segmentweise Ausgabe)
@@ -41240,7 +42189,6 @@ class AudioProcessor:
 
         text = segment.text.strip()
         if not text:
-            # Leere Segmente ignorieren
             if DEBUG_LEVEL >= 4:
                 log_debug("transcript_buffer", "Ignoring empty segment")
             return
@@ -41252,118 +42200,105 @@ class AudioProcessor:
             now = time.time()
 
             # -----------------------------------------------------------------
-            # 2a. Benutzerabbruch? Puffer sofort leeren und aktuelles Segment
-            #     direkt ausgeben, um Datenverlust zu vermeiden.
+            # Hilfsfunktion: Aktuellen Puffer leeren und Callbacks auslösen
+            # -----------------------------------------------------------------
+            def flush_buffer(reason: str = "") -> None:
+                """
+                Leert den internen Satzpuffer, erzeugt ein kombiniertes
+                Transkriptionssegment und sendet es sowohl an die GUI
+                als auch an die Übersetzungsroutine.
+                """
+                if not self._transcript_parts:
+                    return
+
+                combined_seg = self._create_combined_transcript_segment()
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "transcript_buffer",
+                        f"Flushing transcript buffer: reason={reason}, "
+                        f"parts={len(self._transcript_parts)}, "
+                        f"chars={len(combined_seg.text)}",
+                    )
+
+                try:
+                    # 1. GUI-Ausgabe des vollständigen Satzes
+                    transcription_callback(combined_seg)
+                    # 2. Übersetzung des vollständigen Satzes anstoßen
+                    if translation_callback is not None:
+                        self._handle_sentence_buffering(combined_seg, translation_callback)
+                except Exception as e:
+                    logger.error(
+                        f"Error in transcription/translation callbacks during flush: {e}",
+                        exc_info=DEBUG_LEVEL >= 3,
+                    )
+                    if DEBUG_LEVEL >= 3:
+                        log_exception("transcript_buffer", "Callback error", e, level="debug")
+                finally:
+                    self._transcript_parts.clear()
+                    self._transcript_segments.clear()
+                    self._transcript_last_flush = now
+
+            # -----------------------------------------------------------------
+            # 3. Benutzerabbruch? Puffer sofort leeren und aktuelles Segment
+            #    einzeln ausgeben, um Datenverlust zu vermeiden.
             # -----------------------------------------------------------------
             if self._stop_event.is_set():
-                if self._transcript_parts:
-                    combined_seg = self._create_combined_transcript_segment()
-                    try:
-                        transcription_callback(combined_seg)
-                        if translation_callback is not None:
-                            self._handle_sentence_buffering(combined_seg, translation_callback)
-                    except Exception as e:
-                        logger.error(f"Error in callbacks during stop flush: {e}")
-                    finally:
-                        self._transcript_parts.clear()
-                        self._transcript_segments.clear()
-                # Aktuelles Segment trotzdem ausgeben (als einzelnes)
+                flush_buffer("stop_event")
+                # Aktuelles Segment trotzdem als Einzelsegment ausgeben
                 try:
                     transcription_callback(segment)
                     if translation_callback is not None:
                         self._handle_sentence_buffering(segment, translation_callback)
                 except Exception as e:
-                    logger.error(f"Error in callbacks for single segment: {e}")
+                    logger.error(
+                        f"Error in callbacks for single segment during stop: {e}",
+                        exc_info=DEBUG_LEVEL >= 3,
+                    )
                 return
 
             # -----------------------------------------------------------------
-            # 2b. Sprachwechsel? Puffer leeren, um Sprachmischung zu vermeiden.
+            # 4. Sprachwechsel? Puffer leeren, um Sprachmischung zu vermeiden.
             # -----------------------------------------------------------------
             if self._transcript_segments:
                 last_lang = self._transcript_segments[-1].language
                 current_lang = getattr(segment, "language", "unknown")
                 if current_lang != last_lang:
-                    if self._transcript_parts:
-                        combined_seg = self._create_combined_transcript_segment()
-                        try:
-                            transcription_callback(combined_seg)
-                            if translation_callback is not None:
-                                self._handle_sentence_buffering(combined_seg, translation_callback)
-                        except Exception as e:
-                            logger.error(f"Error in callbacks on language change: {e}")
-                        finally:
-                            self._transcript_parts.clear()
-                            self._transcript_segments.clear()
-                            self._transcript_last_flush = now
-                    # Nach Sprachwechsel mit neuem Segment fortfahren
-                    # (kein return, Segment wird unten angefügt)
+                    flush_buffer(f"language_change ({last_lang} → {current_lang})")
 
             # -----------------------------------------------------------------
-            # 2c. Timeout überschritten? Puffer leeren.
+            # 5. Timeout überschritten? Puffer leeren.
             # -----------------------------------------------------------------
-            if self._transcript_parts and (now - self._transcript_last_flush) > self._transcript_flush_interval:
-                combined_seg = self._create_combined_transcript_segment()
-                try:
-                    transcription_callback(combined_seg)
-                    if translation_callback is not None:
-                        self._handle_sentence_buffering(combined_seg, translation_callback)
-                except Exception as e:
-                    logger.error(f"Error in callbacks on timeout flush: {e}")
-                finally:
-                    self._transcript_parts.clear()
-                    self._transcript_segments.clear()
-                    self._transcript_last_flush = now
-                # Nach Timeout-Flush wird das aktuelle Segment unten angefügt
+            if (self._transcript_parts and
+                    (now - self._transcript_last_flush) > self._transcript_flush_interval):
+                flush_buffer(f"timeout ({self._transcript_flush_interval}s)")
 
             # -----------------------------------------------------------------
-            # 3. Aktuelles Segment an den Puffer anhängen
+            # 6. Aktuelles Segment an den Puffer anhängen
             # -----------------------------------------------------------------
             self._transcript_parts.append(text)
             self._transcript_segments.append(segment)
             self._transcript_last_flush = now
 
             # -----------------------------------------------------------------
-            # 4. Prüfen, ob der Puffer jetzt geleert werden soll
+            # 7. Prüfen, ob der Puffer jetzt geleert werden soll
             # -----------------------------------------------------------------
             should_flush = False
             flush_reason = ""
 
-            # 4a. Satzende erkannt?
+            # 7a. Satzende erkannt?
             if text and text[-1] in ".!?。！？":
                 should_flush = True
                 flush_reason = "punctuation"
 
-            # 4b. Wortanzahl-Schwellwert überschritten?
+            # 7b. Wortanzahl-Schwellwert überschritten?
             if not should_flush:
                 word_count = sum(len(part.split()) for part in self._transcript_parts)
                 if word_count >= self._transcript_word_threshold:
                     should_flush = True
                     flush_reason = f"word_threshold({word_count})"
 
-            # -----------------------------------------------------------------
-            # 5. Puffer leeren und Callbacks aufrufen
-            # -----------------------------------------------------------------
             if should_flush:
-                combined_seg = self._create_combined_transcript_segment()
-                if DEBUG_LEVEL >= 3:
-                    log_debug(
-                        "transcript_buffer",
-                        f"Flushing transcript buffer: reason={flush_reason}, "
-                        f"parts={len(self._transcript_parts)}, "
-                        f"chars={len(combined_seg.text)}",
-                    )
-                try:
-                    # GUI-Ausgabe des vollständigen Satzes
-                    transcription_callback(combined_seg)
-                    # Übersetzung des vollständigen Satzes anstoßen
-                    if translation_callback is not None:
-                        self._handle_sentence_buffering(combined_seg, translation_callback)
-                except Exception as e:
-                    logger.error(f"Error in callbacks on flush: {e}")
-                finally:
-                    self._transcript_parts.clear()
-                    self._transcript_segments.clear()
-                    self._transcript_last_flush = time.time()
+                flush_buffer(flush_reason)
 
     def _create_combined_transcript_segment(self) -> TranscriptionResult:
         """
@@ -41489,8 +42424,38 @@ class AudioProcessor:
         start: Optional[float] = None,
         end: Optional[float] = None,
     ) -> None:
+        """
+        Startet eine asynchrone Übersetzung eines Textes mit der konfigurierten
+        Übersetzungs‑Engine. Die Methode ist nicht blockierend und verwendet
+        einen dedizierten Executor.
+
+        Verbesserungen:
+            - Explizite WARNING‑Logs für alle kritischen Pfade (Debugging auch ohne DEBUG‑LEVEL).
+            - Prüfung der Engine‑Verfügbarkeit und des Executors vor dem Einreichen.
+            - Semaphor‑gesteuerte Begrenzung paralleler Übersetzungen.
+            - Automatischer Fallback auf sekundäre Engine bei Fehlern.
+            - Sequenznummern‑Prüfung, um veraltete Übersetzungen zu verwerfen.
+            - Robuste Fehlerbehandlung im Worker‑Thread.
+            - Abbruch bei None‑Callbacks oder deaktivierter Übersetzung.
+
+        Args:
+            text: Der zu übersetzende Text (bereits bereinigt).
+            source_lang: Quellsprache (ISO‑Code oder "auto").
+            translation_callback: Callback für das Übersetzungsergebnis.
+            start: Optionaler Startzeitstempel (für Untertitel).
+            end: Optionaler Endzeitstempel (für Untertitel).
+        """
+        # -----------------------------------------------------------------
+        # 1. Schnelle Abbruchbedingungen mit WARNING‑Logs
+        # -----------------------------------------------------------------
+        logger.warning("🌐 _translate_and_send_async ENTERED")
+
+        if translation_callback is None:
+            logger.warning("🌐 translation_callback is None – aborting")
+            return
+
         if not self._translation_enabled.is_set():
-            log_debug("translate", "Translation disabled – skipping")
+            logger.warning("🌐 Translation disabled – skipping")
             return
 
         with self._engine_lock:
@@ -41498,128 +42463,134 @@ class AudioProcessor:
             fallback = self._fallback_translation_engine
 
         if engine is None:
-            log_debug("translate", "Translation engine not set – skipping")
+            logger.warning("🌐 Translation engine not set – skipping")
             return
 
         target_lang = engine.default_target_lang
         if source_lang != "auto" and source_lang == target_lang:
-            log_debug(
-                "translate",
-                f"Source language ({source_lang}) equals target ({target_lang}) – skipping",
+            logger.warning(
+                f"🌐 Source language equals target ({target_lang}) – skipping translation"
             )
             return
 
+        # Prüfen, ob der Executor noch existiert und nicht heruntergefahren ist
+        executor = self._translation_executor
+        if executor is None:
+            logger.warning("🌐 Translation executor is None – cannot submit task")
+            return
+
+        # -----------------------------------------------------------------
+        # 2. Semaphor für parallele Übersetzungen
+        # -----------------------------------------------------------------
         acquired = self._translation_semaphore.acquire(blocking=True, timeout=3.0)
         if not acquired:
-            log_debug("translate", "Translation semaphore timeout – discarding request")
+            logger.warning("🌐 Translation semaphore timeout – discarding request")
             return
 
         if self._stop_event.is_set():
-            log_debug(
-                "translate", "Stop requested – releasing semaphore and discarding"
-            )
+            logger.warning("🌐 Stop requested – releasing semaphore and discarding")
             self._translation_semaphore.release()
             return
 
         with self._translation_seq_lock:
             current_seq = self._translation_seq
 
-        log_debug(
-            "translate",
-            f"Scheduling translation: text_len={len(text)}, source={source_lang}, target={target_lang}",
+        logger.warning(
+            f"🌐 Scheduling translation: text_len={len(text)}, source={source_lang}, "
+            f"target={target_lang}, seq={current_seq}"
         )
 
-        def task():
+        # -----------------------------------------------------------------
+        # 3. Worker‑Funktion für den Executor
+        # -----------------------------------------------------------------
+        def task() -> None:
             start_time = time.perf_counter()
             translation = None
 
             try:
+                # Primäre Engine prüfen
                 primary_ok = True
                 if hasattr(engine, "is_functional"):
                     primary_ok = engine.is_functional()
+
                 if primary_ok:
                     try:
-                        log_debug("translate", "Calling primary translation engine...")
+                        logger.warning("🌐 Calling primary translation engine...")
                         translation = engine.translate_text(text, source_lang)
                         if translation is not None:
-                            log_debug(
-                                "translate",
-                                f"Primary translation successful: {len(translation.translated)} chars",
+                            logger.warning(
+                                f"🌐 Primary translation successful: "
+                                f"{len(translation.translated)} chars"
                             )
                         else:
-                            log_debug("translate", "Primary translation returned None")
+                            logger.warning("🌐 Primary translation returned None")
                     except Exception as e:
-                        log_debug(
-                            "translate",
-                            f"Primary translation error: {type(e).__name__}: {e}",
+                        logger.warning(
+                            f"🌐 Primary translation error: {type(e).__name__}: {e}"
                         )
                         if DEBUG_LEVEL >= 3:
-                            logger.exception("Primary translation exception")
-                else:
-                    log_debug("translate", "Primary engine not functional")
+                            log_exception("translate", "Primary translation exception", e)
 
+                # Fallback-Engine, falls primäre fehlschlägt
                 if translation is None and fallback is not None:
                     fallback_ok = True
                     if hasattr(fallback, "is_functional"):
                         fallback_ok = fallback.is_functional()
                     if fallback_ok:
                         try:
-                            log_debug(
-                                "translate", "Calling fallback translation engine..."
-                            )
+                            logger.warning("🌐 Calling fallback translation engine...")
                             translation = fallback.translate_text(text, source_lang)
                             if translation is not None:
-                                log_debug(
-                                    "translate",
-                                    f"Fallback translation successful: {len(translation.translated)} chars",
+                                logger.warning(
+                                    f"🌐 Fallback translation successful: "
+                                    f"{len(translation.translated)} chars"
                                 )
                             else:
-                                log_debug(
-                                    "translate", "Fallback translation returned None"
-                                )
+                                logger.warning("🌐 Fallback translation returned None")
                         except Exception as e:
-                            log_debug(
-                                "translate",
-                                f"Fallback translation error: {type(e).__name__}: {e}",
+                            logger.warning(
+                                f"🌐 Fallback translation error: {type(e).__name__}: {e}"
                             )
                             if DEBUG_LEVEL >= 3:
-                                logger.exception("Fallback translation exception")
-                    else:
-                        log_debug("translate", "Fallback engine not functional")
+                                log_exception("translate", "Fallback translation exception", e)
 
                 duration_ms = (time.perf_counter() - start_time) * 1000
-                log_debug(
-                    "time",
-                    f"_translate_and_send took {duration_ms:.2f}ms for {len(text)} chars",
+                logger.warning(
+                    f"🌐 Translation task took {duration_ms:.2f}ms for {len(text)} chars"
                 )
 
+                # Sequenznummer prüfen – veraltete Ergebnisse verwerfen
                 with self._translation_seq_lock:
                     if current_seq != self._translation_seq:
-                        log_debug(
-                            "translate",
-                            f"Translation discarded: seq {current_seq} != current {self._translation_seq}",
+                        logger.warning(
+                            f"🌐 Translation discarded: seq {current_seq} != current "
+                            f"{self._translation_seq}"
                         )
                         return
 
                 if translation:
                     translation.start = start
                     translation.end = end
-                    if (
-                        self.subtitle_mode
-                        and self.settings.config.ENABLE_TIMED_TRANSLATIONS
-                    ):
+
+                    if self.subtitle_mode and self.settings.config.ENABLE_TIMED_TRANSLATIONS:
                         with self._subtitle_lock:
                             self._timed_translations.append(translation)
 
-                    quality = self._assess_translation_quality(text, translation.translated, target_lang)
+                    # Qualitätsbewertung (optional)
+                    quality = self._assess_translation_quality(
+                        text, translation.translated, target_lang
+                    )
                     if quality < 0.5:
-                        log_debug("translate", f"Low quality translation detected (score={quality:.2f})")
+                        logger.warning(
+                            f"🌐 Low quality translation detected (score={quality:.2f})"
+                        )
                         if self._event_bus:
-                            self._event_bus.emit("translation_quality_warning", {
-                                "target_lang": target_lang,
-                                "quality": quality,
-                            })
+                            self._event_bus.emit(
+                                "translation_quality_warning",
+                                {"target_lang": target_lang, "quality": quality},
+                            )
 
+                    # Callback im Hauptthread ausführen
                     if self.controller_ref is not None:
                         gui = (
                             self.controller_ref.gui_ref()
@@ -41628,38 +42599,42 @@ class AudioProcessor:
                         )
                         if gui is not None and not gui.is_shutting_down():
                             translation_callback(translation)
+                            logger.warning(
+                                f"🌐 Translation delivered: {len(translation.translated)} chars"
+                            )
                         else:
-                            log_debug("translate", "GUI not available, skipping callback")
+                            logger.warning("🌐 GUI not available, skipping callback")
                     else:
                         translation_callback(translation)
-                    log_debug(
-                        "translate",
-                        f"Translation delivered: {len(translation.translated)} chars, source length: {len(text)} chars",
-                    )
+                        logger.warning(
+                            f"🌐 Translation delivered: {len(translation.translated)} chars"
+                        )
                 else:
-                    log_debug(
-                        "translate",
-                        f"No translation produced (primary and fallback both failed) for text: {text[:50]}...",
+                    logger.warning(
+                        f"🌐 No translation produced (primary and fallback both failed) "
+                        f"for text: {text[:100]}..."
                     )
 
             except Exception as e:
                 logger.error(
-                    f"Unexpected error in translation task: {e}", exc_info=True
+                    f"🌐 Unexpected error in translation task: {e}", exc_info=True
                 )
-                log_debug("translate", f"Translation task crashed: {e}")
+                if DEBUG_LEVEL >= 3:
+                    log_exception("translate", "Translation task crashed", e)
             finally:
                 self._translation_semaphore.release()
 
+        # -----------------------------------------------------------------
+        # 4. Task an Executor übergeben
+        # -----------------------------------------------------------------
         try:
-            self._translation_executor.submit(task)
-            log_debug("translate", "Translation task submitted to executor")
+            executor.submit(task)
+            logger.warning("🌐 Translation task submitted to executor")
         except RuntimeError as e:
-            log_debug(
-                "translate", f"Translation executor shutdown, discarding task: {e}"
-            )
+            logger.warning(f"🌐 Translation executor shutdown, discarding task: {e}")
             self._translation_semaphore.release()
         except Exception as e:
-            log_debug("translate", f"Failed to submit translation task: {e}")
+            logger.warning(f"🌐 Failed to submit translation task: {e}")
             self._translation_semaphore.release()
 
     def _update_realtime_factor(self, chunk_duration: float, processing_duration: float) -> None:
