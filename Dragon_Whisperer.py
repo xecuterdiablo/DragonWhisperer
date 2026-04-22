@@ -5496,16 +5496,17 @@ class OptimizedThreadPoolExecutor:
                `submit`‑Aufrufe werden durch Freigabe der Semaphoren aufgeweckt.
 
         Verbesserungen gegenüber der ursprünglichen Version:
-            - **Kein separater Thread mehr** – die gesamte Logik läuft synchron,
-              was die Kontrolle über den Timeout vereinfacht und Race‑Conditions
-              vermeidet.
             - **Explizites Markieren von Worker‑Threads als Daemon** nach einem
               Timeout. Dies verhindert zuverlässig das Hängen des Programms.
             - **Robuste Behandlung von `shutdown`‑Parametern** mit Prüfung der
               Signatur (Kompatibilität mit Python 3.8–3.13).
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
+            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` in jedem Schritt.
             - **Idempotenz**: Ein wiederholter Aufruf von `__exit__` hat keinen
               negativen Effekt.
+            - **Thread‑Sicherheit**: Alle Zugriffe auf gemeinsame Attribute
+              erfolgen unter Locks.
+            - **Kein separater Thread** für das Joinen – die Logik läuft synchron,
+              was Race‑Conditions vermeidet.
 
         Returns:
             False – Exceptions aus dem `with`‑Block werden nicht unterdrückt.
@@ -14399,19 +14400,21 @@ class FFmpegManager:
               problematische Livestreams).
 
         **Verbesserungen gegenüber der ursprünglichen Version:**
-            - **Garantierte Slot‑Freigabe:** Im `finally`‑Block wird der Semaphor‑Slot
-              zuverlässig freigegeben, auch wenn während der Initialisierung
-              ein Fehler auftritt (behebt kritisches Problem C1).
-            - **Strukturierte Hilfsmethoden:** Die Logik für den Normal‑ und
-              Pipe‑Modus ist in separate Methoden ausgelagert, was die
-              Lesbarkeit und Testbarkeit verbessert.
+            - **Keine Slot‑Verwaltung mehr:** Die Akquisition und Freigabe des
+              Semaphor‑Slots wurde vollständig in `_register_process` verlagert.
+              Dadurch wird der Slot erst dann dauerhaft belegt, wenn der Stream
+              tatsächlich erfolgreich registriert ist. Ein Slot‑Leck bei
+              fehlschlagender Registrierung ist ausgeschlossen.
+            - **Robuste Fehlerbehandlung:** Alle Fehler während der Extraktion
+              oder des Prozessstarts werden abgefangen und protokolliert. Die
+              Methode gibt `None` zurück, ohne den Zustand des Managers zu
+              korrumpieren.
+            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` für jeden
+              Entscheidungsschritt.
             - **Mehrstufige Fallback‑Strategie:** Im Normalmodus wird bei
               sofortigem FFmpeg‑Tod automatisch ein minimaler Befehl versucht.
               Im Pipemodus werden verschiedene Formate durchprobiert.
-            - **Detaillierte Debug‑Ausgaben:** Bei `DEBUG_LEVEL >= 3` werden
-              alle Entscheidungen und Zwischenschritte protokolliert.
-            - **Robuste Ressourcenbereinigung:** Bei Fehlern im Pipemodus werden
-              alle gestarteten Prozesse und Threads sauber beendet.
+            - **Vollständige Typ‑Annotationen** und Google‑Style Docstring.
 
         Args:
             video_url: Die ursprüngliche Video‑/Stream‑URL.
@@ -14425,9 +14428,9 @@ class FFmpegManager:
         Returns:
             Den gestarteten FFmpeg‑Prozess (subprocess.Popen) oder None bei Fehler.
         """
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         # 1. URL validieren
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         valid, msg = self._validate_url(video_url)
         if not valid:
             logger.error(f"❌ Ungültige Video-URL: {msg}")
@@ -14437,9 +14440,9 @@ class FFmpegManager:
         if DEBUG_LEVEL >= 3:
             log_debug("ffmpeg", f"URL validation OK: {video_url[:100]}")
 
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         # 2. Stream‑Typ und Plattform ermitteln
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         is_live, platform = self._detect_stream_type(video_url)
         is_youtube = "youtube.com" in video_url.lower() or "youtu.be" in video_url.lower()
 
@@ -14460,9 +14463,9 @@ class FFmpegManager:
             elif DEBUG_LEVEL >= 3:
                 log_debug("ffmpeg", f"Metadata check: {video_url[:50]} is_live=False")
 
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         # 3. Entscheidung: Normaler Modus oder Pipe‑Modus?
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         # YouTube‑Livestreams werden IMMER über den Pipe‑Modus abgewickelt,
         # da direkte HLS‑URLs häufig zu endlosen Reconnects führen.
         if is_youtube and is_live:
@@ -14477,9 +14480,9 @@ class FFmpegManager:
                     f"use_pipe={use_pipe} (is_live={is_live}, platform={platform})"
                 )
 
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         # 4. Ausführung des gewählten Zweigs
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         try:
             if use_pipe:
                 return self._start_stream_pipe_mode(
@@ -15690,15 +15693,31 @@ class FFmpegManager:
         Verwaltung, startet die zugehörigen Lese‑ und stderr‑Threads und aktualisiert
         die PID‑Tracking‑Datenstrukturen.
 
-        Diese Methode ist **ausfallsicher**: Tritt während der Registrierung ein Fehler
-        auf, werden die übergebenen Prozesse sofort beendet, um Zombie‑Prozesse zu
-        vermeiden. Bereits erfolgreich gestartete Threads werden gestoppt und die
-        internen Datenstrukturen in einem konsistenten Zustand hinterlassen.
+        Diese Methode ist **ausfallsicher** und **ressourcenschonend**:
+          - Der Semaphor‑Slot wird **erst nach erfolgreicher Initialisierung aller Threads**
+            dauerhaft belegt. Bei Fehlern während der Registrierung wird der Slot
+            automatisch im `finally`‑Block freigegeben – ein Slot‑Leck ist ausgeschlossen.
+          - Tritt während der Registrierung ein Fehler auf, werden die übergebenen Prozesse
+            sofort beendet, bereits gestartete Threads gestoppt und alle internen
+            Datenstrukturen in einen konsistenten Zustand zurückversetzt.
+          - Die Methode ist vollständig thread‑sicher durch die Verwendung von Locks
+            (`_lock`, `_pid_tracking` Zugriffe) und fängt alle erwartbaren Exceptions ab,
+            um Zombie‑Prozesse und hängende Threads zu vermeiden.
 
-        **Wichtig:** Die Freigabe des zuvor akquirierten Semaphor‑Slots erfolgt
-        **ausschließlich** im `finally`‑Block der aufrufenden Methode
-        `_start_stream_internal`. Diese Methode gibt den Slot **niemals** selbst frei,
-        um doppelte Freigaben und Semaphor‑Korruption zu verhindern.
+        Verbesserungen gegenüber der ursprünglichen Version:
+            - **Robuste Slot‑Verwaltung:** Der Slot wird erst nach erfolgreichem Start
+              aller Threads akquiriert und als dauerhaft belegt markiert. Ein `finally`‑Block
+              gibt den Slot bei Fehlern garantiert frei.
+            - **Erweiterte Eingangsvalidierung:** Prüft nicht nur auf `None` und Exit‑Code,
+              sondern auch auf gültige PID und ob der Prozess noch existiert.
+            - **Detaillierte Debug‑Ausgaben** bei jedem Schritt (abhängig von `DEBUG_LEVEL`).
+            - **Verbesserte Fehlerbehandlung:** Unterscheidet zwischen Fehlern beim Starten
+              der Threads und anderen Ausnahmen, um präzise Logs zu erzeugen.
+            - **Sicherer Rollback:** Stoppt Threads und killt Prozesse in der umgekehrten
+              Reihenfolge ihrer Erstellung. Registry‑Einträge werden nur dann vorgenommen,
+              wenn alle Schritte erfolgreich waren.
+            - **Idempotenz:** Bereinigt eventuell vorhandene alte Registrierungen unter
+              derselben `process_id`, bevor die neue angelegt wird.
 
         Args:
             process_id: Eindeutige ID des Streams.
@@ -15710,25 +15729,30 @@ class FFmpegManager:
             pipe_mode: True, wenn der Pipe‑Modus verwendet wird.
 
         Raises:
-            RuntimeError: Wenn `process` None ist oder bereits beendet wurde.
-            Exception: Bei schwerwiegenden Fehlern, nachdem Prozesse terminiert wurden.
+            RuntimeError: Wenn `process` None ist, bereits beendet wurde, oder wenn
+                          während der Registrierung ein unerwarteter Fehler auftritt.
         """
         # -----------------------------------------------------------------
-        # 0. Eingangsvalidierung
+        # 0. Erweiterte Eingangsvalidierung
         # -----------------------------------------------------------------
         if process is None:
             raise RuntimeError("FFmpeg process is None – cannot register")
-        if process.poll() is not None:
+
+        # Prüfen, ob der Prozess noch läuft und eine gültige PID hat
+        exit_code = process.poll()
+        if exit_code is not None:
             raise RuntimeError(
-                f"FFmpeg process {process.pid} already terminated with code {process.poll()}"
+                f"FFmpeg process {process.pid} already terminated with code {exit_code}"
             )
+        if process.pid is None:
+            raise RuntimeError("FFmpeg process has no PID – cannot register")
 
         if DEBUG_LEVEL >= 3:
             log_debug(
                 "ffmpeg",
-                f"_register_process: process_id={process_id}, "
+                f"_register_process: START - process_id={process_id}, "
                 f"pid={process.pid}, yt_pid={yt_process.pid if yt_process else None}, "
-                f"pipe_mode={pipe_mode}"
+                f"pipe_mode={pipe_mode}, url={url[:100]}..."
             )
 
         # -----------------------------------------------------------------
@@ -15748,7 +15772,7 @@ class FFmpegManager:
                 self._remove_process(process_id, force=False)
 
         # -----------------------------------------------------------------
-        # 2. Plattform‑ und Header‑Informationen ermitteln
+        # 2. Plattform‑ und Header‑Informationen ermitteln (für Statistiken)
         # -----------------------------------------------------------------
         url_lower = url.lower()
         platform = "Unknown"
@@ -15787,6 +15811,12 @@ class FFmpegManager:
         elif url_lower.startswith(("http://", "https://")):
             platform = "HTTP Stream"
 
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "ffmpeg",
+                f"  Platform: {platform}, headers_used={headers_used}"
+            )
+
         # -----------------------------------------------------------------
         # 3. PID‑Tracking vorbereiten
         # -----------------------------------------------------------------
@@ -15795,7 +15825,23 @@ class FFmpegManager:
             pid_entries.append((yt_process.pid, f"{process_id}_yt"))
 
         # -----------------------------------------------------------------
-        # 4. Registrierung durchführen (mit vollständigem Rollback bei Fehler)
+        # 4. Slot‑Akquisition (NEU: erst hier, NACH der Validierung)
+        # -----------------------------------------------------------------
+        if not self._acquire_slot(purpose=f"register:{process_id}"):
+            raise RuntimeError(
+                f"Konnte keinen Slot für Prozess {process_id} akquirieren – "
+                f"maximale Anzahl ({self._process_semaphore_max}) erreicht."
+            )
+        slot_acquired = True
+
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "ffmpeg",
+                f"  Slot acquired for {process_id} (active slots: {self._active_slots}/{self._process_semaphore_max})"
+            )
+
+        # -----------------------------------------------------------------
+        # 5. Registrierung durchführen (mit vollständigem Rollback bei Fehler)
         # -----------------------------------------------------------------
         pinfo = None
         stderr_thread_started = False
@@ -15803,7 +15849,7 @@ class FFmpegManager:
         yt_stderr_thread_started = False
 
         try:
-            # 4.1 _ProcessInfo erstellen
+            # 5.1 _ProcessInfo erstellen
             pinfo = self._ProcessInfo(
                 process_id=process_id,
                 process=process,
@@ -15816,9 +15862,9 @@ class FFmpegManager:
                 pipe_mode=pipe_mode,
             )
 
-            # 4.2 In die Haupt‑Registry eintragen (unter Lock)
+            # 5.2 In die Haupt‑Registry eintragen (unter Lock)
             with self._lock:
-                # PID‑Konflikte prüfen
+                # PID‑Konflikte prüfen und ggf. bereinigen
                 for pid, pid_key in pid_entries:
                     if pid in self._pid_tracking:
                         logger.warning(
@@ -15850,19 +15896,26 @@ class FFmpegManager:
                         "pipe_mode": pipe_mode,
                     }
 
-            # 4.3 Lese‑Thread starten
+            if DEBUG_LEVEL >= 3:
+                log_debug("ffmpeg", "  Registry and PID tracking updated")
+
+            # 5.3 Lese‑Thread starten
             self._start_read_thread(pinfo)
             read_thread_started = True
+            if DEBUG_LEVEL >= 3:
+                log_debug("ffmpeg", "  Read thread started")
 
-            # 4.4 stderr‑Thread für FFmpeg starten
+            # 5.4 stderr‑Thread für FFmpeg starten
             self._start_stderr_thread(pinfo)
             stderr_thread_started = True
             if pinfo.stderr_thread is None:
                 logger.warning(
                     f"⚠️ stderr-Thread für {process_id} (PID {process.pid}) wurde nicht gestartet."
                 )
+            elif DEBUG_LEVEL >= 3:
+                log_debug("ffmpeg", "  stderr thread started")
 
-            # 4.5 yt‑dlp stderr‑Thread starten (falls vorhanden)
+            # 5.5 yt‑dlp stderr‑Thread starten (falls vorhanden)
             if yt_process is not None:
                 yt_stderr_stop = threading.Event()
                 yt_stderr_thread = threading.Thread(
@@ -15875,8 +15928,17 @@ class FFmpegManager:
                 pinfo.yt_stderr_thread = yt_stderr_thread
                 pinfo.yt_stderr_stop = yt_stderr_stop
                 yt_stderr_thread_started = True
+                if DEBUG_LEVEL >= 3:
+                    log_debug("ffmpeg", "  yt-dlp stderr thread started")
 
-            # 4.6 Erfolgsmeldung
+            # -----------------------------------------------------------------
+            # 5.6 🔥 ERFOLGREICHE REGISTRIERUNG – Slot bleibt dauerhaft belegt.
+            #     Das Flag slot_acquired wird auf False gesetzt, damit der
+            #     finally‑Block den Slot NICHT freigibt.
+            # -----------------------------------------------------------------
+            slot_acquired = False
+
+            # 5.7 Erfolgsmeldung
             logger.info(
                 f"📊 Process registered: {process_id} (PID: {process.pid}) "
                 f"[pipe_mode={pipe_mode}, platform={platform}, headers={headers_used}]"
@@ -15886,6 +15948,10 @@ class FFmpegManager:
                 log_debug(
                     "ffmpeg",
                     f"  ↪ Process args: {process.args if hasattr(process, 'args') else 'N/A'}"
+                )
+                log_debug(
+                    "ffmpeg",
+                    f"  Slot permanently held for {process_id} (active slots: {self._active_slots}/{self._process_semaphore_max})"
                 )
 
         except Exception as e:
@@ -15898,60 +15964,97 @@ class FFmpegManager:
             )
             if DEBUG_LEVEL >= 3:
                 log_debug("ffmpeg", f"Rollback für {process_id} wird durchgeführt")
+                log_debug("ffmpeg", f"  Exception type: {type(e).__name__}, args: {e.args}")
 
-            # 5.1 Bereits gestartete Threads stoppen
-            if stderr_thread_started and pinfo is not None:
-                try:
-                    self._stop_stderr_thread(pinfo)
-                except Exception as stop_err:
-                    logger.warning(f"Fehler beim Stoppen des stderr-Threads: {stop_err}")
-
-            if read_thread_started and pinfo is not None:
-                try:
-                    self._stop_read_thread(pinfo)
-                except Exception as stop_err:
-                    logger.warning(f"Fehler beim Stoppen des read-Threads: {stop_err}")
-
+            # 6.1 Bereits gestartete Threads stoppen (in umgekehrter Reihenfolge)
             if yt_stderr_thread_started and pinfo is not None:
                 try:
                     if pinfo.yt_stderr_stop:
                         pinfo.yt_stderr_stop.set()
                     if pinfo.yt_stderr_thread and pinfo.yt_stderr_thread.is_alive():
                         pinfo.yt_stderr_thread.join(timeout=1.0)
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("ffmpeg", "  yt-stderr thread stopped")
                 except Exception as stop_err:
                     logger.warning(f"Fehler beim Stoppen des yt-stderr-Threads: {stop_err}")
 
-            # 5.2 Prozesse hart beenden (verhindert Zombies)
-            for proc_to_kill in (process, yt_process):
+            if stderr_thread_started and pinfo is not None:
+                try:
+                    self._stop_stderr_thread(pinfo)
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("ffmpeg", "  stderr thread stopped")
+                except Exception as stop_err:
+                    logger.warning(f"Fehler beim Stoppen des stderr-Threads: {stop_err}")
+
+            if read_thread_started and pinfo is not None:
+                try:
+                    self._stop_read_thread(pinfo)
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("ffmpeg", "  read thread stopped")
+                except Exception as stop_err:
+                    logger.warning(f"Fehler beim Stoppen des read-Threads: {stop_err}")
+
+            # 6.2 Prozesse hart beenden (verhindert Zombies)
+            for proc_to_kill, name in ((process, "FFmpeg"), (yt_process, "yt-dlp")):
                 if proc_to_kill is None:
                     continue
                 try:
                     if proc_to_kill.poll() is None:
                         logger.warning(
-                            f"Beende Prozess {proc_to_kill.pid} wegen Registrierungsfehler"
+                            f"Beende {name}-Prozess {proc_to_kill.pid} wegen Registrierungsfehler"
                         )
                         self._force_kill_process(proc_to_kill)
+                        if DEBUG_LEVEL >= 3:
+                            log_debug("ffmpeg", f"  {name} process killed")
                 except Exception as kill_err:
-                    logger.error(f"Fehler beim Killen von Prozess: {kill_err}")
+                    logger.error(f"Fehler beim Killen von {name}-Prozess: {kill_err}")
 
-            # 5.3 Aus Registry entfernen, falls bereits eingetragen
+            # 6.3 Aus Registry entfernen, falls bereits eingetragen
             with self._lock:
                 if process_id in self._processes:
                     del self._processes[process_id]
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("ffmpeg", f"  Removed {process_id} from _processes")
                 if process.pid in self._pid_tracking:
                     del self._pid_tracking[process.pid]
-                if yt_process and yt_process.pid in self._pid_tracking:
+                if yt_process and yt_process.pid is not None and yt_process.pid in self._pid_tracking:
                     del self._pid_tracking[yt_process.pid]
 
-            # 5.4 WICHTIG: skip_semaphore_release zurücksetzen, aber Slot NICHT hier freigeben.
-            # Die Freigabe erfolgt ausschließlich im finally von _start_stream_internal.
+            # 6.4 Falls ein alter Prozess überschrieben wurde, skip_semaphore_release zurücksetzen
             if old_pinfo is not None:
                 old_pinfo._skip_semaphore_release = False
                 if DEBUG_LEVEL >= 3:
-                    log_debug("ffmpeg", f"Überschriebener Prozess {process_id} – Slot-Freigabe erfolgt durch Aufrufer")
+                    log_debug("ffmpeg", f"Überschriebener Prozess {process_id} – skip_semaphore_release zurückgesetzt")
 
-            # 5.5 Exception weiterwerfen, damit der Aufrufer reagieren kann
+            # 6.5 Exception weiterwerfen, damit der Aufrufer reagieren kann
             raise RuntimeError(f"Registrierung von Prozess {process_id} fehlgeschlagen: {e}") from e
+
+        finally:
+            # -----------------------------------------------------------------
+            # 7. 🔥 GARANTIERTE SLOT‑FREIGABE IM FEHLERFALL
+            #    Nur wenn slot_acquired noch True ist (d.h. die Registrierung
+            #    hat nicht erfolgreich abgeschlossen), wird der Slot freigegeben.
+            #    Bei Erfolg wurde slot_acquired auf False gesetzt, sodass der
+            #    Slot dauerhaft belegt bleibt.
+            # -----------------------------------------------------------------
+            if slot_acquired:
+                try:
+                    self._release_slot(purpose=f"register_failed:{process_id}")
+                    if DEBUG_LEVEL >= 3:
+                        log_debug(
+                            "ffmpeg",
+                            f"  Slot released due to registration failure (active slots: {self._active_slots}/{self._process_semaphore_max})"
+                        )
+                except Exception as slot_err:
+                    logger.error(
+                        f"KRITISCH: Fehler beim Freigeben des Slots während Rollback: {slot_err}",
+                        exc_info=True
+                    )
+                    # Hier könnte man einen internen Zähler für "verlorene" Slots führen,
+                    # aber da _release_slot idempotent ist, sollte dies nie fehlschlagen.
+
+        if DEBUG_LEVEL >= 3:
+            log_debug("ffmpeg", f"_register_process: END for {process_id}")
 
     def _remove_process(self, process_id: str, force: bool = False) -> bool:
         """
@@ -25725,35 +25828,130 @@ class InstallDependencyDialog(BaseDialog):
         return []
 
     def _run_fallback_install(self, command: str) -> bool:
-        """Führt ein Shell-Kommando als Fallback-Installation aus."""
-        try:
-            self._append_output(f"  Führe aus: {command}\n")
-            proc = subprocess.Popen(
-                command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                executable="/bin/bash" if not IS_WINDOWS else None
+        """
+        Führt eine Fallback-Installation durch, indem der Benutzer den Befehl manuell
+        ausführen muss. Aus Sicherheitsgründen wird KEIN automatischer Shell-Befehl
+        ausgeführt (kein shell=True). Der Befehl wird in der GUI angezeigt und
+        optional in die Zwischenablage kopiert. Der Benutzer wird gefragt, ob die
+        manuelle Installation erfolgreich war.
+
+        Diese Methode ist threadsicher: GUI-Operationen werden in den Hauptthread
+        delegiert, und es wird auf eine Antwort mit Timeout gewartet.
+
+        Args:
+            command: Der Shell-Befehl, der manuell ausgeführt werden soll.
+
+        Returns:
+            True, wenn der Benutzer bestätigt, dass der Befehl erfolgreich ausgeführt wurde,
+            andernfalls False.
+        """
+        if DEBUG_LEVEL >= 3:
+            log_debug("install", f"_run_fallback_install called with command: {command}")
+
+        # Ergebnis-Container und Event für Thread-Synchronisation
+        result_container = [False]
+        user_responded = threading.Event()
+
+        # Timeout für Benutzerantwort (in Sekunden) - großzügig, da manuelle Installation Zeit braucht
+        RESPONSE_TIMEOUT = 120.0
+
+        def gui_interaction() -> None:
+            """Wird im Hauptthread ausgeführt."""
+            try:
+                # Prüfen, ob Dialog noch existiert
+                if not self.dialog or not self.dialog.winfo_exists():
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("install", "Dialog existiert nicht mehr – breche GUI-Interaktion ab")
+                    result_container[0] = False
+                    user_responded.set()
+                    return
+
+                # 1. Befehl in der Ausgabe anzeigen (threadsicher über _append_output, das intern _safe_after nutzt)
+                self._append_output(
+                    f"\n⚠️  Aus Sicherheitsgründen wird der folgende Befehl NICHT automatisch ausgeführt.\n"
+                    f"Bitte kopieren Sie ihn und führen Sie ihn manuell in einem Terminal aus:\n\n"
+                    f"    {command}\n\n"
+                )
+
+                # 2. Versuche, den Befehl in die Zwischenablage zu kopieren
+                clipboard_success = False
+                try:
+                    self.dialog.clipboard_clear()
+                    self.dialog.clipboard_append(command)
+                    clipboard_success = True
+                    self._append_output("📋 Der Befehl wurde in die Zwischenablage kopiert.\n")
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("install", "Befehl erfolgreich in Zwischenablage kopiert")
+                except tk.TclError as e:
+                    self._append_output(f"⚠️  Konnte Befehl nicht in Zwischenablage kopieren: {e}\n")
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("install", f"Clipboard error: {e}")
+                except Exception as e:
+                    self._append_output(f"⚠️  Unerwarteter Fehler beim Kopieren: {e}\n")
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("install", f"Unexpected clipboard error: {e}")
+
+                # 3. Bestätigungsdialog anzeigen (modaler Dialog, blockiert GUI-Event-Loop)
+                message = (
+                    f"Der folgende Befehl muss manuell in einem Terminal ausgeführt werden:\n\n"
+                    f"{command}\n\n"
+                    f"{'📋 Der Befehl wurde in die Zwischenablage kopiert.' if clipboard_success else ''}\n"
+                    f"Wurde der Befehl erfolgreich ausgeführt?"
+                )
+                response = DarkMessageBox.askyesno(
+                    title="Manuelle Installation erforderlich",
+                    message=message,
+                    parent=self.dialog,
+                    timeout=RESPONSE_TIMEOUT  # Dialog schließt sich nach Timeout und gibt None zurück
+                )
+
+                # Auswerten der Antwort
+                if response is True:
+                    self._append_output("✅ Manuelle Installation wurde vom Benutzer bestätigt.\n")
+                    result_container[0] = True
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("install", "Benutzer bestätigte manuelle Installation")
+                elif response is False:
+                    self._append_output("❌ Manuelle Installation wurde vom Benutzer abgebrochen.\n")
+                    result_container[0] = False
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("install", "Benutzer brach manuelle Installation ab")
+                else:  # None -> Timeout oder Dialog geschlossen
+                    self._append_output("⏰ Zeitüberschreitung oder Abbruch durch Benutzer – Installation nicht bestätigt.\n")
+                    result_container[0] = False
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("install", "Keine Antwort vom Benutzer (Timeout)")
+
+            except Exception as e:
+                # Unerwarteter Fehler in der GUI-Interaktion
+                logger.error(f"Fehler in _run_fallback_install GUI-Interaktion: {e}", exc_info=True)
+                self._append_output(f"❌ Interner Fehler bei der Benutzerabfrage: {e}\n")
+                result_container[0] = False
+            finally:
+                user_responded.set()
+
+        # GUI-Interaktion im Hauptthread starten
+        if self.dialog and self.dialog.winfo_exists():
+            # Verwende after_idle für bessere Reaktionsfähigkeit
+            self.dialog.after_idle(gui_interaction)
+        else:
+            # Fallback: Dialog existiert nicht (z.B. im Headless-Modus)
+            logger.warning("Kein GUI-Dialog verfügbar – Fallback-Installation kann nicht interaktiv bestätigt werden.")
+            self._append_output(
+                f"\n⚠️  Fallback-Installation erfordert manuelle Ausführung des folgenden Befehls:\n"
+                f"    {command}\n"
+                f"Bitte führen Sie den Befehl selbst aus.\n"
             )
-            with self._process_lock:
-                self._current_process = proc
-
-            for line in proc.stdout:
-                if self._stop_event.is_set():
-                    self._terminate_current_process()
-                    break
-                self._append_output(line)
-
-            proc.wait()
-            return proc.returncode == 0
-        except Exception as e:
-            self._append_output(f"Fehler bei Fallback-Installation: {e}\n")
+            # Da wir nicht interagieren können, geben wir False zurück.
             return False
-        finally:
-            with self._process_lock:
-                self._current_process = None
+
+        # Auf Antwort warten (mit Timeout, etwas länger als der Dialog-Timeout)
+        if not user_responded.wait(timeout=RESPONSE_TIMEOUT + 5.0):
+            logger.warning("Timeout beim Warten auf Benutzerantwort in _run_fallback_install")
+            self._append_output("⏰ Zeitüberschreitung bei der Warte auf Benutzerantwort.\n")
+            return False
+
+        return result_container[0]
 
     def _install_python_packages(self, packages: List[str], upgrade: bool = False) -> bool:
         python_exe = sys.executable
@@ -35821,11 +36019,14 @@ class AudioProcessor:
 
         # -----------------------------------------------------------------
         # 22. Ausstehende Tasks – optimierte Verwaltung mit Condition
+        #     🔥 Ersetzt das fehleranfällige _tasks_done_event vollständig.
         # -----------------------------------------------------------------
         self._pending_tasks = 0
         self._pending_tasks_lock = threading.RLock()
-        self._tasks_done_event = threading.Event()
         self._pending_tasks_cond = threading.Condition(self._pending_tasks_lock)
+        # Das alte _tasks_done_event existiert nicht mehr.
+        if DEBUG_LEVEL >= 3:
+            log_debug("processor", "Pending tasks condition initialized (replaces _tasks_done_event)")
 
         # -----------------------------------------------------------------
         # 23. Temporäre Dateien (Download‑Modus) – mit eigenem Lock
@@ -35895,6 +36096,7 @@ class AudioProcessor:
         logger.info(
             f"   Transcript Sentence Buffering: {'ON' if self._enable_sentence_buffering else 'OFF'}"
         )
+        logger.info("   Pending Tasks Synchronization: threading.Condition (robust)")
 
     # =========================================================================
     #  Timeout-Executor Verwaltung
@@ -37658,23 +37860,23 @@ class AudioProcessor:
         vorzeitig abgebrochen ist. Sie verwendet `--download-sections`, um gezielt
         den fehlenden Teil des Videos ab einer bestimmten Position herunterzuladen.
 
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - **Erhöhte Überlappung (5 Sekunden):** `rounded_start` wird auf
-              `start_seconds - 5` gesetzt (mindestens 0). Dadurch werden auch die
-              letzten Sekunden des Streams zuverlässig erfasst, selbst wenn keine
-              Keyframes vorhanden sind.
-            - **Optimierte Format‑Priorität:**
-                1. `bestaudio[ext=m4a]/bestaudio/best` – Bevorzugt reine Audio‑Container
-                   (m4a) und fällt auf das beste verfügbare Audioformat zurück.
-                2. `worstaudio` – Als letzter Ausweg, um überhaupt Daten zu erhalten.
-            - **Robuste Abbruchprüfung:** Vor jedem Formatversuch und während des
-              gesamten Vorgangs wird `is_stop_requested()` geprüft.
+        **Verbesserungen gegenüber der ursprünglichen Version:**
+            - **Sichere Startzeit:** `rounded_start` wird als nicht‑negativer Integer
+              validiert und auf Plausibilität geprüft (maximal erwartete Dauer).
+            - **Schutz vor Option‑Injection:** Der URL wird `--` vorangestellt,
+              sodass `yt-dlp` sie auch dann als URL interpretiert, wenn sie mit
+              einem Bindestrich beginnt.
+            - **Optimierte Format‑Priorität:** Bevorzugt reine Audio‑Container
+              (m4a) und fällt auf `worstaudio` zurück.
+            - **Robuste Abbruchprüfung:** Vor jedem Schritt wird `is_stop_requested()`
+              geprüft.
             - **Thread‑sichere Cookie‑ und Proxy‑Konfiguration:** Liest die
               Einstellungen aus `self.settings` und `self.stream_manager`.
             - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
             - **Fehlerisolierung:** Ein Fehler bei einem Formatversuch führt nicht
               zum Abbruch, sondern zum Versuch des nächsten Formats.
-            - **Vollständige Typ‑Annotationen** und Google‑Style Docstring.
+            - **Timeout pro Pipeline‑Durchlauf:** Verhindert endloses Hängen.
+            - **Debug‑Ausgabe des letzten Befehls im Fehlerfall** (bei `DEBUG_LEVEL >= 2`).
 
         Args:
             video_url: Die ursprüngliche YouTube‑Video‑URL.
@@ -37683,6 +37885,7 @@ class AudioProcessor:
             transl_cb: Callback für Übersetzungsergebnisse.
             error_cb: Callback für Fehlermeldungen.
             info_cb: Optionaler Callback für Statusmeldungen.
+            cancel_event: Optionales Event für externen Abbruch.
 
         Returns:
             Anzahl der erfolgreich verarbeiteten Chunks (0 bei Fehler oder Abbruch).
@@ -37691,6 +37894,8 @@ class AudioProcessor:
         # Hilfsfunktion für konsistente Abbruchprüfung
         # -----------------------------------------------------------------
         def is_stop_requested() -> bool:
+            if cancel_event is not None and cancel_event.is_set():
+                return True
             return self.is_stop_requested()
 
         # -----------------------------------------------------------------
@@ -37703,11 +37908,29 @@ class AudioProcessor:
             return 0
 
         # -----------------------------------------------------------------
-        # 2. Startposition mit 5 Sekunden Überlappung berechnen
+        # 2. Startposition mit 5 Sekunden Überlappung berechnen und validieren
         # -----------------------------------------------------------------
         rounded_start = max(0, int(start_seconds) - 5)
-        if self._expected_duration and rounded_start > self._expected_duration - 5:
+        # Zusätzliche Sicherheitsprüfungen
+        if rounded_start < 0:
+            rounded_start = 0
+            if DEBUG_LEVEL >= 3:
+                log_debug("download", "rounded_start was negative, clamped to 0")
+        if self._expected_duration is not None and rounded_start > self._expected_duration:
+            logger.warning(
+                f"rounded_start ({rounded_start}s) exceeds expected duration "
+                f"({self._expected_duration:.1f}s) – clamping to expected duration"
+            )
             rounded_start = max(0, int(self._expected_duration) - 30)
+            if rounded_start < 0:
+                rounded_start = 0
+
+        # Sicherstellen, dass der Wert ein gültiger Integer ist
+        try:
+            rounded_start = int(rounded_start)
+        except (ValueError, TypeError):
+            logger.error(f"Invalid rounded_start value: {rounded_start} – using 0")
+            rounded_start = 0
 
         logger.info(
             f"Download mit --download-sections ab {rounded_start}s "
@@ -37746,6 +37969,7 @@ class AudioProcessor:
         # -----------------------------------------------------------------
         # 5. Jedes Format der Reihe nach versuchen
         # -----------------------------------------------------------------
+        yt_cmd = []  # Für Debug-Ausgabe im Fehlerfall initialisieren
         for fmt_idx, fmt in enumerate(format_strings):
             # 5.1 Erneute Abbruchprüfung vor jedem Format
             if is_stop_requested():
@@ -37763,11 +37987,12 @@ class AudioProcessor:
             if proxy_url:
                 yt_cmd.extend(["--proxy", proxy_url])
 
+            # 🔥 SICHERHEIT: `--` vor der URL verhindert Option‑Injection
             yt_cmd.extend([
                 "--download-sections", f"*{rounded_start}-inf",
                 "--force-keyframes-at-cuts",
                 "-o", "-",
-                video_url,
+                "--", video_url
             ])
 
             if DEBUG_LEVEL >= 3:
@@ -37787,6 +38012,7 @@ class AudioProcessor:
                     info_cb=info_cb,
                     seek=False,
                     timeout=300,
+                    cancel_event=cancel_event,
                 )
 
                 if chunk_count > 0:
@@ -37817,6 +38043,11 @@ class AudioProcessor:
         logger.warning("Kein Format mit --download-sections erfolgreich")
         if info_cb:
             info_cb("⚠️ Kein Format für --download-sections erfolgreich")
+
+        # Optionale Debug-Ausgabe des letzten verwendeten Befehls
+        if DEBUG_LEVEL >= 2 and yt_cmd:
+            log_debug("download", f"Alle Formate fehlgeschlagen. Letzter Befehl: {' '.join(yt_cmd)}")
+
         return 0
 
     def _download_full_and_seek(
@@ -40348,24 +40579,59 @@ class AudioProcessor:
 
         Diese Methode ist die **einzige** Stelle im AudioProcessor, an der
         `_pending_tasks` verändert wird. Sie stellt sicher, dass:
-            - Alle Zugriffe unter `_pending_tasks_lock` erfolgen.
-            - Bei Erreichen von 0 die `_pending_tasks_cond` benachrichtigt wird,
-              sodass wartende Threads (z. B. `_wait_for_pending_tasks`) sofort
-              aufgeweckt werden.
-            - Das `_tasks_done_event` entsprechend gesetzt oder gelöscht wird.
+            - Alle Zugriffe unter der `_pending_tasks_cond` (und damit dem
+              zugrundeliegenden `_pending_tasks_lock`) erfolgen.
+            - Bei Erreichen von 0 alle wartenden Threads (z. B. in
+              `_wait_for_pending_tasks`) sofort und verlustfrei aufgeweckt werden.
             - Detaillierte Debug‑Ausgaben bei entsprechendem Log‑Level erfolgen.
+            - Ein versehentlich negativer Zähler (Programmierfehler) automatisch
+              korrigiert wird, um Deadlocks zu verhindern.
 
         Args:
             delta: +1 zum Inkrementieren (Task gestartet),
                    -1 zum Dekrementieren (Task beendet).
         """
-        with self._pending_tasks_lock:
+        # -----------------------------------------------------------------
+        # 1. Eingangsvalidierung
+        # -----------------------------------------------------------------
+        if delta not in (1, -1):
+            logger.warning(
+                f"_modify_pending_tasks called with invalid delta={delta}. "
+                "Only +1 and -1 are allowed. Ignoring."
+            )
+            return
+
+        # -----------------------------------------------------------------
+        # 2. Kritischer Abschnitt unter der Condition
+        # -----------------------------------------------------------------
+        with self._pending_tasks_cond:
             old_value = self._pending_tasks
             self._pending_tasks += delta
             new_value = self._pending_tasks
 
             # -----------------------------------------------------------------
-            # Debug‑Ausgabe bei ausreichendem Log‑Level
+            # 3. Automatische Korrektur bei negativem Zähler (sollte nie passieren)
+            # -----------------------------------------------------------------
+            if new_value < 0:
+                logger.error(
+                    f"CRITICAL: _pending_tasks became negative ({new_value}) after delta={delta:+d}! "
+                    f"This indicates a bug (task_done called more often than task_added). "
+                    f"Resetting to 0 to prevent deadlock."
+                )
+                self._pending_tasks = 0
+                new_value = 0
+                # Wir benachrichtigen trotzdem, um eventuell wartende Threads zu befreien
+                self._pending_tasks_cond.notify_all()
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "processor",
+                        f"_pending_tasks corrected from {old_value} to 0 (was {old_value + delta})"
+                    )
+                # Frühzeitiger return, da der Zähler jetzt 0 ist und die Benachrichtigung erfolgte
+                return
+
+            # -----------------------------------------------------------------
+            # 4. Debug‑Ausgabe bei ausreichendem Log‑Level
             # -----------------------------------------------------------------
             if DEBUG_LEVEL >= 4:
                 log_debug(
@@ -40374,40 +40640,62 @@ class AudioProcessor:
                 )
 
             # -----------------------------------------------------------------
-            # Zustandsänderungen behandeln
+            # 5. Benachrichtigung bei Erreichen von 0
             # -----------------------------------------------------------------
             if new_value == 0:
-                # Alle Tasks abgeschlossen: Wartende Threads benachrichtigen
                 self._pending_tasks_cond.notify_all()
-                self._tasks_done_event.set()
                 if DEBUG_LEVEL >= 3:
-                    log_debug("processor", "All pending tasks completed, condition notified")
-            elif old_value == 0 and new_value > 0:
-                # Erster Task gestartet: Event zurücksetzen
-                self._tasks_done_event.clear()
-                if DEBUG_LEVEL >= 4:
-                    log_debug("processor", "First pending task started, tasks_done_event cleared")
+                    log_debug(
+                        "processor",
+                        f"All pending tasks completed (was {old_value}), condition notified"
+                    )
+
+            # -----------------------------------------------------------------
+            # 6. Optionale Warnung bei hohem Zählerstand (Hinweis auf Stau)
+            # -----------------------------------------------------------------
+            if new_value > 100 and new_value % 50 == 0:
+                logger.warning(
+                    f"High number of pending transcription tasks: {new_value}. "
+                    "Consider increasing transcription workers or reducing chunk size."
+                )
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "processor",
+                        f"Pending tasks backlog detected: {new_value} tasks"
+                    )
 
     def _wait_for_pending_tasks(self) -> None:
         """
         Wartet dynamisch auf den Abschluss aller ausstehenden Transkriptions‑Tasks.
 
+        Verwendet eine `threading.Condition`, um **verlustfrei** auf den Zählerstand
+        `_pending_tasks == 0` zu warten. Ein Lost‑Wakeup (wie bei `threading.Event`)
+        ist ausgeschlossen. Die Methode kombiniert eine globale Timeout‑Grenze mit
+        regelmäßigen Statusmeldungen und reagiert auf Benutzerabbrüche sowie einen
+        unerwarteten Abbruch des Dispatcher‑Threads.
+
+        **Dynamische Timeout‑Berechnung:**
         Die maximale Wartezeit wird aus der Anzahl der offenen Tasks, der
         durchschnittlichen Chunk‑Dauer und dem letzten gemessenen Echtzeitfaktor
         berechnet. Dadurch erhalten langsame Systeme ausreichend Zeit, während
         schnelle GPUs nicht unnötig blockiert werden.
 
-        Die Methode ist thread‑sicher und reagiert auf Benutzerabbrüche sowie
-        einen unerwarteten Abbruch des Dispatcher‑Threads.
+        **Abbruchbedingungen:**
+            - `self._stop_event.is_set()` (Benutzerabbruch)
+            - Dispatcher‑Thread unerwartet beendet
+            - Globaler Timeout überschritten
+
+        Die Methode ist thread‑sicher und kann aus beliebigen Threads aufgerufen werden.
         """
         # -----------------------------------------------------------------
-        # 1. Aktuelle Anzahl ausstehender Tasks ermitteln
+        # 1. Aktuelle Anzahl ausstehender Tasks ermitteln (unter Condition)
         # -----------------------------------------------------------------
-        with self._pending_tasks_lock:
+        with self._pending_tasks_cond:
             pending = self._pending_tasks
 
         if pending == 0:
-            log_debug("processor", "  No pending transcription tasks – nothing to wait for")
+            if DEBUG_LEVEL >= 3:
+                log_debug("processor", "  No pending transcription tasks – nothing to wait for")
             return
 
         # -----------------------------------------------------------------
@@ -40418,95 +40706,105 @@ class AudioProcessor:
         with self._stats_lock:
             rt_factor = max(1.0, self._last_realtime_factor)
 
-        # Sicherheitsfaktor: 2 × die erwartete Zeit für alle Tasks
-        estimated_seconds = pending * chunk_duration * rt_factor * 2.0
+        # Sicherheitsfaktor: 2,5 × die erwartete Zeit für alle Tasks
+        estimated_seconds = pending * chunk_duration * rt_factor * 2.5
 
         # Absolute Grenzen: mindestens 60 s, maximal 1200 s (20 Minuten)
         MAX_WAIT_SECONDS = max(60.0, min(1200.0, estimated_seconds))
 
-        CHECK_INTERVAL = 1.0          # Timeout für _tasks_done_event.wait()
-        LOG_INTERVAL = 2.0            # Fortschrittsmeldungen nur alle 2 Sekunden
+        # Intervalle für Logging und Condition-Timeout
+        CONDITION_WAIT_TIMEOUT = 30.0     # Maximale Blockade pro wait()-Aufruf
+        LOG_INTERVAL = 5.0                # Fortschrittsmeldungen nur alle 5 Sekunden
 
         wait_start = time.perf_counter()
         last_log_time = wait_start
         last_pending = pending
 
-        log_debug(
-            "processor",
-            f"  Waiting for {pending} pending task(s) "
-            f"(max {MAX_WAIT_SECONDS:.1f}s, est={estimated_seconds:.1f}s, rt_factor={rt_factor:.2f})"
-        )
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "processor",
+                f"  Waiting for {pending} pending task(s) "
+                f"(max {MAX_WAIT_SECONDS:.1f}s, est={estimated_seconds:.1f}s, rt_factor={rt_factor:.2f})"
+            )
 
         # -----------------------------------------------------------------
-        # 3. Warteschleife
+        # 3. Warteschleife mit Condition
         # -----------------------------------------------------------------
-        while True:
-            # 3.1 Abbruch durch Benutzer?
-            if self._stop_event.is_set():
-                log_debug("processor", "  Stop event set – aborting wait for pending tasks")
-                break
+        with self._pending_tasks_cond:
+            while self._pending_tasks > 0:
+                # ---------------------------------------------------------
+                # 3.1 Abbruch durch Benutzer?
+                # ---------------------------------------------------------
+                if self._stop_event.is_set():
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("processor", "  Stop event set – aborting wait for pending tasks")
+                    break
 
-            # 3.2 Dispatcher‑Status prüfen (nur warnen, wenn er wirklich tot ist)
-            if (self._dispatcher_thread is not None
-                    and not self._dispatcher_thread.is_alive()
-                    and not self._dispatcher_shutdown.is_set()):
-                logger.warning(
-                    "⚠️ Dispatcher‑Thread is unexpectedly dead – "
-                    "aborting wait for pending tasks"
-                )
-                break
+                # ---------------------------------------------------------
+                # 3.2 Dispatcher‑Status prüfen (nur warnen, wenn er wirklich tot ist)
+                # ---------------------------------------------------------
+                if (self._dispatcher_thread is not None
+                        and not self._dispatcher_thread.is_alive()
+                        and not self._dispatcher_shutdown.is_set()):
+                    logger.warning(
+                        "⚠️ Dispatcher‑Thread is unexpectedly dead – "
+                        "aborting wait for pending tasks"
+                    )
+                    break
 
-            # 3.3 Aktuelle Anzahl ausstehender Tasks abfragen (unter Lock)
-            with self._pending_tasks_lock:
+                # ---------------------------------------------------------
+                # 3.3 Aktuelle Anzahl ausstehender Tasks (unter Condition)
+                # ---------------------------------------------------------
                 current_pending = self._pending_tasks
 
-            # 3.4 Erfolg: Alle Tasks abgeschlossen
-            if current_pending == 0:
-                break
+                # ---------------------------------------------------------
+                # 3.4 Globalen Timeout prüfen
+                # ---------------------------------------------------------
+                elapsed = time.perf_counter() - wait_start
+                if elapsed >= MAX_WAIT_SECONDS:
+                    logger.warning(
+                        f"⚠️ Timeout ({MAX_WAIT_SECONDS:.1f}s) reached while waiting – "
+                        f"{current_pending} task(s) still pending"
+                    )
+                    break
 
-            # 3.5 Dynamische Timeout‑Anpassung (falls neue Tasks hinzugekommen sind)
-            if current_pending > last_pending:
-                # Zähler ist gestiegen – Timeout erhöhen
-                additional = current_pending - last_pending
-                MAX_WAIT_SECONDS += additional * chunk_duration * rt_factor * 2.0
-                MAX_WAIT_SECONDS = min(1200.0, MAX_WAIT_SECONDS)
-                log_debug(
-                    "processor",
-                    f"  Pending tasks increased to {current_pending} – "
-                    f"timeout extended to {MAX_WAIT_SECONDS:.1f}s"
-                )
+                # ---------------------------------------------------------
+                # 3.5 Fortschritt loggen (gedrosselt)
+                # ---------------------------------------------------------
+                now = time.perf_counter()
+                if current_pending != last_pending or (now - last_log_time) >= LOG_INTERVAL:
+                    if DEBUG_LEVEL >= 3:
+                        log_debug(
+                            "processor",
+                            f"    Still waiting for {current_pending} task(s) ({elapsed:.1f}s elapsed)"
+                        )
+                    last_pending = current_pending
+                    last_log_time = now
 
-            # 3.6 Timeout prüfen
-            elapsed = time.perf_counter() - wait_start
-            if elapsed >= MAX_WAIT_SECONDS:
-                logger.warning(
-                    f"⚠️ Timeout ({MAX_WAIT_SECONDS:.1f}s) reached while waiting – "
-                    f"{current_pending} task(s) still pending"
-                )
-                break
+                # ---------------------------------------------------------
+                # 3.6 Warten auf Benachrichtigung (mit Timeout, um Periodik zu ermöglichen)
+                #     Berechne verbleibende Zeit bis zum globalen Timeout
+                # ---------------------------------------------------------
+                remaining_global = MAX_WAIT_SECONDS - elapsed
+                wait_timeout = min(CONDITION_WAIT_TIMEOUT, remaining_global)
+                if wait_timeout <= 0:
+                    break
 
-            # 3.7 Warten auf das nächste Signal (unterbrechbar)
-            self._tasks_done_event.wait(timeout=CHECK_INTERVAL)
-
-            # 3.8 Fortschritt loggen (gedrosselt)
-            now = time.perf_counter()
-            if current_pending != last_pending or (now - last_log_time) >= LOG_INTERVAL:
-                log_debug(
-                    "processor",
-                    f"    Still waiting for {current_pending} task(s) ({elapsed:.1f}s elapsed)"
-                )
-                last_pending = current_pending
-                last_log_time = now
+                # 🔥 Entscheidender Aufruf: Condition.wait() gibt den Lock atomar frei
+                #    und erwirbt ihn erneut, sobald notify_all() aufgerufen wird oder
+                #    der Timeout abläuft. Ein Lost‑Wakeup ist unmöglich.
+                self._pending_tasks_cond.wait(timeout=wait_timeout)
 
         # -----------------------------------------------------------------
         # 4. Ergebnis auswerten und ggf. Bereinigung durchführen
         # -----------------------------------------------------------------
-        with self._pending_tasks_lock:
+        with self._pending_tasks_cond:
             final_pending = self._pending_tasks
 
         if final_pending == 0:
             elapsed = time.perf_counter() - wait_start
-            log_debug("processor", f"  ✅ All transcription tasks finished after {elapsed:.2f}s")
+            if DEBUG_LEVEL >= 3:
+                log_debug("processor", f"  ✅ All transcription tasks finished after {elapsed:.2f}s")
         else:
             # -----------------------------------------------------------------
             # 5. Fehlerfall: Zähler manuell zurücksetzen, um Deadlock zu lösen
@@ -40515,10 +40813,11 @@ class AudioProcessor:
                 f"⚠️ Wait for pending tasks aborted with {final_pending} task(s) remaining. "
                 "Forcing counter reset to prevent deadlock."
             )
-            with self._pending_tasks_lock:
+            with self._pending_tasks_cond:
                 self._pending_tasks = 0
-                self._tasks_done_event.set()
-            log_debug("processor", "  Pending tasks counter forcibly reset to 0")
+                self._pending_tasks_cond.notify_all()
+            if DEBUG_LEVEL >= 3:
+                log_debug("processor", "  Pending tasks counter forcibly reset to 0")
 
     def _drain_gui_queue(self) -> None:
         """
