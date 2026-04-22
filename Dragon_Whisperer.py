@@ -1896,21 +1896,6 @@ CURRENT_THEME = DarkTheme()
 class ConfigDefaults:
     """
     Zentrale Konfigurationskonstanten für Dragon Whisperer.
-
-    Diese Klasse enthält alle statischen Standardwerte, die von der dynamischen
-    `Config`-Klasse geerbt werden. Die Werte sind nach Themenbereichen gruppiert
-    und ausführlich dokumentiert.
-
-    Design-Prinzipien:
-        - Alle Werte sind Klassenvariablen (keine Instanzvariablen)
-        - Veränderliche Strukturen (Dicts, Lists) werden über `default_factory`
-          in der `Config`-Klasse kopiert, um unbeabsichtigte Seiteneffekte zu vermeiden
-        - Plattformspezifische Anpassungen sind zentral verwaltet
-        - Debug-freundlich durch ausführliche Kommentare und optionale Logging-Hinweise
-
-    Hinweis für Entwickler:
-        - Änderungen an dieser Klasse wirken sich auf das gesamte System aus.
-        - Verwende die `validate_config()`-Methode, um Konsistenz zu prüfen.
     """
 
     # =========================================================================
@@ -2356,38 +2341,6 @@ class Config(ConfigDefaults):
     Eigenschaften, die zur Laufzeit geändert werden können (z. B. Chunk‑Dauer,
     Audio‑Filter). Diese Klasse ist das zentrale Konfigurationsobjekt für die
     Audioverarbeitung und Whisper‑Transkription.
-
-    Attributes:
-        _base_chunk_duration: Basis-Chunk-Dauer (wird für Berechnungen verwendet).
-        CHUNK_OVERLAP: Überlappung zwischen Chunks in Sekunden.
-        MIN_CHUNK_DURATION: Minimal erlaubte Chunk-Dauer (überschreibt ConfigDefaults).
-        MAX_CHUNK_DURATION: Maximal erlaubte Chunk-Dauer.
-        LANGUAGE_VAD: Sprachspezifische VAD-Parameter (Kopie von ConfigDefaults).
-        _actual_chunk_duration: Aktuelle Chunk-Dauer (intern, über Property CHUNK_DURATION zugreifen).
-        AUDIO_FILTER: Standard-Audiofilter (FFmpeg Filtergraph).
-        LANGUAGE_FILTERS: Sprachspezifische Audiofilter (derzeit nur Platzhalter).
-        FILTER_PROFILES: Vordefinierte Filterprofile für verschiedene Szenarien.
-        YOUTUBE_HEADERS: HTTP-Header für YouTube-Anfragen.
-        PLATFORM_CONFIG: Plattformspezifische FFmpeg- und Prozessparameter.
-        AUDIO_ENHANCEMENT_ENABLED: Aktiviert Rauschunterdrückung und Verstärkung.
-        MIN_RMS_THRESHOLD, TARGET_RMS, MAX_GAIN, CLIPPING_THRESHOLD: Parameter für Audio-Enhancement.
-        DUPLICATE_CHECK_ENABLED: Aktiviert Duplikaterkennung.
-        RECENT_TRANSCRIPTIONS_SIZE: Anzahl der letzten Transkriptionen für Duplikatprüfung.
-        MIN_TEXT_LENGTH: Minimale Textlänge für Duplikatprüfung.
-        MIN_UNIQUE_WORDS_RATIO: Minimaler Anteil einzigartiger Wörter.
-        SUBTITLE_BUFFER_SIZE: Maximale Anzahl Untertitel-Segmente.
-        ENABLE_TIMED_TRANSCRIPTIONS: Aktiviert Zeitstempel für Transkriptionen.
-        ENABLE_TIMED_TRANSLATIONS: Aktiviert Zeitstempel für Übersetzungen.
-        ENABLE_DEBUG_LOGGING: Globales Debug-Logging.
-        LOG_CHUNK_PROCESSING: Detailliertes Chunk-Logging.
-        LOG_AUDIO_STATS: Loggt Audio-Statistiken (RMS, Gain).
-        LOG_PERFORMANCE: Loggt Performance-Metriken.
-        LOG_STREAM_EVENTS: Loggt Stream-Ereignisse.
-        PERFORMANCE_LOG_INTERVAL: Intervall für Performance-Logs (Anzahl Chunks).
-        MAX_CACHE_SIZE_MB: Maximale Cache-Größe in MB.
-        CACHE_ENABLED: Aktiviert Caching.
-        WHISPER_MODELS: Liste der verfügbaren Whisper-Modelle.
-        _cached_bytes_per_second: Interner Cache für BYTES_PER_SECOND.
     """
 
     # -------------------------------------------------------------------------
@@ -3304,14 +3257,6 @@ class FastLazyLoader:
         Diese Methode wird vom Lazy-Loader aufgerufen, wenn das Modul 'faster_whisper'
         angefordert wird. Sie importiert die WhisperModel-Klasse, deaktiviert
         störende Log-Meldungen von CTranslate2 und gibt die Klasse zurück.
-
-        Returns:
-            Die WhisperModel-Klasse aus faster_whisper.
-
-        Raises:
-            ImportError: Wenn faster-whisper nicht installiert ist oder ein
-                         Importfehler auftritt (wird vom Lazy-Loader in ein
-                         Mock-Modul umgewandelt).
         """
         try:
             # Versuche, störende Log-Meldungen von CTranslate2 zu unterdrücken
@@ -7877,22 +7822,6 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
 class OllamaTranslationEngine(BaseCachedTranslationEngine):
     """
     Übersetzungs‑Engine mit lokalem Ollama‑Modell – optimiert für strikte Übersetzungen.
-
-    Verbesserungen:
-        - Dedizierter System‑Prompt für Übersetzungsaufgaben.
-        - Strenger Benutzer‑Prompt, der Zusatzkommentare verbietet.
-        - Postprocessing zur Entfernung unerwünschter Muster (z. B. "(Note: ...)").
-        - Temperatur standardmäßig 0.0 für deterministische Ergebnisse.
-        - Intelligente Timeout‑Behandlung mit exponentiellem Backoff und separater
-          Fehlerzählung für Timeouts vs. andere Fehler.
-        - Automatische Wiederherstellung nach kürzerer Deaktivierungsdauer (60 s).
-        - `keep_alive`‑Optimierung (konfigurierbar) zur Reduzierung von VRAM‑Druck.
-        - Vollständige Thread‑Sicherheit für alle Zustandsvariablen.
-        - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 2`.
-
-    Verwendung:
-        engine = OllamaTranslationEngine(target_lang="de", settings=advanced_settings)
-        result = engine.translate_text("Hello", source_lang="en")
     """
 
     __slots__ = (
@@ -14097,21 +14026,6 @@ class FFmpegManager:
         Sie verwendet eine mehrstufige Strategie, um sicherzustellen, dass auch
         widerspenstige Prozesse (z. B. in endlosen Reconnect-Schleifen) zuverlässig
         beendet werden und keine Zombie-Prozesse zurückbleiben.
-
-        Ablauf:
-            1. SIGKILL auf die gesamte Prozessgruppe (Linux / macOS).
-            2. Fallback: `proc.kill()` für einzelne Prozesse (Windows oder wenn Gruppe fehlschlägt).
-            3. Aufräumen der internen Registry und des PID-Trackings.
-
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - Explizite Verwendung von `os.killpg` mit `SIGKILL`, um die gesamte
-              Prozessfamilie zu eliminieren.
-            - Detaillierte Debug-Ausgaben für jeden Schritt, um hängende Prozesse
-              identifizieren zu können.
-            - Robustes Fallback für Windows und für den Fall, dass `killpg` nicht
-              verfügbar ist oder fehlschlägt.
-            - Garantiert, dass die internen Datenstrukturen (`_processes`, `_pid_tracking`)
-              auch bei Fehlern während der Terminierung geleert werden.
         """
         self._global_shutdown = True
         logger.info("🔥 kill_all_streams: Start")
@@ -15416,24 +15330,6 @@ class FFmpegManager:
         (4.x bis 7.x) stabil funktionieren. Nicht allgemein unterstützte Flags werden
         vermieden, und Reconnect‑Optionen werden **nur für Livestreams** aktiviert,
         da sie bei VODs und lokalen Dateien zu Fehlern oder endlosen Hängern führen.
-
-        Features:
-            - Kein `-reconnect` für VODs oder lokale Dateien (verhindert Hänger)
-            - Explizite Absicherung für `file://`‑URLs
-            - YouTube‑spezifische Header und User‑Agent für googlevideo.com‑URLs
-            - Robuste Timeouts (`-timeout`, `-rw_timeout`) in Mikrosekunden
-            - Seeking für lokale Dateien und Nicht‑YouTube‑VODs (vermeidet PCM‑Korruption)
-            - Sprach‑ und profilabhängiger Audiofilter
-            - Kompatibilitätsflags (`-fflags`, `-avoid_negative_ts`)
-            - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 2`
-
-        Args:
-            url: Die Audio‑URL (direkter Stream oder Datei).
-            seek_seconds: Startposition in Sekunden (nur für Nicht‑YouTube‑VODs).
-            detected_language: Vom Whisper‑Modell erkannte Sprache (für Audiofilter).
-
-        Returns:
-            Liste der Befehlsargumente für subprocess.Popen.
         """
         log_debug("ffmpeg", f"_build_ffmpeg_command_optimized: url={url[:100]}...")
 
@@ -15605,40 +15501,6 @@ class FFmpegManager:
         """
         Erkennt, ob es sich bei der gegebenen URL um einen Livestream oder ein
         Video-on-Demand (VOD) handelt, und gibt die Plattform zurück.
-
-        Die Methode verwendet eine mehrstufige, robuste Erkennungsstrategie:
-
-        1. **Cache-Prüfung**: Vermeidet wiederholte Netzwerkanfragen für kürzlich
-           analysierte URLs (TTL = 5 Minuten).
-
-        2. **URL-Heuristik**: Untersucht die URL auf eindeutige Live-Indikatoren
-           (z. B. `/live`, `live=1`). Diese Prüfung ist sofort und zuverlässig.
-           Bei positivem Ergebnis wird `is_live = True` gesetzt – **ohne**
-           Netzwerkanfrage.
-
-        3. **Metadaten-Abfrage (Fallback)**: Nur wenn die URL-Heuristik negativ
-           ist, wird yt‑dlp mit `--dump-json` aufgerufen, um das `is_live`-Feld
-           aus den Metadaten zu lesen. Bei YouTube wird bei einem negativen
-           Ergebnis ein **zweiter Versuch** nach einer kurzen Verzögerung
-           durchgeführt, da die Plattform manchmal verzögert korrekte Daten liefert.
-
-        4. **Plausibilitätsprüfung (YouTube)**: Falls sowohl Heuristik als auch
-           Metadaten negativ sind, wird zusätzlich die Dauer (`duration`) des
-           Videos geprüft. Livestreams haben typischerweise keine oder eine
-           Dauer von 0. Diese Prüfung erfolgt über `yt-dlp --dump-json` mit
-           korrekt gesetzten Cookies (aus den Einstellungen).
-
-        5. **Plattform-spezifische Logik**: Für Twitch, TikTok, Facebook etc.
-           werden eigene Heuristiken angewendet.
-
-        Das Ergebnis wird im Cache gespeichert, um nachfolgende Aufrufe zu
-        beschleunigen.
-
-        Args:
-            url: Die zu analysierende URL (z. B. YouTube, Twitch, lokale Datei).
-
-        Returns:
-            Ein Tupel (is_live: bool, platform: str).
         """
         # -----------------------------------------------------------------
         # 1. Cache prüfen
@@ -16709,11 +16571,6 @@ class FFmpegManager:
         während eines blockierenden `read()`‑Aufrufs von außen geschlossen wird
         (z. B. durch `_stop_read_thread`). In allen Fehlerfällen wird der
         Thread sauber beendet und ein Sentinel (`None`) in die Queue gelegt.
-
-        Args:
-            pinfo: Die `_ProcessInfo`‑Instanz, für die der Lese‑Thread gestartet wird.
-                   Muss die Attribute `process`, `read_queue`, `read_stop` und
-                   `process_id` enthalten.
         """
         # Queue und Stop‑Event initialisieren
         pinfo.read_queue = queue.Queue(maxsize=10)
@@ -17064,27 +16921,6 @@ class FFmpegManager:
         (gibt den Slot frei) und startet einen neuen unter derselben ID.
         Dadurch entfällt die manuelle Slot‑Behandlung und das
         `_skip_semaphore_release`‑Flag.
-
-        Verbesserungen:
-            - Kein manuelles Slot‑Management mehr; Verwendung von
-              `_remove_process` für saubere Bereinigung.
-            - Robuste Abbruchprüfung mit `cancel_event` und Timeout.
-            - Exponentieller Backoff mit Jitter bei Fehlversuchen.
-            - Detaillierte Debug‑Ausgaben bei jedem Schritt.
-            - Unterstützung für `seek_seconds` (nur bei Nicht‑YouTube‑Streams).
-            - Rückgabe des neuen Prozesses oder `None` bei Fehlschlag.
-
-        Args:
-            process_id: Eindeutige Kennung des zu ersetzenden Prozesses.
-            video_url: Ursprüngliche Video‑URL.
-            detected_language: Optional erkannte Sprache.
-            max_attempts: Maximale Anzahl Wiederholungsversuche.
-            seek_seconds: Falls angegeben, wird die Wiedergabe an dieser Position
-                          fortgesetzt (nur für Nicht‑YouTube‑Streams wirksam).
-            cancel_event: Optionales Event zum vorzeitigen Abbruch.
-
-        Returns:
-            Neuen FFmpeg‑Prozess bei Erfolg, sonst None.
         """
         # ---------------------------------------------------------------------
         # Hilfsklasse für Zustandsverfolgung (nur für Debug)
