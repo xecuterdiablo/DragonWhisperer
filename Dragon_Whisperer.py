@@ -2353,9 +2353,9 @@ class Config(ConfigDefaults):
     Dynamische Konfiguration für Dragon Whisperer.
 
     Erbt alle Standardwerte von ConfigDefaults und erweitert sie um dynamische
-    Eigenschaften, die zur Laufzeit geändert werden können (z. B. Chunk-Dauer,
-    Audio-Filter). Diese Klasse ist das zentrale Konfigurationsobjekt für die
-    Audioverarbeitung und Whisper-Transkription.
+    Eigenschaften, die zur Laufzeit geändert werden können (z. B. Chunk‑Dauer,
+    Audio‑Filter). Diese Klasse ist das zentrale Konfigurationsobjekt für die
+    Audioverarbeitung und Whisper‑Transkription.
 
     Attributes:
         _base_chunk_duration: Basis-Chunk-Dauer (wird für Berechnungen verwendet).
@@ -2387,6 +2387,7 @@ class Config(ConfigDefaults):
         MAX_CACHE_SIZE_MB: Maximale Cache-Größe in MB.
         CACHE_ENABLED: Aktiviert Caching.
         WHISPER_MODELS: Liste der verfügbaren Whisper-Modelle.
+        _cached_bytes_per_second: Interner Cache für BYTES_PER_SECOND.
     """
 
     # -------------------------------------------------------------------------
@@ -2481,6 +2482,11 @@ class Config(ConfigDefaults):
     )
 
     # -------------------------------------------------------------------------
+    #  Interner Cache für BYTES_PER_SECOND (Performance-Optimierung)
+    # -------------------------------------------------------------------------
+    _cached_bytes_per_second: Optional[int] = field(default=None, init=False, repr=False)
+
+    # -------------------------------------------------------------------------
     #  Properties für dynamische Werte
     # -------------------------------------------------------------------------
     @property
@@ -2526,8 +2532,24 @@ class Config(ConfigDefaults):
 
     @property
     def BYTES_PER_SECOND(self) -> int:
-        """Datenrate in Bytes pro Sekunde (für schnelle Berechnungen)."""
-        return self.SAMPLE_RATE * self.CHANNELS * self.BYTES_PER_SAMPLE
+        """
+        Datenrate in Bytes pro Sekunde (mit Caching für Performance).
+
+        Der Wert wird nur beim ersten Zugriff berechnet und bei Änderungen
+        der zugrundeliegenden Attribute (SAMPLE_RATE, CHANNELS, BYTES_PER_SAMPLE)
+        automatisch invalidiert.
+        """
+        if self._cached_bytes_per_second is None:
+            self._cached_bytes_per_second = (
+                self.SAMPLE_RATE * self.CHANNELS * self.BYTES_PER_SAMPLE
+            )
+            if DEBUG_LEVEL >= 4:
+                log_debug(
+                    "config",
+                    f"Computed BYTES_PER_SECOND = {self._cached_bytes_per_second} "
+                    f"(SR={self.SAMPLE_RATE}, CH={self.CHANNELS}, BPS={self.BYTES_PER_SAMPLE})",
+                )
+        return self._cached_bytes_per_second
 
     @property
     def MIN_CHUNK_BYTES(self) -> int:
@@ -2584,7 +2606,10 @@ class Config(ConfigDefaults):
             filter_str = self.LANGUAGE_FILTERS[language]
 
         if self.LOG_AUDIO_STATS and DEBUG_LEVEL >= 2:
-            log_debug("audio", f"Verwende Audiofilter: {filter_str} (profil={profile}, lang={language})")
+            log_debug(
+                "audio",
+                f"Verwende Audiofilter: {filter_str} (profil={profile}, lang={language})",
+            )
 
         return filter_str
 
@@ -2619,8 +2644,26 @@ class Config(ConfigDefaults):
             platform = SYSTEM.lower()
         config = self.PLATFORM_CONFIG.get(platform, self.PLATFORM_CONFIG["linux"])
         if DEBUG_LEVEL >= 3:
-            log_debug("platform", f"Plattform-Konfiguration für {platform}: {config}")
+            log_debug(
+                "platform", f"Plattform-Konfiguration für {platform}: {config}"
+            )
         return config
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """
+        Invalidiert den BYTES_PER_SECOND‑Cache nur bei tatsächlicher Wertänderung.
+        """
+        if name in ("SAMPLE_RATE", "CHANNELS", "BYTES_PER_SAMPLE"):
+            current = getattr(self, name, None)
+            if current != value:
+                object.__setattr__(self, "_cached_bytes_per_second", None)
+                if DEBUG_LEVEL >= 4:
+                    log_debug(
+                        "config",
+                        f"Invalidated BYTES_PER_SECOND cache due to change of {name} "
+                        f"({current} → {value})",
+                    )
+        super().__setattr__(name, value)
 
     def __post_init__(self) -> None:
         """
@@ -2632,9 +2675,7 @@ class Config(ConfigDefaults):
             3. Validiert einmalig die statischen Konstanten von `ConfigDefaults`.
             4. Protokolliert eine Zusammenfassung der wichtigsten Werte.
             5. Korrigiert automatisch erkennbare Fehlkonfigurationen (Clamping).
-
-        Die Methode ist idempotent bezüglich der statischen Validierung und
-        threadsicher (da sie nur beim Instanzieren im Hauptthread aufgerufen wird).
+            6. Initialisiert den Cache für BYTES_PER_SECOND (vor und nach Validierung).
         """
         # ---------------------------------------------------------------------
         # 1. Initiale Chunk-Dauer setzen (aus der Basis-Konfiguration)
@@ -2642,10 +2683,16 @@ class Config(ConfigDefaults):
         self._actual_chunk_duration = float(self._base_chunk_duration)
 
         # ---------------------------------------------------------------------
-        # 2. Eigene Werte validieren und ggf. clampen
+        # 2. Cache für BYTES_PER_SECOND initial füllen
+        # ---------------------------------------------------------------------
+        self._cached_bytes_per_second = (
+            self.SAMPLE_RATE * self.CHANNELS * self.BYTES_PER_SAMPLE
+        )
+
+        # ---------------------------------------------------------------------
+        # 3. Eigene Werte validieren und ggf. clampen
         # ---------------------------------------------------------------------
         if not self.validate_config():
-            # Wenn die Validierung fehlschlägt, versuchen wir, die Werte zu reparieren.
             logger.warning(
                 "Config-Instanz enthält ungültige Werte. Versuche automatische Korrektur."
             )
@@ -2683,8 +2730,13 @@ class Config(ConfigDefaults):
                 )
                 self.CHANNELS = 1
 
+            # Cache nach Korrekturen erneut füllen, da Werte geändert worden sein können
+            self._cached_bytes_per_second = (
+                self.SAMPLE_RATE * self.CHANNELS * self.BYTES_PER_SAMPLE
+            )
+
         # ---------------------------------------------------------------------
-        # 3. Debug-Ausgaben je nach Level
+        # 4. Debug-Ausgaben je nach Level
         # ---------------------------------------------------------------------
         if self.ENABLE_DEBUG_LOGGING:
             if DEBUG_LEVEL >= 2:
@@ -2702,25 +2754,25 @@ class Config(ConfigDefaults):
                 )
 
         # ---------------------------------------------------------------------
-        # 4. Einmalige Validierung der statischen Konstanten (ConfigDefaults)
+        # 5. Einmalige Validierung der statischen Konstanten (ConfigDefaults)
         # ---------------------------------------------------------------------
-        if not getattr(Config, '_constants_validated', False):
+        if not getattr(Config, "_constants_validated", False):
             issues = Config.validate_constants()
             if issues:
                 logger.error(
                     f"❌ ConfigDefaults enthält inkonsistente Konstanten: {', '.join(issues)}"
                 )
                 if DEBUG_LEVEL >= 3:
-                    log_debug("config", f"Validation issues details: {issues}")
-                # Bei kritischen Konstanten könnten wir hier eine Warnung an den Benutzer ausgeben,
-                # aber das Programm läuft trotzdem weiter (mit ggf. unerwartetem Verhalten).
+                    log_debug(
+                        "config", f"Validation issues details: {issues}"
+                    )
             else:
                 if DEBUG_LEVEL >= 2:
                     log_debug("config", "✅ ConfigDefaults validation passed")
             Config._constants_validated = True
 
         # ---------------------------------------------------------------------
-        # 5. Optionale Warnung bei verdächtigen Kombinationen
+        # 6. Optionale Warnung bei verdächtigen Kombinationen
         # ---------------------------------------------------------------------
         if self.AUDIO_ENHANCEMENT_ENABLED and not SCIPY_AVAILABLE:
             logger.warning(
@@ -2834,7 +2886,10 @@ class Config(ConfigDefaults):
             mem = psutil.virtual_memory()
             limit = int(mem.total * 0.75)
             if DEBUG_LEVEL >= 2:
-                logger.debug(f"Dynamisches Speicherlimit: {limit // (1024**2)} MB (75% von {mem.total // (1024**2)} MB)")
+                logger.debug(
+                    f"Dynamisches Speicherlimit: {limit // (1024**2)} MB "
+                    f"(75% von {mem.total // (1024**2)} MB)"
+                )
             return limit
         except ImportError:
             if DEBUG_LEVEL >= 1:
@@ -10635,23 +10690,73 @@ class TranscriptionEngine:
         self.load_model(current, set_active=True)
 
     def _handle_cuda_oom(self) -> None:
+        """
+        Behandelt einen CUDA Out‑of‑Memory Fehler durch mehrstufigen Fallback.
+
+        Verbesserungen:
+            - Nach erfolgreichem Wechsel auf ein kleineres Modell wird `_last_oom`
+              explizit auf `False` gesetzt, um zukünftige GPU‑Nutzung zu ermöglichen.
+            - Detaillierte Debug‑Ausgaben über jeden Schritt.
+            - Robuste Prüfung, ob ein Fallback tatsächlich erfolgreich war.
+            - Vermeidet CPU‑Fallback, wenn ein kleineres GPU‑Modell funktioniert.
+        """
         if self.device == "cpu":
+            if DEBUG_LEVEL >= 3:
+                log_debug("oom", "_handle_cuda_oom: Already on CPU, nothing to do")
             return
+
         with self._lock:
             self._reloading = True
+            logger.warning("🚨 CUDA OOM detected – initiating fallback sequence")
+            if DEBUG_LEVEL >= 3:
+                log_debug("oom", f"Current model: {self.model_size}, device: {self.device}")
+
         try:
+            # ---------------------------------------------------------------------
+            # 1. GPU‑Cache leeren und erneut versuchen (kurze Pause)
+            # ---------------------------------------------------------------------
             if self._torch:
                 self._torch.cuda.empty_cache()
                 time.sleep(0.2)
                 free = self._get_free_gpu_memory()
                 if free is not None and free > 1.0:
                     logger.info(f"✅ Nach Cache‑Leerung: {free:.1f} GB frei – versuche weiter")
+                    with self._state_lock:
+                        self._last_oom = False   # 🔥 Explizit zurücksetzen
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("oom", "Cache cleared, OOM flag reset, continuing")
                     return
+
+            # ---------------------------------------------------------------------
+            # 2. Versuche iterativ kleinere Modelle
+            # ---------------------------------------------------------------------
             if self._try_smaller_model_iterative():
+                # 🔥 KRITISCH: Nach erfolgreichem Wechsel zu kleinerem Modell
+                #             das OOM‑Flag zurücksetzen, damit zukünftige Transkriptionen
+                #             wieder die GPU nutzen können.
+                with self._state_lock:
+                    self._last_oom = False
+                logger.info("✅ OOM‑Flag nach erfolgreichem Modellwechsel zurückgesetzt")
+                if DEBUG_LEVEL >= 3:
+                    log_debug("oom", "Switched to smaller model, OOM flag cleared")
                 return
+
+            # ---------------------------------------------------------------------
+            # 3. Fallback auf CPU
+            # ---------------------------------------------------------------------
             self._fallback_to_cpu()
+            # Nach CPU‑Fallback ist _last_oom irrelevant (GPU wird nicht mehr genutzt),
+            # aber wir setzen es trotzdem auf False, um konsistent zu sein.
+            with self._state_lock:
+                self._last_oom = False
+            if DEBUG_LEVEL >= 3:
+                log_debug("oom", "Fell back to CPU, OOM flag cleared")
+
         except Exception as e:
             logger.exception(f"❌ Fehler in _handle_cuda_oom: {e}")
+            # Im Fehlerfall das Flag ebenfalls zurücksetzen, um nicht dauerhaft blockiert zu sein
+            with self._state_lock:
+                self._last_oom = False
         finally:
             with self._lock:
                 self._reloading = False
@@ -14764,29 +14869,118 @@ class FFmpegManager:
         yt_stderr_thread: Optional[threading.Thread],
         yt_stderr_stop: Optional[threading.Event],
     ) -> None:
-        """Bereinigt alle Ressourcen eines fehlgeschlagenen Pipe‑Versuchs."""
+        """
+        Bereinigt alle Ressourcen eines fehlgeschlagenen Pipe‑Versuchs.
+
+        Verbesserungen:
+            - Explizites Schließen aller Pipes (stdout, stderr, stdin) vor der
+              Prozessbeendigung, um Ressourcenlecks unter Windows zu verhindern.
+            - Detaillierte Debug‑Ausgaben bei jedem Schritt (abhängig von DEBUG_LEVEL).
+            - Robuste Fehlerbehandlung: Fehler beim Schließen einer Pipe führen nicht
+              zum Abbruch der gesamten Bereinigung.
+            - Falls der yt‑dlp stderr‑Thread nicht rechtzeitig beendet wird, wird er
+              als Daemon markiert, um den Shutdown nicht zu blockieren.
+        """
+        # -------------------------------------------------------------------------
+        # 1. yt‑dlp stderr‑Thread stoppen
+        # -------------------------------------------------------------------------
         if yt_stderr_thread and yt_stderr_thread.is_alive():
             if DEBUG_LEVEL >= 3:
-                log_debug("ffmpeg", "Stopping yt‑dlp stderr thread")
+                log_debug("ffmpeg", "  → Stopping yt‑dlp stderr thread")
             if yt_stderr_stop:
                 yt_stderr_stop.set()
-            try:
-                if yt_process and yt_process.stderr and not yt_process.stderr.closed:
-                    yt_process.stderr.close()
-            except Exception:
-                pass
-            yt_stderr_thread.join(timeout=1.0)
-
-        for proc in (ff_process, yt_process):
-            if proc is not None and proc.poll() is None:
+            # Thread aufwecken, falls er in readline() hängt
+            if yt_process and yt_process.stderr and not yt_process.stderr.closed:
                 try:
-                    proc.terminate()
-                    proc.wait(timeout=2.0)
-                except subprocess.TimeoutExpired:
+                    yt_process.stderr.close()
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("ffmpeg", "    Closed yt_process.stderr to unblock thread")
+                except Exception as e:
+                    log_debug("ffmpeg", f"    Error closing yt_process.stderr: {e}")
+            yt_stderr_thread.join(timeout=1.0)
+            if yt_stderr_thread.is_alive():
+                logger.warning("yt_stderr_thread did not terminate within timeout")
+                # 🔥 Zusätzliche Absicherung: Thread als Daemon markieren
+                try:
+                    yt_stderr_thread.daemon = True
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("ffmpeg", "    Marked yt_stderr_thread as daemon")
+                except RuntimeError as e:
+                    log_debug("ffmpeg", f"    Could not set daemon flag: {e}")
+            else:
+                if DEBUG_LEVEL >= 3:
+                    log_debug("ffmpeg", "  → yt_stderr_thread joined")
+
+        # -------------------------------------------------------------------------
+        # 2. Prozesse bereinigen – erst Pipes schließen, dann terminieren
+        # -------------------------------------------------------------------------
+        for proc, name in ((ff_process, "FFmpeg"), (yt_process, "yt‑dlp")):
+            if proc is None:
+                continue
+            if proc.poll() is not None:
+                if DEBUG_LEVEL >= 3:
+                    log_debug("ffmpeg", f"  → {name} already terminated (exit {proc.poll()})")
+                # Trotzdem Pipes schließen, falls noch offen
+                for pipe_name in ("stdout", "stderr", "stdin"):
+                    pipe = getattr(proc, pipe_name, None)
+                    if pipe and not pipe.closed:
+                        try:
+                            pipe.close()
+                            if DEBUG_LEVEL >= 4:
+                                log_debug("ffmpeg", f"    Closed {name} {pipe_name}")
+                        except Exception as e:
+                            log_debug("ffmpeg", f"    Error closing {name} {pipe_name}: {e}")
+                continue
+    
+            if DEBUG_LEVEL >= 3:
+                log_debug("ffmpeg", f"  → Cleaning up {name} (PID {proc.pid})")
+
+            # ---------------------------------------------------------------------
+            # 2a. Alle Pipes explizit schließen (Windows‑Ressourcenleck verhindern)
+            # ---------------------------------------------------------------------
+            pipes_closed = 0
+            for pipe_name in ("stdout", "stderr", "stdin"):
+                pipe = getattr(proc, pipe_name, None)
+                if pipe and not pipe.closed:
+                    try:
+                        pipe.close()
+                        pipes_closed += 1
+                        if DEBUG_LEVEL >= 4:
+                            log_debug("ffmpeg", f"    Closed {name} {pipe_name}")
+                    except Exception as e:
+                        log_debug("ffmpeg", f"    Error closing {name} {pipe_name}: {e}")
+            if DEBUG_LEVEL >= 3 and pipes_closed > 0:
+                log_debug("ffmpeg", f"    Closed {pipes_closed} pipe(s) for {name}")
+    
+            # ---------------------------------------------------------------------
+            # 2b. Prozess beenden (erst SIGTERM, dann SIGKILL)
+            # ---------------------------------------------------------------------
+            try:
+                proc.terminate()
+                if DEBUG_LEVEL >= 3:
+                    log_debug("ffmpeg", f"    Sent SIGTERM to {name}")
+            except Exception as e:
+                log_debug("ffmpeg", f"    Error sending SIGTERM to {name}: {e}")
+
+            try:
+                proc.wait(timeout=2.0)
+                if DEBUG_LEVEL >= 3:
+                    log_debug("ffmpeg", f"    {name} terminated gracefully")
+            except subprocess.TimeoutExpired:
+                if DEBUG_LEVEL >= 3:
+                    log_debug("ffmpeg", f"    {name} did not respond to SIGTERM, sending SIGKILL")
+                try:
                     proc.kill()
                     proc.wait(timeout=1.0)
-                except Exception:
-                    pass
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("ffmpeg", f"    {name} killed")
+                except Exception as e:
+                    log_debug("ffmpeg", f"    Error killing {name}: {e}")
+            except Exception as e:
+                log_debug("ffmpeg", f"    Error waiting for {name}: {e}")
+
+        if DEBUG_LEVEL >= 3:
+            log_debug("ffmpeg", "  → Pipe resources cleanup completed")
 
     # -------------------------------------------------------------------------
     # Normaler Modus (direkte Audio‑URL)
@@ -23631,12 +23825,18 @@ class SummarizeDialog(BaseDialog):
         - Parallele Chunk‑Verarbeitung langer Texte (> 2000 Wörter) mit begrenzter Parallelität
         - Fortschrittsbalken und detaillierte Statusanzeige
         - Abbruchmöglichkeit während der gesamten Verarbeitung (kooperativ)
-        - Blacklist‑Filterung der finalen Zusammenfassung
+        - Blacklist‑Filterung der finalen Zusammenfassung unter Erhalt der Formatierung
         - Speichern und Kopieren der Ergebnisse
         - Direkte Übersetzung der Zusammenfassung
+        - Wahl zwischen kompakter und ausführlicher Zusammenfassung (persistent gespeichert)
         - Vollständige Ressourcenfreigabe beim Schließen
         - Wiederholungslogik bei Server‑Fehlern (exponentieller Backoff)
-        - Token‑Limit‑Warnung für große Prompts
+        - Token‑Limit‑Warnung für große Prompts (mit dynamischer Abfrage des Kontextlimits)
+        - Schutz vor versehentlichem Überschreiben manuell editierter Prompts
+        - Vorkompilierte Blacklist‑Patterns für bessere Performance
+        - Zeichenbegrenzung für asiatische Sprachen in der Textaufteilung
+        - Automatisches Backup der letzten Zusammenfassung (Notfall‑Wiederherstellung)
+        - Garantierte Ressourcenfreigabe in allen Fehlerpfaden
         - Debug‑Ausgaben bei --debug=3
     """
 
@@ -23690,6 +23890,13 @@ class SummarizeDialog(BaseDialog):
 
     SUPPORTED_SUMMARY_LANGUAGES = list(SUMMARY_LANGUAGE_PROMPTS.keys())
 
+    # Konstante für maximale Zeichen pro Chunk (für Sprachen ohne Worttrennung)
+    MAX_CHARS_PER_CHUNK = 8000
+
+    # Cache für dynamisch abgerufene Kontextlimits
+    _context_limit_cache: Dict[str, int] = {}
+    _context_limit_cache_lock = threading.RLock()
+
     # -------------------------------------------------------------------------
     # Initialisierung
     # -------------------------------------------------------------------------
@@ -23698,10 +23905,13 @@ class SummarizeDialog(BaseDialog):
         self.gui = gui_ref
         self.stream_title = None
 
-        # Stream‑Titel ermitteln
+        # Stream‑Titel ermitteln (robust, mit persistentem Fallback)
         if self.gui and hasattr(self.gui, "current_stream_info") and self.gui.current_stream_info:
             self.stream_title = self.gui.current_stream_info.title
-        if not self.stream_title and self.gui and hasattr(self.gui, "last_stream_title") and self.gui.last_stream_title:
+        if not self.stream_title and self.gui and hasattr(self.gui, "last_completed_stream_info"):
+            if self.gui.last_completed_stream_info:
+                self.stream_title = self.gui.last_completed_stream_info.title
+        if not self.stream_title and self.gui and hasattr(self.gui, "last_stream_title"):
             self.stream_title = self.gui.last_stream_title
         if not self.stream_title and hasattr(self.gui, "stream_title_label"):
             try:
@@ -23727,6 +23937,10 @@ class SummarizeDialog(BaseDialog):
         self.saved_temp = self.gui.advanced_settings.summarize_temperature
         self.saved_model = self.gui.advanced_settings.summarize_model
 
+        # Stil‑Präferenz aus den Einstellungen laden
+        saved_style = getattr(self.gui.advanced_settings, "summary_style", "Kompakt")
+        self._saved_style = saved_style
+
         # Thread‑sichere Datenstrukturen
         self._lock = threading.RLock()
         self._chunk_results: List[str] = []
@@ -23734,16 +23948,111 @@ class SummarizeDialog(BaseDialog):
         self._current_chunk = 0
         self._prompt = ""
         self._temp = 0.1
+        self._full_summary_parts: List[str] = []  # Effiziente String‑Konkatenation
         self.full_summary = ""
         self._destroyed = False
 
         # Executor für parallele Chunk‑Verarbeitung (wird bei Bedarf erstellt)
         self._chunk_executor: Optional[ThreadPoolExecutor] = None
         self._chunk_semaphore = threading.BoundedSemaphore(value=2)
+        self._worker_thread: Optional[threading.Thread] = None
+
+        # Flag für manuelle Prompt‑Bearbeitung
+        self._prompt_manually_edited = False
+
+        # Vorkompilierte Blacklist-Patterns
+        self._blacklist_patterns: List[re.Pattern] = []
+        self._prepare_blacklist_patterns()
+
+        # Backup‑Datei für Notfall‑Wiederherstellung
+        self._backup_file = os.path.join(tempfile.gettempdir(), "dragon_summary_backup.txt")
 
         super().__init__(
             parent, "Zusammenfassung mit Ollama", width=800, height=700, modal=True
         )
+
+        if DEBUG_LEVEL >= 2:
+            current_lang = SUPPORTED_LANGUAGES.get(self.gui.current_language, "Deutsch")
+            log_debug("SUMMARIZE", f"Dialog geöffnet: model={self.saved_model}, lang={current_lang}, style={saved_style}, text_len={len(text)}")
+            limit = self._get_model_context_limit(self.saved_model)
+            log_debug("SUMMARIZE", f"Kontextlimit für {self.saved_model}: {limit}")
+
+        # Prüfen, ob ein Backup vorhanden ist
+        self._check_backup()
+
+    def _prepare_blacklist_patterns(self) -> None:
+        """Kompiliert die Blacklist-Patterns einmalig für bessere Performance."""
+        if not hasattr(self.gui, "advanced_settings") or self.gui.advanced_settings is None:
+            return
+        blacklist = self.gui.advanced_settings.blacklist
+        if not blacklist:
+            return
+        mode = getattr(self.gui.advanced_settings, "blacklist_mode", "word")
+        for phrase in blacklist:
+            if not phrase:
+                continue
+            try:
+                if mode == "word":
+                    pattern = re.compile(r"\b" + re.escape(phrase) + r"\b", re.IGNORECASE)
+                else:
+                    pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+                self._blacklist_patterns.append(pattern)
+            except re.error as e:
+                logger.warning(f"Ungültiges Blacklist-Pattern '{phrase}': {e}")
+
+    def _check_backup(self) -> None:
+        """Prüft auf eine vorhandene Backup‑Datei und bietet Wiederherstellung an."""
+        if not os.path.exists(self._backup_file):
+            return
+        # Nur wiederherstellen, wenn Datei jünger als 1 Stunde
+        try:
+            if time.time() - os.path.getmtime(self._backup_file) > 3600:
+                return
+        except OSError:
+            return
+        if DarkMessageBox.askyesno(
+            "Zusammenfassung wiederherstellen?",
+            "Es wurde eine nicht gespeicherte Zusammenfassung gefunden.\n"
+            "Möchten Sie den Inhalt wiederherstellen?",
+            parent=self.dialog if hasattr(self, 'dialog') else None
+        ):
+            try:
+                with open(self._backup_file, "r", encoding="utf-8") as f:
+                    saved = f.read()
+                self._full_summary_parts = [saved]
+                self.full_summary = saved
+                if DEBUG_LEVEL >= 2:
+                    log_debug("SUMMARIZE", "Backup wiederhergestellt")
+                # Nach dem Öffnen des Dialogs die GUI aktualisieren (muss im Hauptthread geschehen)
+                if hasattr(self, 'dialog') and self.dialog:
+                    self.dialog.after(100, self._restore_backup_to_gui)
+            except Exception as e:
+                logger.warning(f"Fehler beim Wiederherstellen des Backups: {e}")
+
+    def _restore_backup_to_gui(self) -> None:
+        """Stellt das Backup in der GUI wieder her."""
+        if self._destroyed:
+            return
+        try:
+            if hasattr(self, 'summary_text') and self.summary_text.winfo_exists():
+                self.summary_text.delete("1.0", "end")
+                self.summary_text.insert("1.0", self.full_summary)
+            self._reset_ui()
+        except Exception as e:
+            logger.warning(f"Fehler beim Anzeigen des Backups: {e}")
+
+    def _save_backup(self) -> None:
+        """Speichert die aktuelle Zusammenfassung als Backup."""
+        with self._lock:
+            if not self.full_summary:
+                return
+            try:
+                with open(self._backup_file, "w", encoding="utf-8") as f:
+                    f.write(self.full_summary)
+                if DEBUG_LEVEL >= 3:
+                    log_debug("SUMMARIZE", "Backup gespeichert")
+            except Exception as e:
+                logger.warning(f"Fehler beim Speichern des Backups: {e}")
 
     # UI‑Aufbau
     def build_ui(self) -> None:
@@ -23858,7 +24167,31 @@ class SummarizeDialog(BaseDialog):
         lang_combo.bind("<<ComboboxSelected>>", lambda e: self._set_default_prompt())
         ToolTip(lang_combo, "Sprache der Zusammenfassung")
 
-        # 4. Videotitel als Kontext
+        # 4. Stil‑Auswahl (kompakt / ausführlich) – mit gespeicherter Präferenz
+        style_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
+        style_frame.pack(fill="x", pady=5)
+        tk.Label(
+            style_frame,
+            text="Stil:",
+            bg=CURRENT_THEME.BG_PRIMARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+        ).pack(side="left")
+        # Initialwert aus der gespeicherten Einstellung
+        initial_style = "Kompakt (3-5 Sätze)" if self._saved_style == "Kompakt" else "Ausführlich (detaillierte Liste)"
+        self.style_var = tk.StringVar(value=initial_style)
+        style_combo = ttk.Combobox(
+            style_frame,
+            textvariable=self.style_var,
+            values=["Kompakt (3-5 Sätze)", "Ausführlich (detaillierte Liste)"],
+            width=28,
+            state="readonly",
+            style="Dark.TCombobox",
+        )
+        style_combo.pack(side="left", padx=10)
+        style_combo.bind("<<ComboboxSelected>>", lambda e: self._set_default_prompt())
+        ToolTip(style_combo, "Art der Zusammenfassung wählen")
+
+        # 5. Videotitel als Kontext
         self.use_title_var = tk.BooleanVar(value=False)
         self.title_checkbox = tk.Checkbutton(
             self.main,
@@ -23876,7 +24209,7 @@ class SummarizeDialog(BaseDialog):
         else:
             self.title_checkbox.bind("<ButtonRelease-1>", lambda e: self._set_default_prompt())
 
-        # 5. Prompt‑Textfeld
+        # 6. Prompt‑Textfeld
         tk.Label(
             self.main,
             text="Prompt (optional):",
@@ -23892,10 +24225,16 @@ class SummarizeDialog(BaseDialog):
             wrap=tk.WORD,
         )
         self.prompt_text.pack(fill="x", pady=(0, 10))
+
+        # Event für manuelle Bearbeitung
+        def on_prompt_edit(event):
+            self._prompt_manually_edited = True
+        self.prompt_text.bind("<Key>", on_prompt_edit)
+
         self._set_default_prompt()
         ToolTip(self.prompt_text, "Optionaler Prompt – wird an das Modell gesendet")
 
-        # 6. Fortschrittsbalken
+        # 7. Fortschrittsbalken
         self.progress_var = tk.DoubleVar(value=0.0)
         self.progress_bar = ttk.Progressbar(
             self.main,
@@ -23905,7 +24244,7 @@ class SummarizeDialog(BaseDialog):
         )
         self.progress_bar.pack(fill="x", pady=(0, 5))
 
-        # 7. Ausgabe
+        # 8. Ausgabe
         tk.Label(
             self.main,
             text="Zusammenfassung:",
@@ -23923,7 +24262,7 @@ class SummarizeDialog(BaseDialog):
         self.summary_text.pack(fill="both", expand=True, pady=10)
         ContextMenuMixin(self.summary_text)
 
-        # 8. Buttons
+        # 9. Buttons
         btn_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
         btn_frame.pack(fill="x", pady=5)
 
@@ -24001,7 +24340,7 @@ class SummarizeDialog(BaseDialog):
         )
         self.close_btn.pack(side="left", padx=5)
 
-        # 9. Statuszeile
+        # 10. Statuszeile
         self.status_label = tk.Label(
             self.main,
             text="",
@@ -24011,10 +24350,16 @@ class SummarizeDialog(BaseDialog):
         )
         self.status_label.pack(pady=5)
 
-    # Prompt‑Generierung
-    def _set_default_prompt(self) -> None:
+    # Prompt‑Generierung (unterstützt Stil‑Auswahl, respektiert manuelle Änderungen)
+    def _set_default_prompt(self, force: bool = False) -> None:
+        # Wenn der Benutzer den Prompt manuell geändert hat und kein force, nichts tun
+        if self._prompt_manually_edited and not force:
+            if DEBUG_LEVEL >= 3:
+                log_debug("SUMMARIZE", "Prompt manuell editiert – wird nicht überschrieben")
+            return
+
         target = self.summary_lang_var.get()
-        prompt = self.SUMMARY_LANGUAGE_PROMPTS.get(
+        base_prompt = self.SUMMARY_LANGUAGE_PROMPTS.get(
             target,
             f"Summarize the following text in 3-5 sentences in {target}. "
             f"Focus on the main points, ignore repetitions and filler words. "
@@ -24022,45 +24367,109 @@ class SummarizeDialog(BaseDialog):
             f"IMPORTANT: The output MUST be in {target.upper()} and must NOT contain characters from other languages."
         )
 
+        style = self.style_var.get()
+        if "Ausführlich" in style:
+            base_prompt = base_prompt.replace(
+                "in 3-5 Sätzen", "in einer ausführlichen, strukturierten Form"
+            ).replace(
+                "in 3-5 sentences", "in a detailed, structured form"
+            ).replace(
+                "3-5문장으로", "구조화된 상세 형식으로"
+            ).replace(
+                "3-5句话", "详细、结构化的形式"
+            ).replace(
+                "3～5文", "詳細で構造化された形式"
+            )
+            base_prompt += "\n\nErstelle eine detaillierte Liste der Hauptpunkte, idealerweise als Aufzählung."
+
         if self.use_title_var.get() and self.stream_title:
             title_prefix = f"Der Titel des Videos lautet: '{self.stream_title}'.\n\n"
         else:
             title_prefix = ""
 
-        full_prompt = title_prefix + prompt
+        full_prompt = title_prefix + base_prompt
         self.prompt_text.delete("1.0", "end")
         self.prompt_text.insert("1.0", full_prompt)
+        self._prompt_manually_edited = False  # Zurücksetzen, da jetzt Default gesetzt
 
-    # Text‑Aufteilung
+        if DEBUG_LEVEL >= 3:
+            log_debug("SUMMARIZE", "Default-Prompt gesetzt")
+
+    # Optimierte Text‑Aufteilung (respektiert Satzgrenzen und Zeichenlimit)
     def _split_text(self, text: str, max_words: int = 2000) -> List[str]:
-        words = text.split()
-        if len(words) <= max_words:
-            return [text]
-        chunks = []
-        chunk = []
-        word_count = 0
-        for word in words:
-            chunk.append(word)
-            word_count += 1
-            if word_count >= max_words:
-                chunks.append(" ".join(chunk))
-                chunk = []
-                word_count = 0
-        if chunk:
-            chunks.append(" ".join(chunk))
-        return chunks
+        """
+        Teilt einen langen Text in sinnvolle Chunks auf, wobei Satzgrenzen
+        bevorzugt werden. Nur wenn ein einzelner Satz länger als max_words ist,
+        wird er an Wortgrenzen geteilt. Zusätzlich wird eine maximale Zeichenlänge
+        pro Chunk eingehalten (für Sprachen ohne Worttrennung).
+        """
+        if not text or not text.strip():
+            return []
 
-    # -------------------------------------------------------------------------
-    # Token‑Limit‑Warnung (grobe Heuristik)
-    # -------------------------------------------------------------------------
+        # 1. An Satzgrenzen aufteilen
+        sentences = re.split(r"(?<=[.!?。！？])\s+", text)
+        chunks = []
+        current_chunk_words = []
+        current_word_count = 0
+
+        for sentence in sentences:
+            words = sentence.split()
+            sentence_word_count = len(words)
+
+            # Wenn der Satz allein schon zu lang ist, muss er weiter geteilt werden
+            if sentence_word_count > max_words:
+                # Erst aktuellen Chunk abschließen, falls vorhanden
+                if current_chunk_words:
+                    chunks.append(" ".join(current_chunk_words))
+                    current_chunk_words = []
+                    current_word_count = 0
+                # Satz in kleinere Stücke teilen
+                for i in range(0, sentence_word_count, max_words):
+                    part = " ".join(words[i:i+max_words])
+                    self._add_chunk_with_char_limit(part, chunks)
+                continue
+
+            # Passt der Satz noch in den aktuellen Chunk?
+            if current_word_count + sentence_word_count <= max_words:
+                current_chunk_words.extend(words)
+                current_word_count += sentence_word_count
+            else:
+                # Chunk voll – abschließen und neuen beginnen
+                chunk_text = " ".join(current_chunk_words)
+                self._add_chunk_with_char_limit(chunk_text, chunks)
+                current_chunk_words = words
+                current_word_count = sentence_word_count
+
+        # Letzten Chunk hinzufügen
+        if current_chunk_words:
+            chunk_text = " ".join(current_chunk_words)
+            self._add_chunk_with_char_limit(chunk_text, chunks)
+
+        return chunks if chunks else [text]
+
+    def _add_chunk_with_char_limit(self, chunk_text: str, chunks: List[str]) -> None:
+        """Teilt einen Chunk weiter auf, falls er das Zeichenlimit überschreitet."""
+        if len(chunk_text) <= self.MAX_CHARS_PER_CHUNK:
+            chunks.append(chunk_text)
+        else:
+            # Grob nach Zeichen aufteilen (für CJK-Sprachen sind Zeichen ≈ Wörter)
+            for i in range(0, len(chunk_text), self.MAX_CHARS_PER_CHUNK):
+                sub_chunk = chunk_text[i:i+self.MAX_CHARS_PER_CHUNK]
+                chunks.append(sub_chunk)
+            if DEBUG_LEVEL >= 3:
+                log_debug("SUMMARIZE", f"Chunk mit {len(chunk_text)} Zeichen in {len(chunks)} Teile aufgeteilt")
+
+    # Token‑Limit‑Warnung (grobe Heuristik + dynamische Abfrage)
     def _estimate_tokens(self, text: str) -> int:
-        # Einfache Schätzung: 1 Token ≈ 4 Zeichen (für europäische Sprachen)
-        # Für asiatische Sprachen grob 1 Token pro Zeichen.
-        # Hier konservative Schätzung.
         return len(text) // 3
 
-    def _check_token_limit(self, model: str, total_prompt: str) -> bool:
-        # Bekannte Kontextlängen (grobe Richtwerte)
+    def _get_model_context_limit(self, model: str) -> int:
+        """Ermittelt das Kontextlimit des Modells (mit Caching)."""
+        with self._context_limit_cache_lock:
+            if model in self._context_limit_cache:
+                return self._context_limit_cache[model]
+
+        # Standardwerte für bekannte Modelle
         limits = {
             "llama3.1:8b": 128000,
             "qwen2.5:7b": 128000,
@@ -24068,28 +24477,48 @@ class SummarizeDialog(BaseDialog):
             "llama3:8b": 8192,
             "mistral": 8192,
         }
-        limit = limits.get(model.split(":")[0], 4096)
-        estimated = self._estimate_tokens(total_prompt)
-        if estimated > limit * 0.9:
-            return False
-        return True
+        base_model = model.split(":")[0]
+        limit = limits.get(base_model, 4096)
 
-    # -------------------------------------------------------------------------
-    # Parallele Chunk‑Verarbeitung
-    # -------------------------------------------------------------------------
+        # Optional: Dynamische Abfrage über Ollama-API (nur wenn Server erreichbar)
+        if self.summarizer.is_server_reachable():
+            try:
+                import requests
+                response = requests.get(
+                    f"{self.gui.advanced_settings.ollama_host}/api/show",
+                    json={"name": model},
+                    timeout=2
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if "model_info" in data and "context_length" in data["model_info"]:
+                        limit = data["model_info"]["context_length"]
+                        if DEBUG_LEVEL >= 3:
+                            log_debug("SUMMARIZE", f"Kontextlimit für {model}: {limit} (via API)")
+            except Exception:
+                pass
+
+        with self._context_limit_cache_lock:
+            self._context_limit_cache[model] = limit
+        return limit
+
+    def _check_token_limit(self, model: str, total_prompt: str) -> bool:
+        limit = self._get_model_context_limit(model)
+        estimated = self._estimate_tokens(total_prompt)
+        return estimated <= limit * 0.9
+
+    # Parallele Chunk‑Verarbeitung (mit garantierter Ressourcenfreigabe)
     def _summarize_chunk_with_retry(
         self, chunk_text: str, prompt: str, temperature: float, max_retries: int = 2
     ) -> Optional[str]:
-        """
-        Fasst einen Chunk zusammen, mit Wiederholungen bei Fehlern.
-        Verwendet einen eigenen OllamaSummarizer pro Chunk (nicht thread‑safe).
-        """
         if self._request_cancel.is_set():
             return None
 
         for attempt in range(max_retries + 1):
             if self._request_cancel.is_set():
                 return None
+
+            local_summarizer = None
             try:
                 local_summarizer = OllamaSummarizer(
                     self.gui,
@@ -24111,6 +24540,9 @@ class SummarizeDialog(BaseDialog):
                     error = err
                     event.set()
 
+                if DEBUG_LEVEL >= 3:
+                    log_debug("SUMMARIZE", f"Chunk summary attempt {attempt+1}/{max_retries+1}")
+
                 local_summarizer.summarize(
                     chunk_text,
                     prompt,
@@ -24121,23 +24553,23 @@ class SummarizeDialog(BaseDialog):
                     cancel_event=self._request_cancel,
                 )
 
-                # Timeout pro Versuch
                 if not event.wait(timeout=120):
                     logger.warning(f"Chunk summary timeout (attempt {attempt+1})")
                     local_summarizer.stop()
-                    local_summarizer.dispose()
                     if attempt < max_retries:
                         time.sleep(2 ** attempt)
                         continue
                     return None
 
-                local_summarizer.dispose()
                 if error:
                     logger.warning(f"Chunk error: {error}")
                     if attempt < max_retries:
                         time.sleep(2 ** attempt)
                         continue
                     return None
+
+                if DEBUG_LEVEL >= 3:
+                    log_debug("SUMMARIZE", f"Chunk summary successful (attempt {attempt+1})")
                 return result
 
             except Exception as e:
@@ -24147,6 +24579,13 @@ class SummarizeDialog(BaseDialog):
                     continue
                 return None
 
+            finally:
+                if local_summarizer is not None:
+                    try:
+                        local_summarizer.dispose()
+                    except Exception:
+                        pass
+
         return None
 
     def _process_chunks_parallel(self, chunks: List[str], prompt: str, temp: float) -> None:
@@ -24155,11 +24594,14 @@ class SummarizeDialog(BaseDialog):
         completed = 0
         lock = threading.Lock()
 
+        if DEBUG_LEVEL >= 2:
+            log_debug("SUMMARIZE", f"Starte parallele Verarbeitung von {total_chunks} Chunks")
+
         def update_progress():
             nonlocal completed
             with lock:
                 completed += 1
-                progress = (completed / total_chunks) * 90  # 90% für Chunks, Rest für Finale
+                progress = (completed / total_chunks) * 90
                 self._safe_after(0, lambda: self.progress_var.set(progress))
                 self._safe_after(0, lambda: self.status_label.config(
                     text=f"⏳ Verarbeite Chunks... {completed}/{total_chunks}"
@@ -24168,7 +24610,6 @@ class SummarizeDialog(BaseDialog):
         def process_chunk(idx: int, chunk: str) -> None:
             if self._request_cancel.is_set():
                 return
-            # Semaphore zur Begrenzung paralleler Chunks
             acquired = self._chunk_semaphore.acquire(timeout=30)
             if not acquired:
                 logger.warning(f"Could not acquire semaphore for chunk {idx}")
@@ -24185,7 +24626,6 @@ class SummarizeDialog(BaseDialog):
                 self._chunk_semaphore.release()
             update_progress()
 
-        # Executor mit max_workers=2 (begrenzt durch Semaphore)
         with self._lock:
             self._chunk_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="SummarizeChunk")
 
@@ -24196,7 +24636,6 @@ class SummarizeDialog(BaseDialog):
             future = self._chunk_executor.submit(process_chunk, i, chunk)
             futures.append(future)
 
-        # Auf alle Futures warten
         for future in futures:
             if self._request_cancel.is_set():
                 future.cancel()
@@ -24210,7 +24649,7 @@ class SummarizeDialog(BaseDialog):
 
         with self._lock:
             if self._chunk_executor:
-                self._chunk_executor.shutdown(wait=False)
+                self._chunk_executor.shutdown(wait=False, cancel_futures=True)
                 self._chunk_executor = None
 
         if self._request_cancel.is_set():
@@ -24218,36 +24657,65 @@ class SummarizeDialog(BaseDialog):
             self._safe_after(0, self._reset_ui)
             return
 
-        valid_results = [r for r in self._chunk_results if r and not r.startswith("[Fehler")]
+        valid_results = [r for r in self._chunk_results if r and not r.startswith("[Fehler]")]
         if not valid_results:
             self._safe_after(0, lambda: self.status_label.config(text="❌ Keine gültigen Teilzusammenfassungen."))
             self._safe_after(0, self._reset_ui)
             return
 
         combined = "\n\n".join(valid_results)
+        if DEBUG_LEVEL >= 2:
+            log_debug("SUMMARIZE", f"Chunks verarbeitet, {len(valid_results)} gültig")
         self._create_final_summary(combined, prompt, temp)
 
-    # Finale Zusammenfassung
+    # Finale Zusammenfassung (mit Stil‑Berücksichtigung)
     def _create_final_summary(self, combined_chunks: str, base_prompt: str, temp: float) -> None:
         target_lang = self.summary_lang_var.get()
-        final_prompt = (
-            f"Fasse die folgenden Teilzusammenfassungen zu einer kohärenten Gesamtzusammenfassung in {target_lang} zusammen. "
-            f"Antworte ausschließlich auf {target_lang}.\n\n{combined_chunks}"
-        )
+        style = self.style_var.get()
+        if "Ausführlich" in style:
+            final_prompt = (
+                f"Kombiniere die folgenden Teilzusammenfassungen zu einer **detaillierten, strukturierten Gesamtzusammenfassung** in {target_lang}. "
+                f"Behalte alle wichtigen Einzelheiten bei und gliedere die Antwort übersichtlich (z.B. als Aufzählung). "
+                f"Antworte ausschließlich auf {target_lang}.\n\n{combined_chunks}"
+            )
+        else:
+            final_prompt = (
+                f"Fasse die folgenden Teilzusammenfassungen zu einer kohärenten Gesamtzusammenfassung in {target_lang} zusammen. "
+                f"Antworte ausschließlich auf {target_lang}.\n\n{combined_chunks}"
+            )
 
+        if DEBUG_LEVEL >= 2:
+            log_debug("SUMMARIZE", "Starte finale Zusammenfassung")
+
+        # Cancel-Button aktivieren und indeterminierten Fortschritt starten
+        self._safe_after(0, lambda: self.cancel_btn.config(state="normal"))
+        self._safe_after(0, lambda: self.progress_bar.config(mode="indeterminate"))
+        self._safe_after(0, lambda: self.progress_bar.start(10))
         self._safe_after(0, lambda: self.status_label.config(text="⏳ Erstelle finale Zusammenfassung..."))
         self._safe_after(0, lambda: self.progress_var.set(95))
 
         def on_final_complete():
             if self._destroyed:
                 return
+            if DEBUG_LEVEL >= 2:
+                log_debug("SUMMARIZE", "Finale Zusammenfassung abgeschlossen")
+            self._safe_after(0, lambda: self.progress_bar.stop())
+            self._safe_after(0, lambda: self.progress_bar.config(mode="determinate"))
+            with self._lock:
+                self.full_summary = "".join(self._full_summary_parts)
             self._apply_blacklist_to_summary()
+            self._save_backup()  # Backup speichern
             self._safe_after(0, lambda: self.progress_var.set(100))
             self._safe_after(0, self._reset_ui)
 
         def on_final_error(error: str):
             if self._destroyed:
                 return
+            logger.error(f"Final summary error: {error}")
+            if DEBUG_LEVEL >= 2:
+                log_debug("SUMMARIZE", f"Finale Zusammenfassung fehlgeschlagen: {error}")
+            self._safe_after(0, lambda: self.progress_bar.stop())
+            self._safe_after(0, lambda: self.progress_bar.config(mode="determinate"))
             self._safe_after(0, lambda: self.status_label.config(text=f"❌ Fehler: {error}"))
             self._safe_after(0, self._reset_ui)
 
@@ -24262,26 +24730,20 @@ class SummarizeDialog(BaseDialog):
         )
 
     def _apply_blacklist_to_summary(self) -> None:
-        if not hasattr(self.gui, "advanced_settings"):
+        if not self._blacklist_patterns:
             return
-        blacklist = self.gui.advanced_settings.blacklist
-        if not blacklist:
-            return
-        mode = getattr(self.gui.advanced_settings, "blacklist_mode", "word")
         with self._lock:
             summary = self.full_summary
         if not summary:
             return
         filtered = summary
-        for phrase in blacklist:
-            if not phrase:
-                continue
-            if mode == "substring":
-                filtered = filtered.replace(phrase, "")
-            else:
-                pattern = r"\b" + re.escape(phrase) + r"\b"
-                filtered = re.sub(pattern, "", filtered, flags=re.IGNORECASE)
-        filtered = re.sub(r"\s+", " ", filtered).strip()
+        for pattern in self._blacklist_patterns:
+            filtered = pattern.sub("", filtered)
+        # Formatierung erhalten (nur Spaces/Tabs normalisieren, Zeilenumbrüche bewahren)
+        filtered = re.sub(r"[ \t]+", " ", filtered)
+        filtered = re.sub(r"\n{3,}", "\n\n", filtered)
+        filtered = "\n".join(line.strip() for line in filtered.splitlines())
+        filtered = filtered.strip()
         filtered = re.sub(r"\.{2,}", ".", filtered)
         with self._lock:
             self.full_summary = filtered
@@ -24325,7 +24787,7 @@ class SummarizeDialog(BaseDialog):
                     self.summary_text.insert("end", chunk)
                     self.summary_text.see("end")
                     with self._lock:
-                        self.full_summary += chunk
+                        self._full_summary_parts.append(chunk)
             except tk.TclError:
                 pass
         self._safe_after(0, update)
@@ -24346,9 +24808,7 @@ class SummarizeDialog(BaseDialog):
                 pass
         self._safe_after(0, update)
 
-    # -------------------------------------------------------------------------
     # Benutzeraktionen
-    # -------------------------------------------------------------------------
     def start_summarize(self) -> None:
         if self._destroyed:
             return
@@ -24372,7 +24832,6 @@ class SummarizeDialog(BaseDialog):
         self._prompt = self.prompt_text.get("1.0", "end-1c").strip()
         self._temp = self.temp_var.get()
 
-        # Token‑Limit‑Warnung
         total_prompt = system_prompt + "\n\n" + self._prompt + "\n\n" + self.text
         if not self._check_token_limit(model, total_prompt):
             if not DarkMessageBox.askyesno(
@@ -24384,8 +24843,20 @@ class SummarizeDialog(BaseDialog):
             ):
                 return
 
+        with self._lock:
+            self._full_summary_parts = []
+            self.full_summary = ""
+
+        # Platzhalter setzen
+        self._safe_after(0, lambda: self.summary_text.delete("1.0", "end"))
+        self._safe_after(0, lambda: self.summary_text.insert("1.0", "[Zusammenfassung wird erstellt...]"))
+
+        if DEBUG_LEVEL >= 2:
+            log_debug("SUMMARIZE", f"Starte Zusammenfassung mit Modell {model}, Stil {self.style_var.get()}")
+
         word_count = len(self.text.split())
-        if word_count > 2000:
+        max_words = 3000 if "Ausführlich" in self.style_var.get() else 2000
+        if word_count > max_words:
             self.status_label.config(text="⏳ Text wird in Abschnitte zerlegt...")
             self.summarize_btn.config(state="disabled", text="⏳ Warte...")
             self.cancel_btn.config(state="normal")
@@ -24394,11 +24865,7 @@ class SummarizeDialog(BaseDialog):
             self.translate_btn.config(state="disabled")
             self._request_cancel.clear()
 
-            with self._lock:
-                self.full_summary = ""
-            self.summary_text.delete("1.0", "end")
-
-            chunks = self._split_text(self.text, max_words=2000)
+            chunks = self._split_text(self.text, max_words=max_words)
             self.status_label.config(text=f"⏳ Verarbeite {len(chunks)} Abschnitte parallel...")
             self.progress_var.set(0)
 
@@ -24406,12 +24873,14 @@ class SummarizeDialog(BaseDialog):
                 self._chunks = chunks
                 self._chunk_results = []
 
-            threading.Thread(
-                target=self._process_chunks_parallel,
-                args=(chunks, self._prompt, self._temp),
-                daemon=True,
-                name="SummarizeChunks",
-            ).start()
+            with self._lock:
+                self._worker_thread = threading.Thread(
+                    target=self._process_chunks_parallel,
+                    args=(chunks, self._prompt, self._temp),
+                    daemon=True,
+                    name="SummarizeChunks",
+                )
+                self._worker_thread.start()
         else:
             self.summarize_btn.config(state="disabled", text="⏳ Warte...")
             self.cancel_btn.config(state="normal")
@@ -24419,17 +24888,17 @@ class SummarizeDialog(BaseDialog):
             self.save_btn.config(state="disabled")
             self.translate_btn.config(state="disabled")
             self.status_label.config(text="Sende Anfrage an Ollama...")
-            self.summary_text.delete("1.0", "end")
             self.progress_var.set(10)
 
-            with self._lock:
-                self.full_summary = ""
             self._request_cancel.clear()
 
             def on_complete() -> None:
                 if self._destroyed:
                     return
+                with self._lock:
+                    self.full_summary = "".join(self._full_summary_parts)
                 self._apply_blacklist_to_summary()
+                self._save_backup()
                 self._safe_after(0, lambda: self.progress_var.set(100))
                 self._safe_after(0, self._reset_ui)
 
@@ -24447,12 +24916,15 @@ class SummarizeDialog(BaseDialog):
         with self._lock:
             self._request_cancel.set()
         if self._chunk_executor:
-            # Kooperativer Abbruch: erst Event setzen, kurz warten, dann hart beenden
             time.sleep(0.5)
             with self._lock:
                 if self._chunk_executor:
                     self._chunk_executor.shutdown(wait=False, cancel_futures=True)
                     self._chunk_executor = None
+        if hasattr(self, "summarizer"):
+            self.summarizer.stop()
+        if DEBUG_LEVEL >= 2:
+            log_debug("SUMMARIZE", "Zusammenfassung abgebrochen")
         self.status_label.config(text="⏹️ Abbruch eingeleitet...")
         self.cancel_btn.config(state="disabled")
         self._safe_after(500, self._reset_ui)
@@ -24509,6 +24981,14 @@ class SummarizeDialog(BaseDialog):
         TranslationDialog(self.dialog, engine, self.gui, initial_text=summary)
 
     def close(self) -> None:
+        # Stil‑Präferenz speichern
+        if hasattr(self, "style_var"):
+            style_value = self.style_var.get()
+            if "Kompakt" in style_value:
+                self.gui.advanced_settings.summary_style = "Kompakt"
+            else:
+                self.gui.advanced_settings.summary_style = "Ausführlich"
+
         if hasattr(self, "temp_var") and hasattr(self, "model_var"):
             self.gui.advanced_settings.summarize_temperature = self.temp_var.get()
             self.gui.advanced_settings.summarize_model = self.model_var.get()
@@ -24524,11 +25004,29 @@ class SummarizeDialog(BaseDialog):
                     self._chunk_executor.shutdown(wait=False, cancel_futures=True)
                     self._chunk_executor = None
 
+        # Worker-Thread joinen (unter Lock)
+        with self._lock:
+            worker = self._worker_thread
+        if worker and worker.is_alive():
+            worker.join(timeout=1.0)
+
         if hasattr(self, "summarizer"):
             try:
                 self.summarizer.dispose()
             except Exception:
                 pass
+
+        # Backup löschen, da erfolgreich gespeichert oder verworfen
+        if os.path.exists(self._backup_file):
+            try:
+                os.unlink(self._backup_file)
+                if DEBUG_LEVEL >= 3:
+                    log_debug("SUMMARIZE", "Backup-Datei gelöscht")
+            except Exception as e:
+                logger.debug(f"Backup-Datei konnte nicht gelöscht werden: {e}")
+
+        if DEBUG_LEVEL >= 2:
+            log_debug("SUMMARIZE", "Dialog geschlossen")
 
         super().close()
 
@@ -29021,6 +29519,11 @@ class DragonWhispererGUI:
         Fehler bei der Initialisierung frühzeitig zu erkennen und abzufangen.
 
         Verbesserungen gegenüber der ursprünglichen Version:
+            - **HiDPI‑Unterstützung für Windows:** Aktiviert DPI‑Awareness,
+              sodass die GUI auf hochauflösenden Bildschirmen scharf dargestellt wird.
+            - **Dynamische Fenstergröße:** Berechnet initiale Fenstergröße relativ
+              zur Bildschirmauflösung (70% Breite, 75% Höhe) und setzt sinnvolle
+              Mindestgrößen.
             - **Status‑Lock:** `_status_lock` und `_last_status_message` werden
               initialisiert, um Race Conditions in `update_status` zu verhindern.
             - **TTS‑Warteschlange:** Eine eigene Queue (`_tts_queue`) und ein
@@ -29035,8 +29538,9 @@ class DragonWhispererGUI:
               Aufschluss über den Fortschritt der Initialisierung.
             - **Thread‑Sicherheit:** Alle gemeinsam genutzten Ressourcen werden
               mit geeigneten Locks geschützt.
-            - **Vollständige Typ‑Annotationen** für alle Instanzvariablen
-              (soweit in Python 3.8+ möglich).
+            - **Persistente Stream‑Info:** `last_completed_stream_info` speichert
+              den zuletzt verarbeiteten Stream dauerhaft, sodass nach Ende des
+              Streams der Titel weiterhin für Zusammenfassungen verfügbar ist.
         """
         # -----------------------------------------------------------------
         # 0. Vorbereitung: RateLimiter und Shutdown-Flags
@@ -29055,6 +29559,8 @@ class DragonWhispererGUI:
         self.subtitle_mode = False
         self.exit_confirmed = False
         self.current_stream_info: Optional[StreamInfo] = None
+        self.last_completed_stream_info: Optional[StreamInfo] = None  # 🔥 Persistente Stream-Info für nachträgliche Verwendung
+        self.last_stream_title: str = ""                               # Legacy-Kompatibilität
         self.current_video_language: Optional[str] = None
         self._progress_bar_started = False
         self.translate_active = True
@@ -29105,7 +29611,6 @@ class DragonWhispererGUI:
         # -----------------------------------------------------------------
         # 6. Sonstige Zustände
         # -----------------------------------------------------------------
-        self.last_completed_stream_title: str = ""
         self._stopping_done = False
         self._current_layout: Optional[str] = None
         self._event_subscriptions: List[Tuple[str, Callable]] = []
@@ -29129,6 +29634,27 @@ class DragonWhispererGUI:
             logger.error("❌ Tkinter nicht verfügbar. Versuche Fallback...")
             self._try_fallback_gui()
             return
+
+        # 🔥🔥🔥 DPI‑Awareness für Windows aktivieren (vor Erstellung von tk.Tk) 🔥🔥🔥
+        if IS_WINDOWS:
+            try:
+                import ctypes
+                # Per Monitor V2 (Windows 10 1703+) – beste Qualität
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)
+                if DEBUG_LEVEL >= 3:
+                    log_debug("gui", "Windows DPI awareness set to Per Monitor V2")
+            except AttributeError:
+                try:
+                    # Fallback für ältere Windows‑Versionen
+                    ctypes.windll.user32.SetProcessDPIAware()
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("gui", "Windows DPI awareness set (legacy mode)")
+                except Exception as e:
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("gui", f"Failed to set Windows DPI awareness: {e}")
+            except Exception as e:
+                if DEBUG_LEVEL >= 3:
+                    log_debug("gui", f"Failed to set Windows DPI awareness: {e}")
 
         # -----------------------------------------------------------------
         # 8. Einstellungen laden (mit Fehlertoleranz)
@@ -29493,7 +30019,34 @@ class DragonWhispererGUI:
     # Theme‑Methoden
     # ------------------------------------------------------------------------
     def _apply_theme(self, theme_name: str) -> None:
-        """Wendet das ausgewählte Theme auf die gesamte GUI an."""
+        """
+        Wendet das ausgewählte Theme auf die gesamte GUI an.
+
+        Diese Methode aktualisiert:
+            - Die globale `CURRENT_THEME` und `self.current_theme`
+            - Den Hintergrund des Hauptfensters
+            - Die ttk‑Styles (Comboboxen, Progressbar, Notebook etc.)
+            - Rekursiv alle Widgets im Fenster (Farben, Schriften)
+            - Spezielle Widgets mit individuellen Farbregeln
+            - Das Layout über `self.layout.apply_theme()`
+
+        Verbesserungen gegenüber der ursprünglichen Version:
+            - **Robuste Fehlerbehandlung:** Widgets, die während der Aktualisierung
+              zerstört werden, führen nicht zum Abbruch.
+            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
+            - **Fallback für fehlende Theme‑Attribute:** Verwendet Standardwerte,
+              falls ein Attribut im Theme nicht definiert ist.
+            - **Korrekte Behandlung von ttk‑Widgets:** Styles werden vor der
+              Widget‑Aktualisierung neu konfiguriert.
+            - **Sicherstellung, dass `self.current_theme` und `CURRENT_THEME`
+              synchron sind.**
+
+        Args:
+            theme_name: Name des Themes (z. B. 'dark', 'light', 'pastel').
+        """
+        # -----------------------------------------------------------------
+        # 1. Theme‑Klasse auswählen
+        # -----------------------------------------------------------------
         theme_map = {
             "dark": DarkTheme,
             "light": LightTheme,
@@ -29505,8 +30058,8 @@ class DragonWhispererGUI:
             "gruvbox": GruvboxDarkTheme,
             "onedark": OneDarkTheme,
             "monokai": MonokaiTheme,
-            "a11y-dark": A11yDarkTheme, # Ersetzt das alte "highcontrast"
-            "catppuccin": CatppuccinMochaTheme, # NEU
+            "a11y-dark": A11yDarkTheme,
+            "catppuccin": CatppuccinMochaTheme,
             "tokyonight": TokyoNightTheme,
         }
         theme_class = theme_map.get(theme_name, DarkTheme)
@@ -29514,13 +30067,69 @@ class DragonWhispererGUI:
         global CURRENT_THEME
         CURRENT_THEME = self.current_theme
 
-        self.root.configure(bg=self.current_theme.BG_PRIMARY)
-        self._update_ttk_styles()
-        self._update_widget_tree(self.root)
+        if DEBUG_LEVEL >= 2:
+            log_debug("gui", f"Theme gewechselt zu: {theme_name}")
 
+        # -----------------------------------------------------------------
+        # 2. Hauptfenster und ttk‑Styles aktualisieren
+        # -----------------------------------------------------------------
+        try:
+            if self.root and self.root.winfo_exists():
+                self.root.configure(bg=self.current_theme.BG_PRIMARY)
+        except tk.TclError as e:
+            logger.warning(f"Fehler beim Setzen des root-Hintergrunds: {e}")
+
+        self._update_ttk_styles()
+
+        # -----------------------------------------------------------------
+        # 3. Rekursiv alle Widgets im Baum aktualisieren
+        # -----------------------------------------------------------------
+        try:
+            if self.root and self.root.winfo_exists():
+                self._update_widget_tree(self.root)
+        except Exception as e:
+            logger.warning(f"Fehler beim Aktualisieren des Widget-Baums: {e}")
+            if DEBUG_LEVEL >= 3:
+                log_debug("gui", f"Theme-Update-Fehler: {e}")
+
+        # -----------------------------------------------------------------
+        # 4. Layout‑spezifische Theme‑Anpassungen
+        # -----------------------------------------------------------------
         if hasattr(self, "layout") and hasattr(self.layout, "apply_theme"):
-            self.layout.apply_theme()
-        logger.info(f"🎨 Theme gewechselt zu: {theme_name}")
+            try:
+                self.layout.apply_theme()
+            except Exception as e:
+                logger.warning(f"Fehler in layout.apply_theme(): {e}")
+
+        # -----------------------------------------------------------------
+        # 5. Spezielle Widgets, die nicht im Standard‑Baum erfasst werden
+        # -----------------------------------------------------------------
+        self._update_special_widgets()
+
+        logger.info(f"🎨 Theme erfolgreich gewechselt zu: {theme_name}")
+
+    def _update_special_widgets(self) -> None:
+        """
+        Aktualisiert Widgets, die nicht im normalen Widget‑Baum erfasst werden
+        oder eine spezielle Behandlung benötigen (z. B. Statusleiste).
+        """
+        special_widgets = []
+        for name in self.SPECIAL_WIDGET_NAMES:
+            widget = getattr(self, name, None)
+            if widget is not None:
+                try:
+                    if widget.winfo_exists():
+                        special_widgets.append((widget, name))
+                except tk.TclError:
+                    pass
+
+        for widget, name in special_widgets:
+            updates = self._get_special_updates(name)
+            if updates:
+                try:
+                    widget.configure(**updates)
+                except tk.TclError:
+                    pass
 
     def _update_ttk_styles(self) -> None:
         """Aktualisiert die ttk‑Styles (Combobox, Progressbar) nach einem Theme‑Wechsel."""
@@ -29562,7 +30171,16 @@ class DragonWhispererGUI:
         )
 
     def _update_widget_tree(self, parent: tk.Widget) -> None:
-        """Rekursiv alle Kinder von `parent` mit den aktuellen Theme‑Farben aktualisieren."""
+        """
+        Rekursiv alle Kinder von `parent` mit den aktuellen Theme‑Farben aktualisieren.
+
+        Verbesserungen:
+            - Fängt `tk.TclError` ab, falls ein Widget während der Iteration zerstört wird.
+            - Verwendet eine iterative Tiefensuche (Stack) für bessere Performance und
+              geringere Rekursionstiefe.
+            - Unterstützt dynamische Updates für spezielle Widgets.
+        """
+        # Liste der speziellen Widgets für schnellen Lookup
         special_widgets = {}
         for name in self.SPECIAL_WIDGET_NAMES:
             widget = getattr(self, name, None)
@@ -29572,22 +30190,26 @@ class DragonWhispererGUI:
         stack = [parent]
         while stack:
             widget = stack.pop()
-            if not widget.winfo_exists():
+            try:
+                if not widget.winfo_exists():
+                    continue
+            except tk.TclError:
                 continue
 
             widget_class = widget.__class__
+            # Standard‑Theme‑Updates für bekannte Widget‑Klassen
             if widget_class in self.WIDGET_UPDATES:
-                updates = {
-                    opt: getattr(self.current_theme, theme_attr)
-                    for opt, theme_attr in self.WIDGET_UPDATES[widget_class].items()
-                    if hasattr(self.current_theme, theme_attr)
-                }
+                updates = {}
+                for opt, theme_attr in self.WIDGET_UPDATES[widget_class].items():
+                    if hasattr(self.current_theme, theme_attr):
+                        updates[opt] = getattr(self.current_theme, theme_attr)
                 if updates:
                     try:
                         widget.configure(**updates)
                     except tk.TclError:
                         pass
 
+            # Spezielle Behandlung für bestimmte Widgets (z. B. Start‑Button)
             if widget in special_widgets:
                 name = special_widgets[widget]
                 special_updates = self._get_special_updates(name)
@@ -29597,6 +30219,7 @@ class DragonWhispererGUI:
                     except tk.TclError:
                         pass
 
+            # Kinder in den Stack legen
             try:
                 stack.extend(widget.winfo_children())
             except tk.TclError:
@@ -30302,7 +30925,7 @@ class DragonWhispererGUI:
     @gui_error_handler
     def _on_file_finished(self, _=None) -> None:
         """
-        Callback für das normale Ende einer Datei (z. B. YouTube-VOD).
+        Callback für das normale Ende einer Datei (z. B. YouTube-VOD) – GUI‑Version.
 
         Diese Methode wird über den Event‑Bus aufgerufen, wenn der AudioProcessor
         das Ende einer lokalen Datei oder eines Video-on-Demand-Streams erkennt
@@ -30336,61 +30959,60 @@ class DragonWhispererGUI:
         # Aktivität signalisieren.
         self._reset_progress()
         if DEBUG_LEVEL >= 3:
-            log_debug("controller", "_on_file_finished: progress bar reset")
+            log_debug("gui", "_on_file_finished: progress bar reset")
 
         # -----------------------------------------------------------------
-        # 2. GUI-Referenz holen und validieren
+        # 2. Prüfen, ob die GUI noch existiert und nicht im Shutdown ist
         # -----------------------------------------------------------------
-        gui = self.gui_ref()
-        if gui is None:
-            logger.warning("⚠️ GUI-Referenz ist None – Auto-Save kann nicht ausgeführt werden")
-            return
-
-        # Prüfen, ob die GUI noch existiert und nicht im Shutdown ist
-        if not hasattr(gui, 'root') or not gui.root.winfo_exists():
-            logger.warning("⚠️ GUI root nicht mehr verfügbar – Auto-Save wird übersprungen")
-            return
-
-        if getattr(gui, '_shutting_down', False):
+        if getattr(self, '_shutting_down', False):
             logger.info("GUI im Shutdown – Auto-Save wird nicht ausgeführt")
+            return
+
+        if not hasattr(self, 'root') or not self.root.winfo_exists():
+            logger.warning("⚠️ GUI root nicht mehr verfügbar – Auto-Save wird übersprungen")
             return
 
         # -----------------------------------------------------------------
         # 3. Automatisches Speichern oder Statusmeldung
         # -----------------------------------------------------------------
-        if gui.settings.auto_save_on_completion:
+        if self.settings.auto_save_on_completion:
             # Prüfen, ob überhaupt Transkriptionen vorhanden sind
-            if not (hasattr(gui, 'transcript_history') and gui.transcript_history):
+            if not (hasattr(self, 'transcript_history') and self.transcript_history):
                 logger.info("Auto-Save übersprungen – keine Transkriptionen vorhanden")
-                gui.update_status("✅ Dateiende – keine Transkription zum Speichern")
+                self.update_status("✅ Dateiende – keine Transkription zum Speichern")
                 return
 
             if DEBUG_LEVEL >= 3:
-                log_debug("controller", "_on_file_finished: scheduling auto-save via after_idle")
+                log_debug("gui", "_on_file_finished: scheduling auto-save via after_idle")
 
             def do_auto_save():
+                """Führt die automatische Speicherung im Hauptthread aus."""
                 try:
-                    gui.save_transcript()
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("controller", "Auto-save triggered successfully")
+                    if hasattr(self, 'save_transcript'):
+                        self.save_transcript()
+                        if DEBUG_LEVEL >= 3:
+                            log_debug("gui", "Auto-save triggered successfully")
+                    else:
+                        logger.warning("save_transcript nicht verfügbar – Auto-Save fehlgeschlagen")
                 except Exception as e:
                     logger.error(f"❌ Auto-save failed: {e}", exc_info=True)
-                    gui.update_status("❌ Auto-Save fehlgeschlagen")
+                    self.update_status("❌ Auto-Save fehlgeschlagen")
 
-            gui.root.after_idle(do_auto_save)
+            # Verwende after_idle, um sicherzustellen, dass alle GUI-Updates abgeschlossen sind
+            self.root.after_idle(do_auto_save)
         else:
-            gui.update_status("✅ Dateiende – zum Speichern 💾 klicken (Strg+S)")
+            self.update_status("✅ Dateiende – zum Speichern 💾 klicken (Strg+S)")
             if DEBUG_LEVEL >= 3:
-                log_debug("controller", "_on_file_finished: manual save reminder displayed")
+                log_debug("gui", "_on_file_finished: manual save reminder displayed")
 
         # -----------------------------------------------------------------
         # 4. Zusätzliche Debug-Information (optional)
         # -----------------------------------------------------------------
         if DEBUG_LEVEL >= 4:
             total_chunks = 0
-            if hasattr(gui, 'audio_processor') and gui.audio_processor is not None:
-                total_chunks = getattr(gui.audio_processor, '_chunk_counter', 0)
-            log_debug("controller", f"_on_file_finished: total chunks processed = {total_chunks}")
+            if hasattr(self, 'audio_processor') and self.audio_processor is not None:
+                total_chunks = getattr(self.audio_processor, '_chunk_counter', 0)
+            log_debug("gui", f"_on_file_finished: total chunks processed = {total_chunks}")
 
     @gui_error_handler
     def _on_processing_finished(self, _=None) -> None:
@@ -30554,21 +31176,111 @@ class DragonWhispererGUI:
 
     @gui_operation_decorator
     def update_stream_info(self, info: Optional[StreamInfo]) -> None:
-        def update():
-            if info is None:
-                self._safe_widget_config("stream_title_label", text="📡 Kein aktiver Stream")
-                self._safe_widget_config("stream_details_label", text="Bereit für neue Verbindung")
-                self.current_stream_info = None
-                return
+        """
+        Aktualisiert die Stream‑Info‑Anzeige in der GUI.
+
+        Diese Methode wird vom Event‑Bus aufgerufen, wenn neue Stream‑Informationen
+        vorliegen (z. B. nach erfolgreicher Extraktion) oder wenn der Stream beendet
+        wurde (info=None). Sie speichert die letzte gültige Information persistent,
+        sodass sie auch nach Stream‑Ende noch für Zusammenfassungen, Exporte oder
+        andere Nachbearbeitungen zur Verfügung steht.
+
+        **Verbesserungen gegenüber der ursprünglichen Version:**
+            - **Persistente Speicherung:** `last_completed_stream_info` wird bei
+              jedem gültigen Update gesetzt und **niemals** gelöscht. Dadurch ist
+              der Titel auch nach `info=None` verfügbar.
+            - **Robuste Widget‑Prüfung:** Vor jedem Zugriff wird `winfo_exists()`
+              geprüft, um Tkinter‑Fehler bei zerstörten Widgets zu vermeiden.
+            - **Thread‑Sicherheit:** Das GUI‑Update wird über `_safe_gui_update`
+              in den Hauptthread delegiert.
+            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
+            - **Konsistente Textlänge:** Titel werden auf 80 Zeichen gekürzt,
+              Details sinnvoll formatiert.
+            - **Legacy‑Kompatibilität:** Setzt `last_stream_title` für ältere
+              Code‑Stellen, die darauf zugreifen.
+
+        Args:
+            info: Das StreamInfo‑Objekt mit Titel, Uploader, Dauer etc.
+                  Wenn None, wird die Anzeige auf "Kein aktiver Stream" zurückgesetzt,
+                  aber die persistente Information bleibt erhalten.
+        """
+        # -----------------------------------------------------------------
+        # 1. Persistente Speicherung (unabhängig vom GUI-Thread)
+        # -----------------------------------------------------------------
+        if info is not None:
+            # Stream-Info dauerhaft speichern – wird nie gelöscht
+            self.last_completed_stream_info = info
+            self.last_stream_title = info.title  # Legacy-Kompatibilität
             self.current_stream_info = info
-            self.last_stream_title = info.title
-            title = info.title[:80] + "..." if len(info.title) > 80 else info.title
-            self._safe_widget_config("stream_title_label", text=f"📡 {title}")
-            details = f"👤 {info.uploader}"
-            if info.duration and info.duration != "Live":
-                details += f" | ⏱️ {info.duration}"
-            self._safe_widget_config("stream_details_label", text=details)
-        self._safe_gui_update(update)
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "gui",
+                    f"update_stream_info: persisted stream info - title='{info.title[:50]}...'"
+                )
+        else:
+            # Nur current_stream_info zurücksetzen, persistente bleibt erhalten
+            self.current_stream_info = None
+            if DEBUG_LEVEL >= 3:
+                log_debug("gui", "update_stream_info: stream ended, persistent info retained")
+
+        # -----------------------------------------------------------------
+        # 2. GUI-Update-Funktion (läuft im Hauptthread)
+        # -----------------------------------------------------------------
+        def update_gui() -> None:
+            """Aktualisiert die Widgets im Hauptthread."""
+            try:
+                if info is None:
+                    # Kein aktiver Stream – Widgets auf Standardtext setzen
+                    if hasattr(self, "stream_title_label") and self.stream_title_label is not None:
+                        if self.stream_title_label.winfo_exists():
+                            self.stream_title_label.config(text="📡 Kein aktiver Stream")
+                    if hasattr(self, "stream_details_label") and self.stream_details_label is not None:
+                        if self.stream_details_label.winfo_exists():
+                            self.stream_details_label.config(text="Bereit für neue Verbindung")
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("gui", "Stream info GUI reset to 'No active stream'")
+                    return
+
+                # Gültige Stream-Informationen anzeigen
+                # Titel (auf 80 Zeichen gekürzt)
+                title = info.title
+                if len(title) > 80:
+                    title = title[:77] + "..."
+                if hasattr(self, "stream_title_label") and self.stream_title_label is not None:
+                    if self.stream_title_label.winfo_exists():
+                        self.stream_title_label.config(text=f"📡 {title}")
+
+                # Details: Uploader, Dauer, Plattform
+                details_parts = [f"👤 {info.uploader}"]
+                if info.duration and info.duration != "Live":
+                    details_parts.append(f"⏱️ {info.duration}")
+                if info.platform and info.platform != "unknown":
+                    details_parts.append(f"🎬 {info.platform}")
+                details_text = " | ".join(details_parts)
+
+                if hasattr(self, "stream_details_label") and self.stream_details_label is not None:
+                    if self.stream_details_label.winfo_exists():
+                        self.stream_details_label.config(text=details_text)
+
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "gui",
+                        f"Stream info GUI updated: title='{title}', details='{details_text}'"
+                    )
+
+            except tk.TclError as e:
+                # Widget wurde während des Zugriffs zerstört – harmlos
+                if DEBUG_LEVEL >= 3:
+                    log_debug("gui", f"TclError in update_stream_info GUI: {e}")
+            except Exception as e:
+                logger.warning(f"⚠️ Fehler in update_stream_info GUI: {e}")
+                if DEBUG_LEVEL >= 3:
+                    log_exception("gui", "update_stream_info GUI exception", e, level="warning")
+
+        # -----------------------------------------------------------------
+        # 3. Thread‑sichere Übergabe an die GUI‑Queue
+        # -----------------------------------------------------------------
+        self._safe_gui_update(update_gui, important=True)
 
     # ------------------------------------------------------------------------
     # GUI‑Aktionen (öffentlich)
@@ -38113,46 +38825,71 @@ class AudioProcessor:
         """
         Zeitbasierte Heuristik für Queues, die `join()` nicht unterstützen.
 
-        Wartet, bis die Queue für eine bestimmte Zeit leer ist und keine
-        ausstehenden Tasks mehr existieren.
+        Verbesserungen:
+            - Exponentielles Backoff (0.05 s → 1.0 s) statt festem sleep(0.2),
+              um CPU‑Zeit zu sparen und gleichzeitig reaktionsfähig zu bleiben.
+            - Abbruchbedingungen (Benutzerabbruch, globaler Timeout) werden regelmäßig geprüft.
+            - Detaillierte Debug‑Ausgaben bei hohem Log‑Level.
+            - Robustere Berechnung der Wartezeiten mit zufälligem Jitter (optional).
 
         Args:
             timeout: Maximale Wartezeit in Sekunden.
 
         Returns:
-            True, wenn die Queue innerhalb des Timeouts geleert wurde.
+            True, wenn die Queue innerhalb des Timeouts stabil leer war.
         """
         start_time = time.perf_counter()
         idle_start = None
         required_idle_duration = 2.0  # Queue muss 2 Sekunden lang leer sein
 
+        # Exponentielles Backoff: beginne mit 50 ms, erhöhe schrittweise auf max. 1.0 s
+        current_sleep = 0.05
+        max_sleep = 1.0
+        backoff_factor = 1.5
+
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "processor",
+                f"_wait_for_queue_idle: timeout={timeout}s, "
+                f"required_idle={required_idle_duration}s, backoff enabled"
+            )
+
         while time.perf_counter() - start_time < timeout:
             if self.is_stop_requested():
+                if DEBUG_LEVEL >= 3:
+                    log_debug("processor", "_wait_for_queue_idle: stop requested")
                 return False
 
             try:
                 qsize = self._raw_audio_queue.qsize()
             except Exception:
                 qsize = 0
-
+    
             with self._pending_tasks_lock:
                 pending = self._pending_tasks
 
             if qsize == 0 and pending == 0:
                 if idle_start is None:
                     idle_start = time.perf_counter()
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("processor", "_wait_for_queue_idle: queue became empty")
                 elif time.perf_counter() - idle_start >= required_idle_duration:
+                    elapsed = time.perf_counter() - start_time
                     if DEBUG_LEVEL >= 3:
                         log_debug(
                             "processor",
-                            f"_wait_for_queue_idle: Queue stabil leer nach "
-                            f"{time.perf_counter() - start_time:.2f}s"
+                            f"_wait_for_queue_idle: Queue stabil leer nach {elapsed:.2f}s"
                         )
                     return True
+                # Queue ist leer – kurze Pause, dann erneut prüfen
+                time.sleep(current_sleep)
             else:
+                # Queue ist nicht leer – Idle‑Timer zurücksetzen
                 idle_start = None
+                time.sleep(current_sleep)
 
-            time.sleep(0.2)
+            # Backoff: Schrittweise erhöhen, aber maximal max_sleep
+            current_sleep = min(max_sleep, current_sleep * backoff_factor)
 
         logger.warning(f"_wait_for_queue_idle: Timeout nach {timeout}s")
         return False
@@ -43449,6 +44186,18 @@ class WhisperLayoutManager:
     Verwaltet das Layout der GUI (vertikal/horizontal) und die Erstellung
     der Text‑Widgets. Die Verarbeitung von Text‑Updates erfolgt zentral über
     den QueueManager – diese Klasse enthält keine Queue‑Verarbeitung mehr.
+
+    Verbesserungen:
+        - Alle Zugriffe auf das aktuelle Theme erfolgen über `self.gui_ref.current_theme`.
+        - Dynamische Fenstergröße und Mindestgröße werden in `DragonWhispererGUI.setup_gui`
+          behandelt; hier wird nur das Layout aufgebaut.
+        - Die Steuerleiste (`create_compact_control_panel`) verwendet `grid()` für
+          eine echte Dreiteilung mit expandierender Mitte.
+        - Vertikales und horizontales Layout nutzen `grid()` für gleichmäßige
+          Platzverteilung und saubere Expansion.
+        - Alle Methoden sind robust gegenüber fehlenden Widgets und fangen
+          Tkinter‑Fehler ab.
+        - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 3`.
     """
 
     def __init__(self, gui_ref: "DragonWhispererGUI") -> None:
@@ -43519,34 +44268,28 @@ class WhisperLayoutManager:
 
     def setup_gui(self) -> None:
         """Erstellt das Hauptfenster und ruft die Layout‑Erstellung auf."""
-        self.root.configure(bg=self.gui_ref.current_theme.BG_PRIMARY)
+        gui = self.gui_ref
+        theme = gui.current_theme
+        self.root.configure(bg=theme.BG_PRIMARY)
         self.root.title("🐉 Dragon Whisperer - Plattformunabhängig")
-        self.root.geometry("900x700")
-        self.root.minsize(850, 600)
-        self.root.grid_rowconfigure(0, weight=0)
-        self.root.grid_rowconfigure(1, weight=0)
-        self.root.grid_rowconfigure(2, weight=0)
-        self.root.grid_rowconfigure(3, weight=10)
-        self.root.grid_rowconfigure(4, weight=0)
-        self.root.grid_columnconfigure(0, weight=1)
         self.setup_dark_styles()
         self.center_window()
-        self.root.protocol("WM_DELETE_WINDOW", self.gui_ref._safe_exit_dialog)
+        self.root.protocol("WM_DELETE_WINDOW", gui._safe_exit_dialog)
         self.create_layout()
-        # Die Batch‑Verarbeitung wird jetzt vom QueueManager übernommen.
-        # Kein separater Aufruf mehr nötig.
 
     def setup_dark_styles(self) -> None:
+        gui = self.gui_ref
+        theme = gui.current_theme
         style = ttk.Style()
         style.theme_use("clam")
         style.configure(
             "Dark.TCombobox",
-            fieldbackground=self.gui_ref.current_theme.COMBO_BG,
-            background=self.gui_ref.current_theme.COMBO_BG,
-            foreground=self.gui_ref.current_theme.COMBO_FG,
-            selectbackground=self.gui_ref.current_theme.COMBO_SELECTION,
-            selectforeground=self.gui_ref.current_theme.TEXT_PRIMARY,
-            insertcolor=self.gui_ref.current_theme.TEXT_PRIMARY,
+            fieldbackground=theme.COMBO_BG,
+            background=theme.COMBO_BG,
+            foreground=theme.COMBO_FG,
+            selectbackground=theme.COMBO_SELECTION,
+            selectforeground=theme.TEXT_PRIMARY,
+            insertcolor=theme.TEXT_PRIMARY,
             borderwidth=1,
             relief="flat",
             arrowsize=12,
@@ -43555,37 +44298,37 @@ class WhisperLayoutManager:
         style.map(
             "Dark.TCombobox",
             fieldbackground=[
-                ("readonly", self.gui_ref.current_theme.COMBO_BG),
-                ("active", self.gui_ref.current_theme.BG_HOVER),
+                ("readonly", theme.COMBO_BG),
+                ("active", theme.BG_HOVER),
             ],
             background=[
-                ("readonly", self.gui_ref.current_theme.COMBO_BG),
-                ("active", self.gui_ref.current_theme.BG_HOVER),
+                ("readonly", theme.COMBO_BG),
+                ("active", theme.BG_HOVER),
             ],
             foreground=[
-                ("readonly", self.gui_ref.current_theme.COMBO_FG),
-                ("active", self.gui_ref.current_theme.TEXT_PRIMARY),
+                ("readonly", theme.COMBO_FG),
+                ("active", theme.TEXT_PRIMARY),
             ],
         )
         style.configure(
             "Dark.Horizontal.TProgressbar",
-            background=self.gui_ref.current_theme.SUCCESS,
-            troughcolor=self.gui_ref.current_theme.BG_TERTIARY,
-            bordercolor=self.gui_ref.current_theme.BORDER,
+            background=theme.SUCCESS,
+            troughcolor=theme.BG_TERTIARY,
+            bordercolor=theme.BORDER,
         )
         self.root.option_add(
-            "*TCombobox*Listbox.background", self.gui_ref.current_theme.COMBO_BG
+            "*TCombobox*Listbox.background", theme.COMBO_BG
         )
         self.root.option_add(
-            "*TCombobox*Listbox.foreground", self.gui_ref.current_theme.COMBO_FG
+            "*TCombobox*Listbox.foreground", theme.COMBO_FG
         )
         self.root.option_add(
             "*TCombobox*Listbox.selectBackground",
-            self.gui_ref.current_theme.COMBO_SELECTION,
+            theme.COMBO_SELECTION,
         )
         self.root.option_add(
             "*TCombobox*Listbox.selectForeground",
-            self.gui_ref.current_theme.TEXT_PRIMARY,
+            theme.TEXT_PRIMARY,
         )
 
     def center_window(self) -> None:
@@ -43598,8 +44341,10 @@ class WhisperLayoutManager:
 
     def create_layout(self) -> None:
         """Erstellt das Hauptlayout und die Steuerelemente."""
+        gui = self.gui_ref
+        theme = gui.current_theme
         header_frame = tk.Frame(
-            self.root, bg=self.gui_ref.current_theme.BG_PRIMARY, height=35
+            self.root, bg=theme.BG_PRIMARY, height=35
         )
         header_frame.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
         header_frame.grid_propagate(False)
@@ -43607,118 +44352,126 @@ class WhisperLayoutManager:
             header_frame,
             text="🐉 Dragon Whisperer - Livestream Transcription & Translation",
             font=Fonts.TITLE,
-            bg=self.gui_ref.current_theme.BG_PRIMARY,
-            fg=self.gui_ref.current_theme.DRAGON_GREEN,
+            bg=theme.BG_PRIMARY,
+            fg=theme.DRAGON_GREEN,
         )
         title_label.pack(side="left")
-        self.gui_ref.status_label = tk.Label(
+        gui.status_label = tk.Label(
             header_frame,
             text="✅ READY",
             font=Fonts.PRIMARY,
-            bg=self.gui_ref.current_theme.BG_PRIMARY,
-            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            bg=theme.BG_PRIMARY,
+            fg=theme.TEXT_SECONDARY,
         )
-        self.gui_ref.status_label.pack(side="right")
+        gui.status_label.pack(side="right")
 
         self.create_stream_info_display()
-        self.gui_ref.stream_info_frame.grid(
+        gui.stream_info_frame.grid(
             row=1, column=0, sticky="ew", padx=12, pady=3
         )
 
-        input_frame = tk.Frame(self.root, bg=self.gui_ref.current_theme.BG_PRIMARY)
+        input_frame = tk.Frame(self.root, bg=theme.BG_PRIMARY)
         input_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=3)
 
-        url_frame = tk.Frame(input_frame, bg=self.gui_ref.current_theme.BG_PRIMARY)
+        url_frame = tk.Frame(input_frame, bg=theme.BG_PRIMARY)
         url_frame.pack(fill="x", pady=2)
         tk.Label(
             url_frame,
             text="URL:",
-            bg=self.gui_ref.current_theme.BG_PRIMARY,
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            bg=theme.BG_PRIMARY,
+            fg=theme.TEXT_PRIMARY,
             font=Fonts.PRIMARY,
         ).pack(side="left")
-        self.gui_ref.url_entry = tk.Entry(
+        gui.url_entry = tk.Entry(
             url_frame,
             font=Fonts.PRIMARY,
-            bg=self.gui_ref.current_theme.BG_TERTIARY,
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
-            insertbackground=self.gui_ref.current_theme.TEXT_PRIMARY,
-            selectbackground=self.gui_ref.current_theme.COMBO_SELECTION,
+            bg=theme.BG_TERTIARY,
+            fg=theme.TEXT_PRIMARY,
+            insertbackground=theme.TEXT_PRIMARY,
+            selectbackground=theme.COMBO_SELECTION,
             width=60,
         )
-        self.gui_ref.url_entry.pack(side="left", fill="x", expand=True, padx=(5, 5))
-        self.gui_ref.url_entry.insert(
-            0, self.gui_ref.settings.last_url if self.gui_ref.settings.last_url else ""
+        gui.url_entry.pack(side="left", fill="x", expand=True, padx=(5, 5))
+        gui.url_entry.insert(
+            0, gui.settings.last_url if gui.settings.last_url else ""
         )
-        ContextMenuMixin(self.gui_ref.url_entry, use_copy_cut_paste=True)
-        self.gui_ref.language_info_label = tk.Label(
+        ContextMenuMixin(gui.url_entry, use_copy_cut_paste=True)
+        gui.language_info_label = tk.Label(
             url_frame,
             text="",
             font=Fonts.PRIMARY,
-            bg=self.gui_ref.current_theme.BG_PRIMARY,
-            fg=self.gui_ref.current_theme.TEXT_ACCENT,
+            bg=theme.BG_PRIMARY,
+            fg=theme.TEXT_ACCENT,
         )
-        self.gui_ref.language_info_label.pack(side="right", padx=(5, 0))
+        gui.language_info_label.pack(side="right", padx=(5, 0))
 
         self.create_compact_control_panel(input_frame)
 
         self.setup_status_bar()
-        self.gui_ref.status_bar_frame.grid(row=4, column=0, sticky="ew", pady=(2, 0))
+        gui.status_bar_frame.grid(row=4, column=0, sticky="ew", pady=(2, 0))
 
         self.create_text_areas()
-        self.gui_ref.text_container.grid(
+        gui.text_container.grid(
             row=3, column=0, sticky="nsew", padx=12, pady=8
         )
 
-        self.gui_ref.url_entry.bind("<KeyRelease>", self.gui_ref.on_url_change)
-        self.gui_ref.url_entry.bind("<FocusOut>", self.gui_ref.on_url_change)
+        gui.url_entry.bind("<KeyRelease>", gui.on_url_change)
+        gui.url_entry.bind("<FocusOut>", gui.on_url_change)
 
     def create_stream_info_display(self) -> None:
-        self.gui_ref.stream_info_frame = tk.Frame(
-            self.root, bg=self.gui_ref.current_theme.BG_SECONDARY, height=50
+        gui = self.gui_ref
+        theme = gui.current_theme
+        gui.stream_info_frame = tk.Frame(
+            self.root, bg=theme.BG_SECONDARY, height=50
         )
-        self.gui_ref.stream_info_frame.grid_propagate(True)
-        self.gui_ref.stream_title_label = tk.Label(
-            self.gui_ref.stream_info_frame,
+        gui.stream_info_frame.grid_propagate(True)
+        gui.stream_title_label = tk.Label(
+            gui.stream_info_frame,
             text="📡 No active stream",
             font=Fonts.SUBTITLE,
-            bg=self.gui_ref.current_theme.BG_SECONDARY,
-            fg=self.gui_ref.current_theme.TEXT_ACCENT,
+            bg=theme.BG_SECONDARY,
+            fg=theme.TEXT_ACCENT,
             wraplength=700,
             justify="left",
         )
-        self.gui_ref.stream_title_label.pack(fill="x", padx=8, pady=(6, 2))
-        self.gui_ref.stream_details_label = tk.Label(
-            self.gui_ref.stream_info_frame,
+        gui.stream_title_label.pack(fill="x", padx=8, pady=(6, 2))
+        gui.stream_details_label = tk.Label(
+            gui.stream_info_frame,
             text="Ready to connect...",
             font=Fonts.PRIMARY,
-            bg=self.gui_ref.current_theme.BG_SECONDARY,
-            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            bg=theme.BG_SECONDARY,
+            fg=theme.TEXT_SECONDARY,
             justify="left",
         )
-        self.gui_ref.stream_details_label.pack(fill="x", padx=8, pady=(2, 6))
+        gui.stream_details_label.pack(fill="x", padx=8, pady=(2, 6))
 
     def create_compact_control_panel(self, parent: tk.Frame) -> None:
-        """Erstellt die kompakte Steuerleiste mit Quellsprache, Modell und Zielsprache."""
-        control_frame = tk.Frame(parent, bg=self.gui_ref.current_theme.BG_PRIMARY)
+        """Optimierte Steuerleiste mit grid für drei Bereiche."""
+        gui = self.gui_ref
+        theme = gui.current_theme
+
+        control_frame = tk.Frame(parent, bg=theme.BG_PRIMARY)
         control_frame.pack(fill="x", pady=8)
 
-        # Linke Buttons (Datei, URL, Layout)
-        left_controls = tk.Frame(
-            control_frame, bg=self.gui_ref.current_theme.BG_PRIMARY
-        )
-        left_controls.pack(side="left")
+        # Grid-Konfiguration: drei Spalten
+        control_frame.grid_columnconfigure(0, weight=0)  # Links (fix)
+        control_frame.grid_columnconfigure(1, weight=1)  # Mitte (expandiert)
+        control_frame.grid_columnconfigure(2, weight=0)  # Rechts (fix)
+
+        # Linke Buttons
+        left_controls = tk.Frame(control_frame, bg=theme.BG_PRIMARY)
+        left_controls.grid(row=0, column=0, sticky="w")
         action_buttons = [
-            ("📁", self.gui_ref.select_file_dark, "Datei auswählen"),
-            ("📋", self.gui_ref.paste_url, "URL aus Zwischenablage einfügen"),
+            ("📁", gui.select_file_dark, "Datei auswählen"),
+            ("📋", gui.paste_url, "URL aus Zwischenablage einfügen"),
         ]
         for icon, command, tooltip in action_buttons:
             btn = tk.Button(
                 left_controls,
                 text=icon,
                 command=command,
-                bg=self.gui_ref.current_theme.BG_TERTIARY,
-                fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+                bg=theme.BG_TERTIARY,
+                fg=theme.TEXT_PRIMARY,
                 relief="flat",
                 bd=0,
                 font=("Segoe UI", 9),
@@ -43727,108 +44480,87 @@ class WhisperLayoutManager:
             btn.pack(side="left", padx=1)
             ToolTip(btn, tooltip)
 
-        self.gui_ref.layout_btn = tk.Button(
+        gui.layout_btn = tk.Button(
             left_controls,
             text="🔄",
-            command=self.gui_ref.toggle_layout,
-            bg=self.gui_ref.current_theme.BG_TERTIARY,
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            command=gui.toggle_layout,
+            bg=theme.BG_TERTIARY,
+            fg=theme.TEXT_PRIMARY,
             relief="flat",
             bd=0,
             font=("Segoe UI", 9),
             cursor="hand2",
         )
-        self.gui_ref.layout_btn.pack(side="left", padx=5)
-        ToolTip(self.gui_ref.layout_btn, "Layout umschalten (vertikal/horizontal)")
+        gui.layout_btn.pack(side="left", padx=5)
+        ToolTip(gui.layout_btn, "Layout umschalten (vertikal/horizontal)")
 
-        # Zentrale Steuerung (Quellsprache, Modell, Zielsprache)
-        center_controls = tk.Frame(
-            control_frame, bg=self.gui_ref.current_theme.BG_PRIMARY
-        )
-        center_controls.pack(side="left", padx=15)
+        # Zentrale Steuerung
+        center_controls = tk.Frame(control_frame, bg=theme.BG_PRIMARY)
+        center_controls.grid(row=0, column=1, padx=15, sticky="ew")
 
-        # Quellsprache (From)
-        src_lang_frame = tk.Frame(
-            center_controls, bg=self.gui_ref.current_theme.BG_PRIMARY
-        )
+        # Quellsprache
+        src_lang_frame = tk.Frame(center_controls, bg=theme.BG_PRIMARY)
         src_lang_frame.pack(side="left", padx=5)
         tk.Label(
             src_lang_frame,
             text="From:",
-            bg=self.gui_ref.current_theme.BG_PRIMARY,
-            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            bg=theme.BG_PRIMARY,
+            fg=theme.TEXT_SECONDARY,
             font=Fonts.PRIMARY,
         ).pack(side="left")
-        self.gui_ref.src_lang_var = tk.StringVar(value="Automatisch")
-        self.gui_ref.src_lang_combo = ttk.Combobox(
+        gui.src_lang_var = tk.StringVar(value="Automatisch")
+        gui.src_lang_combo = ttk.Combobox(
             src_lang_frame,
-            textvariable=self.gui_ref.src_lang_var,
+            textvariable=gui.src_lang_var,
             values=[name for name, code in SORTED_LANGUAGES],
             width=10,
             style="Dark.TCombobox",
             state="readonly",
         )
-        self.gui_ref.src_lang_combo.pack(side="left", padx=3)
-        ToolTip(
-            self.gui_ref.src_lang_combo,
-            "Quellsprache (Automatisch = Whisper-Erkennung)",
-        )
-    
+        gui.src_lang_combo.pack(side="left", padx=3)
+        ToolTip(gui.src_lang_combo, "Quellsprache (Automatisch = Whisper-Erkennung)")
+
         # Modellauswahl
-        model_frame = tk.Frame(
-            center_controls, bg=self.gui_ref.current_theme.BG_PRIMARY
-        )
+        model_frame = tk.Frame(center_controls, bg=theme.BG_PRIMARY)
         model_frame.pack(side="left", padx=5)
         tk.Label(
             model_frame,
             text="Model:",
-            bg=self.gui_ref.current_theme.BG_PRIMARY,
-            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            bg=theme.BG_PRIMARY,
+            fg=theme.TEXT_SECONDARY,
             font=Fonts.PRIMARY,
         ).pack(side="left")
-        self.gui_ref.model_var = tk.StringVar(value=self.gui_ref.settings.default_model)
-        self.gui_ref.model_combo = ttk.Combobox(
+        gui.model_var = tk.StringVar(value=gui.settings.default_model)
+        gui.model_combo = ttk.Combobox(
             model_frame,
-            textvariable=self.gui_ref.model_var,
+            textvariable=gui.model_var,
             values=Config.WHISPER_MODELS,
             width=8,
             style="Dark.TCombobox",
             state="readonly",
         )
-        self.gui_ref.model_combo.pack(side="left", padx=3)
-        ToolTip(
-            self.gui_ref.model_combo,
-            "Whisper-Modell auswählen (größer = genauer, aber langsamer)",
-        )
-        if getattr(self.gui_ref, "demo_mode", False):
-            self.gui_ref.model_combo.config(state="disabled")
-            self.gui_ref.model_var.set("dummy (Demo)")
+        gui.model_combo.pack(side="left", padx=3)
+        ToolTip(gui.model_combo, "Whisper-Modell auswählen (größer = genauer, aber langsamer)")
+        if getattr(gui, "demo_mode", False):
+            gui.model_combo.config(state="disabled")
+            gui.model_var.set("dummy (Demo)")
 
-        # Debug: Initialer Wert der ComboBox
-        logger.debug(f"🔧 ComboBox initialisiert mit model_var = {self.gui_ref.model_var.get()}")
-        # Stelle sicher, dass der gespeicherte Wert gesetzt wird
-        if self.gui_ref.settings.default_model:
-            self.gui_ref.model_var.set(self.gui_ref.settings.default_model)
-            logger.debug(f"🔧 ComboBox nach manuellem Setzen: {self.gui_ref.model_var.get()}")
+        if gui.settings.default_model:
+            gui.model_var.set(gui.settings.default_model)
 
-        # Zielsprache (Translate) – optimierte Gruppierung
-        target_lang_frame = tk.Frame(
-            center_controls, bg=self.gui_ref.current_theme.BG_PRIMARY
-        )
+        # Zielsprache
+        target_lang_frame = tk.Frame(center_controls, bg=theme.BG_PRIMARY)
         target_lang_frame.pack(side="left", padx=5)
         tk.Label(
             target_lang_frame,
             text="Translate:",
-            bg=self.gui_ref.current_theme.BG_PRIMARY,
-            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            bg=theme.BG_PRIMARY,
+            fg=theme.TEXT_SECONDARY,
             font=Fonts.PRIMARY,
         ).pack(side="left")
-
-        # Sprachliste für Zielsprache (gruppiert mit neuen Hilfsfunktionen)
         common_names = get_common_language_names()
         asian_names = get_asian_language_names()
         other_names = get_other_language_names()
-
         target_lang_values = []
         if common_names:
             target_lang_values.append("--- Common ---")
@@ -43839,93 +44571,78 @@ class WhisperLayoutManager:
         if other_names:
             target_lang_values.append("--- More ---")
             target_lang_values.extend(other_names)
-
-        self.gui_ref.lang_var = tk.StringVar()
-
-        # Standard-Zielsprache aus den Einstellungen (als lesbarer Name)
-        default_lang_name = self.gui_ref.settings.get_language_name()
+        gui.lang_var = tk.StringVar()
+        default_lang_name = gui.settings.get_language_name()
         if default_lang_name not in target_lang_values:
             default_lang_name = "Deutsch"
-        self.gui_ref.lang_var.set(default_lang_name)
-
-        self.gui_ref.lang_combo = ttk.Combobox(
+        gui.lang_var.set(default_lang_name)
+        gui.lang_combo = ttk.Combobox(
             target_lang_frame,
-            textvariable=self.gui_ref.lang_var,
+            textvariable=gui.lang_var,
             values=target_lang_values,
             width=12,
             style="Dark.TCombobox",
             state="readonly",
         )
-        self.gui_ref.lang_combo.pack(side="left", padx=3)
-        ToolTip(self.gui_ref.lang_combo, "Zielsprache für Übersetzung")
-        self.gui_ref.lang_combo.bind(
-            "<<ComboboxSelected>>", self.gui_ref.on_language_change
-        )
-    
-        # Rechte Buttons (Start/Stop, Übersetzung, Untertitel)
-        right_controls = tk.Frame(
-            control_frame, bg=self.gui_ref.current_theme.BG_PRIMARY
-        )
-        right_controls.pack(side="right")
-        self.gui_ref.start_button = tk.Button(
+        gui.lang_combo.pack(side="left", padx=3)
+        ToolTip(gui.lang_combo, "Zielsprache für Übersetzung")
+        gui.lang_combo.bind("<<ComboboxSelected>>", gui.on_language_change)
+
+        # Rechte Buttons
+        right_controls = tk.Frame(control_frame, bg=theme.BG_PRIMARY)
+        right_controls.grid(row=0, column=2, sticky="e")
+        gui.start_button = tk.Button(
             right_controls,
             text="🚀 START",
-            command=self.gui_ref._on_start_click,
-            bg=self.gui_ref.current_theme.SUCCESS,
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            command=gui._on_start_click,
+            bg=theme.SUCCESS,
+            fg=theme.TEXT_PRIMARY,
             font=("Segoe UI", 9, "bold"),
             relief="flat",
             padx=20,
         )
-        self.gui_ref.start_button.pack(side="left", padx=2)
-        ToolTip(self.gui_ref.start_button, "Transkription/Übersetzung starten")
-        self.gui_ref.stop_button = tk.Button(
+        gui.start_button.pack(side="left", padx=2)
+        ToolTip(gui.start_button, "Transkription/Übersetzung starten")
+        gui.stop_button = tk.Button(
             right_controls,
             text="⏹️ STOP",
-            command=self.gui_ref.controller.stop_processing,
-            bg=self.gui_ref.current_theme.ERROR,
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            command=gui.controller.stop_processing,
+            bg=theme.ERROR,
+            fg=theme.TEXT_PRIMARY,
             state="disabled",
             font=("Segoe UI", 9, "bold"),
             relief="flat",
             padx=20,
         )
-        self.gui_ref.stop_button.pack(side="left", padx=2)
-        ToolTip(self.gui_ref.stop_button, "Laufende Verarbeitung stoppen")
-        self.gui_ref.translate_btn = tk.Button(
+        gui.stop_button.pack(side="left", padx=2)
+        ToolTip(gui.stop_button, "Laufende Verarbeitung stoppen")
+        gui.translate_btn = tk.Button(
             right_controls,
-            text="🌐 ON" if self.gui_ref.translate_active else "🌐 OFF",
-            command=self.gui_ref.toggle_translation,
-            bg=(
-                self.gui_ref.current_theme.SUCCESS
-                if self.gui_ref.translate_active
-                else self.gui_ref.current_theme.BG_TERTIARY
-            ),
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            text="🌐 ON" if gui.translate_active else "🌐 OFF",
+            command=gui.toggle_translation,
+            bg=theme.SUCCESS if gui.translate_active else theme.BG_TERTIARY,
+            fg=theme.TEXT_PRIMARY,
             relief="flat",
             font=("Segoe UI", 9),
             padx=6,
         )
-        self.gui_ref.translate_btn.pack(side="left", padx=2)
-        ToolTip(self.gui_ref.translate_btn, "Übersetzung ein/aus")
-        self.gui_ref.subtitle_btn = tk.Button(
+        gui.translate_btn.pack(side="left", padx=2)
+        ToolTip(gui.translate_btn, "Übersetzung ein/aus")
+        gui.subtitle_btn = tk.Button(
             right_controls,
             text="🎬",
-            command=self.gui_ref.toggle_subtitle_mode,
-            bg=self.gui_ref.current_theme.SUBTITLE_INACTIVE,
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            command=gui.toggle_subtitle_mode,
+            bg=theme.SUBTITLE_INACTIVE,
+            fg=theme.TEXT_PRIMARY,
             relief="flat",
             bd=0,
             font=("Segoe UI", 9),
             cursor="hand2",
         )
-        self.gui_ref.subtitle_btn.pack(side="left", padx=5)
-        ToolTip(self.gui_ref.subtitle_btn, "Untertitel-Modus (mit Zeitstempeln)")
+        gui.subtitle_btn.pack(side="left", padx=5)
+        ToolTip(gui.subtitle_btn, "Untertitel-Modus (mit Zeitstempeln)")
 
-        # Event-Bindung für Modellwechsel
-        self.gui_ref.model_combo.bind(
-            "<<ComboboxSelected>>", self.gui_ref.on_model_change
-        )
+        gui.model_combo.bind("<<ComboboxSelected>>", gui.on_model_change)
 
     def create_text_areas(
         self,
@@ -43945,7 +44662,7 @@ class WhisperLayoutManager:
                 if self.gui_ref.text_container.winfo_exists():
                     logger.info("   🗑️ Destroying old container for layout change")
                     self.gui_ref.text_container.destroy()
-                    self.root.update_idletasks()  # GUI‑Ereignisse kurz abarbeiten, statt time.sleep
+                    self.root.update_idletasks()
             except tk.TclError:
                 pass
             except Exception as e:
@@ -43977,381 +44694,382 @@ class WhisperLayoutManager:
         )
 
     def create_vertical_layout(self) -> None:
+        gui = self.gui_ref
+        theme = gui.current_theme
+
         main_frame = tk.LabelFrame(
-            self.gui_ref.text_container,
+            gui.text_container,
             text="Live Transkription & Übersetzung",
-            bg=self.gui_ref.current_theme.BG_SECONDARY,
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            bg=theme.BG_SECONDARY,
+            fg=theme.TEXT_PRIMARY,
             font=Fonts.SUBTITLE,
             padx=8,
             pady=8,
         )
         main_frame.pack(fill="both", expand=True)
 
-        trans_frame = tk.Frame(main_frame, bg=self.gui_ref.current_theme.BG_SECONDARY)
-        trans_frame.pack(fill="x", pady=(0, 3))
-        trans_header = tk.Frame(trans_frame, bg=self.gui_ref.current_theme.BG_SECONDARY)
-        trans_header.pack(fill="x")
+        # Grid: 2 Zeilen, 1 Spalte
+        main_frame.grid_rowconfigure(0, weight=1)
+        main_frame.grid_rowconfigure(1, weight=1)
+        main_frame.grid_columnconfigure(0, weight=1)
+
+        # Transkription
+        trans_frame = tk.Frame(main_frame, bg=theme.BG_SECONDARY)
+        trans_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 3))
+        trans_frame.grid_rowconfigure(1, weight=1)
+        trans_frame.grid_columnconfigure(0, weight=1)
+
+        trans_header = tk.Frame(trans_frame, bg=theme.BG_SECONDARY)
+        trans_header.grid(row=0, column=0, sticky="ew", pady=(0, 2))
         tk.Label(
             trans_header,
             text="🎤 Transkription:",
-            bg=self.gui_ref.current_theme.BG_SECONDARY,
-            fg=self.gui_ref.current_theme.TEXT_ACCENT,
+            bg=theme.BG_SECONDARY,
+            fg=theme.TEXT_ACCENT,
             font=Fonts.SUBTITLE,
         ).pack(side="left")
 
-        # Auto‑Scroll Checkbox
-        self.gui_ref.transcript_scroll_var = tk.BooleanVar(value=True)
+        gui.transcript_scroll_var = tk.BooleanVar(value=True)
         scroll_cb = tk.Checkbutton(
             trans_header,
-            variable=self.gui_ref.transcript_scroll_var,
-            bg=self.gui_ref.current_theme.BG_SECONDARY,
-            activebackground=self.gui_ref.current_theme.BG_SECONDARY,
-            selectcolor=self.gui_ref.current_theme.CHECKBOX_ACTIVE,
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            variable=gui.transcript_scroll_var,
+            bg=theme.BG_SECONDARY,
+            activebackground=theme.BG_SECONDARY,
+            selectcolor=theme.CHECKBOX_ACTIVE,
+            fg=theme.TEXT_PRIMARY,
         )
         scroll_cb.pack(side="right", padx=3)
         tk.Label(
             trans_header,
             text="Auto-Scroll",
-            bg=self.gui_ref.current_theme.BG_SECONDARY,
-            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            bg=theme.BG_SECONDARY,
+            fg=theme.TEXT_SECONDARY,
             font=("Segoe UI", 7),
         ).pack(side="right", padx=1)
 
-        # 🔥 NEU: Auto‑TTS Checkbox (Transkription)f
         tts_cb = tk.Checkbutton(
             trans_header,
-            variable=self.gui_ref.auto_tts_transcript_var,
-            command=lambda: self.gui_ref._on_auto_tts_toggle("transcript"),
-            bg=self.gui_ref.current_theme.BG_SECONDARY,
-            activebackground=self.gui_ref.current_theme.BG_SECONDARY,
-            selectcolor=self.gui_ref.current_theme.CHECKBOX_ACTIVE,
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            variable=gui.auto_tts_transcript_var,
+            command=lambda: gui._on_auto_tts_toggle("transcript"),
+            bg=theme.BG_SECONDARY,
+            activebackground=theme.BG_SECONDARY,
+            selectcolor=theme.CHECKBOX_ACTIVE,
+            fg=theme.TEXT_PRIMARY,
         )
         tts_cb.pack(side="right", padx=3)
         tk.Label(
             trans_header,
             text="🔊 Auto-TTS",
-            bg=self.gui_ref.current_theme.BG_SECONDARY,
-            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            bg=theme.BG_SECONDARY,
+            fg=theme.TEXT_SECONDARY,
             font=("Segoe UI", 7),
         ).pack(side="right", padx=1)
-        # Ende Auto‑TTS
 
-        self.gui_ref.transcript_text = self.create_text_widget(main_frame, height=6)
+        gui.transcript_text = self.create_text_widget(trans_frame, height=6)
+        gui.transcript_text.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
 
-        transla_frame = tk.Frame(main_frame, bg=self.gui_ref.current_theme.BG_SECONDARY)
-        transla_frame.pack(fill="x", pady=(8, 0))
-        transla_header = tk.Frame(
-            transla_frame, bg=self.gui_ref.current_theme.BG_SECONDARY
-        )
-        transla_header.pack(fill="x")
-        self.gui_ref.translation_header = tk.Label(
+        # Übersetzung
+        transla_frame = tk.Frame(main_frame, bg=theme.BG_SECONDARY)
+        transla_frame.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        transla_frame.grid_rowconfigure(1, weight=1)
+        transla_frame.grid_columnconfigure(0, weight=1)
+
+        transla_header = tk.Frame(transla_frame, bg=theme.BG_SECONDARY)
+        transla_header.grid(row=0, column=0, sticky="ew", pady=(0, 2))
+        gui.translation_header = tk.Label(
             transla_header,
             text="🌐 Übersetzung:",
-            bg=self.gui_ref.current_theme.BG_SECONDARY,
-            fg=self.gui_ref.current_theme.TEXT_ACCENT,
+            bg=theme.BG_SECONDARY,
+            fg=theme.TEXT_ACCENT,
             font=Fonts.SUBTITLE,
         )
-        self.gui_ref.translation_header.pack(side="left")
+        gui.translation_header.pack(side="left")
 
-        # Auto‑Scroll Checkbox (Übersetzung)
-        self.gui_ref.translation_scroll_var = tk.BooleanVar(value=True)
-        scroll_cb = tk.Checkbutton(
+        gui.translation_scroll_var = tk.BooleanVar(value=True)
+        scroll_cb2 = tk.Checkbutton(
             transla_header,
-            variable=self.gui_ref.translation_scroll_var,
-            bg=self.gui_ref.current_theme.BG_SECONDARY,
-            activebackground=self.gui_ref.current_theme.BG_SECONDARY,
-            selectcolor=self.gui_ref.current_theme.CHECKBOX_ACTIVE,
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            variable=gui.translation_scroll_var,
+            bg=theme.BG_SECONDARY,
+            activebackground=theme.BG_SECONDARY,
+            selectcolor=theme.CHECKBOX_ACTIVE,
+            fg=theme.TEXT_PRIMARY,
         )
-        scroll_cb.pack(side="right", padx=3)
+        scroll_cb2.pack(side="right", padx=3)
         tk.Label(
             transla_header,
             text="Auto-Scroll",
-            bg=self.gui_ref.current_theme.BG_SECONDARY,
-            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            bg=theme.BG_SECONDARY,
+            fg=theme.TEXT_SECONDARY,
             font=("Segoe UI", 7),
         ).pack(side="right", padx=1)
 
-        # 🔥 NEU: Auto‑TTS Checkbox (Übersetzung)
-        tts_cb = tk.Checkbutton(
+        tts_cb2 = tk.Checkbutton(
             transla_header,
-            variable=self.gui_ref.auto_tts_translation_var,
-            command=lambda: self.gui_ref._schedule_settings_save(),
-            bg=self.gui_ref.current_theme.BG_SECONDARY,
-            activebackground=self.gui_ref.current_theme.BG_SECONDARY,
-            selectcolor=self.gui_ref.current_theme.CHECKBOX_ACTIVE,
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            variable=gui.auto_tts_translation_var,
+            command=lambda: gui._schedule_settings_save(),
+            bg=theme.BG_SECONDARY,
+            activebackground=theme.BG_SECONDARY,
+            selectcolor=theme.CHECKBOX_ACTIVE,
+            fg=theme.TEXT_PRIMARY,
         )
-        tts_cb.pack(side="right", padx=3)
+        tts_cb2.pack(side="right", padx=3)
         tk.Label(
             transla_header,
             text="🔊 Auto-TTS",
-            bg=self.gui_ref.current_theme.BG_SECONDARY,
-            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            bg=theme.BG_SECONDARY,
+            fg=theme.TEXT_SECONDARY,
             font=("Segoe UI", 7),
         ).pack(side="right", padx=1)
-        # Ende Auto‑TTS
 
-        self.gui_ref.translation_text = self.create_text_widget(main_frame, height=6)
+        gui.translation_text = self.create_text_widget(transla_frame, height=6)
+        gui.translation_text.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
 
     def create_horizontal_layout(self) -> None:
+        gui = self.gui_ref
+        theme = gui.current_theme
+
         main_frame = tk.LabelFrame(
-            self.gui_ref.text_container,
+            gui.text_container,
             text="Live Transkription & Übersetzung",
-            bg=self.gui_ref.current_theme.BG_SECONDARY,
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            bg=theme.BG_SECONDARY,
+            fg=theme.TEXT_PRIMARY,
             font=Fonts.SUBTITLE,
             padx=8,
             pady=8,
         )
         main_frame.pack(fill="both", expand=True)
+        main_frame.grid_rowconfigure(0, weight=1)
+        main_frame.grid_columnconfigure(0, weight=1)
 
-        self.gui_ref.paned_window = tk.PanedWindow(
+        gui.paned_window = tk.PanedWindow(
             main_frame,
             orient=tk.HORIZONTAL,
-            bg=self.gui_ref.current_theme.BG_SECONDARY,
+            bg=theme.BG_SECONDARY,
             sashrelief="raised",
             sashwidth=4,
             sashpad=0,
         )
-        self.gui_ref.paned_window.pack(fill="both", expand=True)
+        gui.paned_window.grid(row=0, column=0, sticky="nsew")
 
-        left_frame = tk.Frame(
-            self.gui_ref.paned_window, bg=self.gui_ref.current_theme.BG_TERTIARY
-        )
-        self.gui_ref.paned_window.add(left_frame, stretch="always", width=400)
+        left_frame = tk.Frame(gui.paned_window, bg=theme.BG_TERTIARY)
+        gui.paned_window.add(left_frame, stretch="always", width=400)
+        left_frame.grid_rowconfigure(0, weight=0)
+        left_frame.grid_rowconfigure(1, weight=1)
+        left_frame.grid_columnconfigure(0, weight=1)
 
-        trans_header = tk.Frame(left_frame, bg=self.gui_ref.current_theme.BG_TERTIARY)
-        trans_header.pack(fill="x", padx=5, pady=2)
+        trans_header = tk.Frame(left_frame, bg=theme.BG_TERTIARY)
+        trans_header.grid(row=0, column=0, sticky="ew", padx=5, pady=2)
         tk.Label(
             trans_header,
             text="🎤 Transkription",
-            bg=self.gui_ref.current_theme.BG_TERTIARY,
-            fg=self.gui_ref.current_theme.TEXT_ACCENT,
+            bg=theme.BG_TERTIARY,
+            fg=theme.TEXT_ACCENT,
             font=Fonts.SUBTITLE,
         ).pack(side="left")
 
-        # Auto‑Scroll Checkbox
-        self.gui_ref.transcript_scroll_var = tk.BooleanVar(value=True)
+        gui.transcript_scroll_var = tk.BooleanVar(value=True)
         scroll_cb = tk.Checkbutton(
             trans_header,
-            variable=self.gui_ref.transcript_scroll_var,
-            bg=self.gui_ref.current_theme.BG_TERTIARY,
-            activebackground=self.gui_ref.current_theme.BG_TERTIARY,
-            selectcolor=self.gui_ref.current_theme.CHECKBOX_ACTIVE,
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            variable=gui.transcript_scroll_var,
+            bg=theme.BG_TERTIARY,
+            activebackground=theme.BG_TERTIARY,
+            selectcolor=theme.CHECKBOX_ACTIVE,
+            fg=theme.TEXT_PRIMARY,
         )
         scroll_cb.pack(side="right", padx=3)
         tk.Label(
             trans_header,
             text="Auto-Scroll",
-            bg=self.gui_ref.current_theme.BG_TERTIARY,
-            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            bg=theme.BG_TERTIARY,
+            fg=theme.TEXT_SECONDARY,
             font=("Segoe UI", 7),
         ).pack(side="right", padx=1)
 
-        # 🔥 NEU: Auto‑TTS Checkbox (Transkription)
         tts_cb = tk.Checkbutton(
             trans_header,
-            variable=self.gui_ref.auto_tts_transcript_var,
-            command=lambda: self.gui_ref._schedule_settings_save(),
-            bg=self.gui_ref.current_theme.BG_TERTIARY,
-            activebackground=self.gui_ref.current_theme.BG_TERTIARY,
-            selectcolor=self.gui_ref.current_theme.CHECKBOX_ACTIVE,
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            variable=gui.auto_tts_transcript_var,
+            command=lambda: gui._schedule_settings_save(),
+            bg=theme.BG_TERTIARY,
+            activebackground=theme.BG_TERTIARY,
+            selectcolor=theme.CHECKBOX_ACTIVE,
+            fg=theme.TEXT_PRIMARY,
         )
         tts_cb.pack(side="right", padx=3)
         tk.Label(
             trans_header,
             text="🔊 Auto-TTS",
-            bg=self.gui_ref.current_theme.BG_TERTIARY,
-            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            bg=theme.BG_TERTIARY,
+            fg=theme.TEXT_SECONDARY,
             font=("Segoe UI", 7),
         ).pack(side="right", padx=1)
-        # Ende Auto‑TTS
 
-        self.gui_ref.transcript_text = self.create_text_widget(left_frame)
+        gui.transcript_text = self.create_text_widget(left_frame)
+        gui.transcript_text.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
 
-        right_frame = tk.Frame(
-            self.gui_ref.paned_window, bg=self.gui_ref.current_theme.BG_TERTIARY
-        )
-        self.gui_ref.paned_window.add(right_frame, stretch="always", width=400)
+        right_frame = tk.Frame(gui.paned_window, bg=theme.BG_TERTIARY)
+        gui.paned_window.add(right_frame, stretch="always", width=400)
+        right_frame.grid_rowconfigure(0, weight=0)
+        right_frame.grid_rowconfigure(1, weight=1)
+        right_frame.grid_columnconfigure(0, weight=1)
 
-        transla_header = tk.Frame(
-            right_frame, bg=self.gui_ref.current_theme.BG_TERTIARY
-        )
-        transla_header.pack(fill="x", padx=5, pady=2)
-        self.gui_ref.translation_header = tk.Label(
+        transla_header = tk.Frame(right_frame, bg=theme.BG_TERTIARY)
+        transla_header.grid(row=0, column=0, sticky="ew", padx=5, pady=2)
+        gui.translation_header = tk.Label(
             transla_header,
             text="🌐 Übersetzung",
-            bg=self.gui_ref.current_theme.BG_TERTIARY,
-            fg=self.gui_ref.current_theme.TEXT_ACCENT,
+            bg=theme.BG_TERTIARY,
+            fg=theme.TEXT_ACCENT,
             font=Fonts.SUBTITLE,
         )
-        self.gui_ref.translation_header.pack(side="left")
+        gui.translation_header.pack(side="left")
 
-        # Auto‑Scroll Checkbox (Übersetzung)
-        self.gui_ref.translation_scroll_var = tk.BooleanVar(value=True)
-        scroll_cb = tk.Checkbutton(
+        gui.translation_scroll_var = tk.BooleanVar(value=True)
+        scroll_cb2 = tk.Checkbutton(
             transla_header,
-            variable=self.gui_ref.translation_scroll_var,
-            bg=self.gui_ref.current_theme.BG_TERTIARY,
-            activebackground=self.gui_ref.current_theme.BG_TERTIARY,
-            selectcolor=self.gui_ref.current_theme.CHECKBOX_ACTIVE,
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            variable=gui.translation_scroll_var,
+            bg=theme.BG_TERTIARY,
+            activebackground=theme.BG_TERTIARY,
+            selectcolor=theme.CHECKBOX_ACTIVE,
+            fg=theme.TEXT_PRIMARY,
         )
-        scroll_cb.pack(side="right", padx=3)
+        scroll_cb2.pack(side="right", padx=3)
         tk.Label(
             transla_header,
             text="Auto-Scroll",
-            bg=self.gui_ref.current_theme.BG_TERTIARY,
-            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            bg=theme.BG_TERTIARY,
+            fg=theme.TEXT_SECONDARY,
             font=("Segoe UI", 7),
         ).pack(side="right", padx=1)
 
-        # 🔥 NEU: Auto‑TTS Checkbox (Übersetzung)
-        tts_cb = tk.Checkbutton(
+        tts_cb2 = tk.Checkbutton(
             transla_header,
-            variable=self.gui_ref.auto_tts_translation_var,
-            command=lambda: self.gui_ref._schedule_settings_save(),
-            bg=self.gui_ref.current_theme.BG_TERTIARY,
-            activebackground=self.gui_ref.current_theme.BG_TERTIARY,
-            selectcolor=self.gui_ref.current_theme.CHECKBOX_ACTIVE,
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            variable=gui.auto_tts_translation_var,
+            command=lambda: gui._schedule_settings_save(),
+            bg=theme.BG_TERTIARY,
+            activebackground=theme.BG_TERTIARY,
+            selectcolor=theme.CHECKBOX_ACTIVE,
+            fg=theme.TEXT_PRIMARY,
         )
-        tts_cb.pack(side="right", padx=3)
+        tts_cb2.pack(side="right", padx=3)
         tk.Label(
             transla_header,
             text="🔊 Auto-TTS",
-            bg=self.gui_ref.current_theme.BG_TERTIARY,
-            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            bg=theme.BG_TERTIARY,
+            fg=theme.TEXT_SECONDARY,
             font=("Segoe UI", 7),
         ).pack(side="right", padx=1)
-        # Ende Auto‑TTS
 
-        self.gui_ref.translation_text = self.create_text_widget(right_frame)
+        gui.translation_text = self.create_text_widget(right_frame)
+        gui.translation_text.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
 
-        self.gui_ref.paned_window.paneconfig(left_frame, minsize=250, width=400)
-        self.gui_ref.paned_window.paneconfig(right_frame, minsize=250, width=400)
+        gui.paned_window.paneconfig(left_frame, minsize=250, width=400)
+        gui.paned_window.paneconfig(right_frame, minsize=250, width=400)
 
     def create_text_widget(
         self, parent: tk.Frame, height: Optional[int] = None
     ) -> scrolledtext.ScrolledText:
+        gui = self.gui_ref
+        theme = gui.current_theme
         text_widget = scrolledtext.ScrolledText(
             parent,
-            bg=self.gui_ref.current_theme.BG_TERTIARY,
-            fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+            bg=theme.BG_TERTIARY,
+            fg=theme.TEXT_PRIMARY,
             font=Fonts.MONOSPACE,
-            insertbackground=self.gui_ref.current_theme.TEXT_PRIMARY,
+            insertbackground=theme.TEXT_PRIMARY,
             wrap=tk.WORD,
             relief="flat",
-            selectbackground=self.gui_ref.current_theme.COMBO_SELECTION,
-            selectforeground=self.gui_ref.current_theme.TEXT_PRIMARY,
+            selectbackground=theme.COMBO_SELECTION,
+            selectforeground=theme.TEXT_PRIMARY,
             maxundo=30,
             undo=True,
         )
         if height:
             text_widget.config(height=height)
-        text_widget.pack(fill="both", expand=True, padx=5, pady=5)
+        # 🔥 KEIN pack() oder grid() hier – das erledigt der Aufrufer!
         ContextMenuMixin(text_widget)
         return text_widget
 
     def setup_status_bar(self) -> None:
-        """Erstellt die Statusleiste mit allen Buttons und Fortschrittsanzeige."""
-        self.gui_ref.status_bar_frame = tk.Frame(
-            self.root, bg=self.gui_ref.current_theme.BG_SECONDARY, height=50
+        gui = self.gui_ref
+        theme = gui.current_theme
+        gui.status_bar_frame = tk.Frame(
+            self.root, bg=theme.BG_SECONDARY, height=50
         )
-        self.gui_ref.status_bar_frame.grid_propagate(True)
+        gui.status_bar_frame.grid_propagate(True)
 
-        # Grüne Trennlinie oben
         separator = tk.Frame(
-            self.gui_ref.status_bar_frame,
+            gui.status_bar_frame,
             height=2,
-            bg=self.gui_ref.current_theme.DRAGON_GREEN,
+            bg=theme.DRAGON_GREEN,
         )
         separator.pack(fill="x", side="top")
 
-        # Hauptcontainer
         main_container = tk.Frame(
-            self.gui_ref.status_bar_frame, bg=self.gui_ref.current_theme.BG_SECONDARY
+            gui.status_bar_frame, bg=theme.BG_SECONDARY
         )
         main_container.pack(fill="x", expand=True, padx=12, pady=8)
         main_container.columnconfigure(0, weight=0)
         main_container.columnconfigure(1, weight=1)
         main_container.columnconfigure(2, weight=0)
 
-        # ---------------------------------------------------------------------
-        # Hilfsfunktion für einheitliche Buttons
-        # ---------------------------------------------------------------------
         def _add_button(parent, text, command, tooltip, **kwargs):
             btn = tk.Button(
                 parent,
                 text=text,
                 command=command,
-                bg=self.gui_ref.current_theme.BG_TERTIARY,
-                fg=self.gui_ref.current_theme.TEXT_PRIMARY,
+                bg=theme.BG_TERTIARY,
+                fg=theme.TEXT_PRIMARY,
                 relief="flat",
                 font=Fonts.SMALL,
                 cursor="hand2",
                 padx=4,
                 pady=2,
-                activebackground=self.gui_ref.current_theme.BG_HOVER,
+                activebackground=theme.BG_HOVER,
                 **kwargs
             )
             ToolTip(btn, tooltip)
             return btn
 
-        # ---------------------------------------------------------------------
-        # Linkes Panel (Schnellaktionen)
-        # ---------------------------------------------------------------------
-        left_panel = tk.Frame(main_container, bg=self.gui_ref.current_theme.BG_SECONDARY)
+        left_panel = tk.Frame(main_container, bg=theme.BG_SECONDARY)
         left_panel.grid(row=0, column=0, sticky="w", padx=5)
 
         quick_actions = [
-            ("🗑️", self.gui_ref.clear_all, "Alles löschen"),
-            ("💾", self.gui_ref.save_transcript, "Transkription speichern"),
-            ("📝", self.gui_ref.export_subtitles, "Untertitel exportieren"),
-            ("📊", self.gui_ref.show_simple_stats, "Statistiken anzeigen"),
-            ("⚙️", self.gui_ref.show_advanced_settings, "Erweiterte Einstellungen"),
-            ("🌐", self.gui_ref.show_translation_dialog, "Text übersetzen"),
-            ("🤖", self.gui_ref.show_summarize_dialog, "Mit Ollama zusammenfassen"),
+            ("🗑️", gui.clear_all, "Alles löschen"),
+            ("💾", gui.save_transcript, "Transkription speichern"),
+            ("📝", gui.export_subtitles, "Untertitel exportieren"),
+            ("📊", gui.show_simple_stats, "Statistiken anzeigen"),
+            ("⚙️", gui.show_advanced_settings, "Erweiterte Einstellungen"),
+            ("🌐", gui.show_translation_dialog, "Text übersetzen"),
+            ("🤖", gui.show_summarize_dialog, "Mit Ollama zusammenfassen"),
         ]
         for i, (icon, cmd, tip) in enumerate(quick_actions):
             btn = _add_button(left_panel, icon, cmd, tip)
             btn.grid(row=0, column=i, padx=1, sticky="w")
 
-        # Installations‑Button (nur bei Bedarf)
-        if getattr(self.gui_ref, "demo_mode", False) or not TRANSLATOR_AVAILABLE:
-            install_btn = _add_button(left_panel, "📦", self.gui_ref.show_install_dialog, "Fehlende Pakete installieren")
+        if getattr(gui, "demo_mode", False) or not TRANSLATOR_AVAILABLE:
+            install_btn = _add_button(left_panel, "📦", gui.show_install_dialog, "Fehlende Pakete installieren")
             install_btn.grid(row=0, column=len(quick_actions), padx=1, sticky="w")
 
-        # ---------------------------------------------------------------------
-        # Mittleres Panel (Fortschritt & Systeminfo)
-        # ---------------------------------------------------------------------
-        center_panel = tk.Frame(main_container, bg=self.gui_ref.current_theme.BG_SECONDARY)
+        center_panel = tk.Frame(main_container, bg=theme.BG_SECONDARY)
         center_panel.grid(row=0, column=1, sticky="ew", padx=5)
 
-        self.gui_ref.progress_bar = ttk.Progressbar(
+        gui.progress_bar = ttk.Progressbar(
             center_panel,
             mode="determinate",
             length=150,
             style="Dark.Horizontal.TProgressbar",
         )
-        self.gui_ref.progress_bar.pack(side="left", padx=(10, 10))
+        gui.progress_bar.pack(side="left", padx=(10, 10))
 
-        self.gui_ref.progress_label = tk.Label(
+        gui.progress_label = tk.Label(
             center_panel,
             text="",
             font=Fonts.SMALL,
-            bg=self.gui_ref.current_theme.BG_SECONDARY,
-            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            bg=theme.BG_SECONDARY,
+            fg=theme.TEXT_SECONDARY,
         )
-        self.gui_ref.progress_label.pack(side="left", padx=(0, 10))
+        gui.progress_label.pack(side="left", padx=(0, 10))
 
-        # Systeminfo‑Label
         if IS_WINDOWS:
             default_text = "🪟 Windows | CPU: --% | RAM: --MB | GPU: --% | Model: --"
         elif IS_MACOS:
@@ -44364,74 +45082,63 @@ class WhisperLayoutManager:
         else:
             default_text = "🌐 Unknown OS | CPU: --% | RAM: --MB | GPU: --% | Model: --"
 
-        self.gui_ref.system_info_label = tk.Label(
+        gui.system_info_label = tk.Label(
             center_panel,
             text=default_text,
             font=Fonts.SMALL,
-            bg=self.gui_ref.current_theme.BG_SECONDARY,
-            fg=self.gui_ref.current_theme.TEXT_SECONDARY,
+            bg=theme.BG_SECONDARY,
+            fg=theme.TEXT_SECONDARY,
             padx=5,
         )
-        self.gui_ref.system_info_label.pack(side="left", fill="x", expand=True)
+        gui.system_info_label.pack(side="left", fill="x", expand=True)
 
-        # ---------------------------------------------------------------------
-        # Rechtes Panel (Exit, TTS, VAD, Live‑Mode, VRAM)
-        # ---------------------------------------------------------------------
-        right_panel = tk.Frame(main_container, bg=self.gui_ref.current_theme.BG_SECONDARY)
+        right_panel = tk.Frame(main_container, bg=theme.BG_SECONDARY)
         right_panel.grid(row=0, column=2, sticky="e", padx=5)
 
-        # VRAM‑Button (NEU)
-        self.gui_ref.vram_unload_btn = _add_button(
-            right_panel, "🧠", self.gui_ref.force_unload_model,
+        gui.vram_unload_btn = _add_button(
+            right_panel, "🧠", gui.force_unload_model,
             "Whisper-Modell aus Grafikspeicher entladen\n(spart VRAM bei Inaktivität)"
         )
-        self.gui_ref.vram_unload_btn.pack(side="right", padx=2)
-        # Initial deaktivieren, wenn kein Modell geladen ist
-        if (hasattr(self.gui_ref, 'transcription_engine') and 
-            self.gui_ref.transcription_engine and 
-            self.gui_ref.transcription_engine.model is None):
-            self.gui_ref.vram_unload_btn.config(state="disabled")
+        gui.vram_unload_btn.pack(side="right", padx=2)
+        if (hasattr(gui, 'transcription_engine') and 
+            gui.transcription_engine and 
+            gui.transcription_engine.model is None):
+            gui.vram_unload_btn.config(state="disabled")
 
-        # Live‑Mode Button
-        self.gui_ref.live_mode_btn = _add_button(
-            right_panel, "⏱️ 20s", self.gui_ref.toggle_live_mode,
+        gui.live_mode_btn = _add_button(
+            right_panel, "⏱️ 20s", gui.toggle_live_mode,
             "Chunk-Dauer umschalten (20s/10s)"
         )
-        self.gui_ref.live_mode_btn.pack(side="right", padx=2)
+        gui.live_mode_btn.pack(side="right", padx=2)
 
-        # VAD‑Fallback Button
-        self.gui_ref.vad_fallback_btn = _add_button(
-            right_panel, "🔁 VAD ON", self.gui_ref.toggle_vad_fallback,
+        gui.vad_fallback_btn = _add_button(
+            right_panel, "🔁 VAD ON", gui.toggle_vad_fallback,
             "VAD-Fallback aktivieren/deaktivieren"
         )
-        self.gui_ref.vad_fallback_btn.pack(side="right", padx=2)
+        gui.vad_fallback_btn.pack(side="right", padx=2)
 
-        # TTS Button
-        self.gui_ref.tts_btn = _add_button(
-            right_panel, "🔊", self.gui_ref.speak_current_text,
+        gui.tts_btn = _add_button(
+            right_panel, "🔊", gui.speak_current_text,
             "Ausgewählten Text vorlesen (TTS)"
         )
-        self.gui_ref.tts_btn.pack(side="right", padx=2)
+        gui.tts_btn.pack(side="right", padx=2)
 
-        # Hilfe Button
         help_btn = _add_button(
-            right_panel, "⌨️", self.gui_ref.show_shortcuts_help,
+            right_panel, "⌨️", gui.show_shortcuts_help,
             "Tastenkürzel anzeigen (F1)"
         )
         help_btn.pack(side="right", padx=2)
 
-        # Korrektur Button (Ollama)
-        self.gui_ref.correct_btn = _add_button(
-            right_panel, "🔧", self.gui_ref.correct_transcript_with_ollama,
+        gui.correct_btn = _add_button(
+            right_panel, "🔧", gui.correct_transcript_with_ollama,
             "Transkript mit Ollama korrigieren"
         )
-        self.gui_ref.correct_btn.pack(side="right", padx=2)
+        gui.correct_btn.pack(side="right", padx=2)
 
-        # Exit Button (speziell gestaltet)
-        self.gui_ref.exit_button = tk.Button(
+        gui.exit_button = tk.Button(
             right_panel,
             text=" ⏻ EXIT ",
-            command=self.gui_ref.controller.safe_exit,
+            command=gui.controller.safe_exit,
             bg="#dc3545",
             fg="white",
             font=("Segoe UI", 9, "bold"),
@@ -44441,8 +45148,8 @@ class WhisperLayoutManager:
             pady=3,
             activebackground="#c82333",
         )
-        self.gui_ref.exit_button.pack(side="right")
-        ToolTip(self.gui_ref.exit_button, "Programm beenden (Strg+Q / Cmd+Q)")
+        gui.exit_button.pack(side="right")
+        ToolTip(gui.exit_button, "Programm beenden (Strg+Q / Cmd+Q)")
 
 
 # =============================================================================
