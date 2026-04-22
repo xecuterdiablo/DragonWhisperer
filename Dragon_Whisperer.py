@@ -5410,24 +5410,6 @@ class OptimizedThreadPoolExecutor:
         Die Wartezeit zwischen Versuchen wird in kleine Intervalle aufgeteilt und
         prüft regelmäßig auf `shutdown`, um bei einem Executor‑Shutdown nicht
         unnötig zu warten.
-
-        Args:
-            fn: Die auszuführende Funktion.
-            max_retries: Maximale Anzahl Wiederholungen (insgesamt max_retries+1 Versuche).
-            retry_delay_base: Basis‑Wartezeit in Sekunden (exponentielle Backoff).
-            retry_delay_max: Maximale Wartezeit zwischen Versuchen in Sekunden.
-            timeout_per_attempt: Timeout pro Versuch in Sekunden.
-            retry_on_exceptions: Tuple von Exception‑Typen, bei denen eine Wiederholung
-                                 erfolgen soll.
-            *args: Positionsargumente für `fn`.
-            **kwargs: Schlüsselwortargumente für `fn`.
-
-        Returns:
-            Das Ergebnis der Funktion.
-
-        Raises:
-            RuntimeError: Wenn der Executor während der Wiederholungen heruntergefahren wird.
-            Exception: Die letzte aufgetretene Exception, wenn alle Versuche fehlschlagen.
         """
         last_exception: Optional[Exception] = None
 
@@ -29406,20 +29388,6 @@ class DragonWhispererGUI:
         """
         Begrenzt die Häufigkeit von GUI‑Updates pro Sekunde, um die Oberfläche
         vor Überlastung durch zu viele schnelle Aufrufe zu schützen.
-
-        Features:
-            - Unterscheidung verschiedener Update‑Typen (z. B. "status", "progress")
-            - Thread‑sicher durch internes RLock
-            - Dynamische Anpassung des Limits zur Laufzeit
-            - Automatische Bereinigung veralteter Einträge (optional)
-            - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 3`
-    
-        Attributes:
-            max_updates_per_second: Maximale Anzahl erlaubter Updates pro Sekunde.
-            min_interval: Berechnetes minimales Intervall zwischen Updates in Sekunden.    
-            last_calls: Dictionary, das für jeden Typ den Zeitpunkt des letzten Updates speichert.
-            _lock: Reentrant Lock für Thread‑Sicherheit.
-            _cleanup_counter: Zähler für periodische Bereinigung (vermeidet Memory Leak).
         """
 
         def __init__(self, max_updates_per_second: int = 60) -> None:
@@ -29598,34 +29566,6 @@ class DragonWhispererGUI:
     def __init__(self) -> None:
         """
         Initialisiert die DragonWhispererGUI – das Hauptfenster der Anwendung.
-
-        Diese Methode führt die vollständige Initialisierung der grafischen
-        Benutzeroberfläche durch, lädt Konfigurationen, erstellt Controller,
-        Manager, Engines und startet Hintergrunddienste. Sie ist in mehrere
-        logische Abschnitte unterteilt, um die Übersichtlichkeit zu wahren und
-        Fehler bei der Initialisierung frühzeitig zu erkennen und abzufangen.
-
-        Optimierungen in dieser Version:
-            - **Stabile Fenstergröße ohne Flackern:** `update_idletasks()` und
-              explizites Setzen der Geometrie verhindern das „Atmen“ des Fensters,
-              während `resizable(True, True)` und `minsize()` dem Benutzer volle
-              Kontrolle über die Fenstergröße geben.
-            - **Robuste Initialisierung:** Jeder Schritt ist in einem separaten
-              `try`‑Block gekapselt; Fehler führen nicht zum Abbruch, sondern
-              werden geloggt und durch Fallback‑Werte ersetzt.
-            - **HiDPI‑Unterstützung für Windows:** Aktiviert DPI‑Awareness,
-              sodass die GUI auf hochauflösenden Bildschirmen scharf dargestellt wird.
-            - **Status‑Lock:** `_status_lock` und `_last_status_message` verhindern
-              Race Conditions in `update_status`.
-            - **TTS‑Warteschlange:** Eine eigene Queue und ein Worker‑Thread sorgen
-              für sequenzielle Sprachausgabe ohne Überschreiben.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 2` für jeden
-              Initialisierungsschritt.
-            - **Thread‑Sicherheit:** Alle gemeinsam genutzten Ressourcen werden
-              mit geeigneten Locks geschützt.
-            - **Persistente Stream‑Info:** `last_completed_stream_info` speichert
-              den zuletzt verarbeiteten Stream dauerhaft.
-            - **Automatische Modellauswahl** basierend auf verfügbarem VRAM oder RAM.
         """
         # -----------------------------------------------------------------
         # 0. Vorbereitung: RateLimiter und Shutdown-Flags
@@ -30128,28 +30068,6 @@ class DragonWhispererGUI:
     def _apply_theme(self, theme_name: str) -> None:
         """
         Wendet das ausgewählte Theme auf die gesamte GUI an.
-
-        Diese Methode aktualisiert:
-            - Die globale `CURRENT_THEME` und `self.current_theme`
-            - Den Hintergrund des Hauptfensters
-            - Die ttk‑Styles (Comboboxen, Progressbar, Notebook etc.)
-            - Rekursiv alle Widgets im Fenster (Farben, Schriften)
-            - Spezielle Widgets mit individuellen Farbregeln
-            - Das Layout über `self.layout.apply_theme()`
-
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - **Robuste Fehlerbehandlung:** Widgets, die während der Aktualisierung
-              zerstört werden, führen nicht zum Abbruch.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
-            - **Fallback für fehlende Theme‑Attribute:** Verwendet Standardwerte,
-              falls ein Attribut im Theme nicht definiert ist.
-            - **Korrekte Behandlung von ttk‑Widgets:** Styles werden vor der
-              Widget‑Aktualisierung neu konfiguriert.
-            - **Sicherstellung, dass `self.current_theme` und `CURRENT_THEME`
-              synchron sind.**
-
-        Args:
-            theme_name: Name des Themes (z. B. 'dark', 'light', 'pastel').
         """
         # -----------------------------------------------------------------
         # 1. Theme‑Klasse auswählen
@@ -37368,35 +37286,6 @@ class AudioProcessor:
     ) -> None:
         """
         Verarbeitet einen Audio‑Chunk asynchron im Transkriptions‑Executor.
-
-        Diese Methode wird vom Dispatcher‑Thread für jeden aus der Queue entnommenen
-        Chunk aufgerufen. Sie führt die eigentliche Whisper‑Transkription durch,
-        aktualisiert Statistiken und stößt ggf. die Übersetzung an.
-
-        **Garantierte Task‑Zählung:**
-            Der Zähler `_pending_tasks` wird **immer** dekrementiert, selbst wenn
-            eine Exception vor oder während der Transkription auftritt. Dazu wird
-            das Flag `task_added` nur dann auf `True` gesetzt, wenn die Inkrementierung
-            erfolgreich war. Im `finally`‑Block wird nur dann dekrementiert, wenn
-            `task_added` wahr ist.
-
-        **Verbesserungen in dieser Version:**
-            - **Präzise Task‑Zählung:** `task_added = False` initial, wird erst nach
-              erfolgreichem `_modify_pending_tasks(1)` auf `True` gesetzt.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
-            - **Fehlerbehandlung:** Unterscheidet zwischen Timeout, Transkriptions‑
-              fehlern und unerwarteten Exceptions. Jeder Fehler wird geloggt und
-              ggf. an den `error_callback` gemeldet.
-            - **Performance‑Metriken:** Aktualisiert den Echtzeitfaktor und loggt
-              die Verarbeitungsdauer.
-            - **Frühe Abbruchprüfung:** Vor Beginn der Verarbeitung wird geprüft,
-              ob der Benutzer bereits `stop` angefordert hat.
-
-        Args:
-            audio_data: PCM‑Audiodaten (16‑bit, mono, 16 kHz).
-            transcription_callback: Callback für Transkriptionsergebnisse.
-            translation_callback: Callback für Übersetzungsergebnisse.
-            error_callback: Callback für Fehlermeldungen.
         """
         # ---------------------------------------------------------------------
         # 1. Differenzierte Abbruchprüfung
@@ -37610,27 +37499,6 @@ class AudioProcessor:
         Im Normalmodus (kein Untertitel) wird die Ausgabe über den Satzpuffer
         geleitet, um zusammenhängende Sätze zu bilden. Im Untertitelmodus wird
         die Ausgabe streng nach Startzeit sortiert.
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - Detaillierte Debug-Ausgaben bei `DEBUG_LEVEL >= 2` mit Präfix `[SEQ]`
-              zur Nachverfolgung der Segmentverarbeitung.
-            - Robuste Fehlerbehandlung: Fehler in Callbacks unterbrechen nicht
-              die Verarbeitung weiterer Segmente.
-            - Automatische Normalisierung des Sequenzzählers, um Überläufe zu
-              vermeiden.
-            - Begrenzung der Puffergröße, um Speicherüberlauf bei massiven
-              Verzögerungen zu verhindern.
-            - Verbesserte Zeitstempel‑Prüfung: Segmente ohne `start`/`end` werden
-              sofort ausgegeben.
-            - Thread‑sicher durch Verwendung von `_segment_buffer_lock`.
-            - Sortierung im Untertitelmodus nach Startzeit, im Normalmodus nach
-              Sequenznummer (Reihenfolge des Eintreffens).
-            - Erzwungenes Flushen bei zu langem Verweilen im Puffer (Timeout).
-
-        Args:
-            segments: Liste der zu verarbeitenden Transkriptionssegmente.
-            transcription_callback: Callback für die GUI‑Ausgabe.
-            translation_callback: Optionaler Callback für Übersetzungen.
         """
         if not segments:
             if DEBUG_LEVEL >= 4:
