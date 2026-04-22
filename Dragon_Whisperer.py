@@ -30304,7 +30304,7 @@ class DragonWhispererGUI:
         """
         Callback für das normale Ende einer Datei (z. B. YouTube-VOD).
 
-        Diese Methode wird über den Event-Bus aufgerufen, wenn der AudioProcessor
+        Diese Methode wird über den Event‑Bus aufgerufen, wenn der AudioProcessor
         das Ende einer lokalen Datei oder eines Video-on-Demand-Streams erkennt
         und erfolgreich abgeschlossen hat. Im Gegensatz zu einem Benutzerabbruch
         oder Fehler signalisiert dieses Event einen vollständigen Durchlauf.
@@ -30326,7 +30326,7 @@ class DragonWhispererGUI:
         Args:
             _: Platzhalter für Event-Daten (wird ignoriert, kann None sein).
         """
-        logger.info("File processing finished normally")
+        logger.info("📁 File processing finished normally")
 
         # -----------------------------------------------------------------
         # 1. Fortschrittsbalken stoppen und zurücksetzen
@@ -30336,35 +30336,61 @@ class DragonWhispererGUI:
         # Aktivität signalisieren.
         self._reset_progress()
         if DEBUG_LEVEL >= 3:
-            log_debug("gui", "_on_file_finished: progress bar reset")
+            log_debug("controller", "_on_file_finished: progress bar reset")
 
         # -----------------------------------------------------------------
-        # 2. Automatisches Speichern oder Statusmeldung
+        # 2. GUI-Referenz holen und validieren
         # -----------------------------------------------------------------
-        if self.settings.auto_save_on_completion:
-            # Verzögerung von 10 ms, um anderen GUI-Updates Vorrang zu geben
-            # und potenzielle Race-Conditions mit Widget-Zerstörung zu vermeiden.
+        gui = self.gui_ref()
+        if gui is None:
+            logger.warning("⚠️ GUI-Referenz ist None – Auto-Save kann nicht ausgeführt werden")
+            return
+
+        # Prüfen, ob die GUI noch existiert und nicht im Shutdown ist
+        if not hasattr(gui, 'root') or not gui.root.winfo_exists():
+            logger.warning("⚠️ GUI root nicht mehr verfügbar – Auto-Save wird übersprungen")
+            return
+
+        if getattr(gui, '_shutting_down', False):
+            logger.info("GUI im Shutdown – Auto-Save wird nicht ausgeführt")
+            return
+
+        # -----------------------------------------------------------------
+        # 3. Automatisches Speichern oder Statusmeldung
+        # -----------------------------------------------------------------
+        if gui.settings.auto_save_on_completion:
+            # Prüfen, ob überhaupt Transkriptionen vorhanden sind
+            if not (hasattr(gui, 'transcript_history') and gui.transcript_history):
+                logger.info("Auto-Save übersprungen – keine Transkriptionen vorhanden")
+                gui.update_status("✅ Dateiende – keine Transkription zum Speichern")
+                return
+
             if DEBUG_LEVEL >= 3:
-                log_debug("gui", "_on_file_finished: scheduling auto-save in 10ms")
-            self._safe_after(10, self.save_transcript)
+                log_debug("controller", "_on_file_finished: scheduling auto-save via after_idle")
+
+            def do_auto_save():
+                try:
+                    gui.save_transcript()
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("controller", "Auto-save triggered successfully")
+                except Exception as e:
+                    logger.error(f"❌ Auto-save failed: {e}", exc_info=True)
+                    gui.update_status("❌ Auto-Save fehlgeschlagen")
+
+            gui.root.after_idle(do_auto_save)
         else:
-            self.update_status("✅ Dateiende – zum Speichern auf 💾 klicken")
+            gui.update_status("✅ Dateiende – zum Speichern 💾 klicken (Strg+S)")
             if DEBUG_LEVEL >= 3:
-                log_debug("gui", "_on_file_finished: manual save reminder displayed")
+                log_debug("controller", "_on_file_finished: manual save reminder displayed")
 
         # -----------------------------------------------------------------
-        # 3. Zusätzliche Debug-Information (optional)
+        # 4. Zusätzliche Debug-Information (optional)
         # -----------------------------------------------------------------
         if DEBUG_LEVEL >= 4:
-            # Bei sehr hohem Debug-Level könnten hier Statistiken ausgegeben werden
-            total_chunks = getattr(self.audio_processor, '_chunk_counter', 0) if hasattr(self, 'audio_processor') else 0
-            log_debug("gui", f"_on_file_finished: total chunks processed = {total_chunks}")
-
-        # -----------------------------------------------------------------
-        # 4. Platz für zukünftige Erweiterungen
-        # -----------------------------------------------------------------
-        # Hier könnten Benachrichtigungen (z. B. Desktop-Notifications)
-        # oder automatisches Öffnen des Speicherdialogs integriert werden.
+            total_chunks = 0
+            if hasattr(gui, 'audio_processor') and gui.audio_processor is not None:
+                total_chunks = getattr(gui.audio_processor, '_chunk_counter', 0)
+            log_debug("controller", f"_on_file_finished: total chunks processed = {total_chunks}")
 
     @gui_error_handler
     def _on_processing_finished(self, _=None) -> None:
@@ -31101,12 +31127,88 @@ class DragonWhispererGUI:
 
     @gui_operation_decorator
     def _reset_progress(self) -> None:
-        if hasattr(self, "progress_bar") and self.progress_bar.winfo_exists():
-            self.progress_bar.stop()
-            self.progress_bar.config(mode="determinate", value=0)
-        self._progress_bar_started = False
-        if hasattr(self, "progress_label") and self.progress_label.winfo_exists():
-            self.progress_label.config(text="")
+        """
+        Setzt den Fortschrittsbalken und das zugehörige Label in der GUI zurück.
+
+        Diese Methode wird nach Abschluss eines Streams oder bei einem Fehler
+        aufgerufen, um dem Benutzer zu signalisieren, dass keine Hintergrund-
+        aktivität mehr stattfindet. Sie ist threadsicher (wird über den
+        Event-Bus oder `root.after` im Hauptthread ausgeführt) und fängt
+        alle erwartbaren Tkinter-Fehler ab.
+
+        **Verbesserungen gegenüber der ursprünglichen Version:**
+            - **Korrekte Referenz:** `self` ist die GUI-Instanz, kein `gui_ref()`-Aufruf.
+            - **Robuste Widget-Prüfung:** Vor jedem Zugriff wird `winfo_exists()`
+              geprüft.
+            - **Detaillierte Debug-Ausgaben** bei `DEBUG_LEVEL >= 3`.
+            - **Vollständige Fehlerbehandlung:** Unterscheidet zwischen TclError
+              (Widget zerstört) und anderen Exceptions.
+            - **Atomare Operationen:** Setzt den Fortschrittsbalken in den
+              deterministischen Modus und stoppt die Animation.
+
+        Die Methode ist idempotent und kann mehrfach gefahrlos aufgerufen werden.
+        """
+        # -----------------------------------------------------------------
+        # 1. Prüfen, ob die benötigten Widgets existieren
+        # -----------------------------------------------------------------
+        if not hasattr(self, 'progress_bar') or self.progress_bar is None:
+            if DEBUG_LEVEL >= 4:
+                log_debug("gui", "_reset_progress: progress_bar nicht vorhanden")
+            return
+        if not hasattr(self, 'progress_label') or self.progress_label is None:
+            if DEBUG_LEVEL >= 4:
+                log_debug("gui", "_reset_progress: progress_label nicht vorhanden")
+            # Nur der Balken wird zurückgesetzt, Label ignorieren wir
+            pass
+
+        # -----------------------------------------------------------------
+        # 2. Fortschrittsbalken zurücksetzen
+        # -----------------------------------------------------------------
+        try:
+            if self.progress_bar.winfo_exists():
+                # Zuerst die Animation stoppen (falls aktiv)
+                self.progress_bar.stop()
+                # In den deterministischen Modus wechseln und auf 0 setzen
+                self.progress_bar.config(mode="determinate", value=0)
+                if DEBUG_LEVEL >= 3:
+                    log_debug("gui", "Progress bar reset to 0")
+            else:
+                if DEBUG_LEVEL >= 3:
+                    log_debug("gui", "Progress bar widget does not exist")
+        except tk.TclError as e:
+            # Widget wurde während des Zugriffs zerstört – ignorieren
+            if DEBUG_LEVEL >= 3:
+                log_debug("gui", f"TclError resetting progress bar: {e}")
+        except Exception as e:
+            # Unerwarteter Fehler – loggen, aber nicht weiterwerfen
+            logger.warning(f"⚠️ Failed to reset progress bar: {e}", exc_info=True)
+
+        # -----------------------------------------------------------------
+        # 3. Fortschrittslabel zurücksetzen (falls vorhanden)
+        # -----------------------------------------------------------------
+        if hasattr(self, 'progress_label') and self.progress_label is not None:
+            try:
+                if self.progress_label.winfo_exists():
+                    self.progress_label.config(text="")
+                    if DEBUG_LEVEL >= 4:
+                        log_debug("gui", "Progress label cleared")
+                else:
+                    if DEBUG_LEVEL >= 4:
+                        log_debug("gui", "Progress label widget does not exist")
+            except tk.TclError as e:
+                if DEBUG_LEVEL >= 3:
+                    log_debug("gui", f"TclError resetting progress label: {e}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to reset progress label: {e}")
+
+        # -----------------------------------------------------------------
+        # 4. Optional: Internes Flag zurücksetzen (falls verwendet)
+        # -----------------------------------------------------------------
+        if hasattr(self, '_progress_bar_started'):
+            self._progress_bar_started = False
+
+        if DEBUG_LEVEL >= 3:
+            log_debug("gui", "_reset_progress: completed successfully")
 
     @gui_operation_decorator
     def speak_current_text(self) -> None:
@@ -36068,7 +36170,7 @@ class AudioProcessor:
         # -----------------------------------------------------------------
         # 28. Flag für den finalen Flush (schützt Übersetzungen vor Stop‑Event)
         # -----------------------------------------------------------------
-        self._in_final_flush = False
+        self._in_final_flush = threading.Event()
 
         # -----------------------------------------------------------------
         # 29. Initialisierungsprotokoll
@@ -36904,14 +37006,39 @@ class AudioProcessor:
     ) -> None:
         """
         Puffert Segmente und gibt sie in der korrekten zeitlichen Reihenfolge aus.
+
         Im Normalmodus (kein Untertitel) wird die Ausgabe über den Satzpuffer
-        geleitet, um zusammenhängende Sätze zu bilden.
+        geleitet, um zusammenhängende Sätze zu bilden. Im Untertitelmodus wird
+        die Ausgabe streng nach Startzeit sortiert.
+
+        **Verbesserungen gegenüber der ursprünglichen Version:**
+            - Detaillierte Debug-Ausgaben bei `DEBUG_LEVEL >= 2` mit Präfix `[SEQ]`
+              zur Nachverfolgung der Segmentverarbeitung.
+            - Robuste Fehlerbehandlung: Fehler in Callbacks unterbrechen nicht
+              die Verarbeitung weiterer Segmente.
+            - Automatische Normalisierung des Sequenzzählers, um Überläufe zu
+              vermeiden.
+            - Begrenzung der Puffergröße, um Speicherüberlauf bei massiven
+              Verzögerungen zu verhindern.
+            - Verbesserte Zeitstempel‑Prüfung: Segmente ohne `start`/`end` werden
+              sofort ausgegeben.
+            - Thread‑sicher durch Verwendung von `_segment_buffer_lock`.
+            - Sortierung im Untertitelmodus nach Startzeit, im Normalmodus nach
+              Sequenznummer (Reihenfolge des Eintreffens).
+            - Erzwungenes Flushen bei zu langem Verweilen im Puffer (Timeout).
+
+        Args:
+            segments: Liste der zu verarbeitenden Transkriptionssegmente.
+            transcription_callback: Callback für die GUI‑Ausgabe.
+            translation_callback: Optionaler Callback für Übersetzungen.
         """
         if not segments:
+            if DEBUG_LEVEL >= 4:
+                log_debug("SEQ", "_buffer_and_flush_segments: empty segment list")
             return
 
         GAP_TOLERANCE = 0.3          # Erlaubte Lücke in Sekunden
-        MAX_BUFFER_AGE = 5.0         # Maximale Verweildauer im Puffer
+        MAX_BUFFER_AGE = 5.0         # Maximale Verweildauer im Puffer (Sekunden)
         COUNTER_NORMALIZE_EVERY = 10000
 
         with self._segment_buffer_lock:
@@ -36921,18 +37048,20 @@ class AudioProcessor:
             # 1. Neue Segmente in den Puffer aufnehmen
             # -----------------------------------------------------------------
             for seg in segments:
+                # Segmente ohne Zeitstempel sofort ausgeben
                 if seg.start is None or seg.end is None:
-                    if DEBUG_LEVEL >= 4:
+                    if DEBUG_LEVEL >= 2:
                         log_debug(
-                            "segment_buffer",
-                            f"Untimed segment (start={seg.start}, end={seg.end}) – flushing immediately"
+                            "SEQ",
+                            f"BUFFER RECV (untimed): text='{seg.text[:50]}...' – flushing immediately"
                         )
                     try:
-                        # Ausgabe je nach Modus
                         if self.subtitle_mode or not self._enable_sentence_buffering:
                             transcription_callback(seg)
                         else:
-                            self._handle_transcript_segment(seg, transcription_callback, translation_callback)
+                            self._handle_transcript_segment(
+                                seg, transcription_callback, translation_callback
+                            )
                     except Exception as e:
                         logger.error(
                             f"Error in transcription_callback for untimed segment: {e}",
@@ -36944,6 +37073,13 @@ class AudioProcessor:
                 self._segment_buffer.append((now, seg, self._segment_counter))
                 self._segment_counter += 1
 
+                if DEBUG_LEVEL >= 2:
+                    log_debug(
+                        "SEQ",
+                        f"BUFFER RECV: start={seg.start:.2f}, end={seg.end:.2f}, "
+                        f"text='{seg.text[:50]}...' (buffer size={len(self._segment_buffer)})"
+                    )
+
                 # Periodische Normalisierung des Zählers, um Overflow zu vermeiden
                 if self._segment_counter % COUNTER_NORMALIZE_EVERY == 0:
                     normalized_buffer = []
@@ -36952,16 +37088,18 @@ class AudioProcessor:
                         normalized_buffer.append((t, s, c - COUNTER_NORMALIZE_EVERY))
                     self._segment_buffer = deque(normalized_buffer)
                     self._segment_counter -= COUNTER_NORMALIZE_EVERY
-                    if DEBUG_LEVEL >= 4:
-                        log_debug("segment_buffer", f"Normalized segment counter by {COUNTER_NORMALIZE_EVERY}")
+                    if DEBUG_LEVEL >= 3:
+                        log_debug(
+                            "SEQ",
+                            f"Normalized segment counter by {COUNTER_NORMALIZE_EVERY}"
+                        )
 
             if not self._segment_buffer:
                 return
 
             # -----------------------------------------------------------------
-            # 2. Puffer nach Startzeit und Sequenznummer sortieren (end ignoriert)
-            # -----------------------------------------------------------------
             # 2. Puffer sortieren – je nach Modus
+            # -----------------------------------------------------------------
             if self.subtitle_mode:
                 # Untertitel-Modus: streng nach start, dann nach seq
                 self._segment_buffer = deque(
@@ -36970,41 +37108,47 @@ class AudioProcessor:
                         key=lambda item: (item[1].start, item[2])
                     )
                 )
+                if DEBUG_LEVEL >= 3:
+                    log_debug("SEQ", "Buffer sorted by start time (subtitle mode)")
             else:
                 # Normalmodus: nur nach seq (ursprüngliche Reihenfolge)
                 self._segment_buffer = deque(
                     sorted(
                         self._segment_buffer,
-                        key=lambda item: item[2]  # nur Sequenzzähler
+                        key=lambda item: item[2]
                     )
                 )
-            
+                if DEBUG_LEVEL >= 3:
+                    log_debug("SEQ", "Buffer sorted by sequence number (normal mode)")
+
             # -----------------------------------------------------------------
             # 3. Prüfen, ob das älteste Segment zu lange im Puffer verweilt
             # -----------------------------------------------------------------
-            oldest_time, oldest_seg, _ = self._segment_buffer[0]
-            age = now - oldest_time
-            if age > MAX_BUFFER_AGE:
-                logger.warning(
-                    f"Segment stuck in buffer for {age:.1f}s "
-                    f"(start={oldest_seg.start:.2f}) – forcing flush to unblock"
-                )
-                if DEBUG_LEVEL >= 4:
-                    log_debug(
-                        "segment_buffer",
-                        f"Forced flush due to timeout: start={oldest_seg.start:.2f}, "
-                        f"end={oldest_seg.end:.2f}, text='{oldest_seg.text[:50]}...'"
+            if self._segment_buffer:
+                oldest_time, oldest_seg, _ = self._segment_buffer[0]
+                age = now - oldest_time
+                if age > MAX_BUFFER_AGE:
+                    logger.warning(
+                        f"Segment stuck in buffer for {age:.1f}s "
+                        f"(start={oldest_seg.start:.2f}) – forcing flush to unblock"
                     )
-                try:
-                    # Ausgabe je nach Modus
-                    if self.subtitle_mode or not self._enable_sentence_buffering:
-                        transcription_callback(oldest_seg)
-                    else:
-                        self._handle_transcript_segment(oldest_seg, transcription_callback, translation_callback)
-                except Exception as e:
-                    logger.error(f"Callback error during forced flush: {e}")
-                self._next_expected_start = max(self._next_expected_start, oldest_seg.end)
-                self._segment_buffer.popleft()
+                    if DEBUG_LEVEL >= 2:
+                        log_debug(
+                            "SEQ",
+                            f"BUFFER FLUSH (timeout): start={oldest_seg.start:.2f}, "
+                            f"end={oldest_seg.end:.2f}, text='{oldest_seg.text[:50]}...'"
+                        )
+                    try:
+                        if self.subtitle_mode or not self._enable_sentence_buffering:
+                            transcription_callback(oldest_seg)
+                        else:
+                            self._handle_transcript_segment(
+                                oldest_seg, transcription_callback, translation_callback
+                            )
+                    except Exception as e:
+                        logger.error(f"Callback error during forced flush: {e}")
+                    self._next_expected_start = max(self._next_expected_start, oldest_seg.end)
+                    self._segment_buffer.popleft()
 
             # -----------------------------------------------------------------
             # 4. Segmente in korrekter Reihenfolge ausgeben
@@ -37016,35 +37160,56 @@ class AudioProcessor:
                 # Zeitliche Prüfung nur im Untertitel-Modus
                 if self.subtitle_mode:
                     if seg.start <= self._next_expected_start + GAP_TOLERANCE:
-                        # Ausgabe im Untertitel-Modus
+                        if DEBUG_LEVEL >= 2:
+                            log_debug(
+                                "SEQ",
+                                f"BUFFER FLUSH: start={seg.start:.2f}, end={seg.end:.2f}, "
+                                f"text='{seg.text[:50]}...'"
+                            )
                         try:
                             if self.subtitle_mode or not self._enable_sentence_buffering:
                                 transcription_callback(seg)
                             else:
-                                self._handle_transcript_segment(seg, transcription_callback, translation_callback)
+                                self._handle_transcript_segment(
+                                    seg, transcription_callback, translation_callback
+                                )
                         except Exception as e:
-                            logger.error(f"Error in transcription_callback: {e}", exc_info=True)
+                            logger.error(
+                                f"Error in transcription_callback: {e}",
+                                exc_info=DEBUG_LEVEL >= 3
+                            )
 
                         self._next_expected_start = max(self._next_expected_start, seg.end)
                         self._segment_buffer.popleft()
                         flushed_segments += 1
                     else:
-                        if DEBUG_LEVEL >= 4:
+                        if DEBUG_LEVEL >= 3:
                             log_debug(
-                                "segment_buffer",
+                                "SEQ",
                                 f"Gap detected: next_expected={self._next_expected_start:.2f}s, "
                                 f"next_buffer={seg.start:.2f}s (gap={seg.start - self._next_expected_start:.2f}s)"
                             )
                         break
                 else:
                     # Normalmodus: immer ausgeben, keine zeitliche Prüfung
+                    if DEBUG_LEVEL >= 2:
+                        log_debug(
+                            "SEQ",
+                            f"BUFFER FLUSH: start={seg.start:.2f}, end={seg.end:.2f}, "
+                            f"text='{seg.text[:50]}...'"
+                        )
                     try:
                         if self.subtitle_mode or not self._enable_sentence_buffering:
                             transcription_callback(seg)
                         else:
-                            self._handle_transcript_segment(seg, transcription_callback, translation_callback)
+                            self._handle_transcript_segment(
+                                seg, transcription_callback, translation_callback
+                            )
                     except Exception as e:
-                        logger.error(f"Error in transcription_callback: {e}", exc_info=True)
+                        logger.error(
+                            f"Error in transcription_callback: {e}",
+                            exc_info=DEBUG_LEVEL >= 3
+                        )
 
                     self._segment_buffer.popleft()
                     flushed_segments += 1
@@ -37062,15 +37227,16 @@ class AudioProcessor:
                 self._segment_buffer = deque(items[-self._max_segment_buffer_size:])
                 if self._segment_buffer:
                     self._next_expected_start = self._segment_buffer[0][1].start
-                    if DEBUG_LEVEL >= 3:
+                    if DEBUG_LEVEL >= 2:
                         log_debug(
-                            "segment_buffer",
-                            f"Reset next_expected to {self._next_expected_start:.2f}s after overflow cleanup"
+                            "SEQ",
+                            f"Reset next_expected to {self._next_expected_start:.2f}s "
+                            "after overflow cleanup"
                         )
 
-            if flushed_segments > 0 and DEBUG_LEVEL >= 3:
+            if flushed_segments > 0 and DEBUG_LEVEL >= 2:
                 log_debug(
-                    "segment_buffer",
+                    "SEQ",
                     f"Flushed {flushed_segments} segment(s), "
                     f"buffer size={len(self._segment_buffer)}, "
                     f"next_expected={self._next_expected_start:.2f}s"
@@ -37522,8 +37688,47 @@ class AudioProcessor:
     ) -> None:
         """
         Lädt den restlichen Teil eines YouTube‑VODs herunter und verarbeitet ihn.
+
+        Diese Methode wird aufgerufen, wenn der normale Stream vorzeitig endet.
+        Sie leert zunächst alle internen Puffer, um Reihenfolgeprobleme zu vermeiden,
+        korrigiert ggf. den internen Fortschrittszähler `_real_processed_seconds`,
+        und startet dann den Download‑Modus. Es werden mehrere Fallback‑Strategien
+        verwendet (--download-sections und vollständiger Download mit Seek).
+
+        **Verbesserungen gegenüber der ursprünglichen Version:**
+            - **Puffer‑Bereinigung vor Download:** Segment‑, Transkriptions‑ und
+              Übersetzungspuffer werden geleert, damit alte Segmente nicht die
+              Reihenfolge der neu heruntergeladenen Segmente stören.
+            - **Korrektur von `_real_processed_seconds`:** Falls der Wert die
+              erwartete Dauer überschreitet, wird er auf einen plausiblen Wert
+              zurückgesetzt, bevor `start_seconds` abgeleitet wird.
+            - **Plausibilitätsprüfung von `start_seconds`:** Der Wert wird auf
+              Gültigkeit geprüft und ggf. korrigiert.
+            - **Robuste Abbruchprüfung** vor jedem Schritt.
+            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 2` mit Präfix `[DOWNLOAD]`.
+            - **Sicherer Umgang mit `cancel_event` und `is_stop_requested`.**
+            - **Dispatcher‑Neustart** falls erforderlich.
+            - **Fehlerisolierung:** Fehler werden geloggt und führen nicht zum Abbruch
+              der gesamten Verarbeitung.
+            - **Vollständige Ressourcenbereinigung** im Fehlerfall.
+
+        Args:
+            video_url: Die ursprüngliche Video‑URL.
+            start_seconds: Position in Sekunden, ab der das Video nachgeladen werden soll.
+            cancel_event: Optionales Event für externen Abbruch.
         """
-        if self.is_stop_requested():
+        # -----------------------------------------------------------------
+        # Hilfsfunktion für konsistente Abbruchprüfung
+        # -----------------------------------------------------------------
+        def is_stop_requested() -> bool:
+            if cancel_event is not None and cancel_event.is_set():
+                return True
+            return self.is_stop_requested()
+
+        # -----------------------------------------------------------------
+        # 1. Vorabprüfung: Abbruch durch Benutzer?
+        # -----------------------------------------------------------------
+        if is_stop_requested():
             logger.info("Download-Modus: Abbruch vor Start erkannt")
             if self._info_callback:
                 self._info_callback("⏹️ Vorgang abgebrochen")
@@ -37533,7 +37738,99 @@ class AudioProcessor:
         logger.warning(
             f"=== DOWNLOAD MODE START: start={start_seconds:.1f}s, expected={self._expected_duration} ==="
         )
+        if DEBUG_LEVEL >= 2:
+            log_debug(
+                "DOWNLOAD",
+                f"Entering download mode with start_seconds={start_seconds:.1f}"
+            )
 
+        # -----------------------------------------------------------------
+        # 2. 🔥 Puffer leeren, um Reihenfolgeprobleme zu vermeiden
+        # -----------------------------------------------------------------
+        # Segment-Puffer leeren (Untertitel-Modus)
+        with self._segment_buffer_lock:
+            flushed_segments = 0
+            while self._segment_buffer:
+                _, seg, _ = self._segment_buffer.popleft()
+                try:
+                    if self._transcription_callback:
+                        self._transcription_callback(seg)
+                    flushed_segments += 1
+                except Exception as e:
+                    logger.warning(f"Fehler beim Leeren des Segment-Puffers: {e}")
+            self._next_expected_start = 0.0
+            if flushed_segments > 0:
+                logger.debug(f"Segment-Puffer geleert: {flushed_segments} Segmente ausgegeben")
+
+        # Transkriptions-Satzpuffer leeren
+        with self._transcript_sentence_lock:
+            if self._transcript_parts:
+                try:
+                    combined = self._create_combined_transcript_segment()
+                    if self._transcription_callback:
+                        self._transcription_callback(combined)
+                    logger.debug(f"Transkriptions-Satzpuffer geleert: {len(combined.text)} Zeichen")
+                except Exception as e:
+                    logger.warning(f"Fehler beim Leeren des Transkriptions-Satzpuffers: {e}")
+                finally:
+                    self._transcript_parts.clear()
+                    self._transcript_segments.clear()
+
+        # Übersetzungs-Satzpuffer leeren
+        with self._sentence_lock:
+            if self._sentence_parts:
+                count = len(self._sentence_parts)
+                self._sentence_parts.clear()
+                self._sentence_segments.clear()
+                logger.debug(f"Übersetzungs-Satzpuffer geleert: {count} Teile verworfen")
+
+        # -----------------------------------------------------------------
+        # 3. 🔥 Korrektur von _real_processed_seconds (falls überhöht)
+        # -----------------------------------------------------------------
+        with self._stats_lock:
+            if self._expected_duration is not None and self._real_processed_seconds > self._expected_duration:
+                old_value = self._real_processed_seconds
+                self._real_processed_seconds = max(0.0, self._expected_duration - 30.0)
+                logger.warning(
+                    f"_real_processed_seconds korrigiert: {old_value:.1f}s → {self._real_processed_seconds:.1f}s"
+                )
+                if DEBUG_LEVEL >= 2:
+                    log_debug(
+                        "DOWNLOAD",
+                        f"Corrected _real_processed_seconds from {old_value:.1f} to {self._real_processed_seconds:.1f}"
+                    )
+                # start_seconds aus dem korrigierten Wert ableiten
+                start_seconds = self._real_processed_seconds
+
+        # -----------------------------------------------------------------
+        # 4. Plausibilitätsprüfung und Korrektur von start_seconds
+        # -----------------------------------------------------------------
+        original_start = start_seconds
+        if self._expected_duration is not None:
+            if start_seconds > self._expected_duration:
+                logger.warning(
+                    f"start_seconds ({start_seconds:.1f}s) exceeds expected duration "
+                    f"({self._expected_duration:.1f}s) – clamping to expected duration - 30s"
+                )
+                start_seconds = max(0.0, self._expected_duration - 30.0)
+            elif start_seconds < 0:
+                start_seconds = 0.0
+        else:
+            if start_seconds < 0:
+                start_seconds = 0.0
+
+        if start_seconds != original_start:
+            if DEBUG_LEVEL >= 2:
+                log_debug(
+                    "DOWNLOAD",
+                    f"Corrected start_seconds from {original_start:.1f}s to {start_seconds:.1f}s"
+                )
+            if self._info_callback:
+                self._info_callback(f"⚠️ Startposition korrigiert auf {start_seconds:.1f}s")
+
+        # -----------------------------------------------------------------
+        # 5. Dispatcher sicherstellen
+        # -----------------------------------------------------------------
         if not self._dispatcher_started or (
             self._dispatcher_thread and not self._dispatcher_thread.is_alive()
         ):
@@ -37551,21 +37848,22 @@ class AudioProcessor:
             self._start_dispatcher()
             time.sleep(0.2)
 
-        trans_cb = getattr(self, '_transcription_callback', None)
-        transl_cb = getattr(self, '_translation_callback', None)
-        info_cb = getattr(self, '_info_callback', None)
-        error_cb = getattr(self, '_error_callback', None)
-
-        if self.is_stop_requested():
+        # -----------------------------------------------------------------
+        # 6. Erneute Abbruchprüfung nach Dispatcher-Start
+        # -----------------------------------------------------------------
+        if is_stop_requested():
             logger.info("Download-Modus: Abbruch nach Dispatcher-Start erkannt")
-            if info_cb:
-                info_cb("⏹️ Vorgang abgebrochen")
+            if self._info_callback:
+                self._info_callback("⏹️ Vorgang abgebrochen")
             self._download_mode_active = False
             return
 
-        if info_cb:
-            info_cb(f"⬇️ Lade restliches Audio ab {start_seconds:.1f}s ...")
+        if self._info_callback:
+            self._info_callback(f"⬇️ Lade restliches Audio ab {start_seconds:.1f}s ...")
 
+        # -----------------------------------------------------------------
+        # 7. Prüfen, ob yt-dlp --download-sections unterstützt
+        # -----------------------------------------------------------------
         use_sections = True
         try:
             result = subprocess.run(
@@ -37579,8 +37877,15 @@ class AudioProcessor:
 
         chunk_count = 0
         download_start = time.perf_counter()
+        trans_cb = self._transcription_callback
+        transl_cb = self._translation_callback
+        info_cb = self._info_callback
+        error_cb = self._error_callback
 
-        if use_sections and not self.is_stop_requested():
+        # -----------------------------------------------------------------
+        # 8. Primärer Versuch: --download-sections
+        # -----------------------------------------------------------------
+        if use_sections and not is_stop_requested():
             chunk_count = self._download_with_ytdlp_sections(
                 video_url, start_seconds, trans_cb, transl_cb, error_cb, info_cb, cancel_event
             )
@@ -37589,13 +37894,19 @@ class AudioProcessor:
             else:
                 logger.warning("--download-sections lieferte 0 Chunks, verwende Fallback")
 
-        if chunk_count == 0 and not self.is_stop_requested():
+        # -----------------------------------------------------------------
+        # 9. Fallback: Gesamtes Audio herunterladen und zuschneiden
+        # -----------------------------------------------------------------
+        if chunk_count == 0 and not is_stop_requested():
             logger.info("🔄 Fallback: Lade gesamtes Audio und schneide mit ffmpeg zu")
             chunk_count = self._download_full_and_seek(
                 video_url, start_seconds, trans_cb, transl_cb, error_cb, info_cb, cancel_event
             )
 
-        if chunk_count > 0 and not self.is_stop_requested():
+        # -----------------------------------------------------------------
+        # 10. Warten auf vollständige Verarbeitung
+        # -----------------------------------------------------------------
+        if chunk_count > 0 and not is_stop_requested():
             logger.info("⏳ Warte auf vollständige Verarbeitung des Downloads...")
             success = self._await_queue_drain(timeout=60.0)
             if success:
@@ -37603,12 +37914,15 @@ class AudioProcessor:
             else:
                 logger.warning("⚠️ Zeitüberschreitung oder Fehler beim Warten auf Queue-Drain")
 
+        # -----------------------------------------------------------------
+        # 11. Abschluss
+        # -----------------------------------------------------------------
         duration_total = time.perf_counter() - download_start
         logger.warning(
             f"Download‑Modus abgeschlossen ({chunk_count} Chunks, Dauer: {duration_total:.2f}s)"
         )
         if info_cb:
-            if self.is_stop_requested():
+            if is_stop_requested():
                 info_cb("⏹️ Download abgebrochen")
             elif chunk_count > 0:
                 info_cb("✅ Restliches Audio heruntergeladen und verarbeitet")
@@ -37862,20 +38176,22 @@ class AudioProcessor:
 
         **Verbesserungen gegenüber der ursprünglichen Version:**
             - **Sichere Startzeit:** `rounded_start` wird als nicht‑negativer Integer
-              validiert und auf Plausibilität geprüft (maximal erwartete Dauer).
+              validiert und auf Plausibilität geprüft (maximal erwartete Dauer sowie
+              absolute Obergrenze von 24 Stunden).
             - **Schutz vor Option‑Injection:** Der URL wird `--` vorangestellt,
               sodass `yt-dlp` sie auch dann als URL interpretiert, wenn sie mit
               einem Bindestrich beginnt.
             - **Optimierte Format‑Priorität:** Bevorzugt reine Audio‑Container
-              (m4a) und fällt auf `worstaudio` zurück.
+              (m4a, webm) und fällt auf `worstaudio` zurück.
             - **Robuste Abbruchprüfung:** Vor jedem Schritt wird `is_stop_requested()`
               geprüft.
             - **Thread‑sichere Cookie‑ und Proxy‑Konfiguration:** Liest die
               Einstellungen aus `self.settings` und `self.stream_manager`.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
+            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 2` mit Präfix `[SECTIONS]`.
             - **Fehlerisolierung:** Ein Fehler bei einem Formatversuch führt nicht
               zum Abbruch, sondern zum Versuch des nächsten Formats.
-            - **Timeout pro Pipeline‑Durchlauf:** Verhindert endloses Hängen.
+            - **Dynamischer Timeout** basierend auf der verbleibenden Dauer (falls bekannt),
+              mit einem Minimum von 30 Sekunden.
             - **Debug‑Ausgabe des letzten Befehls im Fehlerfall** (bei `DEBUG_LEVEL >= 2`).
 
         Args:
@@ -37911,11 +38227,14 @@ class AudioProcessor:
         # 2. Startposition mit 5 Sekunden Überlappung berechnen und validieren
         # -----------------------------------------------------------------
         rounded_start = max(0, int(start_seconds) - 5)
+        # Sicherstellen, dass rounded_start nicht größer als start_seconds ist
+        rounded_start = min(rounded_start, int(start_seconds))
+
         # Zusätzliche Sicherheitsprüfungen
         if rounded_start < 0:
             rounded_start = 0
-            if DEBUG_LEVEL >= 3:
-                log_debug("download", "rounded_start was negative, clamped to 0")
+            if DEBUG_LEVEL >= 2:
+                log_debug("SECTIONS", "rounded_start was negative, clamped to 0")
         if self._expected_duration is not None and rounded_start > self._expected_duration:
             logger.warning(
                 f"rounded_start ({rounded_start}s) exceeds expected duration "
@@ -37924,6 +38243,15 @@ class AudioProcessor:
             rounded_start = max(0, int(self._expected_duration) - 30)
             if rounded_start < 0:
                 rounded_start = 0
+
+        # Absolute Obergrenze (24 Stunden) für den Fall, dass _expected_duration fehlt
+        MAX_REASONABLE_START = 86400  # 24 Stunden
+        if rounded_start > MAX_REASONABLE_START:
+            logger.warning(
+                f"rounded_start ({rounded_start}s) exceeds reasonable maximum "
+                f"({MAX_REASONABLE_START}s) – clamping"
+            )
+            rounded_start = MAX_REASONABLE_START
 
         # Sicherstellen, dass der Wert ein gültiger Integer ist
         try:
@@ -37938,14 +38266,16 @@ class AudioProcessor:
         )
         if info_cb:
             info_cb(f"⬇️ Lade Abschnitt ab {rounded_start}s...")
+        if DEBUG_LEVEL >= 2:
+            log_debug("SECTIONS", f"Using start position: {rounded_start}s")
 
         # -----------------------------------------------------------------
         # 3. Format‑Strings in absteigender Priorität
-        #    - Primär: Audio‑only m4a, Fallback auf bestes Audio
+        #    - Primär: Audio‑only m4a/webm, Fallback auf bestes Audio
         #    - Sekundär: worstaudio als ultimativer Fallback
         # -----------------------------------------------------------------
         format_strings = [
-            "bestaudio[ext=m4a]/bestaudio/best",
+            "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
             "worstaudio",
         ]
 
@@ -37967,18 +38297,34 @@ class AudioProcessor:
         proxy_url = getattr(self.settings, 'proxy_url', '') if proxy_enabled else ''
 
         # -----------------------------------------------------------------
-        # 5. Jedes Format der Reihe nach versuchen
+        # 5. Dynamischen Timeout berechnen
+        # -----------------------------------------------------------------
+        if self._expected_duration is not None:
+            remaining = max(1, self._expected_duration - rounded_start)
+            dynamic_timeout = max(30, min(1800, int(remaining * 2.5)))  # 30s – 30min
+        else:
+            dynamic_timeout = 300
+
+        if DEBUG_LEVEL >= 2:
+            log_debug(
+                "SECTIONS",
+                f"Dynamic timeout: {dynamic_timeout}s (remaining: "
+                f"{self._expected_duration - rounded_start if self._expected_duration else 'unknown'}s)"
+            )
+
+        # -----------------------------------------------------------------
+        # 6. Jedes Format der Reihe nach versuchen
         # -----------------------------------------------------------------
         yt_cmd = []  # Für Debug-Ausgabe im Fehlerfall initialisieren
         for fmt_idx, fmt in enumerate(format_strings):
-            # 5.1 Erneute Abbruchprüfung vor jedem Format
+            # 6.1 Erneute Abbruchprüfung vor jedem Format
             if is_stop_requested():
                 logger.info("Download sections: Abbruch vor Formatversuch")
                 if info_cb:
                     info_cb("⏹️ Download abgebrochen")
                 return 0
 
-            # 5.2 yt‑dlp Befehl zusammenbauen
+            # 6.2 yt‑dlp Befehl zusammenbauen
             yt_cmd = ["yt-dlp", "-f", fmt]
 
             if use_cookies and cookies_browser:
@@ -37995,14 +38341,15 @@ class AudioProcessor:
                 "--", video_url
             ])
 
-            if DEBUG_LEVEL >= 3:
+            if DEBUG_LEVEL >= 2:
                 log_debug(
-                    "download",
-                    f"Versuch mit Format '{fmt}' (Index {fmt_idx+1}/{len(format_strings)})"
+                    "SECTIONS",
+                    f"Attempt {fmt_idx+1}/{len(format_strings)} with format '{fmt}'"
                 )
-                log_debug("download", f"yt-dlp command: {' '.join(yt_cmd)}")
+                if DEBUG_LEVEL >= 3:
+                    log_debug("SECTIONS", f"yt-dlp command: {' '.join(yt_cmd)}")
 
-            # 5.3 Pipeline ausführen und Chunks zählen
+            # 6.3 Pipeline ausführen und Chunks zählen
             try:
                 chunk_count = self._run_ffmpeg_pipe(
                     yt_cmd,
@@ -38011,7 +38358,7 @@ class AudioProcessor:
                     error_cb=error_cb,
                     info_cb=info_cb,
                     seek=False,
-                    timeout=300,
+                    timeout=dynamic_timeout,
                     cancel_event=cancel_event,
                 )
 
@@ -38021,6 +38368,8 @@ class AudioProcessor:
                     )
                     if info_cb:
                         info_cb(f"✅ Download abgeschlossen ({chunk_count} Chunks)")
+                    if DEBUG_LEVEL >= 2:
+                        log_debug("SECTIONS", f"Successful command: {' '.join(yt_cmd)}")
                     return chunk_count
                 else:
                     logger.debug(f"Format '{fmt}' lieferte 0 Chunks, probiere nächstes")
@@ -38038,7 +38387,7 @@ class AudioProcessor:
                 continue
 
         # -----------------------------------------------------------------
-        # 6. Kein Format erfolgreich
+        # 7. Kein Format erfolgreich
         # -----------------------------------------------------------------
         logger.warning("Kein Format mit --download-sections erfolgreich")
         if info_cb:
@@ -38046,7 +38395,7 @@ class AudioProcessor:
 
         # Optionale Debug-Ausgabe des letzten verwendeten Befehls
         if DEBUG_LEVEL >= 2 and yt_cmd:
-            log_debug("download", f"Alle Formate fehlgeschlagen. Letzter Befehl: {' '.join(yt_cmd)}")
+            log_debug("SECTIONS", f"Alle Formate fehlgeschlagen. Letzter Befehl: {' '.join(yt_cmd)}")
 
         return 0
 
@@ -40122,7 +40471,7 @@ class AudioProcessor:
           - FFmpeg‑Prozesse beendet werden.
           - Der Dispatcher keine neuen Aufgaben mehr annimmt.
           - Alle gepufferten Audiodaten verarbeitet werden.
-          - Die Rohdaten‑Queue vollständig geleert wird (`queue.join()`).
+          - Die Rohdaten‑Queue vollständig geleert wird (mit Timeout).
           - Der Dispatcher‑Thread endgültig gestoppt wird.
           - Ausstehende Transkriptions‑Tasks abgeschlossen werden.
           - Die GUI‑Queue geleert wird (für eine vollständige Anzeige).
@@ -40130,6 +40479,7 @@ class AudioProcessor:
           - Der Übersetzungs‑Executor **nach** dem Flushen der Puffer heruntergefahren wird.
           - Temporäre Dateien gelöscht werden.
           - Callbacks für Fehler oder erfolgreiches Ende ausgelöst werden.
+          - Executor‑Referenzen nach Shutdown auf `None` gesetzt werden.
 
         **Verbesserungen in dieser Version:**
             - **Korrekte Reihenfolge:** Der Übersetzungs‑Executor wird **nach** dem
@@ -40141,9 +40491,28 @@ class AudioProcessor:
             - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
             - **Vollständige Ressourcenfreigabe:** Auch bei vorzeitigem Abbruch wird
               versucht, alle Ressourcen freizugeben.
-            - **`_in_final_flush`‑Flag:** Schützt finale Übersetzungen vor dem
-              `_stop_event`, sodass sie garantiert ausgeführt werden.
+            - **`_in_final_flush` als `threading.Event`** für thread‑sichere Abfrage.
+            - **Verwendung von `threading.Condition`** für verlustfreies Warten auf
+              ausstehende Tasks.
+            - **Queue‑Join mit Timeout** (`_join_queue_with_timeout`), um Deadlocks
+              bei fehlenden `task_done()`-Aufrufen zu verhindern.
+            - **Executor‑Referenzen werden nach Shutdown auf `None` gesetzt** (sowohl
+              Transkription, Timeout-Executor als auch Übersetzung), um versehentliche
+              Wiederverwendung zu verhindern.
+            - **`cancel_futures=True`** beim Shutdown der Executoren, um wartende
+              Futures abzubrechen.
+
+        Args:
+            normal_ending: True, wenn der Stream normal beendet wurde.
+            error_occurred: True, wenn ein Fehler zum Abbruch führte.
+            callbacks: Dictionary mit den Callback-Funktionen für 'transcription',
+                       'translation', 'info', 'error' und 'finished'.
         """
+        # ---------------------------------------------------------------------
+        # Konstanten
+        # ---------------------------------------------------------------------
+        QUEUE_JOIN_TIMEOUT = 30.0  # Sekunden
+
         log_debug(
             "processor",
             f"_cleanup_after_stream: START - normal_ending={normal_ending}, "
@@ -40215,9 +40584,9 @@ class AudioProcessor:
         )
 
         # ---------------------------------------------------------------------
-        # 4. Warten, bis die Raw-Audio-Queue vollständig geleert ist.
+        # 4. Warten, bis die Raw-Audio-Queue vollständig geleert ist (mit Timeout).
         # ---------------------------------------------------------------------
-        timed_step("wait_for_queue_empty", lambda: self._raw_audio_queue.join())
+        timed_step("wait_for_queue_empty", lambda: self._join_queue_with_timeout(timeout=QUEUE_JOIN_TIMEOUT))
 
         # ---------------------------------------------------------------------
         # 5. Dispatcher endgültig stoppen
@@ -40247,7 +40616,7 @@ class AudioProcessor:
         #    Verhindert, dass das _stop_event während der finalen Übersetzung
         #    die Aufgaben verwirft.
         # ---------------------------------------------------------------------
-        self._in_final_flush = True
+        self._in_final_flush.set()
         logger.info("🌐 Entering final flush phase – stop_event will be ignored")
 
         # ---------------------------------------------------------------------
@@ -40277,19 +40646,22 @@ class AudioProcessor:
                 return
             logger.debug("🌐 Shutting down translation executor and waiting for tasks...")
             try:
-                executor.shutdown(wait=True, cancel_futures=False)
+                executor.shutdown(wait=True, cancel_futures=True)
                 logger.debug("🌐 Translation executor shut down successfully")
             except TypeError:
                 executor.shutdown(wait=True)
-                logger.debug("🌐 Translation executor shut down (fallback)")
+                logger.debug("🌐 Translation executor shut down (fallback, cancel_futures not supported)")
             except Exception as e:
                 logger.error(f"🌐 Error shutting down translation executor: {e}")
+            finally:
+                # Referenz freigeben, um versehentliche spätere Nutzung zu verhindern
+                self._translation_executor = None
         timed_step("shutdown_translation_executor", shutdown_translation_executor)
 
         # ---------------------------------------------------------------------
         # 13. 🔥 FINAL‑FLUSH‑PHASE BEENDEN
         # ---------------------------------------------------------------------
-        self._in_final_flush = False
+        self._in_final_flush.clear()
         logger.info("🌐 Final flush phase ended")
 
         # ---------------------------------------------------------------------
@@ -40343,7 +40715,20 @@ class AudioProcessor:
         )
 
         # ---------------------------------------------------------------------
-        # 21. Abschließende Debug‑Ausgabe
+        # 21. Executor‑Referenzen freigeben (Transkription und Timeout)
+        # ---------------------------------------------------------------------
+        def release_executors():
+            if hasattr(self, "_transcription_executor"):
+                self._transcription_executor = None
+            if hasattr(self, "_transcribe_timeout_executor"):
+                # Timeout-Executor wird nicht mehr benötigt
+                self._transcribe_timeout_executor = None
+            if DEBUG_LEVEL >= 3:
+                log_debug("processor", "  Executor references set to None")
+        timed_step("release_executors", release_executors)
+
+        # ---------------------------------------------------------------------
+        # 22. Abschließende Debug‑Ausgabe
         # ---------------------------------------------------------------------
         total_duration = time.perf_counter() - cleanup_start_time
         with self._pending_tasks_lock:
@@ -42445,7 +42830,7 @@ class AudioProcessor:
         self,
         segment: TranscriptionResult,
         transcription_callback: TranscriptionCallback,
-        translation_callback: TranslationCallback,
+        translation_callback: Optional[TranslationCallback] = None,
     ) -> None:
         """
         Puffert ein Transkriptionssegment und gibt bei Satzende, Timeout oder
@@ -42466,21 +42851,25 @@ class AudioProcessor:
             - Thread-sicher durch internes Lock
             - Deaktivierbar über `self._enable_sentence_buffering`
             - Im Untertitel-Modus automatisch deaktiviert (segmentweise Ausgabe)
-            - Leitet vollständige Sätze auch an die Übersetzung weiter
+            - Detaillierte Debug‑Ausgaben mit Präfix `[TRANSCRIPT]` bei `DEBUG_LEVEL >= 2`
 
         Args:
             segment: Das aktuelle Transkriptionssegment von Whisper.
             transcription_callback: Der ursprüngliche Callback für die GUI.
-            translation_callback: Callback für die Übersetzung (wird für
-                                  `_handle_sentence_buffering` benötigt).
+            translation_callback: Optionaler Callback für die Übersetzung.
         """
         # -----------------------------------------------------------------
         # 1. Frühe Ausstiege: Satzpuffer deaktiviert oder Untertitel-Modus
         # -----------------------------------------------------------------
         if not self._enable_sentence_buffering or self.subtitle_mode:
             # Direkte Ausgabe ohne Pufferung
-            transcription_callback(segment)
-            # Übersetzung für dieses Einzelsegment anstoßen
+            try:
+                transcription_callback(segment)
+            except Exception as e:
+                logger.error(
+                    f"Error in transcription_callback (direct): {e}",
+                    exc_info=DEBUG_LEVEL >= 3
+                )
             if translation_callback is not None:
                 self._handle_sentence_buffering(segment, translation_callback)
             return
@@ -42488,7 +42877,7 @@ class AudioProcessor:
         text = segment.text.strip()
         if not text:
             if DEBUG_LEVEL >= 4:
-                log_debug("transcript_buffer", "Ignoring empty segment")
+                log_debug("TRANSCRIPT", "_handle_transcript_segment: empty segment – ignored")
             return
 
         # -----------------------------------------------------------------
@@ -42510,48 +42899,60 @@ class AudioProcessor:
                     return
 
                 combined_seg = self._create_combined_transcript_segment()
-                if DEBUG_LEVEL >= 3:
+                combined_text = combined_seg.text
+                num_parts = len(self._transcript_parts)
+
+                if DEBUG_LEVEL >= 2:
                     log_debug(
-                        "transcript_buffer",
-                        f"Flushing transcript buffer: reason={reason}, "
-                        f"parts={len(self._transcript_parts)}, "
-                        f"chars={len(combined_seg.text)}",
+                        "TRANSCRIPT",
+                        f"FLUSH BUFFER: reason={reason}, parts={num_parts}, "
+                        f"chars={len(combined_text)}, lang={combined_seg.language}"
                     )
+                    if DEBUG_LEVEL >= 3:
+                        preview = combined_text[:200] + "…" if len(combined_text) > 200 else combined_text
+                        log_debug("TRANSCRIPT", f"  Combined text: {preview}")
 
                 try:
                     # 1. GUI-Ausgabe des vollständigen Satzes
                     transcription_callback(combined_seg)
-                    # 2. Übersetzung des vollständigen Satzes anstoßen
-                    if translation_callback is not None:
-                        self._handle_sentence_buffering(combined_seg, translation_callback)
                 except Exception as e:
                     logger.error(
-                        f"Error in transcription/translation callbacks during flush: {e}",
-                        exc_info=DEBUG_LEVEL >= 3,
+                        f"Error in transcription_callback during flush: {e}",
+                        exc_info=DEBUG_LEVEL >= 3
                     )
-                    if DEBUG_LEVEL >= 3:
-                        log_exception("transcript_buffer", "Callback error", e, level="debug")
-                finally:
-                    self._transcript_parts.clear()
-                    self._transcript_segments.clear()
-                    self._transcript_last_flush = now
+
+                # 2. Übersetzung des vollständigen Satzes anstoßen
+                if translation_callback is not None:
+                    try:
+                        self._handle_sentence_buffering(combined_seg, translation_callback)
+                    except Exception as e:
+                        logger.error(
+                            f"Error in translation_callback during flush: {e}",
+                            exc_info=DEBUG_LEVEL >= 3
+                        )
+
+                self._transcript_parts.clear()
+                self._transcript_segments.clear()
+                self._transcript_last_flush = now
 
             # -----------------------------------------------------------------
             # 3. Benutzerabbruch? Puffer sofort leeren und aktuelles Segment
             #    einzeln ausgeben, um Datenverlust zu vermeiden.
             # -----------------------------------------------------------------
             if self._stop_event.is_set():
+                if DEBUG_LEVEL >= 2:
+                    log_debug("TRANSCRIPT", "Stop event set – flushing buffer and outputting current segment directly")
                 flush_buffer("stop_event")
                 # Aktuelles Segment trotzdem als Einzelsegment ausgeben
                 try:
                     transcription_callback(segment)
-                    if translation_callback is not None:
-                        self._handle_sentence_buffering(segment, translation_callback)
                 except Exception as e:
                     logger.error(
-                        f"Error in callbacks for single segment during stop: {e}",
-                        exc_info=DEBUG_LEVEL >= 3,
+                        f"Error in transcription_callback for single segment during stop: {e}",
+                        exc_info=DEBUG_LEVEL >= 3
                     )
+                if translation_callback is not None:
+                    self._handle_sentence_buffering(segment, translation_callback)
                 return
 
             # -----------------------------------------------------------------
@@ -42561,6 +42962,11 @@ class AudioProcessor:
                 last_lang = self._transcript_segments[-1].language
                 current_lang = getattr(segment, "language", "unknown")
                 if current_lang != last_lang:
+                    if DEBUG_LEVEL >= 2:
+                        log_debug(
+                            "TRANSCRIPT",
+                            f"Language change detected ({last_lang} → {current_lang}) – flushing buffer"
+                        )
                     flush_buffer(f"language_change ({last_lang} → {current_lang})")
 
             # -----------------------------------------------------------------
@@ -42568,6 +42974,11 @@ class AudioProcessor:
             # -----------------------------------------------------------------
             if (self._transcript_parts and
                     (now - self._transcript_last_flush) > self._transcript_flush_interval):
+                if DEBUG_LEVEL >= 2:
+                    log_debug(
+                        "TRANSCRIPT",
+                        f"Timeout ({self._transcript_flush_interval}s) exceeded – flushing buffer"
+                    )
                 flush_buffer(f"timeout ({self._transcript_flush_interval}s)")
 
             # -----------------------------------------------------------------
@@ -42576,6 +42987,14 @@ class AudioProcessor:
             self._transcript_parts.append(text)
             self._transcript_segments.append(segment)
             self._transcript_last_flush = now
+
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "TRANSCRIPT",
+                    f"BUFFER APPEND: text='{text[:50]}...', "
+                    f"parts={len(self._transcript_parts)}, "
+                    f"total_chars={sum(len(p) for p in self._transcript_parts)}"
+                )
 
             # -----------------------------------------------------------------
             # 7. Prüfen, ob der Puffer jetzt geleert werden soll
@@ -42596,6 +43015,8 @@ class AudioProcessor:
                     flush_reason = f"word_threshold({word_count})"
 
             if should_flush:
+                if DEBUG_LEVEL >= 2:
+                    log_debug("TRANSCRIPT", f"Flush triggered by: {flush_reason}")
                 flush_buffer(flush_reason)
 
     def _create_combined_transcript_segment(self) -> TranscriptionResult:
