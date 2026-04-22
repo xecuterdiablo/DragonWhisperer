@@ -43848,21 +43848,6 @@ class AudioProcessor:
     def _update_realtime_factor(self, chunk_duration: float, processing_duration: float) -> None:
         """
         Aktualisiert den gleitenden Echtzeitfaktor (_last_realtime_factor).
-
-        Der Echtzeitfaktor ist das Verhältnis von Verarbeitungszeit zu Audiospieldauer.
-        Ein Wert < 1.0 bedeutet, dass die Transkription schneller als Echtzeit erfolgt.
-        Werte > 1.0 zeigen an, dass das System nicht hinterherkommt.
-
-        Diese Methode wird nach jeder erfolgreichen Transkription eines Chunks aufgerufen.
-        Sie verwendet einen exponentiell gleitenden Durchschnitt (EMA), um kurzzeitige
-        Schwankungen zu glätten und eine stabilere Steuerung der adaptiven Chunk-Anpassung
-        zu ermöglichen.
-
-        Thread-sicher durch Verwendung von _stats_lock.
-
-        Args:
-            chunk_duration: Dauer des verarbeiteten Audiomaterials in Sekunden.
-            processing_duration: Benötigte Verarbeitungszeit in Sekunden.
         """
         if chunk_duration <= 0.0 or processing_duration <= 0.0:
             # Ungültige Eingaben ignorieren
@@ -43938,18 +43923,6 @@ class WhisperLayoutManager:
     Verwaltet das Layout der GUI (vertikal/horizontal) und die Erstellung
     der Text‑Widgets. Die Verarbeitung von Text‑Updates erfolgt zentral über
     den QueueManager – diese Klasse enthält keine Queue‑Verarbeitung mehr.
-
-    Verbesserungen:
-        - Alle Zugriffe auf das aktuelle Theme erfolgen über `self.gui_ref.current_theme`.
-        - Dynamische Fenstergröße und Mindestgröße werden in `DragonWhispererGUI.setup_gui`
-          behandelt; hier wird nur das Layout aufgebaut.
-        - Die Steuerleiste (`create_compact_control_panel`) verwendet `grid()` für
-          eine echte Dreiteilung mit expandierender Mitte.
-        - Vertikales und horizontales Layout nutzen `grid()` für gleichmäßige
-          Platzverteilung und saubere Expansion.
-        - Alle Methoden sind robust gegenüber fehlenden Widgets und fangen
-          Tkinter‑Fehler ab.
-        - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 3`.
     """
 
     def __init__(self, gui_ref: "DragonWhispererGUI") -> None:
@@ -44453,24 +44426,6 @@ class WhisperLayoutManager:
         Sie verwendet `grid` mit entsprechenden `row`- und `column`-Parametern,
         um die Widgets untereinander anzuordnen. Die Widgets werden in einem
         `ttk.LabelFrame`-Container platziert.
-
-        Optimierungen in dieser Version:
-            - **Kompaktere Abstände:** `padx` und `pady` wurden reduziert, um
-              mehr Platz für die Textausgabe zu schaffen und den verfügbaren
-              Bildschirmbereich effizienter zu nutzen.
-            - **Robuste Fehlerbehandlung:** Alle Widget-Erstellungen sind in
-              `try/except`-Blöcke gekapselt, um bei Tkinter-Fehlern nicht
-              abzustürzen.
-            - **Detaillierte Debug-Ausgaben** bei `DEBUG_LEVEL >= 3` für jeden
-              Schritt der Layout-Erstellung.
-            - **Flexible Größenanpassung:** `grid_rowconfigure` und
-              `grid_columnconfigure` mit `weight=1` sorgen dafür, dass die
-              Textbereiche bei Fenstervergrößerung proportional mitwachsen.
-            - **Fallback-Schriftarten:** Falls die definierten Schriftarten
-              nicht verfügbar sind, wird auf sichere System-Standards
-              zurückgegriffen.
-            - **Konsistente Theme-Anwendung:** Alle Farben werden aus
-              `self.gui_ref.current_theme` bezogen.
         """
         gui = self.gui_ref
         theme = gui.current_theme
@@ -45637,9 +45592,7 @@ class AdvancedSettings:
     vram_idle_timeout_seconds: int = 180
     optimize_translations: bool = False
 
-    # =========================================================================
     # Konfigurationstypen und Audio
-    # =========================================================================
     config_type: str = "high_accuracy"
     transcript_max_lines: int = 400
     translation_max_lines: int = 300
@@ -45656,9 +45609,7 @@ class AdvancedSettings:
     audio_profile: str = "transcription"
     adaptive_chunk: bool = False
 
-    # =========================================================================
     # Duplikate & Confidence
-    # =========================================================================
     duplicate_similarity_threshold: float = 0.98
     adaptive_chunk_low_words: int = 3
     adaptive_chunk_high_words: int = 10
@@ -45673,12 +45624,9 @@ class AdvancedSettings:
     vad_min_silence_duration_ms: int = 50
     max_empty_reads: int = 30
 
-    # =========================================================================
     # Blacklist & Text-Filter
-    # =========================================================================
     blacklist: List[str] = field(
         default_factory=lambda: [
-            # --- Bestehende Einträge ---
             "Untertitelung des ZDF für funk",
             "Untertitelung des ZDF",
             "Untertitelung: ZDF",
@@ -45712,7 +45660,6 @@ class AdvancedSettings:
     translation_workers: int = 1
     cpu_threads: int = 0
 
-    # =========================================================================
     # Text-to-Speech
     # =========================================================================
     tts_engine: str = "piper"
@@ -45720,7 +45667,6 @@ class AdvancedSettings:
     tts_length_scale: float = 0.9
     tts_sentence_silence: float = 0.1
 
-    # =========================================================================
     # Erweiterte Whisper-Parameter
     # =========================================================================
     best_of: int = 5
@@ -45733,12 +45679,10 @@ class AdvancedSettings:
 
     # =========================================================================
     # VAD-Fallback & Proxy
-    # =========================================================================
     vad_fallback_enabled: bool = True
     proxy_url: str = "socks5://127.0.0.1:18080"
     proxy_enabled: bool = False
 
-    # =========================================================================
     # Zusammenfassung (Ollama)
     # =========================================================================
     summarize_temperature: float = 0.1
@@ -45754,21 +45698,15 @@ class AdvancedSettings:
     # =========================================================================
     download_inactivity_timeout: float = 30.0   # Sekunden
 
-    # =========================================================================
     # Erweiterte Pfade (für Dateizugriff)
-    # =========================================================================
     allowed_dirs: List[str] = field(default_factory=list)
 
-    # =========================================================================
     # Auto‑TTS
-    # =========================================================================
     auto_tts_transcript: bool = False
     auto_tts_translation: bool = False
     auto_tts_delay_ms: int = 1500
 
-    # =========================================================================
     # Zielsprache (für Übersetzung)
-    # =========================================================================
     target_language: str = "de"
 
     # =========================================================================
@@ -45827,14 +45765,6 @@ class AdvancedSettings:
         modusabhängige Überschreibungen an. Sie ist vollständig abgesichert gegen
         fehlende Felder und Exceptions – im Fehlerfall wird ein funktionsfähiger
         Minimalzustand hergestellt.
-
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - Robuste Fallback-Werte für alle optionalen Attribute.
-            - Validierung von `ollama_temperature`, `ollama_timeout` und anderer Werte.
-            - Garantiert, dass `self.config` existiert (im finally-Block).
-            - Sicherung der Originalwerte vor dem ersten Aufruf von `_apply_mode_overrides`.
-            - Detaillierte Debug-Ausgaben bei `DEBUG_LEVEL >= 2`.
-            - Fängt alle Exceptions ab und loggt sie, ohne den Start zu verhindern.
         """
         try:
             # -----------------------------------------------------------------
@@ -45870,9 +45800,7 @@ class AdvancedSettings:
             else:
                 self.ollama_temperature = 0.0
 
-            # -----------------------------------------------------------------
             # 3. Ollama‑Timeout validieren (30 – 300 Sekunden)
-            # -----------------------------------------------------------------
             if hasattr(self, 'ollama_timeout'):
                 if not (30 <= self.ollama_timeout <= 300):
                     logger.warning(
@@ -45883,9 +45811,7 @@ class AdvancedSettings:
             else:
                 self.ollama_timeout = 90
 
-            # -----------------------------------------------------------------
             # 4. Zielsprache validieren (muss in SUPPORTED_LANGUAGES sein)
-            # -----------------------------------------------------------------
             if not hasattr(self, 'target_language') or self.target_language not in SUPPORTED_LANGUAGES:
                 self.target_language = "de"
                 if DEBUG_LEVEL >= 2:
@@ -46161,44 +46087,15 @@ class AdvancedSettings:
                 f"restore_mode_overrides: {restored_count} Werte wiederhergestellt, Cache geleert"
             )
 
-    # -------------------------------------------------------------------------
     # Persistenz
-    # -------------------------------------------------------------------------
     @classmethod
     def load_from_file(cls, filename: str = "dragon_advanced_settings.json") -> "AdvancedSettings":
         """
         Lädt erweiterte Einstellungen robust, typensicher und mit automatischer Typableitung.
-
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - **Globaler Cache:** Verhindert mehrfaches Laden derselben Datei während eines
-              Programmablaufs. Der Cache wird bei Änderungen (z. B. Speichern) invalidiert.
-            - **Thread‑Sicherheit:** Alle Zugriffe auf den Cache erfolgen unter einem
-              `RLock`, sodass parallele Aufrufe sicher sind.
-            - **Versionierung:** Unterstützt ein optionales `_version`-Feld, um zukünftige
-              Migrationen zu ermöglichen.
-            - **Erweiterte Fehlerbehandlung:** Bei korrupten JSON-Dateien wird eine
-              Sicherungskopie erstellt und die Standardeinstellungen geladen.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
-            - **Typkonvertierung mit Fallbacks:** Numerische Werte, Boolesche Werte und
-              Listen werden sicher in den erwarteten Typ konvertiert.
-            - **Automatische Reparatur:** Fehlende Felder werden durch Standardwerte
-              ersetzt, ohne dass die gesamte Datei verworfen wird.
-            - **Kompatibilität mit älteren Versionen:** Felder, die im aktuellen Schema
-              nicht mehr existieren, werden ignoriert und nicht gespeichert.
-
-        Args:
-            filename: Name der JSON-Datei im Konfigurationsverzeichnis.
-
-        Returns:
-            Eine Instanz von AdvancedSettings mit den geladenen (und ggf. reparierten) Werten.
-            Im Fehlerfall wird eine Instanz mit Standardwerten zurückgegeben.
         """
         import re
         from typing import get_origin, get_args, Union
 
-        # ---------------------------------------------------------------------
-        # Hilfsfunktion: Sicheres Lesen einer JSON‑Datei mit Backup
-        # ---------------------------------------------------------------------
         def _read_json_safe(file_path: Path) -> Optional[Dict[str, Any]]:
             """Liest eine JSON‑Datei und erstellt bei Fehlern ein Backup."""
             try:
@@ -46206,7 +46103,6 @@ class AdvancedSettings:
                     return json.load(f)
             except json.JSONDecodeError as e:
                 logger.error(f"JSONDecodeError in {file_path}: {e}")
-                # Backup der korrupten Datei erstellen
                 backup_path = file_path.with_suffix(".json.bak")
                 try:
                     shutil.copy2(file_path, backup_path)
@@ -46221,9 +46117,7 @@ class AdvancedSettings:
                 logger.error(f"Unerwarteter Fehler beim Lesen von {file_path}: {e}")
                 return None
 
-        # ---------------------------------------------------------------------
         # Hilfsfunktion: Typkonvertierung mit Fallback
-        # ---------------------------------------------------------------------
         def _convert_value(value: Any, target_type: type, default: Any) -> Any:
             """Konvertiert einen Wert sicher in den Zieltyp."""
             if value is None:
@@ -46252,9 +46146,7 @@ class AdvancedSettings:
                 logger.warning(f"⚠️ Konvertierung von '{value}' zu {target_type.__name__} fehlgeschlagen, verwende Standard {default}")
                 return default
 
-        # ---------------------------------------------------------------------
         # 1. Cache-Infrastruktur (thread‑sicher)
-        # ---------------------------------------------------------------------
         if not hasattr(cls, "_cache"):
             cls._cache: Dict[str, "AdvancedSettings"] = {}
             cls._cache_lock = threading.RLock()
@@ -46269,9 +46161,7 @@ class AdvancedSettings:
                     log_debug("settings", f"Returning cached AdvancedSettings from {cache_key}")
                 return cls._cache[cache_key]
 
-        # ---------------------------------------------------------------------
         # 2. Datei existiert nicht → Standardeinstellungen
-        # ---------------------------------------------------------------------
         if not file_path.exists():
             logger.info("📝 Keine gespeicherten erweiterten Einstellungen, verwende Standard")
             instance = cls()
@@ -46280,12 +46170,9 @@ class AdvancedSettings:
                 cls._cache[cache_key] = instance
             return instance
 
-        # ---------------------------------------------------------------------
         # 3. JSON‑Daten sicher laden
-        # ---------------------------------------------------------------------
         data = _read_json_safe(file_path)
         if data is None:
-            # Fehler beim Laden – Standardeinstellungen verwenden
             logger.warning("Verwende Standardeinstellungen aufgrund von Lesefehlern")
             instance = cls()
             instance._repair_if_needed()
@@ -46293,9 +46180,7 @@ class AdvancedSettings:
                 cls._cache[cache_key] = instance
             return instance
 
-        # ---------------------------------------------------------------------
         # 4. Versionsprüfung (für zukünftige Migrationen)
-        # ---------------------------------------------------------------------
         file_version = data.get("_version", 1)
         if file_version > 1:
             logger.warning(
@@ -46303,13 +46188,10 @@ class AdvancedSettings:
                 "Möglicherweise nicht vollständig kompatibel."
             )
 
-        # ---------------------------------------------------------------------
         # 5. NUR gültige Felder übernehmen (ignoriere Fremdfelder)
-        # ---------------------------------------------------------------------
         valid_fields = {f.name for f in fields(cls) if f.init}
         filtered = {k: v for k, v in data.items() if k in valid_fields}
 
-        # Warnung bei veralteten Feldern (nur einmal pro Feld)
         for key in data:
             if key not in valid_fields and key != "_version":
                 if not hasattr(cls, "_warned_obsolete_fields"):
@@ -46318,9 +46200,7 @@ class AdvancedSettings:
                     cls._warned_obsolete_fields.add(key)
                     logger.debug(f"Ignoriere veraltetes Feld '{key}' in AdvancedSettings")
 
-        # ---------------------------------------------------------------------
         # 6. Typableitung aus der Dataclass
-        # ---------------------------------------------------------------------
         default_instance = cls()
         type_map = {}
         for f in fields(cls):
@@ -46335,9 +46215,7 @@ class AdvancedSettings:
             if typ in (int, float, bool, str, list):
                 type_map[f.name] = typ
 
-        # ---------------------------------------------------------------------
         # 7. Werte typensicher konvertieren
-        # ---------------------------------------------------------------------
         for key in list(filtered.keys()):
             if key not in type_map:
                 continue
@@ -46345,14 +46223,10 @@ class AdvancedSettings:
             default_value = getattr(default_instance, key)
             filtered[key] = _convert_value(filtered[key], target, default_value)
 
-        # ---------------------------------------------------------------------
         # 8. Spezialfall chunk_duration (Property)
-        # ---------------------------------------------------------------------
         chunk_duration_val = filtered.pop("chunk_duration", None)
 
-        # ---------------------------------------------------------------------
         # 9. Instanz erstellen
-        # ---------------------------------------------------------------------
         try:
             instance = cls(**filtered)
         except Exception as e:
@@ -46365,14 +46239,10 @@ class AdvancedSettings:
             except (ValueError, TypeError):
                 logger.warning(f"⚠️ Ungültiger Wert für chunk_duration: {chunk_duration_val}")
 
-        # ---------------------------------------------------------------------
         # 10. Reparatur durchführen (fügt fehlende Felder hinzu)
-        # ---------------------------------------------------------------------
         instance._repair_if_needed()
 
-        # ---------------------------------------------------------------------
         # 11. Cache speichern
-        # ---------------------------------------------------------------------
         with cls._cache_lock:
             cls._cache[cache_key] = instance
 
