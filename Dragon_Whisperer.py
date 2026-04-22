@@ -41012,48 +41012,6 @@ class AudioProcessor:
     ) -> None:
         """
         Bereinigt nach dem Stream‑Ende alle Ressourcen in korrekter Reihenfolge.
-
-        Diese Methode ist **kritisch** für einen sauberen Abschluss der Verarbeitung.
-        Sie stellt sicher, dass:
-          - FFmpeg‑Prozesse beendet werden.
-          - Der Dispatcher keine neuen Aufgaben mehr annimmt.
-          - Alle gepufferten Audiodaten verarbeitet werden.
-          - Die Rohdaten‑Queue vollständig geleert wird (mit Timeout).
-          - Der Dispatcher‑Thread endgültig gestoppt wird.
-          - Ausstehende Transkriptions‑Tasks abgeschlossen werden.
-          - Die GUI‑Queue geleert wird (für eine vollständige Anzeige).
-          - Die Satzpuffer für Übersetzung **und** Transkription geleert werden.
-          - Der Übersetzungs‑Executor **nach** dem Flushen der Puffer heruntergefahren wird.
-          - Temporäre Dateien gelöscht werden.
-          - Callbacks für Fehler oder erfolgreiches Ende ausgelöst werden.
-          - Executor‑Referenzen nach Shutdown auf `None` gesetzt werden.
-
-        **Verbesserungen in dieser Version:**
-            - **Korrekte Reihenfolge:** Der Übersetzungs‑Executor wird **nach** dem
-              Flushen von `_flush_sentence_buffer` und `_flush_transcript_buffer`
-              heruntergefahren. Dadurch gehen keine finalen Übersetzungen verloren.
-            - **Robuste Fehlerbehandlung:** Jeder Schritt ist in `try/except` gekapselt
-              und wird über `timed_step` ausgeführt. Ein Fehler in einem Schritt
-              unterbricht nicht die gesamte Bereinigung.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
-            - **Vollständige Ressourcenfreigabe:** Auch bei vorzeitigem Abbruch wird
-              versucht, alle Ressourcen freizugeben.
-            - **`_in_final_flush` als `threading.Event`** für thread‑sichere Abfrage.
-            - **Verwendung von `threading.Condition`** für verlustfreies Warten auf
-              ausstehende Tasks.
-            - **Queue‑Join mit Timeout** (`_join_queue_with_timeout`), um Deadlocks
-              bei fehlenden `task_done()`-Aufrufen zu verhindern.
-            - **Executor‑Referenzen werden nach Shutdown auf `None` gesetzt** (sowohl
-              Transkription, Timeout-Executor als auch Übersetzung), um versehentliche
-              Wiederverwendung zu verhindern.
-            - **`cancel_futures=True`** beim Shutdown der Executoren, um wartende
-              Futures abzubrechen.
-
-        Args:
-            normal_ending: True, wenn der Stream normal beendet wurde.
-            error_occurred: True, wenn ein Fehler zum Abbruch führte.
-            callbacks: Dictionary mit den Callback-Funktionen für 'transcription',
-                       'translation', 'info', 'error' und 'finished'.
         """
         # ---------------------------------------------------------------------
         # Konstanten
@@ -43694,22 +43652,6 @@ class AudioProcessor:
         Startet eine asynchrone Übersetzung eines Textes mit der konfigurierten
         Übersetzungs‑Engine. Die Methode ist nicht blockierend und verwendet
         einen dedizierten Executor.
-
-        Verbesserungen:
-            - Explizite WARNING‑Logs für alle kritischen Pfade (Debugging auch ohne DEBUG‑LEVEL).
-            - Prüfung der Engine‑Verfügbarkeit und des Executors vor dem Einreichen.
-            - Semaphor‑gesteuerte Begrenzung paralleler Übersetzungen.
-            - Automatischer Fallback auf sekundäre Engine bei Fehlern.
-            - Sequenznummern‑Prüfung, um veraltete Übersetzungen zu verwerfen.
-            - Robuste Fehlerbehandlung im Worker‑Thread.
-            - Abbruch bei None‑Callbacks oder deaktivierter Übersetzung.
-
-        Args:
-            text: Der zu übersetzende Text (bereits bereinigt).
-            source_lang: Quellsprache (ISO‑Code oder "auto").
-            translation_callback: Callback für das Übersetzungsergebnis.
-            start: Optionaler Startzeitstempel (für Untertitel).
-            end: Optionaler Endzeitstempel (für Untertitel).
         """
         # -----------------------------------------------------------------
         # 1. Schnelle Abbruchbedingungen mit WARNING‑Logs
@@ -44730,12 +44672,6 @@ class WhisperLayoutManager:
     def create_horizontal_layout(self) -> None:
         """
         Erstellt das horizontale Layout der GUI.
-
-        Diese Methode konfiguriert das Hauptfenster mit einem horizontalen Layout.
-        Sie verwendet `grid` mit entsprechenden `row`- und `column`-Parametern,
-        um die Widgets nebeneinander anzuordnen. Die Widgets werden in einem
-        `ttk.Frame`-Container platziert, der wiederum in einem `tk.Toplevel`
-        eingebettet ist. Das Layout wird durch `grid`-Optionen gesteuert.
         """
         gui = self.gui_ref
         theme = gui.current_theme
