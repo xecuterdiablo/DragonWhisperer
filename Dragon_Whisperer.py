@@ -39057,298 +39057,298 @@ class AudioProcessor:
             f"🌐 AudioProcessor: Zielsprache auf {lang_code} gesetzt, Sequenz {self._translation_seq}"
         )
 
-def start_processing(
-    self,
-    url: str,
-    transcription_callback: TranscriptionCallback,
-    translation_callback: TranslationCallback,
-    info_callback: InfoCallback,
-    error_callback: ErrorCallback,
-    finished_callback: Optional[FinishedCallback] = None,
-) -> None:
-    """
-    Startet die asynchrone Audioverarbeitung für eine gegebene URL.
+    def start_processing(
+        self,
+        url: str,
+        transcription_callback: TranscriptionCallback,
+        translation_callback: TranslationCallback,
+        info_callback: InfoCallback,
+        error_callback: ErrorCallback,
+        finished_callback: Optional[FinishedCallback] = None,
+    ) -> None:
+        """
+        Startet die asynchrone Audioverarbeitung für eine gegebene URL.
 
-    🛡️ Der Emergency Reset wurde vollständig aus dem IDLE‑Pfad entfernt.  
-    Er wird ausschließlich dann ausgelöst, wenn der Zustand **nicht** IDLE ist und
-    kein aktiver Verarbeitungsthread existiert.
-    """
-    if DEBUG_LEVEL >= 3:
-        log_debug("processor", ">>> start_processing FINAL <<<")
-        log_debug("processor", f"start_processing called with URL: {url[:100]}...")
+        🛡️ Der Emergency Reset wurde vollständig aus dem IDLE‑Pfad entfernt.  
+        Er wird ausschließlich dann ausgelöst, wenn der Zustand **nicht** IDLE ist und
+        kein aktiver Verarbeitungsthread existiert.
+        """
+        if DEBUG_LEVEL >= 3:
+            log_debug("processor", ">>> start_processing FINAL <<<")
+            log_debug("processor", f"start_processing called with URL: {url[:100]}...")
 
-    # -----------------------------------------------------------------
-    # 1. Atomarer Zustandsübergang
-    # -----------------------------------------------------------------
-    with self._state_lock:
-        current_state = self._state
+        # -----------------------------------------------------------------
+        # 1. Atomarer Zustandsübergang
+        # -----------------------------------------------------------------
+        with self._state_lock:
+            current_state = self._state
 
-        if current_state != AudioProcessor.State.IDLE:
-            # Prüfen, ob tatsächlich ein Thread aktiv ist
-            thread_alive = (
-                hasattr(self, '_processing_thread') and
-                self._processing_thread is not None and
-                self._processing_thread.is_alive()
-            )
-            dispatcher_alive = (
-                self._dispatcher_started and
-                self._dispatcher_thread is not None and
-                self._dispatcher_thread.is_alive()
-            )
+            if current_state != AudioProcessor.State.IDLE:
+                # Prüfen, ob tatsächlich ein Thread aktiv ist
+                thread_alive = (
+                    hasattr(self, '_processing_thread') and
+                    self._processing_thread is not None and
+                    self._processing_thread.is_alive()
+                )
+                dispatcher_alive = (
+                    self._dispatcher_started and
+                    self._dispatcher_thread is not None and
+                    self._dispatcher_thread.is_alive()
+                )
 
-            if thread_alive or dispatcher_alive:
-                error_callback("⚠️ A processing thread is already active")
+                if thread_alive or dispatcher_alive:
+                    error_callback("⚠️ A processing thread is already active")
+                    if DEBUG_LEVEL >= 3:
+                        log_debug(
+                            "processor",
+                            f"Aborting: state={current_state.name}, thread_alive={thread_alive}, "
+                            f"dispatcher_alive={dispatcher_alive}"
+                        )
+                    return
+
+                # Zustand hängt (kein Thread) → Emergency Reset
+                logger.debug(
+                    "AudioProcessor stuck in state '%s' without active threads. "
+                    "Performing emergency reset.",
+                    current_state.name
+                )
+                self._guaranteed_cleanup()
+                # _guaranteed_cleanup setzt den Zustand bereits auf IDLE
+                if DEBUG_LEVEL >= 3:
+                    log_debug("processor", "Emergency reset performed. State is now IDLE.")
+
+            # Jetzt ist der Zustand garantiert IDLE → wechsle zu STARTING
+            self._set_state(AudioProcessor.State.STARTING)
+            if DEBUG_LEVEL >= 3:
+                log_debug("processor", "State set to STARTING")
+
+        # -----------------------------------------------------------------
+        # 2. URL validieren und Dateigröße ermitteln
+        # -----------------------------------------------------------------
+        url = PlatformUtils.sanitize_url(url)
+        if DEBUG_LEVEL >= 3:
+            log_debug("processor", f"Sanitized URL: {url[:100]}...")
+
+        if url.startswith("file://"):
+            try:
+                ok, real_path = PlatformUtils.validate_file_path(url)
+                if not ok:
+                    with self._state_lock:
+                        self._set_state(AudioProcessor.State.IDLE)
+                    error_callback(f"❌ {real_path}")
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("processor", f"File validation failed: {real_path}")
+                    return
+                file_path = real_path
+                self._total_file_size = os.path.getsize(file_path)
+                logger.info(f"📁 Lokale Datei, Größe: {self._total_file_size} bytes")
                 if DEBUG_LEVEL >= 3:
                     log_debug(
                         "processor",
-                        f"Aborting: state={current_state.name}, thread_alive={thread_alive}, "
-                        f"dispatcher_alive={dispatcher_alive}"
+                        f"Local file: {file_path}, size={self._total_file_size}",
                     )
-                return
-
-            # Zustand hängt (kein Thread) → Emergency Reset
-            logger.debug(
-                "AudioProcessor stuck in state '%s' without active threads. "
-                "Performing emergency reset.",
-                current_state.name
-            )
-            self._guaranteed_cleanup()
-            # _guaranteed_cleanup setzt den Zustand bereits auf IDLE
-            if DEBUG_LEVEL >= 3:
-                log_debug("processor", "Emergency reset performed. State is now IDLE.")
-
-        # Jetzt ist der Zustand garantiert IDLE → wechsle zu STARTING
-        self._set_state(AudioProcessor.State.STARTING)
-        if DEBUG_LEVEL >= 3:
-            log_debug("processor", "State set to STARTING")
-
-    # -----------------------------------------------------------------
-    # 2. URL validieren und Dateigröße ermitteln
-    # -----------------------------------------------------------------
-    url = PlatformUtils.sanitize_url(url)
-    if DEBUG_LEVEL >= 3:
-        log_debug("processor", f"Sanitized URL: {url[:100]}...")
-
-    if url.startswith("file://"):
-        try:
-            ok, real_path = PlatformUtils.validate_file_path(url)
-            if not ok:
+            except OSError as e:
                 with self._state_lock:
                     self._set_state(AudioProcessor.State.IDLE)
-                error_callback(f"❌ {real_path}")
+                error_callback(f"❌ Dateizugriffsfehler: {e}")
                 if DEBUG_LEVEL >= 3:
-                    log_debug("processor", f"File validation failed: {real_path}")
+                    log_debug("processor", f"OSError on file: {e}")
                 return
-            file_path = real_path
-            self._total_file_size = os.path.getsize(file_path)
-            logger.info(f"📁 Lokale Datei, Größe: {self._total_file_size} bytes")
+        else:
+            self._total_file_size = None
+            if DEBUG_LEVEL >= 3:
+                log_debug("processor", "Stream URL (non-file)")
+
+        # -----------------------------------------------------------------
+        # 3. Stop-Event und Stream‑ID zurücksetzen
+        # -----------------------------------------------------------------
+        self.reset_stop_flag()
+        self._current_stream_id = f"stream_{int(time.time())}"
+        if DEBUG_LEVEL >= 3:
+            log_debug("processor", f"Stream ID: {self._current_stream_id}")
+        self.processing_completed_event.clear()
+
+        # -----------------------------------------------------------------
+        # 4. Statistik-Zähler zurücksetzen
+        # -----------------------------------------------------------------
+        with self._stats_lock:
+            self._chunk_counter = 0
+            self._total_bytes_processed = 0
+            self._processed_seconds = 0.0
+            self._read_error_count = 0
+            self._consecutive_timeouts = 0
+            self._consecutive_errors = 0
+            self._consecutive_successes = 0
+            self._low_conf_counter = 0
+            self._slow_chunks = 0
+            self._last_realtime_factor = 0.0
+
+        self._real_processed_seconds = 0.0
+
+        # -----------------------------------------------------------------
+        # 5. Audio-Puffer leeren
+        # -----------------------------------------------------------------
+        with self._buffer_lock:
+            self._audio_chunks.clear()
+            self._audio_total_bytes = 0
+
+        # -----------------------------------------------------------------
+        # 6. Segment-Puffer zurücksetzen
+        # -----------------------------------------------------------------
+        with self._segment_buffer_lock:
+            self._segment_buffer.clear()
+            self._next_expected_start = 0.0
+            if DEBUG_LEVEL >= 4:
+                log_debug("processor", "Segment buffer cleared for new stream")
+
+        # -----------------------------------------------------------------
+        # 7. Callback speichern
+        # -----------------------------------------------------------------
+        self._finished_callback = finished_callback
+
+        # -----------------------------------------------------------------
+        # 8. Adaptive Chunk-Variablen zurücksetzen
+        # -----------------------------------------------------------------
+        with self._word_count_lock:
+            self._word_count_history.clear()
+            self._smoothed_word_count = None
+
+        self._last_chunk_duration = self.settings.config.CHUNK_DURATION
+        self._chunk_stable_counter = 0
+
+        # -----------------------------------------------------------------
+        # 9. Executors konfigurieren
+        # -----------------------------------------------------------------
+        cpu_count = os.cpu_count() or 4
+        _transcribe_workers = getattr(
+            self.settings, "transcription_workers", max(1, cpu_count // 8)
+        )
+        translate_workers = getattr(
+            self.settings, "translation_workers", min(8, max(1, cpu_count // 4))
+        )
+
+        if self._translation_executor is None:
+            self._translation_executor = OptimizedThreadPoolExecutor(
+                max_workers=translate_workers,
+                thread_name_prefix="DW-Translate",
+                max_queue_size=100,
+            )
             if DEBUG_LEVEL >= 3:
                 log_debug(
                     "processor",
-                    f"Local file: {file_path}, size={self._total_file_size}",
+                    f"Translation executor created with {translate_workers} worker(s)"
                 )
-        except OSError as e:
-            with self._state_lock:
-                self._set_state(AudioProcessor.State.IDLE)
-            error_callback(f"❌ Dateizugriffsfehler: {e}")
+        else:
             if DEBUG_LEVEL >= 3:
-                log_debug("processor", f"OSError on file: {e}")
-            return
-    else:
-        self._total_file_size = None
-        if DEBUG_LEVEL >= 3:
-            log_debug("processor", "Stream URL (non-file)")
+                log_debug("processor", "Translation executor already exists, reusing")
 
-    # -----------------------------------------------------------------
-    # 3. Stop-Event und Stream‑ID zurücksetzen
-    # -----------------------------------------------------------------
-    self.reset_stop_flag()
-    self._current_stream_id = f"stream_{int(time.time())}"
-    if DEBUG_LEVEL >= 3:
-        log_debug("processor", f"Stream ID: {self._current_stream_id}")
-    self.processing_completed_event.clear()
+        if self.subtitle_mode:
+            self._set_transcription_workers(1)
+            logger.info("✅ Untertitel‑Modus: sequenzielle Transkription (1 Worker)")
+        else:
+            self._set_transcription_workers(1)
+            logger.info("✅ Normaler Modus: sequenzielle Transkription (1 Worker)")
 
-    # -----------------------------------------------------------------
-    # 4. Statistik-Zähler zurücksetzen
-    # -----------------------------------------------------------------
-    with self._stats_lock:
-        self._chunk_counter = 0
-        self._total_bytes_processed = 0
-        self._processed_seconds = 0.0
-        self._read_error_count = 0
-        self._consecutive_timeouts = 0
-        self._consecutive_errors = 0
-        self._consecutive_successes = 0
-        self._low_conf_counter = 0
-        self._slow_chunks = 0
-        self._last_realtime_factor = 0.0
+        # -----------------------------------------------------------------
+        # 10. Dispatcher vorbereiten und starten
+        # -----------------------------------------------------------------
+        if self._dispatcher_started:
+            log_debug("processor", "start_processing: old dispatcher still running, stopping it")
+            self._stop_dispatcher(clear_queue=True)
 
-    self._real_processed_seconds = 0.0
-
-    # -----------------------------------------------------------------
-    # 5. Audio-Puffer leeren
-    # -----------------------------------------------------------------
-    with self._buffer_lock:
-        self._audio_chunks.clear()
-        self._audio_total_bytes = 0
-
-    # -----------------------------------------------------------------
-    # 6. Segment-Puffer zurücksetzen
-    # -----------------------------------------------------------------
-    with self._segment_buffer_lock:
-        self._segment_buffer.clear()
-        self._next_expected_start = 0.0
-        if DEBUG_LEVEL >= 4:
-            log_debug("processor", "Segment buffer cleared for new stream")
-
-    # -----------------------------------------------------------------
-    # 7. Callback speichern
-    # -----------------------------------------------------------------
-    self._finished_callback = finished_callback
-
-    # -----------------------------------------------------------------
-    # 8. Adaptive Chunk-Variablen zurücksetzen
-    # -----------------------------------------------------------------
-    with self._word_count_lock:
-        self._word_count_history.clear()
-        self._smoothed_word_count = None
-
-    self._last_chunk_duration = self.settings.config.CHUNK_DURATION
-    self._chunk_stable_counter = 0
-
-    # -----------------------------------------------------------------
-    # 9. Executors konfigurieren
-    # -----------------------------------------------------------------
-    cpu_count = os.cpu_count() or 4
-    _transcribe_workers = getattr(
-        self.settings, "transcription_workers", max(1, cpu_count // 8)
-    )
-    translate_workers = getattr(
-        self.settings, "translation_workers", min(8, max(1, cpu_count // 4))
-    )
-
-    if self._translation_executor is None:
-        self._translation_executor = OptimizedThreadPoolExecutor(
-            max_workers=translate_workers,
-            thread_name_prefix="DW-Translate",
-            max_queue_size=100,
-        )
-        if DEBUG_LEVEL >= 3:
-            log_debug(
-                "processor",
-                f"Translation executor created with {translate_workers} worker(s)"
-            )
-    else:
-        if DEBUG_LEVEL >= 3:
-            log_debug("processor", "Translation executor already exists, reusing")
-
-    if self.subtitle_mode:
-        self._set_transcription_workers(1)
-        logger.info("✅ Untertitel‑Modus: sequenzielle Transkription (1 Worker)")
-    else:
-        self._set_transcription_workers(1)
-        logger.info("✅ Normaler Modus: sequenzielle Transkription (1 Worker)")
-
-    # -----------------------------------------------------------------
-    # 10. Dispatcher vorbereiten und starten
-    # -----------------------------------------------------------------
-    if self._dispatcher_started:
-        log_debug("processor", "start_processing: old dispatcher still running, stopping it")
-        self._stop_dispatcher(clear_queue=True)
-
-    cleared = 0
-    try:
-        while True:
-            self._raw_audio_queue.get_nowait()
-            self._raw_audio_queue.task_done()
-            cleared += 1
-    except queue.Empty:
-        pass
-    if cleared > 0:
-        logger.debug(f"Queue vor Dispatcher-Start geleert: {cleared} Elemente entfernt")
-
-    self._start_dispatcher()
-    if DEBUG_LEVEL >= 3:
-        log_debug("processor", "Dispatcher started")
-
-    # -----------------------------------------------------------------
-    # 11. Callbacks speichern
-    # -----------------------------------------------------------------
-    self._transcription_callback = transcription_callback
-    self._translation_callback = translation_callback
-    self._info_callback = info_callback
-    self._error_callback = error_callback
-
-    # -----------------------------------------------------------------
-    # 12. _last_oom zurücksetzen
-    # -----------------------------------------------------------------
-    if hasattr(self, '_transcription_engine') and self._transcription_engine is not None:
+        cleared = 0
         try:
-            with self._transcription_engine._state_lock:
-                self._transcription_engine._last_oom = False
-            if DEBUG_LEVEL >= 3:
-                log_debug("processor", "Reset _last_oom flag for new stream")
-        except Exception as e:
-            logger.warning(f"Failed to reset _last_oom: {e}")
+            while True:
+                self._raw_audio_queue.get_nowait()
+                self._raw_audio_queue.task_done()
+                cleared += 1
+        except queue.Empty:
+            pass
+        if cleared > 0:
+            logger.debug(f"Queue vor Dispatcher-Start geleert: {cleared} Elemente entfernt")
 
-    # -----------------------------------------------------------------
-    # 13. Verarbeitungs-Thread starten
-    # -----------------------------------------------------------------
-    def _process_thread(
-        url: str,
-        trans_cb: TranscriptionCallback,
-        transl_cb: TranslationCallback,
-        info_cb: InfoCallback,
-        err_cb: ErrorCallback,
-        finish_cb: Optional[FinishedCallback],
-    ) -> None:
-        try:
-            if DEBUG_LEVEL >= 3:
-                log_debug("processor", "Processing thread entered")
-            self._process_loop_enhanced(
+        self._start_dispatcher()
+        if DEBUG_LEVEL >= 3:
+            log_debug("processor", "Dispatcher started")
+
+        # -----------------------------------------------------------------
+        # 11. Callbacks speichern
+        # -----------------------------------------------------------------
+        self._transcription_callback = transcription_callback
+        self._translation_callback = translation_callback
+        self._info_callback = info_callback
+        self._error_callback = error_callback
+
+        # -----------------------------------------------------------------
+        # 12. _last_oom zurücksetzen
+        # -----------------------------------------------------------------
+        if hasattr(self, '_transcription_engine') and self._transcription_engine is not None:
+            try:
+                with self._transcription_engine._state_lock:
+                    self._transcription_engine._last_oom = False
+                if DEBUG_LEVEL >= 3:
+                    log_debug("processor", "Reset _last_oom flag for new stream")
+            except Exception as e:
+                logger.warning(f"Failed to reset _last_oom: {e}")
+
+        # -----------------------------------------------------------------
+        # 13. Verarbeitungs-Thread starten
+        # -----------------------------------------------------------------
+        def _process_thread(
+            url: str,
+            trans_cb: TranscriptionCallback,
+            transl_cb: TranslationCallback,
+            info_cb: InfoCallback,
+            err_cb: ErrorCallback,
+            finish_cb: Optional[FinishedCallback],
+        ) -> None:
+            try:
+                if DEBUG_LEVEL >= 3:
+                    log_debug("processor", "Processing thread entered")
+                self._process_loop_enhanced(
+                    url,
+                    trans_cb,
+                    transl_cb,
+                    info_cb,
+                    err_cb,
+                    finish_cb,
+                )
+            except Exception as e:
+                logger.exception(f"❌ Unhandled exception in processing thread: {e}")
+                err_cb(f"Internal error: {e}")
+            finally:
+                with self._state_lock:
+                    self._set_state(AudioProcessor.State.IDLE)
+                self._stop_event.set()
+                if DEBUG_LEVEL >= 3:
+                    log_debug("processor", "Processing thread finished")
+
+        thread = threading.Thread(
+            target=_process_thread,
+            args=(
                 url,
-                trans_cb,
-                transl_cb,
-                info_cb,
-                err_cb,
-                finish_cb,
-            )
-        except Exception as e:
-            logger.exception(f"❌ Unhandled exception in processing thread: {e}")
-            err_cb(f"Internal error: {e}")
-        finally:
-            with self._state_lock:
-                self._set_state(AudioProcessor.State.IDLE)
-            self._stop_event.set()
-            if DEBUG_LEVEL >= 3:
-                log_debug("processor", "Processing thread finished")
+                transcription_callback,
+                translation_callback,
+                info_callback,
+                error_callback,
+                finished_callback,
+            ),
+            daemon=True,
+            name=f"DW-AudioProc_{self._current_stream_id}",
+        )
+        self._processing_thread = thread
+        thread.start()
 
-    thread = threading.Thread(
-        target=_process_thread,
-        args=(
-            url,
-            transcription_callback,
-            translation_callback,
-            info_callback,
-            error_callback,
-            finished_callback,
-        ),
-        daemon=True,
-        name=f"DW-AudioProc_{self._current_stream_id}",
-    )
-    self._processing_thread = thread
-    thread.start()
+        # -----------------------------------------------------------------
+        # 14. Zustand auf PROCESSING setzen
+        # -----------------------------------------------------------------
+        with self._state_lock:
+            if self._state == AudioProcessor.State.STARTING:
+                self._set_state(AudioProcessor.State.PROCESSING)
+                if DEBUG_LEVEL >= 3:
+                    log_debug("processor", "State changed to PROCESSING")
 
-    # -----------------------------------------------------------------
-    # 14. Zustand auf PROCESSING setzen
-    # -----------------------------------------------------------------
-    with self._state_lock:
-        if self._state == AudioProcessor.State.STARTING:
-            self._set_state(AudioProcessor.State.PROCESSING)
-            if DEBUG_LEVEL >= 3:
-                log_debug("processor", "State changed to PROCESSING")
-
-    logger.info("✅ Processing thread started")
+        logger.info("✅ Processing thread started")
 
     def reset_stop_flag(self) -> None:
         self._stop_event.clear()
