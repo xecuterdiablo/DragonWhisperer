@@ -68,12 +68,6 @@ def _filter_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     Betroffene Parameter:
         - 'key_threadpool' (explizit)
         - Alle Schlüssel, die mit '_' beginnen (interne Parameter von urllib3)
-
-    Args:
-        kwargs: Das zu bereinigende Dictionary.
-
-    Returns:
-        Ein neues Dictionary ohne die problematischen Schlüssel.
     """
     # Defensiv: Kopie erstellen, um Seiteneffekte zu vermeiden
     filtered = kwargs.copy()
@@ -153,9 +147,7 @@ def _apply_patches() -> None:
     import urllib3._collections
     import urllib3.connection
 
-    # -------------------------------------------------------------------------
     # 1. PoolManager.__init__
-    # -------------------------------------------------------------------------
     _original_pool_init = urllib3.poolmanager.PoolManager.__init__
 
     def _patched_pool_init(self, *args, **kwargs):
@@ -164,9 +156,7 @@ def _apply_patches() -> None:
 
     urllib3.poolmanager.PoolManager.__init__ = _patched_pool_init
 
-    # -------------------------------------------------------------------------
     # 2. ProxyManager.__init__
-    # -------------------------------------------------------------------------
     if hasattr(urllib3.poolmanager, 'ProxyManager'):
         _original_proxy_init = urllib3.poolmanager.ProxyManager.__init__
 
@@ -176,9 +166,7 @@ def _apply_patches() -> None:
 
         urllib3.poolmanager.ProxyManager.__init__ = _patched_proxy_init
 
-    # -------------------------------------------------------------------------
     # 3. PoolKey.__new__
-    # -------------------------------------------------------------------------
     if hasattr(urllib3.connectionpool, 'PoolKey'):
         _original_poolkey_new = urllib3.connectionpool.PoolKey.__new__
 
@@ -189,9 +177,7 @@ def _apply_patches() -> None:
 
         urllib3.connectionpool.PoolKey.__new__ = _patched_poolkey_new
 
-    # -------------------------------------------------------------------------
     # 4. PoolKey.__init__ (Sicherheitspatch)
-    # -------------------------------------------------------------------------
     if (hasattr(urllib3.connectionpool, 'PoolKey') and
         hasattr(urllib3.connectionpool.PoolKey, '__init__')):
         _original_poolkey_init = urllib3.connectionpool.PoolKey.__init__
@@ -202,9 +188,7 @@ def _apply_patches() -> None:
 
         urllib3.connectionpool.PoolKey.__init__ = _patched_poolkey_init
 
-    # -------------------------------------------------------------------------
     # 5. connection_from_pool_key
-    # -------------------------------------------------------------------------
     if hasattr(urllib3.poolmanager.PoolManager, 'connection_from_pool_key'):
         _original_connection_from_pool_key = (
             urllib3.poolmanager.PoolManager.connection_from_pool_key
@@ -217,9 +201,7 @@ def _apply_patches() -> None:
             _patched_connection_from_pool_key
         )
 
-    # -------------------------------------------------------------------------
     # 6. RecentlyUsedContainer (für ältere urllib3-Versionen)
-    # -------------------------------------------------------------------------
     if hasattr(urllib3._collections, 'RecentlyUsedContainer'):
         _original_container_init = urllib3._collections.RecentlyUsedContainer.__init__
 
@@ -229,9 +211,7 @@ def _apply_patches() -> None:
 
         urllib3._collections.RecentlyUsedContainer.__init__ = _patched_container_init
 
-    # -------------------------------------------------------------------------
     # 7. ConnectionPool.urlopen (kann ebenfalls key_threadpool erhalten)
-    # -------------------------------------------------------------------------
     if hasattr(urllib3.connectionpool, 'ConnectionPool'):
         _original_urlopen = urllib3.connectionpool.ConnectionPool.urlopen
 
@@ -243,6 +223,8 @@ def _apply_patches() -> None:
 
     _patch_applied = True
 
+    if DEBUG_LEVEL >= 4:
+        log_debug("monkey", "urllib3 monkey-patch applied successfully")
 
 def apply() -> None:
     """
@@ -253,7 +235,6 @@ def apply() -> None:
     wird der Patch an mehreren Stellen angebracht und ein entsprechender
     Debug‑Eintrag geschrieben.
 
-    Diese Funktion ist idempotent – mehrfaches Aufrufen ist unschädlich.
     """
     global _patch_applied
     if _patch_applied:
@@ -332,35 +313,25 @@ def unpatch() -> None:
 
     # Debug-Ausgabe mit Schutz gegen undefinierte Variablen
     try:
-        if DEBUG_LEVEL >= 3:
+        if DEBUG_LEVEL >= 4:
             log_debug("monkey", "urllib3 monkey-patch removed")
     except NameError:
         pass
 
-
-# =============================================================================
 # Automatische Anwendung beim Import dieses Moduls
-# =============================================================================
-# Standardmäßig wird der Patch beim Import angewendet, falls erforderlich.
-# Dies stellt sicher, dass alle nachfolgenden urllib3-Operationen fehlerfrei
-# funktionieren.
 apply()
 
 warnings.filterwarnings(
     "ignore", category=UserWarning, module="multiprocessing.resource_tracker"
 )
 
-# =============================================================================
 # 2. DRITTBIBLIOTHEKEN
-# =============================================================================
 try:
     import requests
 except ImportError:
     requests = None
 
-# =============================================================================
 # 3. TKINTER (GUI)
-# =============================================================================
 try:
     import tkinter as tk
     from tkinter import filedialog, scrolledtext, ttk, simpledialog
@@ -370,9 +341,7 @@ except ImportError:
     GUI_AVAILABLE = False
     tk = ttk = scrolledtext = filedialog = None
 
-# =============================================================================
 # 4. KOMMANDOZEILEN-PARAMETER (DEBUG, QUIET)
-# =============================================================================
 DEBUG_LEVEL = 0
 DEBUG_COMPONENTS = []
 
@@ -388,9 +357,7 @@ for arg in sys.argv:
 
 QUIET_MODE = "--quiet" in sys.argv or "-q" in sys.argv
 
-# =============================================================================
 # 5. LOGGING KONFIGURATION
-# =============================================================================
 logging.basicConfig(
     level=logging.WARNING,
     format="[%(asctime)s.%(msecs)03d] [%(levelname)s] %(message)s",
@@ -414,9 +381,7 @@ if QUIET_MODE:
 warnings.filterwarnings("ignore", message=".*pynvml.*")
 warnings.filterwarnings("ignore", message=".*The pynvml package is deprecated.*")
 
-# =============================================================================
 # 6. PLATTFORMERKENNUNG & UMWELTVARIABLEN
-# =============================================================================
 SYSTEM = platform.system()
 IS_WINDOWS = SYSTEM == "Windows"
 IS_MACOS = SYSTEM == "Darwin"
@@ -462,11 +427,6 @@ if requests is not None:
     class NamedHTTPAdapter(HTTPAdapter):
         """
         HTTPAdapter mit benanntem ThreadPoolExecutor – kompatibel mit urllib3 1.x und 2.x.
-
-        Diese Klasse erweitert requests.adapters.HTTPAdapter und ersetzt den internen
-        ThreadPoolExecutor durch einen benutzerdefinierten Executor mit aussagekräftigem
-        Thread-Namen. Dies erleichtert das Debugging und Monitoring von parallelen
-        HTTP-Anfragen.
         """
 
         def __init__(
@@ -505,21 +465,6 @@ if requests is not None:
             Diese Methode wird von urllib3 aufgerufen, wenn eine neue Verbindung
             aufgebaut wird. Sie ersetzt den standardmäßigen ThreadPool durch einen
             eigenen Executor mit benutzerdefiniertem Thread-Namen-Präfix.
-
-            Kompatibilitätshinweis:
-                In urllib3 < 2.0 wurde `threadpool` als Keyword-Argument akzeptiert.
-                In urllib3 ≥ 2.0 wird `threadpool` nicht mehr als Keyword-Argument
-                erwartet, sondern muss direkt als `pool_cls` oder ähnlich übergeben
-                werden. Die hier verwendete Methode übergibt `threadpool` als
-                Keyword-Argument und entfernt vorher eventuell vorhandene
-                `key_threadpool`-Einträge, die in neueren Versionen zu Fehlern führen.
-
-            Args:
-                *args: Positionsargumente für den PoolManager.
-                **kwargs: Schlüsselwortargumente für den PoolManager.
-
-            Returns:
-                Den initialisierten PoolManager.
             """
             # Entferne `key_threadpool`, falls vorhanden (verursacht Fehler in urllib3 >= 2.0)
             kwargs.pop("key_threadpool", None)
@@ -632,10 +577,6 @@ class TranscriptionError(Exception):
 # Vollständige Liste aller von Whisper (faster-whisper / openai-whisper)
 # unterstützten Sprachen. Basierend auf der offiziellen Dokumentation:
 # https://github.com/openai/whisper/blob/main/whisper/tokenizer.py
-#
-# Hinweis: Der Code "auto" ist ein Kunstwort und wird von Whisper nicht direkt
-#          unterstützt – er signalisiert der Anwendung, die automatische
-#          Spracherkennung zu verwenden.
 BASE_LANGUAGES: Dict[str, str] = {
     "auto": "Automatisch",
     # --------------------------- Europäische Sprachen ---------------------------
@@ -764,9 +705,6 @@ BASE_LANGUAGES: Dict[str, str] = {
 # -----------------------------------------------------------------------------
 # 8.2 Mapping für abweichende Sprachcodes (Whisper → Übersetzungs-APIs)
 # -----------------------------------------------------------------------------
-# ACHTUNG: Dieses Mapping wird NUR für Übersetzungs-Engines (Google, Argos, Ollama)
-#          verwendet, NICHT für die Whisper-Transkription!
-#          Whisper erwartet die originalen ISO-Codes (z. B. 'tl' für Tagalog).
 LANGUAGE_CODE_MAPPING: Dict[str, str] = {
     "yue": "zh-TW",   # Kantonesisch → Traditionelles Chinesisch (Google)
     "tl": "fil",      # Tagalog → Filipino (Google)
@@ -804,12 +742,6 @@ DISPLAY_NAME_TO_CODE: Dict[str, str] = {
 def get_whisper_language_code(display_name: str) -> Optional[str]:
     """
     Gibt den Whisper‑Code für einen Anzeigenamen zurück.
-
-    Args:
-        display_name: Der lesbare Name der Sprache (z. B. 'Deutsch').
-
-    Returns:
-        Der zugehörige ISO‑Code (z. B. 'de') oder None, wenn nicht gefunden.
     """
     return DISPLAY_NAME_TO_CODE.get(display_name)
 
@@ -817,12 +749,6 @@ def get_whisper_language_code(display_name: str) -> Optional[str]:
 def get_display_name(code: str) -> str:
     """
     Gibt den lesbaren Namen für einen Sprachcode zurück.
-
-    Args:
-        code: Der Sprachcode (z. B. 'de').
-
-    Returns:
-        Der Anzeigename (z. B. 'Deutsch') oder der Code selbst, falls unbekannt.
     """
     return BASE_LANGUAGES.get(code, code)
 
@@ -830,13 +756,6 @@ def get_display_name(code: str) -> str:
 def map_to_google_code(whisper_code: str) -> str:
     """
     Konvertiert einen Whisper‑Sprachcode in den von Google Translate erwarteten Code.
-
-    Args:
-        whisper_code: Der Whisper‑Code (z. B. 'tl', 'yue').
-
-    Returns:
-        Der für die Übersetzungs‑API geeignete Code (z. B. 'fil', 'zh-TW').
-        Bei unbekannten Codes wird der Originalcode zurückgegeben.
     """
     if whisper_code == "auto":
         return "auto"
@@ -846,12 +765,6 @@ def map_to_google_code(whisper_code: str) -> str:
 def is_whisper_language_code(code: str) -> bool:
     """
     Prüft, ob ein gegebener Code von Whisper direkt unterstützt wird.
-
-    Args:
-        code: Der zu prüfende Sprachcode (z. B. 'de', 'tl').
-
-    Returns:
-        True, wenn Whisper diesen Code akzeptiert, sonst False.
     """
     return code in WHISPER_SUPPORTED_LANGUAGES
 
@@ -859,12 +772,6 @@ def is_whisper_language_code(code: str) -> bool:
 def is_valid_source_language(display_name: str) -> bool:
     """
     Prüft, ob ein Anzeigename eine gültige Quellsprache für Whisper ist.
-
-    Args:
-        display_name: Der lesbare Name (z. B. 'Deutsch' oder 'Automatisch').
-
-    Returns:
-        True, wenn der Name in der Sprachliste existiert (einschließlich 'auto').
     """
     return display_name in DISPLAY_NAME_TO_CODE
 
@@ -925,9 +832,7 @@ def get_other_language_names() -> List[str]:
     return _OTHER_NAMES.copy()
 
 
-# =============================================================================
 # 9. BASISKLASSEN UND HILFSKLASSEN (EventBus, PeriodicTaskMixin, BaseDialog, ContextMenuMixin, Themes, Fonts)
-# =============================================================================
 class EventBus:
     """
     Thread-sicherer Event-Bus mit exakten und Muster-Abonnements.
@@ -1045,9 +950,7 @@ class EventBus:
                     return True
             return False
 
-    # -------------------------------------------------------------------------
     # Events senden
-    # -------------------------------------------------------------------------
     def emit(self, event_type: str, data: Any = None) -> None:
         """
         Sendet ein Event an alle Abonnenten.
@@ -1097,9 +1000,7 @@ class EventBus:
                 if fnmatch.fnmatch(event_type, pattern):
                     run_callback(cb, data)
 
-    # -------------------------------------------------------------------------
     # Kontext-Manager
-    # -------------------------------------------------------------------------
     @contextmanager
     def subscription_context(self, event_type: str, callback: Callable[[Any], None]):
         """
@@ -1127,9 +1028,7 @@ class EventBus:
         finally:
             self.unsubscribe_pattern(pattern, callback)
 
-    # -------------------------------------------------------------------------
     # Verwaltung
-    # -------------------------------------------------------------------------
     def clear(self) -> None:
         """Entfernt alle Abonnements."""
         with self._lock:
@@ -1825,7 +1724,6 @@ class HighContrastTheme:
     STATUS_BAR_FG = "#ffff00"
     STATUS_BAR_ACCENT = "#00ffff"
 
-
 class Fonts:
     TITLE = ("Segoe UI", 12, "bold")
     SUBTITLE = ("Segoe UI", 10, "bold")
@@ -2075,19 +1973,14 @@ class MonokaiTheme:
 
 CURRENT_THEME = DarkTheme()
 
-# =============================================================================
 # 10. KONFIGURATION (ConfigDefaults, Config, RealtimeConfig, HighAccuracyConfig, YouTubeOptimizedConfig, get_config)
-# =============================================================================
 
 
 class ConfigDefaults:
     """
     Zentrale Konfigurationskonstanten für Dragon Whisperer.
     """
-
-    # =========================================================================
     # Audio-Grundlagen
-    # =========================================================================
     SAMPLE_RATE: int = 16000
     """Audio-Samplerate in Hz (16 kHz ist optimal für Whisper)."""
 
@@ -2100,9 +1993,7 @@ class ConfigDefaults:
     BYTES_PER_SAMPLE: int = 2
     """Bytes pro Sample (bei 16-bit = 2)."""
 
-    # =========================================================================
     # Allgemeine Konfiguration
-    # =========================================================================
     DEFAULT_BEAM_SIZE: int = 10
     """Standard-Beam-Size für Whisper-Decodierung (höher = genauer, aber langsamer)."""
 
@@ -2127,9 +2018,7 @@ class ConfigDefaults:
     MAX_CONSECUTIVE_ERRORS: int = 5
     """Maximale aufeinanderfolgende Fehler, bevor der Stream neu gestartet wird."""
 
-    # =========================================================================
     # Chunk-Parameter (Audiodaten-Blöcke)
-    # =========================================================================
     BASE_CHUNK_DURATION: int = 20
     """Standard-Chunk-Dauer in Sekunden (20s ist ein guter Kompromiss)."""
 
@@ -2142,9 +2031,7 @@ class ConfigDefaults:
     CHUNK_OVERLAP: float = 2.0
     """Überlappung zwischen aufeinanderfolgenden Chunks in Sekunden (verhindert Informationsverlust an den Grenzen)."""
 
-    # =========================================================================
     # Streaming & Netzwerk
-    # =========================================================================
     STREAM_TIMEOUT: int = 25
     """Timeout für Stream-Verbindungen in Sekunden."""
 
@@ -2232,9 +2119,7 @@ class ConfigDefaults:
     SUCCESSES_BEFORE_CHUNK_INCREASE: int = 5
     """Anzahl der Erfolge, bevor die Chunk-Dauer erhöht wird."""
 
-    # =========================================================================
     # FFmpeg
-    # =========================================================================
     FFMPEG_BUFSIZE: str = "2048k"
     """FFmpeg Puffergröße (2 MB)."""
 
@@ -2247,9 +2132,7 @@ class ConfigDefaults:
     FFMPEG_ANALYZE_DURATION: str = "0"
     """FFmpeg Analyze-Duration (0 = automatisch)."""
 
-    # =========================================================================
     # Audio-Enhancement (Rauschunterdrückung, Verstärkung)
-    # =========================================================================
     AUDIO_ENHANCEMENT_ENABLED: bool = True
     """Audio-Enhancement standardmäßig aktivieren."""
 
@@ -2298,9 +2181,7 @@ class ConfigDefaults:
     MIN_UNIQUE_WORDS_RATIO: float = 0.3
     """Minimaler Anteil einzigartiger Wörter (verhindert Wiederholungen wie 'ja ja ja')."""
 
-    # =========================================================================
     # Untertitel (Timed Transcripts)
-    # =========================================================================
     SUBTITLE_BUFFER_SIZE: int = 1000
     """Maximale Anzahl von Untertitel-Segmenten im Puffer."""
 
@@ -2310,9 +2191,7 @@ class ConfigDefaults:
     ENABLE_TIMED_TRANSLATIONS: bool = True
     """Zeitstempel für Übersetzungen aktivieren (für Untertitel-Modus)."""
 
-    # =========================================================================
     # Logging
-    # =========================================================================
     ENABLE_DEBUG_LOGGING: bool = True
     """Debug-Logging global aktivieren."""
 
@@ -2331,9 +2210,7 @@ class ConfigDefaults:
     PERFORMANCE_LOG_INTERVAL: int = 50
     """Intervall für Performance-Logs (Anzahl der Chunks)."""
 
-    # =========================================================================
     # Caching
-    # =========================================================================
     MAX_CACHE_SIZE_MB: int = 100
     """Maximale Cache-Größe in MB (Überschreibung durch Config möglich)."""
 
@@ -2479,9 +2356,7 @@ class ConfigDefaults:
     STALLED_RECONNECT_LOG_INTERVAL: float = 10.0
     """Intervall für Logs bei hängenden Reconnects in Sekunden."""
 
-    # =========================================================================
     # Zusätzliche Debug-Informationen (nur für Entwicklung)
-    # =========================================================================
     @classmethod
     def print_debug_info(cls) -> None:
         """Gibt eine Übersicht aller Konfigurationswerte für Debugging-Zwecke aus."""
@@ -2525,9 +2400,7 @@ class Config(ConfigDefaults):
     Dynamische Konfiguration für Dragon Whisperer.
     """
 
-    # -------------------------------------------------------------------------
     #  Basisattribute (überschreiben oder ergänzen)
-    # -------------------------------------------------------------------------
     _base_chunk_duration: int = ConfigDefaults.BASE_CHUNK_DURATION
     CHUNK_OVERLAP: float = ConfigDefaults.CHUNK_OVERLAP
     MIN_CHUNK_DURATION: int = ConfigDefaults.MIN_CHUNK_DURATION
@@ -2539,9 +2412,7 @@ class Config(ConfigDefaults):
         init=False, default=float(ConfigDefaults.BASE_CHUNK_DURATION)
     )
 
-    # -------------------------------------------------------------------------
     #  Audio-Filter
-    # -------------------------------------------------------------------------
     AUDIO_FILTER: str = "aresample=16000"
     LANGUAGE_FILTERS: Dict[str, str] = field(
         default_factory=lambda: {
@@ -2559,9 +2430,7 @@ class Config(ConfigDefaults):
         }
     )
 
-    # -------------------------------------------------------------------------
     #  Plattform- und YouTube-Konfiguration
-    # -------------------------------------------------------------------------
     YOUTUBE_HEADERS: Dict[str, str] = field(
         default_factory=lambda: ConfigDefaults.YOUTUBE_HEADERS.copy()
     )
@@ -2569,33 +2438,25 @@ class Config(ConfigDefaults):
         default_factory=lambda: ConfigDefaults.PLATFORM_CONFIG.copy()
     )
 
-    # -------------------------------------------------------------------------
     #  Audio-Enhancement
-    # -------------------------------------------------------------------------
     AUDIO_ENHANCEMENT_ENABLED: bool = False
     MIN_RMS_THRESHOLD: float = ConfigDefaults.MIN_RMS_THRESHOLD
     TARGET_RMS: float = ConfigDefaults.TARGET_RMS
     MAX_GAIN: float = ConfigDefaults.MAX_GAIN
     CLIPPING_THRESHOLD: float = ConfigDefaults.CLIPPING_THRESHOLD
 
-    # -------------------------------------------------------------------------
     #  Duplikaterkennung
-    # -------------------------------------------------------------------------
     DUPLICATE_CHECK_ENABLED: bool = False
     RECENT_TRANSCRIPTIONS_SIZE: int = ConfigDefaults.RECENT_TRANSCRIPTIONS_SIZE
     MIN_TEXT_LENGTH: int = ConfigDefaults.MIN_TEXT_LENGTH
     MIN_UNIQUE_WORDS_RATIO: float = ConfigDefaults.MIN_UNIQUE_WORDS_RATIO
 
-    # -------------------------------------------------------------------------
     #  Untertitel
-    # -------------------------------------------------------------------------
     SUBTITLE_BUFFER_SIZE: int = ConfigDefaults.SUBTITLE_BUFFER_SIZE
     ENABLE_TIMED_TRANSCRIPTIONS: bool = ConfigDefaults.ENABLE_TIMED_TRANSCRIPTIONS
     ENABLE_TIMED_TRANSLATIONS: bool = ConfigDefaults.ENABLE_TIMED_TRANSLATIONS
 
-    # -------------------------------------------------------------------------
     #  Logging
-    # -------------------------------------------------------------------------
     ENABLE_DEBUG_LOGGING: bool = ConfigDefaults.ENABLE_DEBUG_LOGGING
     LOG_CHUNK_PROCESSING: bool = ConfigDefaults.LOG_CHUNK_PROCESSING
     LOG_AUDIO_STATS: bool = ConfigDefaults.LOG_AUDIO_STATS
@@ -2603,27 +2464,19 @@ class Config(ConfigDefaults):
     LOG_STREAM_EVENTS: bool = ConfigDefaults.LOG_STREAM_EVENTS
     PERFORMANCE_LOG_INTERVAL: int = ConfigDefaults.PERFORMANCE_LOG_INTERVAL
 
-    # -------------------------------------------------------------------------
     #  Caching
-    # -------------------------------------------------------------------------
     MAX_CACHE_SIZE_MB: int = ConfigDefaults.MAX_CACHE_SIZE_MB
     CACHE_ENABLED: bool = ConfigDefaults.CACHE_ENABLED
 
-    # -------------------------------------------------------------------------
     #  Whisper-Modelle (direkt als Klassenattribut für bessere Performance)
-    # -------------------------------------------------------------------------
     WHISPER_MODELS: List[str] = field(
         default_factory=lambda: ConfigDefaults.WHISPER_MODELS.copy()
     )
 
-    # -------------------------------------------------------------------------
     #  Interner Cache für BYTES_PER_SECOND (Performance-Optimierung)
-    # -------------------------------------------------------------------------
     _cached_bytes_per_second: Optional[int] = field(default=None, init=False, repr=False)
 
-    # -------------------------------------------------------------------------
     #  Properties für dynamische Werte
-    # -------------------------------------------------------------------------
     @property
     def CHUNK_DURATION(self) -> float:
         """Aktuelle Chunk-Dauer in Sekunden (dynamisch änderbar)."""
@@ -3176,9 +3029,7 @@ def get_config(config_type: str = "default") -> Config:
     return config
 
 
-# =============================================================================
 # 11. HILFSKLASSEN (FastLazyLoader, PlatformStderrFilter, PlatformUtils, DummyQueue, SimplePerformanceTracker, OptimizedThreadPoolExecutor, TTLCache, LRUCache, CacheManager, DebugFilter, AppContext, log_exception, MemoryManager, Decorators)
-# =============================================================================
 class FastLazyLoader:
     """
     Thread‑sicherer Lazy‑Loader für Module mit Caching und Verfügbarkeitsprüfung.
@@ -3191,18 +3042,6 @@ class FastLazyLoader:
         - Automatische Bereinigung abgelaufener Verfügbarkeitseinträge.
         - Bei Importfehlern wird ein Mock‑Modul zurückgegeben, das bei Zugriff eine Warnung ausgibt.
         - Ausführliche Debug‑Logs bei `DEBUG_LEVEL >= 3`.
-
-    Attribute (Klassenvariablen):
-        _loaded_modules (Dict[str, Any]): Cache geladener Module.
-        _module_locks (Dict[str, threading.Lock]): Locks pro Modul.
-        _global_lock (threading.Lock): Lock für globale Zustände.
-        _availability_cache (Dict[str, Tuple[bool, float]]): Cache für Verfügbarkeit mit Zeitstempel.
-        _availability_cache_ttl (float): Lebensdauer der Cache‑Einträge (Sekunden).
-        _metrics_enabled (bool): Ob Metriken gesammelt werden.
-        _metrics (Dict[str, Any]): Metrik‑Zähler.
-        _metrics_lock (threading.RLock): Lock für Metriken.
-        _cache_lock (threading.RLock): Lock für Availability‑Cache.
-        _logger (logging.Logger): Interner Logger (zur Laufzeit gesetzt).
     """
 
     _loaded_modules: Dict[str, Any] = {}
@@ -3687,8 +3526,6 @@ class PlatformUtils:
         - Prozess‑Terminierung mit psutil‑Fallback.
         - Detaillierte Debug‑Logs bei DEBUG_LEVEL >= 3.
         - Thread‑sichere Operationen über Klassen‑Locks.
-
-    Alle öffentlichen Methoden sind als Klassenmethoden ausgeführt und thread‑sicher.
     """
 
     # =========================================================================
@@ -4987,38 +4824,6 @@ class DummyQueue:
     def put(self, item: Any, block: bool = True, timeout: Optional[float] = None) -> None:
         """
         Fügt ein Element in die Warteschlange ein.
-
-        Diese Methode verhält sich **exakt** wie `queue.Queue.put`:
-            - Wenn die Queue nicht voll ist, wird das Element sofort hinzugefügt.
-            - Wenn die Queue voll ist (maxsize > 0 und aktuelle Größe >= maxsize):
-                * Bei `block=False` wird sofort `queue.Full` ausgelöst.
-                * Bei `block=True` wartet die Methode, bis ein Platz frei wird,
-                  jedoch maximal `timeout` Sekunden. Wird innerhalb dieser Zeit
-                  kein Platz frei, wird ebenfalls `queue.Full` ausgelöst.
-            - Wenn `timeout=None`, wird unbegrenzt gewartet (bis Platz frei wird).
-
-        **Unterschied zu `queue.Queue`:**
-            Da diese Dummy‑Implementierung keine echten systemeigenen Locks verwendet,
-            kann es in seltenen Fällen zu minimalen Verzögerungen kommen. Die Semantik
-            ist jedoch vollständig kompatibel.
-
-        **Debug‑Ausgaben:**
-            Bei `DEBUG_LEVEL >= 3` werden detaillierte Informationen über den
-            Zustand der Queue (Größe, maxsize, Wartezeit) ausgegeben.
-
-        Args:
-            item: Das einzufügende Element (beliebiger Typ).
-            block: Ob bei voller Queue gewartet werden soll (Standard: True).
-            timeout: Maximale Wartezeit in Sekunden (nur bei block=True).
-                     None bedeutet unbegrenztes Warten.
-
-        Raises:
-            queue.Full: Wenn die Queue voll ist und entweder block=False gesetzt
-                        ist oder die Wartezeit `timeout` überschritten wurde.
-
-        Thread‑Sicherheit:
-            Die Methode verwendet interne Locks und Conditions und ist daher
-            vollständig thread‑sicher.
         """
         with self._not_full:
             # -----------------------------------------------------------------
@@ -5304,28 +5109,6 @@ class OptimizedThreadPoolExecutor:
     ) -> Future[T]:
         """
         Reicht eine Aufgabe zur Ausführung ein.
-
-        Bei `block=True` wartet die Methode, bis ein Slot in der Queue frei wird
-        (maximal `timeout` Sekunden). Bei `block=False` oder Timeout wird eine
-        `RuntimeError` ausgelöst.
-
-        **Wichtig:** Wenn der Executor während des Wartens heruntergefahren wird,
-        wird ebenfalls eine `RuntimeError` ausgelöst.
-
-        Args:
-            fn: Die auszuführende Funktion.
-            *args: Positionsargumente für `fn`.
-            block: Wenn True, blockiert die Methode bei voller Queue.
-            timeout: Maximale Wartezeit in Sekunden (nur bei `block=True`).
-            **kwargs: Schlüsselwortargumente für `fn`.
-
-        Returns:
-            Ein `Future`-Objekt, das das Ergebnis der Berechnung repräsentiert.
-
-        Raises:
-            RuntimeError: Wenn der Executor bereits heruntergefahren wurde,
-                          die Warteschlange voll ist und kein Slot frei wird,
-                          oder der Executor während des Wartens heruntergefahren wird.
         """
         with self._shutdown_lock:
             if self._shutdown:
@@ -5770,19 +5553,6 @@ class OptimizedThreadPoolExecutor:
 class TTLCache:
     """
     Thread-sicherer TTL-Cache mit LRU-Eviction und periodischer Bereinigung.
-
-    Verwendet ein OrderedDict, um die Reihenfolge der Einfügung/Zugriffe zu verfolgen.
-    Bei Erreichen der maximalen Größe wird das am längsten nicht benutzte Element
-    (LRU) entfernt.
-
-    Die Bereinigung abgelaufener Einträge erfolgt periodisch nach einer bestimmten
-    Anzahl von Zugriffen (`cleanup_interval`), um Overhead zu reduzieren.
-    Zusätzlich wird bei jedem Lesezugriff die Gültigkeit des angefragten Eintrags
-    geprüft, sodass keine abgelaufenen Werte zurückgegeben werden.
-
-    Attributes:
-        maxsize: Maximale Anzahl von Einträgen im Cache.
-        ttl: Time-to-live in Sekunden.
     """
 
     def __init__(
@@ -6072,20 +5842,6 @@ class CacheManager:
     Diese Klasse bündelt die verschiedenen Caches (TTL-basiert für Text, LRU für Audio)
     und bietet eine einheitliche Schnittstelle zum Speichern und Abrufen von Ergebnissen.
     Sie ist vollständig thread-sicher und enthält ausführliche Debug- und Metrik-Funktionen.
-
-    Features:
-        - Automatische periodische Bereinigung abgelaufener Einträge (über separaten Thread)
-        - Detaillierte Metriken (Zugriffe, Treffer, Fehlschläge, Evictions)
-        - Sauberer Shutdown mit `threading.Event` und Timeout
-        - Idempotente, thread-sichere `dispose()`-Methode mit Größen-Logging vor dem Leeren
-        - Robuster Cleanup-Thread, der bei Exceptions nicht abstürzt
-        - Ausführliche Debug-Ausgaben bei `DEBUG_LEVEL >= 3`
-        - Vollständige Typisierung und Google‑Style Docstrings
-
-    Attributes:
-        transcription_cache (TTLCache): Cache für Transkriptionen (TTL-basiert)
-        translation_cache (TTLCache): Cache für Übersetzungen (TTL-basiert)
-        audio_cache (LRUCache): Cache für Audiodaten (LRU-basiert)
     """
 
     def __init__(self, cleanup_interval: int = 300) -> None:
@@ -6156,19 +5912,6 @@ class CacheManager:
     def _cleanup_worker(self) -> None:
         """
         Worker‑Methode für den periodischen Cleanup‑Thread.
-
-        Wartet auf das Stop‑Event oder den Cleanup‑Intervall.
-        Prüft vor jedem Cache‑Zugriff, ob der CacheManager bereits disposed wurde,
-        um Zugriffe auf gelöschte Objekte zu vermeiden.
-        Bei Exceptions wird der Thread nicht beendet, sondern läuft weiter,
-        es sei denn, der CacheManager wurde disposed.
-
-        **Verbesserungen:**
-            - Prüft `_stop_event` **vor** dem Aufruf von `clear_expired_entries`,
-              um schneller auf Shutdown zu reagieren.
-            - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 3` inkl. Dauer.
-            - Robuste Fehlerbehandlung – fängt alle Exceptions ab und loggt sie.
-            - Automatischer Abbruch, wenn `_disposed` gesetzt ist.
         """
         logger.debug("CacheCleanup thread started")
 
@@ -7145,12 +6888,6 @@ class BaseTranslationEngine(ABC):
 class ErrorHandlingMixin:
     """
     Mixin für robuste Fehlerbehandlung mit automatischer Deaktivierung bei zu vielen Fehlern.
-
-    Attributes:
-        _error_count (int): Anzahl aufgetretener Fehler.
-        _disabled_until (float): Zeitpunkt, bis zu dem die Engine deaktiviert ist.
-        _max_errors (int): Maximale Fehleranzahl, bevor deaktiviert wird.
-        _disable_duration (float): Dauer der Deaktivierung in Sekunden.
     """
 
     def __init__(self, max_errors: int = 5, disable_duration: float = 300.0):
@@ -7456,14 +7193,6 @@ class BaseCachedTranslationEngine(BaseTranslationEngine, ErrorHandlingMixin):
 class GoogleTranslationEngine(BaseCachedTranslationEngine):
     """
     Übersetzungs‑Engine mit Google Translate, persistenter Session und robustem Fallback.
-
-    Optimierungen:
-        - Qualitätsmängel führen NICHT zur Deaktivierung (nur Logging).
-        - Stabilere Google Translate API (JSON‑Endpunkt statt Webseiten‑Scraping).
-        - Verbesserte Fehlerbehandlung mit differenzierter Reaktion auf Rate Limits.
-        - Effizienteres Pre‑/Postprocessing mit weniger Regex‑Overhead.
-        - Vollständige Thread‑Sicherheit für alle Zustandsvariablen.
-        - Saubere Trennung von direkter API und deep_translator‑Fallback.
     """
 
     # Maximale Fehler für die direkte API, bevor sie deaktiviert wird
@@ -9279,16 +9008,6 @@ class AudioEnhancer:
         Verwendet Normalisierung, Ähnlichkeitsvergleich (rapidfuzz/difflib) und
         Wortvielfaltsanalyse. Die Duplikaterkennung kann über die Einstellungen
         ein- und ausgeschaltet werden.
-
-        Args:
-            current_text: Aktueller Transkriptionstext
-            last_text: Vorheriger Transkriptionstext
-            recent_texts: Liste der letzten Transkriptionstexte
-            confidence: Confidence-Wert des aktuellen Segments (optional)
-            last_confidence: Confidence-Wert des vorherigen Segments
-
-        Returns:
-            True wenn der Text als Duplikat erkannt wird, sonst False
         """
         # Verwende die Einstellung aus AdvancedSettings
         if not self.settings.enable_duplicate_check:
@@ -9469,20 +9188,6 @@ class TranscriptionEngine:
       - Intel XPU: float16 bevorzugt, float32 als Fallback
       - Apple MPS: float16, float32
       - CPU: int8 (bei AVX2), sonst float32 (stabiler Fallback)
-
-    Automatische Modellauswahl:
-      - Wählt das größtmögliche Modell, das sicher in den verfügbaren VRAM/RAM passt.
-      - Fallback-Kette: large-v3 → large-v3-turbo → medium → small → base → tiny.
-
-    OOM-Behandlung:
-      - _last_oom wird **nur** bei Modellwechsel oder Notfall-Reset zurückgesetzt.
-      - Verhindert Race-Conditions im Untertitel-Modus.
-
-    Weitere Verbesserungen:
-      - Sprachspezifische VAD-Parameter für bessere Genauigkeit.
-      - Automatische Erkennung inkompatibler PyTorch-Versionen.
-      - Umfangreiche Debug-Ausgaben bei DEBUG_LEVEL >= 3.
-      - Methode get_hardware_diagnostics() für detaillierte Systeminformationen.
     """
 
     MODEL_SIZE_ORDER = [
@@ -10430,22 +10135,6 @@ class TranscriptionEngine:
         """
         Lädt faster-whisper mit maximaler Robustheit, automatischem Fallback und
         detailliertem Debugging.
-
-        Diese Methode ist die zentrale Laderoutine für das faster-whisper-Backend.
-        Sie implementiert:
-
-            - Prüfung auf Mock-Modul (verhindert Absturz bei fehlender Installation)
-            - Mehrstufige Fallback-Strategie für Compute-Typen (int8 → float16 → float32)
-            - Automatischen CPU-Fallback, falls alle GPU-Versuche fehlschlagen
-            - GPU-Cache-Bereinigung nach OOM-Fehlern
-            - Detaillierte Log-Ausgaben bei jedem Schritt (abhängig vom DEBUG_LEVEL)
-            - Unterstützung für benutzerdefinierte CPU-Threads aus den Einstellungen
-
-        Args:
-            model_size: Name des zu ladenden Modells (z.B. 'large-v3-turbo').
-
-        Returns:
-            Das geladene WhisperModel-Objekt oder None bei vollständigem Fehlschlag.
         """
         # -----------------------------------------------------------------
         # 1. faster-whisper importieren und auf Mock prüfen
@@ -10854,13 +10543,6 @@ class TranscriptionEngine:
     def _handle_cuda_oom(self) -> None:
         """
         Behandelt einen CUDA Out‑of‑Memory Fehler durch mehrstufigen Fallback.
-
-        Verbesserungen:
-            - Nach erfolgreichem Wechsel auf ein kleineres Modell wird `_last_oom`
-              explizit auf `False` gesetzt, um zukünftige GPU‑Nutzung zu ermöglichen.
-            - Detaillierte Debug‑Ausgaben über jeden Schritt.
-            - Robuste Prüfung, ob ein Fallback tatsächlich erfolgreich war.
-            - Vermeidet CPU‑Fallback, wenn ein kleineres GPU‑Modell funktioniert.
         """
         if self.device == "cpu":
             if DEBUG_LEVEL >= 3:
@@ -10986,14 +10668,6 @@ class TranscriptionEngine:
         Behandelt GPU-OOM-Fehler durch mehrstufigen Fallback (Cache leeren, CPU) und
         setzt das OOM-Flag bei erfolgreichem CPU-Fallback korrekt zurück.
         Enthält erweiterte Debug-Ausgaben und threadsichere Zustandsverwaltung.
-
-        Args:
-            model: Das geladene Whisper-Modell.
-            audio_np: Audio-Daten als numpy-Array (float32).
-            **kwargs: Zusätzliche Transkriptionsparameter.
-
-        Returns:
-            Tuple aus (Liste von Segmenten, Info-Objekt).
         """
         if model is None:
             raise ValueError("Kein Modell geladen")
@@ -11230,29 +10904,6 @@ class TranscriptionEngine:
     ) -> Tuple[List[Any], Any]:
         """
         Führt die Transkription mit faster-whisper durch – optimiert für Stabilität.
-
-        Diese Methode ist die zentrale Schnittstelle zum faster-whisper-Backend.
-        Sie enthält umfangreiche Fallback-Strategien, unterdrückt störende
-        Log-Meldungen und validiert die übergebenen Parameter.
-
-        Features:
-            - Automatische sprachspezifische VAD-Parameter.
-            - Fallback auf minimale Parameter bei TypeError/ValueError.
-            - Unterdrückung von faster-whisper-Logmeldungen (insb. "Log probability
-              threshold is not met").
-            - Detaillierte Debug-Ausgaben bei DEBUG_LEVEL >= 3.
-            - Garantierte Rückgabe eines gültigen Tupels (Segmente, Info) auch im
-              Fehlerfall.
-            - Robustes Exception-Handling mit Wiederherstellung des Log-Levels.
-
-        Args:
-            model: Das geladene faster-whisper WhisperModel-Objekt.
-            audio_np: Audio-Daten als numpy-Array (float32).
-            **kwargs: Transkriptionsparameter (language, task, beam_size, etc.)
-
-        Returns:
-            Tuple[List[Segment], Info]: Liste der Segment-Objekte und ein
-            Info-Objekt mit Metadaten (Sprache, Wahrscheinlichkeit, Dauer).
         """
         # -----------------------------------------------------------------
         # 1. Vorbereitung: Logging unterdrücken und VAD-Parameter aufbereiten
@@ -11763,10 +11414,6 @@ class DummyTranscriptionEngine:
     """
     Platzhalter‑Engine, wenn kein Whisper‑Backend verfügbar ist.
     Thread‑sicher und gibt konsistente Dummy‑Ergebnisse zurück.
-
-    Implementiert alle Methoden der echten TranscriptionEngine,
-    sodass sie ohne weitere Anpassungen in der GUI und im AudioProcessor
-    verwendet werden kann.
     """
 
     def __init__(
@@ -14113,31 +13760,6 @@ class FFmpegManager:
     def stop_stream(self, process_id: str) -> bool:
         """
         Stoppt einen laufenden Stream und gibt alle zugehörigen Ressourcen frei.
-
-        Diese Methode ist der zentrale Einstiegspunkt, um einen aktiven Stream
-        (FFmpeg‑Prozess, yt‑dlp‑Prozess sowie alle Lese‑ und stderr‑Threads)
-        sauber zu beenden. Sie setzt das interne `stopping`‑Flag, sendet einen
-        Sentinel in die Lese‑Queue, schließt die Pipes, stoppt die Threads und
-        ruft schließlich `_remove_process` auf, um den Prozess aus der Registry
-        zu entfernen und die Systemprozesse zu terminieren.
-
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - Garantierter Aufruf von `_remove_process`, auch wenn bereits ein
-              anderer Thread den Prozess entfernt.
-            - Kein `finally`‑Block mit `return`, um Kontrollfluss‑Probleme zu vermeiden.
-            - Robustes Setzen des Sentinels auch bei voller Queue.
-            - Schließen der Pipes vor dem Stoppen der Threads, um blockierte
-              `read()`‑Aufrufe zu unterbrechen.
-            - Detaillierte Debug‑Ausgaben für jeden Schritt zur Nachverfolgung
-              von Hängern.
-            - Explizite Behandlung des yt‑dlp‑stderr‑Threads.
-
-        Args:
-            process_id: Die eindeutige ID des zu stoppenden Streams.
-
-        Returns:
-            True, wenn der Stream erfolgreich gestoppt und entfernt wurde,
-            False, wenn der Stream nicht gefunden wurde oder bereits entfernt wird.
         """
         logger.debug(f"[FFmpegManager] stop_stream: {process_id}")
 
@@ -14643,42 +14265,6 @@ class FFmpegManager:
     ) -> Optional[subprocess.Popen]:
         """
         Startet den Stream intern – entscheidet zwischen Normal‑ und Pipe‑Modus.
-
-        Diese Methode ist das Herzstück des FFmpegManagers. Sie analysiert die
-        Video‑URL, erkennt den Stream‑Typ (Live/VOD, Plattform) und wählt den
-        am besten geeigneten Weg, um die Audiodaten zu beschaffen:
-            - Normaler Modus: Direkte Audio‑URL wird mit FFmpeg abgespielt.
-            - Pipe‑Modus: yt‑dlp streamt die Daten direkt an FFmpeg (für
-              problematische Livestreams).
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - **Keine Slot‑Verwaltung mehr:** Die Akquisition und Freigabe des
-              Semaphor‑Slots wurde vollständig in `_register_process` verlagert.
-              Dadurch wird der Slot erst dann dauerhaft belegt, wenn der Stream
-              tatsächlich erfolgreich registriert ist. Ein Slot‑Leck bei
-              fehlschlagender Registrierung ist ausgeschlossen.
-            - **Robuste Fehlerbehandlung:** Alle Fehler während der Extraktion
-              oder des Prozessstarts werden abgefangen und protokolliert. Die
-              Methode gibt `None` zurück, ohne den Zustand des Managers zu
-              korrumpieren.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` für jeden
-              Entscheidungsschritt.
-            - **Mehrstufige Fallback‑Strategie:** Im Normalmodus wird bei
-              sofortigem FFmpeg‑Tod automatisch ein minimaler Befehl versucht.
-              Im Pipemodus werden verschiedene Formate durchprobiert.
-            - **Vollständige Typ‑Annotationen** und Google‑Style Docstring.
-
-        Args:
-            video_url: Die ursprüngliche Video‑/Stream‑URL.
-            output_queue: Queue für Ausgaben (wird an die Lesethreads übergeben).
-            process_id: Eindeutige ID des zu erstellenden Prozesses.
-            force_refresh_audio_url: Erzwingt das Abrufen einer neuen Audio‑URL.
-            audio_url: Bereits aufgelöste Audio‑URL (falls vorhanden).
-            seek_seconds: Startposition in Sekunden (nur für VODs, nicht für YouTube).
-            detected_language: Vom Whisper‑Modell erkannte Sprache (für Audiofilter).
-
-        Returns:
-            Den gestarteten FFmpeg‑Prozess (subprocess.Popen) oder None bei Fehler.
         """
         # -----------------------------------------------------------------
         # 1. URL validieren
@@ -14777,36 +14363,6 @@ class FFmpegManager:
     ) -> Optional[subprocess.Popen]:
         """
         Startet einen Stream im Pipe‑Modus (yt‑dlp → FFmpeg) mit garantierter Bereinigung.
-
-        Diese Methode wird für problematische Livestreams (YouTube, Twitch, Kick etc.)
-        verwendet, bei denen eine direkte Audio‑URL zu häufigen Reconnects oder Fehlern
-        führt. Sie baut eine Pipeline aus yt‑dlp (Datenquelle) und FFmpeg (Decoder)
-        auf und testet mehrere Fallback‑Formate, bis ein stabiles Setup gefunden wird.
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - **Garantierte Prozessbereinigung:** Alle jemals gestarteten Prozesse werden
-              in einer Liste gesammelt und im `finally`‑Block beendet. Dadurch sind
-              Zombie‑Prozesse selbst bei Exceptions ausgeschlossen.
-            - **Optimierte Format‑Auswahl:** Verwendet die verbesserte
-              `_build_yt_dlp_pipe_command` mit korrekter Audio‑only‑Priorität.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` für jeden Schritt.
-            - **Robuste Fehlerbehandlung:** Trennung von Start‑ und Laufzeitfehlern,
-              sauberes Aufräumen zwischen Format‑Versuchen.
-            - **Unterstützung für benutzerdefinierte Browser‑Cookies und Proxys**
-              (wird aus `self.settings` gelesen).
-            - **Thread‑Sicherheit:** Alle Zugriffe auf gemeinsame Ressourcen erfolgen
-              unter den entsprechenden Locks.
-
-        Args:
-            video_url: Die ursprüngliche Video‑/Stream‑URL.
-            output_queue: Queue für Ausgaben (wird an die Lesethreads übergeben).
-            process_id: Eindeutige ID des zu erstellenden Prozesses.
-            is_live: True, wenn es sich um einen Livestream handelt.
-            platform: Name der erkannten Plattform (z. B. "YouTube").
-            detected_language: Vom Whisper‑Modell erkannte Sprache (für Audiofilter).
-
-        Returns:
-            Den gestarteten FFmpeg‑Prozess (subprocess.Popen) bei Erfolg, sonst None.
         """
         logger.info(
             f"  🎥 {platform}‑{'Livestream' if is_live else 'Video'}: "
@@ -15018,15 +14574,6 @@ class FFmpegManager:
     ) -> None:
         """
         Bereinigt alle Ressourcen eines fehlgeschlagenen Pipe‑Versuchs.
-
-        Verbesserungen:
-            - Explizites Schließen aller Pipes (stdout, stderr, stdin) vor der
-              Prozessbeendigung, um Ressourcenlecks unter Windows zu verhindern.
-            - Detaillierte Debug‑Ausgaben bei jedem Schritt (abhängig von DEBUG_LEVEL).
-            - Robuste Fehlerbehandlung: Fehler beim Schließen einer Pipe führen nicht
-              zum Abbruch der gesamten Bereinigung.
-            - Falls der yt‑dlp stderr‑Thread nicht rechtzeitig beendet wird, wird er
-              als Daemon markiert, um den Shutdown nicht zu blockieren.
         """
         # -------------------------------------------------------------------------
         # 1. yt‑dlp stderr‑Thread stoppen
@@ -15557,12 +15104,6 @@ class FFmpegManager:
     ) -> List[str]:
         """
         Erstellt eine optimierte, robuste und maximal kompatible FFmpeg‑Befehlszeile.
-
-        Die Methode analysiert den Stream‑Typ (Live / VOD) und die Plattform (YouTube etc.)
-        und wählt gezielt Optionen, die auf einer breiten Palette von FFmpeg‑Versionen
-        (4.x bis 7.x) stabil funktionieren. Nicht allgemein unterstützte Flags werden
-        vermieden, und Reconnect‑Optionen werden **nur für Livestreams** aktiviert,
-        da sie bei VODs und lokalen Dateien zu Fehlern oder endlosen Hängern führen.
         """
         log_debug("ffmpeg", f"_build_ffmpeg_command_optimized: url={url[:100]}...")
 
@@ -15981,45 +15522,6 @@ class FFmpegManager:
         Registriert einen neuen FFmpeg‑Prozess (und optional yt‑dlp) in der internen
         Verwaltung, startet die zugehörigen Lese‑ und stderr‑Threads und aktualisiert
         die PID‑Tracking‑Datenstrukturen.
-
-        Diese Methode ist **ausfallsicher** und **ressourcenschonend**:
-          - Der Semaphor‑Slot wird **erst nach erfolgreicher Initialisierung aller Threads**
-            dauerhaft belegt. Bei Fehlern während der Registrierung wird der Slot
-            automatisch im `finally`‑Block freigegeben – ein Slot‑Leck ist ausgeschlossen.
-          - Tritt während der Registrierung ein Fehler auf, werden die übergebenen Prozesse
-            sofort beendet, bereits gestartete Threads gestoppt und alle internen
-            Datenstrukturen in einen konsistenten Zustand zurückversetzt.
-          - Die Methode ist vollständig thread‑sicher durch die Verwendung von Locks
-            (`_lock`, `_pid_tracking` Zugriffe) und fängt alle erwartbaren Exceptions ab,
-            um Zombie‑Prozesse und hängende Threads zu vermeiden.
-
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - **Robuste Slot‑Verwaltung:** Der Slot wird erst nach erfolgreichem Start
-              aller Threads akquiriert und als dauerhaft belegt markiert. Ein `finally`‑Block
-              gibt den Slot bei Fehlern garantiert frei.
-            - **Erweiterte Eingangsvalidierung:** Prüft nicht nur auf `None` und Exit‑Code,
-              sondern auch auf gültige PID und ob der Prozess noch existiert.
-            - **Detaillierte Debug‑Ausgaben** bei jedem Schritt (abhängig von `DEBUG_LEVEL`).
-            - **Verbesserte Fehlerbehandlung:** Unterscheidet zwischen Fehlern beim Starten
-              der Threads und anderen Ausnahmen, um präzise Logs zu erzeugen.
-            - **Sicherer Rollback:** Stoppt Threads und killt Prozesse in der umgekehrten
-              Reihenfolge ihrer Erstellung. Registry‑Einträge werden nur dann vorgenommen,
-              wenn alle Schritte erfolgreich waren.
-            - **Idempotenz:** Bereinigt eventuell vorhandene alte Registrierungen unter
-              derselben `process_id`, bevor die neue angelegt wird.
-
-        Args:
-            process_id: Eindeutige ID des Streams.
-            process: Der gestartete FFmpeg‑Prozess (darf nicht None sein).
-            output_queue: Queue für Audiodaten (kann None sein).
-            url: Die verwendete Audio‑URL (für Logging/Diagnose).
-            is_live: True, wenn es sich um einen Livestream handelt.
-            yt_process: Optionaler yt‑dlp‑Prozess (nur im Pipe‑Modus).
-            pipe_mode: True, wenn der Pipe‑Modus verwendet wird.
-
-        Raises:
-            RuntimeError: Wenn `process` None ist, bereits beendet wurde, oder wenn
-                          während der Registrierung ein unerwarteter Fehler auftritt.
         """
         # -----------------------------------------------------------------
         # 0. Erweiterte Eingangsvalidierung
@@ -16542,40 +16044,6 @@ class FFmpegManager:
         Diese Methode ist die letzte Eskalationsstufe, wenn ein Prozess auf ein normales
         SIGTERM (`terminate()`) nicht reagiert – typischerweise weil er in einem
         blockierenden I/O‑Aufruf (z. B. `read()`) hängt und keine Signale verarbeiten kann.
-
-        **Plattformspezifisches Verhalten:**
-            - **Unix (Linux / macOS):** Sendet `SIGKILL` an den Prozess. Falls möglich,
-              wird zuvor versucht, die gesamte Prozessgruppe (`os.killpg`) zu beenden,
-              um auch Kindprozesse zu eliminieren. Dies ist besonders effektiv gegen
-              hängende Subprozesse.
-            - **Windows:** Ruft `proc.kill()` auf, was intern `TerminateProcess`
-              verwendet. Dies beendet den Prozess ebenfalls sofort.
-
-        **Nach dem Kill:**
-            Es wird bis zu 1,0 Sekunden auf das tatsächliche Ende des Prozesses gewartet
-            (`proc.wait(timeout=1.0)`). Falls der Prozess danach immer noch existiert,
-            wird eine Warnung protokolliert – der Prozess könnte als Zombie verbleiben.
-            In diesem Fall kann nur ein Neustart des Systems den Zombie beseitigen.
-
-        **Thread‑Sicherheit:**
-            Die Methode greift nur auf das übergebene Prozessobjekt zu und verändert
-            keine gemeinsamen Ressourcen. Sie kann daher aus beliebigen Threads
-            aufgerufen werden.
-
-        **Fehlerbehandlung:**
-            - Falls `proc` `None` ist, wird die Methode still beendet.
-            - Falls der Prozess bereits beendet ist (`proc.poll() is not None`), wird
-              nichts unternommen.
-            - `ProcessLookupError`: Der Prozess existiert nicht mehr – wird als Erfolg
-              gewertet.
-            - `PermissionError`: Fehlende Berechtigung zum Beenden – wird als Fehler
-              geloggt.
-            - Andere Ausnahmen werden ebenfalls geloggt, der Stacktrace wird bei Bedarf
-              ausgegeben.
-
-        Args:
-            proc: Der zu beendende `subprocess.Popen`‑Prozess. Darf `None` sein; in
-                  diesem Fall tut die Methode nichts.
         """
         # ---------------------------------------------------------------------
         # 1. Eingangsvalidierung
@@ -16899,16 +16367,6 @@ class FFmpegManager:
         um einen blockierenden `read()`‑Aufruf im Lese‑Thread zu unterbrechen.
         Unter Windows wird das Schließen der Pipe in einen separaten Daemon‑Thread
         ausgelagert, um Blockaden des Haupt‑Threads zu vermeiden.
-
-        Ablauf:
-            1. `read_stop`‑Event setzen (signalisiert dem Thread das Ende).
-            2. stdout‑Pipe schließen (Windows‑sicher).
-            3. Kurze Pause, damit die Exception den Thread erreichen kann.
-            4. Thread joinen (maximal 1 Sekunde warten).
-            5. Thread‑bezogene Attribute aufräumen.
-
-        Args:
-            pinfo: Die `_ProcessInfo`‑Instanz des zu stoppenden Prozesses.
         """
         process_id = pinfo.process_id
         logger.debug(f"[FFmpegManager] _stop_read_thread: {process_id}")
@@ -17505,17 +16963,6 @@ class FFmpegManager:
               FFmpeg extrahiert die Audiospur anschließend über `-vn`.
             - **VODs**: Hier können wir strikt Audio‑only‑Container bevorzugen, um das
               Risiko von Video‑only‑Streams (z. B. Format 301) zu minimieren.
-
-        Zusätzlich werden für Livestreams YouTube‑spezifische Extractor‑Argumente
-        (`po_token`, `formats=missing_pot`) und Remote‑Komponenten (`ejs:github`)
-        hinzugefügt, um auch geschützte Streams zuverlässig abrufen zu können.
-
-        Args:
-            video_url: Die ursprüngliche Video‑/Stream‑URL.
-            is_live: True, wenn es sich um einen Livestream handelt.
-
-        Returns:
-            Liste der Befehlsargumente für subprocess.Popen.
         """
         # ---------------------------------------------------------------------
         # Format‑String je nach Stream‑Typ wählen
@@ -17614,27 +17061,6 @@ class FFmpegManager:
     ) -> List[str]:
         """
         Erstellt einen minimalen, robusten FFmpeg‑Befehl als Fallback.
-
-        Diese Methode wird aufgerufen, wenn der optimierte Befehl in
-        `_build_ffmpeg_command_optimized` sofort nach dem Start stirbt.
-        Der Befehl verzichtet auf erweiterte Optionen (z. B. `-reconnect_*`,
-        `-headers`, komplexe Audiofilter) und verwendet nur grundlegende,
-        weitgehend kompatible Parameter. Ziel ist maximale Kompatibilität
-        mit verschiedenen FFmpeg‑Versionen und Stream‑Typen.
-
-        Features:
-            - Nur essentielle Reconnect‑Flags (falls vom System unterstützt)
-            - Keine YouTube‑spezifischen Header
-            - Einfacher Audiofilter (aresample) oder gar keiner
-            - IPv4‑Präferenz nur bei expliziter Einstellung
-            - Detaillierte Debug‑Ausgaben bei DEBUG_LEVEL >= 2
-
-        Args:
-            url: Die Audio‑URL (direkter Stream oder Datei).
-            detected_language: Optional erkannte Sprache (derzeit nur für Log).
-
-        Returns:
-            Liste der Befehlsargumente für subprocess.Popen.
         """
         cmd = [
             "ffmpeg",
@@ -17694,23 +17120,6 @@ class FFmpegManager:
         """
         Erstellt einen extrem abgespeckten FFmpeg‑Befehl ohne Timeout‑Optionen,
         Reconnect‑Flags, YouTube‑Header oder andere erweiterte Parameter.
-
-        Dieser Befehl wird als letzter Fallback verwendet, wenn selbst der minimale
-        Befehl (mit Timeout‑Optionen) an einer älteren FFmpeg‑Version scheitert.
-
-        Features:
-            - Keine `-timeout` / `-rw_timeout` (nicht in FFmpeg < 4.0 vorhanden)
-            - Keine `-reconnect_*`‑Flags
-            - Keine YouTube‑spezifischen Header
-            - Nur `-i`, `-vn`, Ausgabeformat, Samplerate, Kanäle
-            - Einfacher `aresample`‑Filter nur falls nötig (SAMPLE_RATE != 16000)
-            - Ausgabe auf stdout
-
-        Args:
-            url: Die Audio‑URL (direkter Stream oder Datei).
-
-        Returns:
-            Liste der Befehlsargumente für subprocess.Popen.
         """
         # Basis‑Befehl mit minimalem Logging
         cmd = [
@@ -17748,19 +17157,6 @@ class FFmpegManager:
         Diese Methode wird verwendet, wenn yt‑dlp die Audiodaten direkt an FFmpeg
         weiterleitet (Pipe‑Zweig). Sie konfiguriert FFmpeg so, dass es von stdin
         liest und die gewünschte PCM‑Ausgabe auf stdout schreibt.
-
-        Features:
-            - Optionale Angabe des Eingabeformats (z. B. 'webm', 'matroska')
-            - Sprach‑ und profilabhängiger Audiofilter
-            - Robuste Flags für korrupte Streams und Timestamps
-            - Detaillierte Debug‑Ausgaben bei erhöhtem Debug‑Level
-
-        Args:
-            fmt: Optionales Eingabeformat. None = automatische Erkennung.
-            detected_language: Vom Whisper‑Modell erkannte Sprache (für Audiofilter).
-
-        Returns:
-            Liste der Befehlsargumente für subprocess.Popen.
         """
         # Audio‑Profil basierend auf Einstellungen wählen
         if self.settings and hasattr(self.settings, "audio_profile"):
@@ -17871,9 +17267,7 @@ class FFmpegManager:
             self.READ_BLOCK_SIZE = 8192
 
 
-# =============================================================================
 # APPSETTINGS & ADVANCEDSETTINGS
-# =============================================================================
 @dataclass
 class AppSettings:
     """
@@ -17883,20 +17277,6 @@ class AppSettings:
     verwendete URL, das Standardmodell, die Sprache (als ISO‑Code), das Layout, etc.
     Die Daten werden im plattformspezifischen Konfigurationsverzeichnis
     als JSON‑Datei gespeichert.
-
-    Attributes:
-        last_url: Zuletzt verwendete URL (leerer String, falls nicht vorhanden).
-        default_model: Standard-Whisper-Modell (z.B. 'large-v3-turbo'). None = noch nicht gesetzt.
-        default_language: Standard-Quellsprache als ISO-Code (z.B. 'de', 'auto').
-        layout_mode: GUI-Layout ('vertical' oder 'horizontal').
-        recent_urls: Liste der zuletzt verwendeten URLs (max. 10).
-        enable_plugins: Ob Plugins aktiviert sind.
-        export_format: Standard-Exportformat ('txt', 'srt', 'vtt', 'json', 'docx').
-        auto_save_on_completion: Automatisches Speichern nach Abschluss.
-        theme: GUI-Theme ('dark', 'light', 'pastel', 'system', 'highcontrast').
-        use_browser_cookies: Browser-Cookies für YouTube/Twitch nutzen.
-        cookies_notice_shown: Ob der Cookie-Hinweis bereits angezeigt wurde.
-        cookies_browser: Name des Browsers für Cookie-Extraktion (z.B. 'firefox', 'chrome').
     """
 
     last_url: str = ""
@@ -18165,16 +17545,6 @@ class AppSettings:
 class StreamInfoExtractor:
     """
     Optimierte Extraktion von Stream-Informationen (Titel, Uploader, Dauer, Plattform).
-
-    Verbesserungen:
-        - Strategie: erst ohne Cookies (schnell), dann mit konfiguriertem Browser (nur dieser).
-        - Keine automatische Fallback-Liste für Browser – nur der eingestellte Browser wird verwendet.
-        - Reduzierte Timeouts für schnellere Fallbacks.
-        - Robuste JSON-Parsing-Hilfsmethoden.
-        - Detaillierte Debug-Ausgaben bei erhöhtem Debug-Level.
-        - Fallback auf direkte Titel-Extraktion für maximale Kompatibilität.
-        - Thread-sicher durch internes Lock (aktueller Stream-Info-Cache).
-        - Cookie-Browser wird einmalig im Konstruktor geladen.
     """
 
     def __init__(self) -> None:
@@ -18457,28 +17827,16 @@ class StreamInfoExtractor:
 
     # -------------------------------------------------------------------------
     # YouTube-optimierte Extraktion
-    # -------------------------------------------------------------------------
     def _extract_youtube_info_optimized(self, url: str) -> Optional[StreamInfo]:
         """
         Optimierte YouTube‑Extraktion mit paralleler Ausführung, minimaler Latenz
         und robustem Fallback. Verwendet gleichzeitig die schnelle direkte
         Extraktion (‑‑get‑title, ‑‑print duration) und einen optionalen JSON‑Dump.
-        Sobald eine Methode erfolgreich ist, wird das Ergebnis sofort verwendet
-        und die andere abgebrochen.
-
-        Strategie:
-            1. Direkte Extraktion (schnell, hohe Erfolgsquote) parallel zu
-               einem JSON‑Dump (reichhaltigere Daten, nur falls Cookies aktiv).
-            2. Timeout für den JSON‑Dump: 10 Sekunden.
-            3. Gesamt‑Timeout für die parallele Ausführung: 12 Sekunden.
-            4. Falls beide scheitern: Fallback auf einfache URL‑Analyse.
         """
         if self._debug:
             logger.debug("🚀 Optimierte YouTube‑Extraktion (parallel) für %s", url[:80])
 
-        # -----------------------------------------------------------------
         # Hilfsfunktionen für die parallelen Tasks
-        # -----------------------------------------------------------------
         def direct_task() -> Optional[StreamInfo]:
             """Führt die schnelle direkte Extraktion durch."""
             if self._debug:
@@ -18509,7 +17867,7 @@ class StreamInfoExtractor:
             try:
                 stdout = YtDlpHelper.run_command(
                     cmd,
-                    timeout=15,
+                    timeout=8,
                     method_name="YouTube JSON (parallel)",
                 )
                 if stdout:
@@ -18535,9 +17893,6 @@ class StreamInfoExtractor:
             # Direkte Extraktion immer starten
             futures[executor.submit(direct_task)] = "direct"
 
-            # JSON nur, wenn Cookies aktiv (kann auch ohne Cookies versucht werden,
-            # aber der direkte Weg ist fast immer ausreichend; wir sparen uns den
-            # JSON‑Versuch ohne Cookies, da er selten erfolgreicher ist als der direkte)
             if use_json:
                 futures[executor.submit(json_task, True, browser)] = "json"
 
@@ -19127,21 +18482,6 @@ class ExportManager:
 class ResourceManager:
     """
     Zentrale Verwaltung von Systemressourcen (Prozesse, Threads, temporäre Dateien).
-
-    Diese Klasse sammelt alle vom Programm erstellten Ressourcen und stellt sicher,
-    dass sie beim Programmende oder bei einem Fehler sauber freigegeben werden.
-    Sie ist thread-sicher und kann über den Kontextmanager `with` verwendet werden.
-
-    Features:
-        - Registrierung von subprocess.Popen-Prozessen
-        - Registrierung von threading.Thread-Objekten
-        - Registrierung temporärer Dateipfade
-        - Automatische Terminierung von Prozessen mit Kindprozessen (via psutil)
-        - Automatisches Joinen von Threads
-        - Löschen temporärer Dateien
-        - GPU-Cache-Bereinigung (via torch)
-        - atexit-Handler für Notfall-Cleanup
-        - Zeitbegrenzung für Cleanup, um Programmende nicht zu blockieren
     """
 
     __slots__ = (
@@ -19402,28 +18742,6 @@ class ResourceManager:
 class LanguageDetector:
     """
     Sprachdetektion für Audio-/Videodateien mittels Whisper.
-
-    Diese Klasse extrahiert eine kurze Audioprobe aus der Mediendatei und führt
-    eine Transkription mit Whisper durch, um die Sprache zu erkennen. Sie ist
-    robust gegenüber verschiedenen Audioformaten, kann die Probe intelligent
-    wählen und liefert detaillierte Ergebnisse.
-
-    Features:
-        - Automatische Extraktion der Audioprobe mit ffmpeg
-        - Intelligente Wahl der Probendauer basierend auf Dateilänge
-        - Robuste Verarbeitung von WAV‑Dateien mit korrektem Header-Parsing
-        - Deaktiviert VAD während der Sprachdetektion für bessere Ergebnisse
-        - Fallback bei leeren Ergebnissen: Zweiter Versuch mit verstärktem Audio
-        - Detaillierte Fehlerbehandlung mit aussagekräftigen Meldungen
-        - Cache für häufige Dateien (optional)
-        - Thread-sicher und mit Timeout-Schutz
-
-    Attributes:
-        transcription_engine (TranscriptionEngine): Die zu verwendende Transkriptionsengine.
-        _debug (bool): Debug-Modus aktiviert.
-        _cache (Optional[TTLCache]): Cache für Spracherkennungsergebnisse.
-        _lock (threading.RLock): Lock für Thread-Sicherheit.
-        _ffmpeg_timeout (int): Timeout für ffmpeg/ffprobe-Aufrufe in Sekunden.
     """
 
     def __init__(
@@ -19825,13 +19143,6 @@ class LanguageDetector:
         Verstärkt die Amplitude des Audiosignals (Gain-Faktor) und gibt die verstärkten
         Bytes zurück. Verwendet numpy, falls verfügbar, ansonsten struct mit expliziter
         little-endian Konvertierung.
-
-        Args:
-            audio_bytes: PCM-16 Audiodaten (16-bit signed little-endian).
-            gain: Verstärkungsfaktor (1.0 = keine Änderung).
-
-        Returns:
-            Verstärkte Audiodaten oder bei Fehler die originalen Audiodaten.
         """
         if not audio_bytes or gain == 1.0:
             return audio_bytes
@@ -19866,34 +19177,6 @@ class OllamaSummarizer:
     Antworten im Streaming-Modus. Sie unterstützt das Abrufen verfügbarer Modelle,
     das Prüfen der Server-Erreichbarkeit und das asynchrone Zusammenfassen von
     Texten mit Abbruchmöglichkeit.
-
-    Features:
-        - Automatische Erkennung der installierten Modelle
-        - Streaming-Antworten mit Callbacks für Teil- und Fehler-Ergebnisse
-        - Abbruch einer laufenden Anfrage über ein Cancel-Event
-        - Caching der verfügbaren Modelle (TTL-gesteuert)
-        - Thread‑sicherer Zugriff über interne Locks
-        - Unterstützung für benutzerdefinierte System-Prompts
-        - Sauberes Thread‑Management und Ressourcenfreigabe
-
-    Attributes:
-        parent (Any): Referenz auf das aufrufende Objekt (für Callbacks).
-        model (str): Name des zu verwendenden Ollama-Modells.
-        host (str): Basis-URL des Ollama-Servers (z.B. 'http://localhost:11434').
-        timeout (int): Timeout in Sekunden für die API-Anfrage.
-        cache_ttl (int): Lebensdauer des Modell-Caches in Sekunden.
-        system_prompt (Optional[str]): Optionaler System-Prompt für das Modell.
-        cache_manager (Optional[CacheManager]): Optionaler Cache-Manager (derzeit nicht genutzt).
-        available (bool): True, wenn requests installiert ist.
-        _session (Optional[requests.Session]): Session für wiederholte API-Aufrufe.
-        _requests: Das requests-Modul (lazy geladen).
-        _lock (threading.RLock): Lock für thread-sicheren Zugriff.
-        _models_cache (List[str]): Cache der verfügbaren Modelle.
-        _models_cache_time (float): Zeitstempel des Caches.
-        _stop_event (threading.Event): Internes Stop-Event (für stop-Methode).
-        last_result (Optional[str]): Letzte vollständige Antwort (für spätere Verwendung).
-        _active_threads (List[threading.Thread]): Liste aller aktiven summarize-Threads.
-        _threads_lock (threading.RLock): Lock für Thread‑Liste.
     """
 
     def __init__(
@@ -20057,33 +19340,6 @@ class OllamaSummarizer:
     ) -> None:
         """
         Startet eine asynchrone Zusammenfassung mit Streaming-Antwort.
-
-        Die Methode erstellt einen neuen Hintergrund-Thread, der die Anfrage an
-        den Ollama-Server sendet. Eingehende Textteile werden einzeln über
-        `callback` gemeldet, Fehler über `error_callback`. Nach Abschluss wird
-        `complete_callback` aufgerufen (falls angegeben).
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - Jeder Aufruf verwendet ein **eigenes, lokales Stop-Event**.
-              Dadurch werden parallele Anfragen nicht mehr ungewollt gemeinsam
-              abgebrochen. Ein optionaler `cancel_event` kann von außen
-              übergeben werden, um die Anfrage gezielt zu stoppen.
-            - Ausführlichere Debug-Protokollierung bei `DEBUG_LEVEL >= 3`,
-              inklusive Request- und Response-Previews.
-            - Robuste Bereinigung der Worker-Thread-Referenz auch bei
-              vorzeitigem Abbruch.
-            - Verbesserte Fehlerbehandlung mit differenzierten Meldungen für
-              Timeout, Verbindungsfehler und leere Antworten.
-
-        Args:
-            text: Der zu verarbeitende Text (z. B. das Transkript).
-            prompt: Der Prompt, der an das Modell gesendet wird.
-            temperature: Kreativitätsparameter (0.0 = deterministisch, 1.0 = kreativ).
-            callback: Wird bei jedem eingehenden Teilstring aufgerufen.
-            error_callback: Wird bei Fehlern mit einer Fehlermeldung aufgerufen.
-            complete_callback: Wird nach erfolgreichem Abschluss aufgerufen.
-            cancel_event: Optionales Event zum vorzeitigen Abbruch der Anfrage.
-                          Wenn gesetzt, wird der Worker-Thread beendet.
         """
         if not self.available:
             error_callback("Ollama nicht verfügbar (requests nicht installiert)")
@@ -20239,14 +19495,6 @@ class OllamaSummarizer:
     ) -> None:
         """
         Korrigiert ein Transkript mit einem Standard-Prompt.
-
-        Nutzt die `summarize`-Methode mit einem vordefinierten Prompt zur Textkorrektur.
-
-        Args:
-            text: Der zu korrigierende Text.
-            callback: Wird bei jedem eingehenden Teilstring aufgerufen.
-            error_callback: Wird bei Fehlern mit einer Fehlermeldung aufgerufen.
-            complete_callback: Wird nach erfolgreichem Abschluss aufgerufen.
         """
         if not self.available:
             error_callback("Ollama nicht verfügbar (requests fehlt)")
@@ -20287,23 +19535,6 @@ class OllamaSummarizer:
     def dispose(self) -> None:
         """
         Gibt alle Ressourcen des OllamaSummarizer frei und beendet laufende Anfragen.
-
-        Diese Methode wird beim Schließen des Dialogs oder beim Programmende
-        aufgerufen. Sie stellt sicher, dass:
-            - Laufende Summarize-Anfragen abgebrochen werden.
-            - Alle aktiven Worker-Threads sauber beendet oder zumindest als Daemon
-              markiert werden, um den Shutdown nicht zu blockieren.
-            - Das verwendete Ollama-Modell auf dem Server explizit entladen wird,
-              um VRAM freizugeben (sendet eine API-Anfrage mit `keep_alive=0`).
-              **Verbesserung:** Die Anfrage wird in einem separaten Daemon-Thread
-              mit sehr kurzem Timeout ausgeführt, damit der Shutdown nicht durch
-              Netzwerkprobleme verzögert wird.
-            - Die HTTP-Session geschlossen wird.
-            - Interne Caches (Modellliste) geleert werden.
-
-        Die Methode ist idempotent und kann mehrfach aufgerufen werden.
-        Sie verwendet großzügige Timeouts für Thread-Joins, aber minimale
-        Wartezeiten für externe Aufrufe, um ein Hängenbleiben zu vermeiden.
         """
         # Verhindert doppelte Ausführung
         if getattr(self, "_disposed", False):
@@ -20368,11 +19599,7 @@ class OllamaSummarizer:
             self._active_threads.clear()
             log_debug("ollama", "  → Active threads list cleared")
 
-        # ---------------------------------------------------------------------
         # 3. Ollama-Modell explizit entladen (VRAM freigeben)
-        #    Wird in einem separaten Daemon-Thread ausgeführt, um den Shutdown
-        #    nicht zu blockieren, falls der Server nicht antwortet.
-        # ---------------------------------------------------------------------
         if self.available and self.model:
             log_debug("ollama", f"  → Requesting model '{self.model}' to unload (async, timeout=0.5s)...")
 
@@ -20447,34 +19674,6 @@ class QueueManager:
     Die Verarbeitung erfolgt in Batches, deren Größe dynamisch an die aktuelle
     Queue-Auslastung angepasst wird. Unwichtige Elemente können bei Überlast
     verworfen werden, um die GUI reaktionsfähig zu halten.
-
-    Features:
-        - Dynamische Batch-Größe basierend auf Queue-Auslastung
-        - Automatische Queue-Bereinigung bei Überlast
-        - Schutz wichtiger Nachrichtentypen (z.B. Status, Fehler)
-        - Detailliertes Logging mit Debug-Modus
-        - Thread-sichere Zugriffe über Locks
-        - Dynamisches Intervall: Bei Leerlauf seltener abfragen
-
-    Attributes:
-        gui (DragonWhispererGUI): Referenz auf die Haupt-GUI.
-        root (tk.Tk): Das Tkinter-Hauptfenster.
-        _gui_update_limiter: Rate-Limiter für GUI-Updates.
-        GUI_QUEUE_MAX_SIZE (int): Maximale Größe der GUI-Queue.
-        GUI_QUEUE_CLEANUP_TARGET (int): Zielgröße nach Bereinigung.
-        TEXT_QUEUE_MAX_SIZE (int): Maximale Größe der Text-Queue.
-        TEXT_QUEUE_CLEANUP_TARGET (int): Zielgröße nach Bereinigung.
-        GUI_PROCESS_MAX_ITEMS (int): Maximale Anzahl Items pro Batch (GUI).
-        TEXT_PROCESS_MAX_ITEMS (int): Maximale Anzahl Items pro Batch (Text).
-        GUI_PROCESS_MAX_DURATION (float): Maximale Batch-Laufzeit in Sekunden.
-        TEXT_PROCESS_MAX_DURATION (float): Maximale Batch-Laufzeit in Sekunden.
-        _gui_queue_lock (threading.RLock): Lock für GUI-Queue.
-        _text_queue_lock (threading.RLock): Lock für Text-Queue.
-        _important_types_lock (threading.RLock): Lock für wichtige Nachrichtentypen.
-        _important_msg_types (set): Menge von Nachrichtentypen, die nie verworfen werden.
-        gui_queue (queue.Queue): Queue für GUI-Updates.
-        text_queue (queue.Queue): Queue für Text-Updates.
-        _last_queue_warning_time (float): Zeitpunkt der letzten Queue-Warnung.
     """
 
     # Standardwerte (können im Konstruktor überschrieben werden)
@@ -20589,7 +19788,14 @@ class QueueManager:
     def safe_put(self, queue_type: Literal["gui", "text"], item: Any) -> bool:
         """
         Fügt ein Element sicher in eine Queue ein.
-        Bei voller Queue werden unwichtige Elemente verworfen oder älteste Elemente entfernt.
+
+        Bei voller Queue werden je nach `queue_type` unterschiedliche Strategien
+        angewendet:
+            - **GUI‑Queue:** Unwichtige Nachrichten werden verworfen, wichtige
+              Nachrichten (wie Status, Fehler, Stream‑Info) werden behalten.
+            - **Text‑Queue:** Text‑Updates (Transkriptionen, Übersetzungen) sind
+              **immer wichtig** und werden daher niemals verworfen. Bei voller
+              Queue wird das älteste Element entfernt, um Platz zu schaffen.
 
         Args:
             queue_type: "gui" oder "text".
@@ -20598,46 +19804,121 @@ class QueueManager:
         Returns:
             True bei Erfolg, False bei Fehler.
         """
+        # ---------------------------------------------------------------------
+        # 1. Queue und Lock auswählen
+        # ---------------------------------------------------------------------
         if queue_type == "gui":
             q = self.gui_queue
             lock = self._gui_queue_lock
+            max_size = self.GUI_QUEUE_MAX_SIZE
         elif queue_type == "text":
             q = self.text_queue
             lock = self._text_queue_lock
+            max_size = self.TEXT_QUEUE_MAX_SIZE
         else:
             logger.error(f"safe_put: unbekannter queue_type '{queue_type}'")
             return False
 
         with lock:
+            # -----------------------------------------------------------------
+            # 2. Versuche, das Element direkt einzufügen
+            # -----------------------------------------------------------------
             try:
                 q.put_nowait(item)
                 return True
             except queue.Full:
-                logger.warning(
-                    f"Queue {queue_type} is full (size={self._safe_qsize(q)}) – versuche, unwichtige Elemente zu verwerfen"
-                )
-                removed = self._discard_unimportant(q, queue_type)
-                if removed > 0:
+                # Queue ist voll – wir müssen Platz schaffen
+                current_size = self._safe_qsize(q)
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "queue",
+                        f"safe_put: {queue_type} queue voll ({current_size}/{max_size}) – "
+                        "versuche Platz zu schaffen"
+                    )
+
+                # -----------------------------------------------------------------
+                # 3. Text‑Queue: Immer wichtig – ältestes Element entfernen
+                # -----------------------------------------------------------------
+                if queue_type == "text":
                     try:
+                        # Ältestes Element entfernen
+                        q.get_nowait()
+                        # Neues Element einfügen
                         q.put_nowait(item)
+                        if logger.isEnabledFor(logging.DEBUG):
+                            log_debug(
+                                "queue",
+                                f"safe_put: {queue_type} queue – ältestes Element verworfen, "
+                                f"neues hinzugefügt (Größe: {self._safe_qsize(q)})"
+                            )
                         return True
-                    except queue.Full:
-                        pass
-                # Falls immer noch voll: ältestes Element entfernen
-                try:
-                    q.get_nowait()
-                    q.put_nowait(item)
-                    if logger.isEnabledFor(logging.DEBUG):
-                        log_debug(
-                            "queue",
-                            f"Queue {queue_type} war voll – ein Element verworfen",
-                        )
-                    return True
-                except (queue.Empty, queue.Full):
-                    return False
+                    except (queue.Empty, queue.Full):
+                        return False
+
+                # -----------------------------------------------------------------
+                # 4. GUI‑Queue: Unwichtige Elemente verwerfen, wichtige behalten
+                # -----------------------------------------------------------------
+                else:  # queue_type == "gui"
+                    removed = self._discard_unimportant(q, queue_type)
+                    if removed > 0:
+                        try:
+                            q.put_nowait(item)
+                            return True
+                        except queue.Full:
+                            pass
+
+                    # Falls immer noch voll: ältestes Element entfernen (Notfall)
+                    try:
+                        q.get_nowait()
+                        q.put_nowait(item)
+                        if logger.isEnabledFor(logging.DEBUG):
+                            log_debug(
+                                "queue",
+                                f"safe_put: {queue_type} queue – ältestes Element verworfen (Notfall)"
+                            )
+                        return True
+                    except (queue.Empty, queue.Full):
+                        return False
+
             except Exception as e:
                 logger.warning(f"safe_put error ({queue_type}): {e}")
                 return False
+
+    def _is_important_item(self, item: Any, queue_type: str) -> bool:
+        """
+        Prüft, ob ein Queue-Element wichtig ist und nicht verworfen werden darf.
+
+        Args:
+            item: Das Queue-Element.
+            queue_type: "gui" oder "text".
+
+        Returns:
+            True, wenn das Element wichtig ist.
+        """
+        # Text‑Queue: Alle Elemente sind wichtig (Transkriptionen/Übersetzungen)
+        if queue_type == "text":
+            return True
+
+        # GUI‑Queue: Prüfe auf wichtige Nachrichtentypen oder explizites Flag
+        if queue_type == "gui":
+            if isinstance(item, tuple) and len(item) >= 2:
+                msg_type = item[0]
+                # Explizites "important"-Flag im Tupel
+                if len(item) == 3 and item[2] is True:
+                    return True
+                # Prüfung gegen die Menge der wichtigen Nachrichtentypen
+                return self._is_important(msg_type)
+
+        return False
+
+    def _is_important(self, msg_type: str) -> bool:
+        """
+        Gibt zurück, ob ein Nachrichtentyp als wichtig markiert ist.
+
+        Wichtige Typen werden bei Überlast der GUI‑Queue niemals verworfen.
+        """
+        with self._important_types_lock:
+            return msg_type in self._important_msg_types
 
     def add_important_type(self, msg_type: str) -> None:
         """
@@ -20705,17 +19986,6 @@ class QueueManager:
         """
         Verarbeitet einen Batch von Elementen aus einer Queue.
         Die Batch-Größe wird dynamisch an die aktuelle Queue-Auslastung angepasst.
-
-        Args:
-            queue_obj: Die zu verarbeitende Queue.
-            lock: Lock für die Queue (wird hier nicht benötigt, nur für die Bereinigung).
-            max_size_threshold: Schwellwert, bei dem eine Bereinigung ausgelöst wird.
-            cleanup_target: Zielgröße nach Bereinigung.
-            max_items_base: Basis-Batch-Größe (wird mit Lastfaktor multipliziert).
-            max_duration_base: Basis-Maximaldauer für Batch-Verarbeitung (Sekunden).
-            interval_base: Basis-Intervall für die nächste Verarbeitung (ms).
-            process_func: Funktion zur Verarbeitung eines einzelnen Elements.
-            queue_name: Name der Queue (für Logging).
         """
         if self.gui._shutting_down or not self._root_exists():
             return
@@ -20793,9 +20063,6 @@ class QueueManager:
         """
         Verarbeitet ein einzelnes GUI‑Queue‑Element.
         Erwartet Tupel (msg_type, callback, important) oder (msg_type, callback).
-
-        Args:
-            item: Das Queue‑Element.
         """
         # Extrahiere die Bestandteile
         if isinstance(item, tuple) and len(item) in (2, 3):
@@ -20842,21 +20109,6 @@ class QueueManager:
     def _process_text_item(self, item: Any) -> None:
         """
         Verarbeitet ein einzelnes Element aus der Text‑Update‑Queue.
-
-        Erwartet wird ein Tupel (update_type, text_data), wobei:
-            - update_type: str – entweder "transcript" oder "translation"
-            - text_data:   str – der einzufügende Text (oder None, wird ignoriert)
-
-        Die Methode ist vollständig defensiv programmiert:
-            - Ignoriert ungültige oder leere Elemente
-            - Prüft die Existenz der Ziel‑Widgets vor jedem Zugriff
-            - Fängt tkinter‑spezifische sowie allgemeine Exceptions ab
-            - Bietet detaillierte Debug‑Ausgaben bei aktiviertem DEBUG_LEVEL
-            - Unterstützt sowohl `tk.Text` als auch `scrolledtext.ScrolledText`
-            - Verhindert übermäßiges Scrollen durch Pufferung der see()‑Aufrufe
-
-        Args:
-            item: Das aus der Queue entnommene Element.
         """
         # -----------------------------------------------------------------
         # 1. Typ- und Strukturvalidierung
@@ -20927,12 +20179,7 @@ class QueueManager:
                 log_debug("queue", f"_process_text_item: Widget für '{update_type}' nicht gefunden – ignoriert")
             return
 
-        # -----------------------------------------------------------------
         # 5. Sichere GUI-Operation im Hauptthread (falls nötig)
-        # -----------------------------------------------------------------
-        # Da diese Methode nur über root.after() aus dem Hauptthread aufgerufen wird,
-        # ist ein zusätzlicher after()-Aufruf nicht erforderlich. Wir gehen direkt
-        # zur Widget-Manipulation über.
 
         try:
             # Prüfen, ob das Widget noch existiert
@@ -20941,9 +20188,7 @@ class QueueManager:
                     log_debug("queue", f"_process_text_item: Widget '{update_type}' existiert nicht mehr")
                 return
 
-            # -----------------------------------------------------------------
             # 6. Text einfügen
-            # -----------------------------------------------------------------
             # Merken der aktuellen Cursor-Position für eventuelles Scrollen
             was_at_end = False
             if scroll_var and scroll_var.get():
@@ -21234,23 +20479,6 @@ class QueueManager:
 class StatusBar:
     """
     Statusleiste am unteren Rand des Hauptfensters.
-
-    Die Statusleiste enthält:
-    - Eine Reihe von Schnellzugriffs-Buttons (Löschen, Speichern, Export, Statistiken,
-      Einstellungen, Übersetzung, Zusammenfassung, Paketinstallation).
-    - Eine Fortschrittsanzeige (Progressbar) mit Prozentwert.
-    - Ein Label mit Systeminformationen (CPU, RAM, VRAM, Modell).
-    - Buttons für Exit, TTS, Hilfe, VAD-Fallback und Live-Modus.
-    - Im Demo‑Modus zusätzlich einen roten Hinweis.
-
-    Die Statusleiste ist dynamisch und reagiert auf Zustandsänderungen der GUI.
-    Sie verwendet das aktuelle Theme und bietet Tooltips für alle Buttons.
-
-    Attributes:
-        gui (DragonWhispererGUI): Referenz auf die Haupt-GUI.
-        root (tk.Tk): Das Tkinter-Hauptfenster.
-        frame (tk.Frame): Das Rahmen-Widget der Statusleiste.
-        demo_mode (bool): True, wenn Whisper nicht verfügbar ist (Demo‑Modus).
     """
 
     def __init__(
@@ -21382,15 +20610,16 @@ class StatusBar:
     def _create_center_panel(self, parent: tk.Frame) -> None:
         """
         Erstellt den mittleren Bereich der Statusleiste mit Progressbar und Systeminfo.
-
-        Args:
-            parent: Das übergeordnete Frame-Widget.
         """
         # Fortschrittsbalken
         self.gui.progress_bar = ttk.Progressbar(
-            parent, mode="determinate", length=90, style="Dark.Horizontal.TProgressbar"
+            parent,
+            mode="determinate",
+            length=110,
+            style="Dark.Horizontal.TProgressbar"
         )
         self.gui.progress_bar.pack(side="left", padx=(3, 3))
+        ToolTip(self.gui.progress_bar, "Fortschritt der Audioverarbeitung")
 
         # Prozent-/Status-Label
         self.gui.progress_label = tk.Label(
@@ -21559,32 +20788,6 @@ class StatusBar:
 class TTSManager:
     """
     Hochwertige Text-to-Speech Verwaltung mit mehreren Engines und Audio-Playern.
-
-    Unterstützte Engines:
-        - Piper (primär, hohe Qualität, offline)
-        - pyttsx3 (systemeigene Engine, Fallback)
-        - espeak (leichtgewichtig, Fallback)
-
-    Features:
-        - Automatische Audio-Player-Erkennung (aplay, paplay, ffplay, sox)
-        - Intelligenter Fallback bei fehlgeschlagenem Player
-        - Lautstärkeregelung (0.0 - 1.0) mit numpy oder struct-Fallback
-        - Satzweise Aufteilung langer Texte (max. 500 Zeichen pro Chunk)
-        - Asynchrone, nicht-blockierende Ausführung
-        - Warteschlange für sequenzielle Wiedergabe (Auto-TTS)
-        - Detaillierte Debug-Ausgaben bei --debug=tts oder --debug=3
-        - Diagnose unvollständiger Wiedergabe (Byte-Zählung, Zeitvergleich, Queue-Logging)
-        - Automatischer Download fehlender Piper-Konfigurationsdateien (.onnx.json)
-        - Reparatur beschädigter Modelldateien (Löschen und erneuter Download)
-        - Fallback auf medium-Modell bei defektem high-Modell (mit Rekursionsschutz)
-        - Test-Audio-Funktion (speaker-test oder TTS)
-        - Robuste Fehlerbehandlung mit vollständiger stderr-Protokollierung
-        - Sicherer Shutdown ohne Queue-Worker-Abstürze
-        - Dynamische Erkennung installierter Piper-Stimmen (für GUI)
-        - Textbereinigung: Entfernung von Markup-Zeichen (*, **, _, __)
-        - Textnormalisierung: Konvertierung von Zahlen und Abkürzungen
-        - Wiederholungslogik bei fehlgeschlagener Piper-Synthese
-        - Erweiterte Piper-Debug-Ausgabe bei Wiederholungen
     """
 
     # -------------------------------------------------------------------------
@@ -21639,9 +20842,6 @@ class TTSManager:
     def __init__(self, settings: "AdvancedSettings") -> None:
         """
         Initialisiert den TTS-Manager mit den gegebenen Einstellungen.
-
-        Args:
-            settings: Erweiterte Einstellungen (enthält TTS-Parameter).
         """
         self.settings = settings
         self._process: Optional[subprocess.Popen] = None
@@ -21694,9 +20894,7 @@ class TTSManager:
             f"normalize_text={self._normalize_text}"
         )
 
-    # -------------------------------------------------------------------------
     # Engine- und Player-Erkennung
-    # -------------------------------------------------------------------------
     def _detect_audio_players(self) -> List[Tuple[str, List[str]]]:
         """
         Ermittelt verfügbare Audio-Player auf dem System.
@@ -21727,9 +20925,7 @@ class TTSManager:
             engines.append("espeak")
         return engines
 
-    # -------------------------------------------------------------------------
     # Öffentliche Konfigurationsmethoden
-    # -------------------------------------------------------------------------
     def set_engine(self, engine_name: str) -> None:
         """Setzt die zu verwendende TTS-Engine."""
         if engine_name in self._available_engines:
@@ -21808,9 +21004,7 @@ class TTSManager:
                 logger.debug(f"speaker-test fehlgeschlagen: {e}")
         self.speak("Test. Dies ist ein kurzer Testton.", callback)
 
-    # -------------------------------------------------------------------------
     # Textbereinigung und Normalisierung
-    # -------------------------------------------------------------------------
     def _clean_text(self, text: str) -> str:
         """
         Bereinigt den Text von Markup-Zeichen und normalisiert ihn für TTS.
@@ -21849,9 +21043,7 @@ class TTSManager:
 
         return text
 
-    # -------------------------------------------------------------------------
     # Hauptschnittstelle: speak und speak_to_file
-    # -------------------------------------------------------------------------
     def speak(self, text: str, callback: Optional[Callable[[bool, str], None]] = None) -> None:
         """
         Gibt den Text als Sprache aus (asynchron).
@@ -22016,9 +21208,7 @@ class TTSManager:
 
         log_debug("tts", "TTSManager.stop() completed")
 
-    # -------------------------------------------------------------------------
     # Blockierende Ausführung (wird in Threads ausgeführt)
-    # -------------------------------------------------------------------------
     def _speak_blocking(self, text: str, callback: Optional[Callable], engine: str) -> None:
         """Führt die TTS-Ausgabe synchron im aktuellen Thread aus."""
         if text is None:
@@ -22084,9 +21274,7 @@ class TTSManager:
         else:
             return False, f"Unbekannte Engine: {engine}"
 
-    # -------------------------------------------------------------------------
     # Piper-Implementierung (primär)
-    # -------------------------------------------------------------------------
     def _get_piper_cache_dir(self) -> str:
         """Ermittelt das plattformunabhängige Cache-Verzeichnis für Piper-Modelle."""
         if IS_WINDOWS:
@@ -22098,24 +21286,6 @@ class TTSManager:
     def _validate_piper_model(self, voice_name: str, attempt_repair: bool = True) -> Tuple[bool, str]:
         """
         Validiert die Piper-Modelldateien (.onnx und .onnx.json) für eine Stimme.
-
-        Führt umfassende Prüfungen auf Existenz, minimale Dateigröße und (für JSON)
-        syntaktische Korrektheit durch. Bei Fehlern werden beide Dateien atomar gelöscht
-        und die Konfigurationsdatei neu heruntergeladen.
-
-        Verbesserungen:
-            - Plattformunabhängige Pfadbehandlung mit pathlib
-            - JSON‑Validierung schützt vor korrupten Konfigurationen
-            - Wiederholungslogik für Löschvorgänge (Windows‑Dateisperren)
-            - Detaillierte Debug‑Ausgaben bei aktiviertem DEBUG_LEVEL
-            - Robuster Download mit Fallback auf manuellen Hinweis
-
-        Args:
-            voice_name: Name der Stimme (z.B. 'de_DE-thorsten-medium')
-            attempt_repair: Wenn True, wird bei Fehlern eine Reparatur versucht.
-
-        Returns:
-            Tuple (Erfolg, Fehlermeldung). Bei Erfolg ist der zweite Wert ein leerer String.
         """
         from pathlib import Path
         import time
@@ -22129,9 +21299,7 @@ class TTSManager:
         MIN_MODEL_SIZE = 1024 * 1024   # 1 MB (typische Modelle sind 50-200 MB)
         MIN_JSON_SIZE = 512            # 512 Bytes (JSON‑Konfiguration ist einige KB groß)
 
-        # ---------------------------------------------------------------------
         # Hilfsfunktion: Dateivalidierung mit erweiterten Prüfungen
-        # ---------------------------------------------------------------------
         def is_file_valid(path: Path, min_size: int, desc: str) -> Tuple[bool, Optional[str]]:
             """Prüft eine Datei auf Existenz, Größe und (bei JSON) Syntax."""
             if not path.exists():
@@ -22154,9 +21322,7 @@ class TTSManager:
                     return False, f"{desc} enthält ungültiges JSON: {e}"
             return True, None
 
-        # ---------------------------------------------------------------------
         # Hilfsfunktion: Sicheres Löschen mit Wiederholungen (Windows‑kompatibel)
-        # ---------------------------------------------------------------------
         def safe_unlink(path: Path, desc: str, max_retries: int = 3, delay: float = 0.2) -> Optional[str]:
             """
             Löscht eine Datei mit Wiederholungen bei temporären Fehlern.
@@ -22188,9 +21354,7 @@ class TTSManager:
                     return f"{desc} konnte nicht gelöscht werden (unerwarteter Fehler): {e}"
             return f"{desc} konnte nach {max_retries} Versuchen nicht gelöscht werden"
 
-        # ---------------------------------------------------------------------
         # 1. Beide Dateien validieren
-        # ---------------------------------------------------------------------
         model_ok, model_err = is_file_valid(model_path, MIN_MODEL_SIZE, "Modelldatei")
         json_ok, json_err = is_file_valid(json_path, MIN_JSON_SIZE, "Konfigurationsdatei")
 
@@ -22199,9 +21363,7 @@ class TTSManager:
                 log_debug("tts", f"Piper-Modell '{voice_name}' ist vollständig und gültig.")
             return True, ""
 
-        # ---------------------------------------------------------------------
         # 2. Reparaturlogik
-        # ---------------------------------------------------------------------
         if not attempt_repair:
             # Ohne Reparatur geben wir den ersten gefundenen Fehler zurück
             return False, model_err or json_err or "Unbekannter Validierungsfehler"
@@ -22213,9 +21375,7 @@ class TTSManager:
             f"Lösche beide Dateien, um einen sauberen Zustand herzustellen."
         )
 
-        # ---------------------------------------------------------------------
         # 3. Atomares Löschen beider Dateien
-        # ---------------------------------------------------------------------
         delete_errors = []
 
         # Zuerst die Modelldatei löschen (größer, daher zuerst)
@@ -22261,9 +21421,7 @@ class TTSManager:
 
         logger.info(f"✅ Konfigurationsdatei für '{voice_name}' erfolgreich heruntergeladen.")
 
-        # ---------------------------------------------------------------------
         # 5. Erneute Validierung (ohne Reparatur, um Endlosschleife zu vermeiden)
-        # ---------------------------------------------------------------------
         return self._validate_piper_model(voice_name, attempt_repair=False)
 
     def _download_piper_json(self, voice_name: str, cache_dir: str) -> bool:
@@ -22363,21 +21521,8 @@ class TTSManager:
         """
         Synchrone Piper-Ausgabe (wird im Worker-Thread aufgerufen).
         Gibt (erfolg, nachricht) zurück.
-
-        Enthält umfangreiche Diagnose, Wiederholungslogik und Schutz gegen
-        Ausführung während des Shutdowns (dispose). Der Timeout für den
-        Audio-Player wurde auf 15 Sekunden erhöht, um ein vorzeitiges Killen
-        zu vermeiden. Bei Bedarf wird erst SIGTERM, dann SIGKILL gesendet.
-
-        **Erweiterte Debug-Ausgaben (bei DEBUG_LEVEL >= 3):**
-            - Zeigt den vollständigen Text, der an Piper gesendet wird.
-            - Protokolliert die gelesenen und weitergeleiteten Bytes.
-            - Vergleicht erwartete Dauer mit tatsächlicher Player-Dauer.
-            - Warnt bei Byte-Differenzen oder zu kurzer Wiedergabe.
         """
-        # -----------------------------------------------------------------
         # 0. Vorab-Prüfung: Wurde der TTSManager bereits disposed oder gestoppt?
-        # -----------------------------------------------------------------
         if getattr(self, "_disposed", False):
             log_debug("tts", "_speak_piper_sync: TTSManager disposed – abort")
             return False, "TTSManager disposed"
@@ -22397,9 +21542,7 @@ class TTSManager:
         _np_available = NUMPY_AVAILABLE
         original_voice = self._voice
 
-        # -----------------------------------------------------------------
         # Erweiterte Debug-Ausgabe: Text vor der Synthese
-        # -----------------------------------------------------------------
         if DEBUG_LEVEL >= 4:
             log_debug(
                 "tts",
@@ -22779,27 +21922,6 @@ class TTSManager:
     def _split_text(self, text: str) -> List[str]:
         """
         Teilt einen langen Text in sinnvolle Chunks für die Sprachsynthese auf.
-
-        Die Methode trennt **immer zuerst an Satzgrenzen** (.!?。！？). Nur wenn
-        ein einzelner Satz die maximale Chunk-Länge (`MAX_CHUNK_LEN`) überschreitet,
-        wird er zusätzlich an Wortgrenzen zerlegt. Dadurch wird sichergestellt,
-        dass Sätze niemals zerrissen werden und die Sprachausgabe natürlich bleibt.
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - **Satzintegrität:** Sätze werden nicht mehr willkürlich bei
-              Erreichen der Maximallänge getrennt. Nur überlange Einzelsätze
-              werden weiter zerlegt.
-            - **Detaillierte Debug-Ausgaben** bei `DEBUG_LEVEL >= 3` zeigen
-              Anzahl, Länge und Inhalt jedes Chunks.
-            - **Robuste Behandlung** von `None` und leeren Strings.
-            - **Korrekte Typannotation** und ausführlicher Docstring.
-
-        Args:
-            text: Der aufzuteilende Text. Darf None sein.
-
-        Returns:
-            Liste von Text-Chunks. Bei None oder leerem Text wird eine leere
-            Liste zurückgegeben.
         """
         # 1. Eingabevalidierung
         if text is None:
@@ -22894,15 +22016,6 @@ class TTSManager:
     def _queue_worker_loop(self) -> None:
         """
         Arbeitet die TTS-Warteschlange sequenziell ab.
-
-        Verbesserungen:
-            - Kurzer Timeout (0,1 s) für reaktionsschnellen Shutdown.
-            - Explizite Prüfung auf _queue_stop vor jedem get().
-            - Sentinel (None) beendet die Schleife sofort.
-            - Robuste Fehlerbehandlung – einzelne fehlgeschlagene Ausgaben
-              unterbrechen die Queue nicht.
-            - Debug-Ausgaben bei --debug=tts oder --debug=3.
-            - Prüfung auf _disposed und _stop_requested vor der Wiedergabe.
         """
         log_debug("tts", "TTSQueue worker thread started")
 
@@ -22969,16 +22082,6 @@ class TTSManager:
     def dispose(self) -> None:
         """
         Gibt alle Ressourcen des TTSManagers frei und beendet laufende Prozesse.
-
-        Diese Methode wird beim Herunterfahren der Anwendung aufgerufen. Sie stellt sicher,
-        dass:
-            - Laufende Sprachausgaben sofort abgebrochen werden.
-            - Alle Subprozesse (Piper, Audio‑Player) hart beendet werden.
-            - Der Queue‑Worker‑Thread sauber gestoppt wird.
-            - Keine Hintergrundprozesse oder Threads zurückbleiben.
-            - Keine Fallback-Mechanismen während des Shutdowns ausgelöst werden.
-
-        Die Methode ist idempotent und kann mehrfach aufgerufen werden.
         """
         # Verhindert doppelte Ausführung
         if getattr(self, "_disposed", False):
@@ -22988,17 +22091,13 @@ class TTSManager:
 
         log_debug("tts", "TTSManager.dispose() called – cleaning up resources")
 
-        # -----------------------------------------------------------------
         # 1. Alle Stop-Events setzen, um laufende Threads zu benachrichtigen
-        # -----------------------------------------------------------------
         self._stop_requested.set()
         self._forward_stop.set()
         self._queue_stop.set()
         log_debug("tts", "  → Stop events set (stop_requested, forward_stop, queue_stop)")
 
-        # -----------------------------------------------------------------
         # 2. Laufenden Forward-Thread stoppen (falls vorhanden)
-        # -----------------------------------------------------------------
         if self._forward_thread and self._forward_thread.is_alive():
             log_debug("tts", "  → Stopping forward thread...")
             self._forward_thread.join(timeout=1.0)
@@ -23012,12 +22111,7 @@ class TTSManager:
                 log_debug("tts", "  → Forward thread joined")
         self._forward_thread = None
 
-        # -----------------------------------------------------------------
         # 3. Laufenden Piper-Prozess **hart** beenden (SIGKILL)
-        #    Verwende kill() statt terminate(), um zu verhindern, dass
-        #    die aufrufende _speak_piper_sync den Fallback-Mechanismus
-        #    (z. B. Wechsel auf medium) auslöst.
-        # -----------------------------------------------------------------
         with self._lock:
             proc = self._process
             self._process = None
@@ -23146,21 +22240,6 @@ class DarkMessageBox:
         """
         Zeigt einen modalen Fortschrittsdialog an und gibt einen Controller zurück,
         mit dem der Dialog geschlossen und die Nachricht aktualisiert werden kann.
-
-        Verbesserungen:
-            - Threadsicherer Zugriff auf GUI-Elemente über `after(0, ...)`.
-            - Robuste Prüfung auf Widget-Existenz vor jeder Operation.
-            - Detaillierte Debug-Ausgaben bei `DEBUG_LEVEL >= 3`.
-            - Automatisches Stoppen der Progressbar beim Schließen.
-
-        Args:
-            title: Titel des Dialogs.
-            message: Anzuzeigende Nachricht.
-            parent: Übergeordnetes Fenster (optional).
-            indeterminate: True für fortlaufende Animation, False für determinierte.
-
-        Returns:
-            ProgressController-Instanz mit `close()` und `update_message()`.
         """
         if threading.current_thread() is not threading.main_thread():
             warnings.warn(
@@ -23206,6 +22285,9 @@ class DarkMessageBox:
                 prog.pack(pady=(0, 10))
                 prog.start(10)
 
+                # 🔥 Korrektur: update_idletasks() vor der Zentrierung aufrufen,
+                # damit die Geometrie korrekt berechnet wird und kein Flackern auftritt.
+                dlg.update_idletasks()
                 cls._center_dialog(dlg, root)
 
                 if DEBUG_LEVEL >= 3:
@@ -25692,34 +24774,6 @@ class InstallDependencyDialog(BaseDialog):
     bietet Live-Feedback während langer Vorgänge und enthält eine spezielle
     Funktion zur Aktualisierung kritischer Pakete (z. B. numpy, faster-whisper).
 
-    Besonderheiten:
-        - Plattformunabhängige Systempaket-Installation (apt, pacman, brew, winget)
-        - Fallback-Installationsmethoden (z. B. curl für ollama)
-        - Python-Pakete werden immer mit `--upgrade` installiert
-        - Zwei getrennte Update-Modi: „Kritische Pakete“ (schnell, sicher) und
-          „Alle Pakete“ (umfassend, kann länger dauern)
-        - Korrekte Piper-Stimmen-URLs und manuelle Download-Hinweise
-        - Live-Streaming der Terminal-Ausgaben, Fortschrittsbalken, Cancel-Button
-        - Automatischer Download von `.onnx` und `.onnx.json` für Piper-Stimmen
-        - Prüfung auf vollständige Installation (beide Dateien vorhanden)
-        - Sudo-Passwort-Erkennung mit Benutzerhinweis
-        - Robuste Abbruchbehandlung mit Timeout und Prozess-Kill
-        - Detaillierte Debug-Ausgaben bei `DEBUG_LEVEL >= 2`
-
-    Verbesserungen in dieser Version:
-        - **Vollständige GUI-Thread-Sicherheit:** Alle Zugriffe auf Widgets aus
-          Hintergrund-Threads erfolgen über `self._safe_after`, das vor dem Zugriff
-          die Existenz des Widgets prüft und `TclError` abfängt.
-        - **Korrekte Abbruchbehandlung:** `close()` bricht laufende Prozesse ab,
-          stoppt den Worker-Thread und gibt Ressourcen frei, bevor das Fenster
-          geschlossen wird.
-        - **Idempotente UI-Steuerung:** `_enable_ui`, `_start_progress`, `_stop_progress`
-          und `_append_output` sind robust gegen Widget-Zerstörung.
-        - **Verbessertes Debug-Logging:** Alle sicherheitskritischen Operationen
-          werden bei `DEBUG_LEVEL >= 3` protokolliert.
-        - **Robuste Prozess-Terminierung:** Verwendung von `PlatformUtils.terminate_process`
-          für plattformunabhängiges, sicheres Beenden von Subprozessen.
-
     Autor: Dragon Whisperer Team
     Version: 6.0 – „Der unverwüstliche Paket-Drache“
     """
@@ -26401,16 +25455,6 @@ class InstallDependencyDialog(BaseDialog):
         ausgeführt (kein shell=True). Der Befehl wird in der GUI angezeigt und
         optional in die Zwischenablage kopiert. Der Benutzer wird gefragt, ob die
         manuelle Installation erfolgreich war.
-
-        Diese Methode ist threadsicher: GUI-Operationen werden in den Hauptthread
-        delegiert, und es wird auf eine Antwort mit Timeout gewartet.
-
-        Args:
-            command: Der Shell-Befehl, der manuell ausgeführt werden soll.
-
-        Returns:
-            True, wenn der Benutzer bestätigt, dass der Befehl erfolgreich ausgeführt wurde,
-            andernfalls False.
         """
         if DEBUG_LEVEL >= 3:
             log_debug("install", f"_run_fallback_install called with command: {command}")
@@ -26621,9 +25665,7 @@ class InstallDependencyDialog(BaseDialog):
 
         return overall_success
 
-    # -------------------------------------------------------------------------
     #  Update-Methoden
-    # -------------------------------------------------------------------------
     def update_all_pip_packages(self):
         self._append_output("\n📦 ALLE PIP-PAKETE AKTUALISIEREN\n")
         self.update_status_label.config(text="🔍 Suche veraltete Pakete...")
@@ -26644,25 +25686,10 @@ class InstallDependencyDialog(BaseDialog):
         direkten GUI-Zugriffe durchführen. Alle Aktualisierungen der
         Benutzeroberfläche erfolgen über `self._safe_after`, das die
         Existenz der Widgets prüft und `TclError` abfängt.
-
-        **Ablauf:**
-            1. Liste der veralteten Pakete mit `pip list --outdated` ermitteln.
-            2. Falls keine veralteten Pakete existieren, Erfolgsmeldung ausgeben.
-            3. Andernfalls alle veralteten Pakete mit `--upgrade` installieren.
-            4. GUI-Elemente (Buttons, Statuslabel) zurücksetzen.
-            5. Thread aus der Liste der aktiven Threads entfernen.
-
-        **Fehlerbehandlung:**
-            - Fehler bei der Paketliste oder Installation werden geloggt und
-              in der GUI angezeigt.
-            - Der `finally`-Block stellt sicher, dass die UI **immer** wieder
-              aktiviert wird, auch wenn ein Fehler auftritt.
         """
         success = False
         try:
-            # -----------------------------------------------------------------
             # 1. Veraltete Pakete ermitteln
-            # -----------------------------------------------------------------
             self._append_output("\n📦 ERMITTLE VERALTETE PAKETE...\n")
             result = subprocess.run(
                 [sys.executable, "-m", "pip", "list", "--outdated", "--format=json"],
@@ -26682,9 +25709,7 @@ class InstallDependencyDialog(BaseDialog):
                 self.status_var.set("✅ Alle Pakete aktuell")
                 return
 
-            # -----------------------------------------------------------------
             # 2. Pakete aktualisieren
-            # -----------------------------------------------------------------
             packages = [pkg["name"] for pkg in outdated]
             self._append_output(f"📦 Aktualisiere {len(packages)} Pakete...\n")
             for pkg in packages:
@@ -26709,9 +25734,7 @@ class InstallDependencyDialog(BaseDialog):
             self._append_output(f"\n❌ Fehler: {e}\n")
             self.status_var.set("❌ Fehler bei Aktualisierung")
         finally:
-            # -----------------------------------------------------------------
             # 3. GUI zurücksetzen (sicher über _safe_after)
-            # -----------------------------------------------------------------
             self._stop_progress()
 
             def restore_ui():
@@ -26734,9 +25757,7 @@ class InstallDependencyDialog(BaseDialog):
 
             self._safe_after(0, restore_ui)
 
-            # -----------------------------------------------------------------
             # 4. Thread aus der aktiven Liste entfernen
-            # -----------------------------------------------------------------
             current = threading.current_thread()
             if current in self._active_threads:
                 self._active_threads.remove(current)
@@ -26764,25 +25785,6 @@ class InstallDependencyDialog(BaseDialog):
     def _update_critical_worker(self) -> None:
         """
         Worker-Thread für die Aktualisierung kritischer pip-Pakete.
-
-        Diese Methode läuft in einem Hintergrundthread und darf **keine**
-        direkten GUI-Zugriffe durchführen. Alle Aktualisierungen der
-        Benutzeroberfläche erfolgen über `self._safe_after`, das die
-        Existenz der Widgets prüft und `TclError` abfängt.
-
-        **Kritische Pakete (CRITICAL_PACKAGES):**
-            - numpy, scipy, faster-whisper, yt-dlp, torch
-
-        **Ablauf:**
-            1. Liste der kritischen Pakete ausgeben.
-            2. Pakete mit `--upgrade` installieren.
-            3. GUI-Elemente (Buttons, Statuslabel) zurücksetzen.
-            4. Thread aus der Liste der aktiven Threads entfernen.
-
-        **Fehlerbehandlung:**
-            - Installationsfehler werden geloggt und in der GUI angezeigt.
-            - Der `finally`-Block stellt sicher, dass die UI **immer** wieder
-              aktiviert wird, auch wenn ein Fehler auftritt.
         """
         success = False
         try:
@@ -26805,9 +25807,7 @@ class InstallDependencyDialog(BaseDialog):
             self._append_output(f"\n❌ Fehler: {e}\n")
             self.status_var.set("❌ Fehler bei Aktualisierung")
         finally:
-            # -----------------------------------------------------------------
             # GUI zurücksetzen (sicher über _safe_after)
-            # -----------------------------------------------------------------
             self._stop_progress()
 
             def restore_ui():
@@ -26839,9 +25839,7 @@ class InstallDependencyDialog(BaseDialog):
 
             self._safe_after(0, restore_ui)
 
-            # -----------------------------------------------------------------
             # Thread aus der aktiven Liste entfernen
-            # -----------------------------------------------------------------
             current = threading.current_thread()
             if current in self._active_threads:
                 self._active_threads.remove(current)
@@ -26849,9 +25847,7 @@ class InstallDependencyDialog(BaseDialog):
             if DEBUG_LEVEL >= 3:
                 log_debug("install", f"_update_critical_worker finished (success={success})")
 
-    # -------------------------------------------------------------------------
     #  Helfer (UI, Prozess, Fortschritt)
-    # -------------------------------------------------------------------------
     def _run_subprocess(self, cmd: List[str], description: str = "", env: Optional[Dict] = None) -> bool:
         try:
             with self._process_lock:
@@ -27620,59 +26616,179 @@ class AdvancedSettingsDialog:
     #  Lazy Loading der Tabs
     # =========================================================================
     def _on_tab_changed(self, event: tk.Event) -> None:
-        """Wird aufgerufen, wenn der Benutzer ein Tab wechselt."""
-        current_tab = self.notebook.select()
-        tab_id = self.notebook.index(current_tab)
+        """
+        Wird aufgerufen, wenn der Benutzer ein Tab wechselt.
 
+        Diese Methode implementiert Lazy Loading für die Tabs: Die Inhalte eines
+        Tabs werden erst dann erstellt, wenn er zum ersten Mal ausgewählt wird.
+        Dadurch wird die Startzeit des Dialogs verkürzt und Speicher gespart.
+
+        Zusätzlich werden nach dem Laden eines Tabs:
+            - Die ttk‑Styles aktualisiert, um das aktuelle Theme anzuwenden.
+            - Der Hintergrund aller Canvas‑Widgets in den bereits geladenen
+              Tabs korrigiert, um schwarze/helle Flächen zu vermeiden.
+            - Validierungsfunktionen an alle numerischen Widgets gebunden.
+        """
+        if DEBUG_LEVEL >= 3:
+            log_debug("settings", f"_on_tab_changed: event={event}")
+
+        # -----------------------------------------------------------------
+        # 1. Aktuell ausgewähltes Tab ermitteln
+        # -----------------------------------------------------------------
+        try:
+            current_tab = self.notebook.select()
+            tab_id = self.notebook.index(current_tab)
+        except tk.TclError as e:
+            logger.warning(f"Konnte aktuelles Tab nicht ermitteln: {e}")
+            return
+
+        if DEBUG_LEVEL >= 3:
+            log_debug("settings", f"Tab changed to index {tab_id}")
+
+        # -----------------------------------------------------------------
+        # 2. Lazy Loading der Tab‑Inhalte
+        # -----------------------------------------------------------------
         if tab_id == 0 and "audio" not in self._loaded_tabs:
+            if DEBUG_LEVEL >= 3:
+                log_debug("settings", "Loading Audio & VAD tab...")
             self._create_audio_vad_tab()
             self._loaded_tabs.add("audio")
             self._bind_validation_recursive(self.tab_audio)
         elif tab_id == 1 and "model" not in self._loaded_tabs:
+            if DEBUG_LEVEL >= 3:
+                log_debug("settings", "Loading Model & Inference tab...")
             self._create_model_inference_tab()
             self._loaded_tabs.add("model")
             self._bind_validation_recursive(self.tab_model)
         elif tab_id == 2 and "translate" not in self._loaded_tabs:
+            if DEBUG_LEVEL >= 3:
+                log_debug("settings", "Loading Translation & TTS tab...")
             self._create_translation_tts_tab()
             self._loaded_tabs.add("translate")
             self._bind_validation_recursive(self.tab_translate)
         elif tab_id == 3 and "advanced" not in self._loaded_tabs:
+            if DEBUG_LEVEL >= 3:
+                log_debug("settings", "Loading Advanced & System tab...")
             self._create_advanced_system_tab()
             self._loaded_tabs.add("advanced")
             self._bind_validation_recursive(self.tab_advanced)
         elif tab_id == 4 and "gui" not in self._loaded_tabs:
+            if DEBUG_LEVEL >= 3:
+                log_debug("settings", "Loading GUI & Display tab...")
             self._create_gui_display_tab()
             self._loaded_tabs.add("gui")
             self._bind_validation_recursive(self.tab_gui)
 
-        # Nach dem Laden eines Tabs die ttk‑Styles erneut anwenden
-        self._setup_ttk_styles()
+        # -----------------------------------------------------------------
+        # 3. ttk‑Styles nach dem Laden aktualisieren
+        # -----------------------------------------------------------------
+        try:
+            self._setup_ttk_styles()
+        except Exception as e:
+            logger.warning(f"Fehler beim Aktualisieren der ttk-Styles: {e}")
+
+        # -----------------------------------------------------------------
+        # 4. Canvas‑Hintergründe in allen geladenen Tabs korrigieren
+        #    (behebt schwarze/helle Flächen)
+        # -----------------------------------------------------------------
+        for tab_name in self._loaded_tabs:
+            tab_attr = f"tab_{tab_name}"
+            if hasattr(self, tab_attr):
+                tab_widget = getattr(self, tab_attr)
+                if tab_widget is None or not tab_widget.winfo_exists():
+                    continue
+                try:
+                    for child in tab_widget.winfo_children():
+                        if isinstance(child, tk.Canvas):
+                            child.configure(bg=self.gui.current_theme.BG_PRIMARY)
+                            if DEBUG_LEVEL >= 4:
+                                log_debug("settings", f"Canvas background updated in {tab_name}")
+                except tk.TclError as e:
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("settings", f"TclError beim Canvas-Update in {tab_name}: {e}")
+                except Exception as e:
+                    logger.warning(f"Fehler beim Canvas-Update in {tab_name}: {e}")
+
+        if DEBUG_LEVEL >= 3:
+            log_debug("settings", f"_on_tab_changed completed for tab {tab_id}")
 
     # =========================================================================
     #  Hilfsmethode: Scrollbaren Container erstellen
     # =========================================================================
     def _make_scrollable(self, parent: tk.Widget) -> tk.Frame:
-        """Erstellt einen scrollbaren Frame innerhalb des übergeordneten Widgets."""
-        canvas = tk.Canvas(parent, bg=self.gui.current_theme.BG_PRIMARY, highlightthickness=0)
-        scrollbar = tk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-        scrollable = tk.Frame(canvas, bg=self.gui.current_theme.BG_PRIMARY)
+        """
+        Erstellt einen scrollbaren Container (Canvas + Scrollbar) innerhalb des
+        übergeordneten Widgets und gibt den inneren Frame zurück, in den die
+        eigentlichen Inhalte platziert werden können.
+        """
+        theme = self.gui.current_theme
 
-        scrollable.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        # -----------------------------------------------------------------
+        # 1. Canvas und Scrollbar erstellen
+        # -----------------------------------------------------------------
+        canvas = tk.Canvas(
+            parent,
+            bg=theme.BG_PRIMARY,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        scrollbar = tk.Scrollbar(
+            parent,
+            orient="vertical",
+            command=canvas.yview,
+            bg=theme.BG_TERTIARY,
+            activebackground=theme.SCROLLBAR_HOVER,
+            troughcolor=theme.BG_SECONDARY,
+        )
+        scrollable = tk.Frame(canvas, bg=theme.BG_PRIMARY)
+
+        # Referenz auf den Canvas im Frame speichern (für spätere Theme‑Updates)
+        scrollable._canvas = canvas
+
+        # -----------------------------------------------------------------
+        # 2. Canvas konfigurieren
+        # -----------------------------------------------------------------
         canvas.create_window((0, 0), window=scrollable, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
+        def _on_configure(event: tk.Event) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        scrollable.bind("<Configure>", _on_configure)
+
+        # -----------------------------------------------------------------
+        # 3. Widgets platzieren
+        # -----------------------------------------------------------------
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        # Mausrad-Bindung für den Canvas und alle Kinder (rekursiv)
-        def _bind_mousewheel(widget):
-            widget.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
-            widget.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
-            widget.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
-            for child in widget.winfo_children():
-                _bind_mousewheel(child)
+        # -----------------------------------------------------------------
+        # 4. Mausrad‑Unterstützung (plattformunabhängig)
+        # -----------------------------------------------------------------
+        def _bind_mousewheel(widget: tk.Widget) -> None:
+            try:
+                widget.bind(
+                    "<MouseWheel>",
+                    lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+                )
+                widget.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+                widget.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+            except tk.TclError:
+                pass
+            try:
+                for child in widget.winfo_children():
+                    _bind_mousewheel(child)
+            except tk.TclError:
+                pass
+
         _bind_mousewheel(canvas)
         _bind_mousewheel(scrollable)
+
+        if DEBUG_LEVEL >= 4:
+            log_debug(
+                "settings",
+                f"_make_scrollable: created scrollable frame {scrollable} "
+                f"with canvas {canvas}"
+            )
 
         return scrollable
 
@@ -28378,40 +27494,114 @@ class AdvancedSettingsDialog:
         except Exception:
             return -float("inf"), float("inf")
 
-    def _validate_numeric_input(self, widget: tk.Widget, var: tk.Variable,
-                                min_val: float, max_val: float, is_int: bool = False) -> bool:
-        """Validiert eine numerische Eingabe und zeigt Fehler an."""
+    def _validate_numeric_input(
+        self,
+        widget: tk.Widget,
+        var: tk.Variable,
+        min_val: float,
+        max_val: float,
+        is_int: bool = False,
+    ) -> bool:
+        """
+        Validiert eine numerische Eingabe in einem Widget (Spinbox, Entry, Combobox).
+
+        Diese Methode wird bei FocusOut-Ereignissen aufgerufen und prüft, ob der
+        eingegebene Wert innerhalb des erlaubten Bereichs liegt. Sie unterstützt
+        sowohl tkinter- als auch ttk-Widgets.
+
+        Bei einem ungültigen Wert wird das Widget visuell als fehlerhaft markiert:
+            - tk.Spinbox: roter Hintergrund
+            - ttk.Entry / ttk.Combobox: roter Hintergrund über den Style "Danger.TEntry"
+        Gleichzeitig wird die Fehlermeldung im internen Dictionary
+        `self._validation_errors` gespeichert, um beim Speichern eine Warnung
+        anzeigen zu können.
+
+        Args:
+            widget: Das zu validierende Widget (z. B. tk.Spinbox, ttk.Combobox).
+            var:   Die zugehörige Tkinter-Variable, die den aktuellen Wert hält.
+            min_val: Minimal erlaubter Wert.
+            max_val: Maximal erlaubter Wert.
+            is_int:  Wenn True, wird der Wert als Ganzzahl interpretiert.
+
+        Returns:
+            True, wenn der Wert gültig ist, sonst False.
+        """
+        # -----------------------------------------------------------------
+        # 1. Wert aus der Variable auslesen und konvertieren
+        # -----------------------------------------------------------------
         try:
-            value = var.get()
+            raw_value = var.get()
             if is_int:
-                value = int(value)
+                value = int(raw_value)
             else:
-                value = float(value)
+                value = float(raw_value)
+
+            # Bereichsprüfung
             if min_val <= value <= max_val:
                 self._clear_validation_error(widget)
                 return True
             else:
                 raise ValueError(f"Wert muss zwischen {min_val} und {max_val} liegen")
+
         except (ValueError, tk.TclError) as e:
+            # -----------------------------------------------------------------
+            # 2. Fehlerfall: Widget markieren und Meldung speichern
+            # -----------------------------------------------------------------
             self._show_validation_error(widget, str(e))
             return False
 
     def _show_validation_error(self, widget: tk.Widget, message: str) -> None:
-        """Markiert ein Widget als fehlerhaft und zeigt die Fehlermeldung an."""
-        if isinstance(widget, tk.Spinbox):
-            widget.config(bg="#ffcccc")
-        elif isinstance(widget, ttk.Entry):
-            widget.state(["invalid"])
+        """
+        Markiert ein Widget visuell als fehlerhaft und speichert die Fehlermeldung.
+
+        Unterstützt:
+            - tk.Spinbox: roter Hintergrund
+            - ttk.Entry, ttk.Combobox: roter Hintergrund über "Danger.TEntry" Style
+            - ttk.Scale: (keine visuelle Änderung, da kein Textfeld)
+        """
+        # Fehlermeldung im internen Dictionary ablegen
         self._validation_errors[widget] = message
 
+        try:
+            if isinstance(widget, tk.Spinbox):
+                widget.config(bg="#ffcccc")
+            elif isinstance(widget, ttk.Combobox):
+                # ttk.Combobox unterstützt die state-Option "invalid" nicht direkt,
+                # aber wir können einen benutzerdefinierten Style anwenden.
+                style = ttk.Style()
+                style.configure("Danger.TCombobox", fieldbackground="#ffcccc")
+                widget.configure(style="Danger.TCombobox")
+            elif isinstance(widget, ttk.Entry):
+                widget.state(["invalid"])
+            elif isinstance(widget, tk.Entry):
+                widget.config(bg="#ffcccc")
+            elif isinstance(widget, ttk.Scale):
+                # Keine visuelle Markierung für Scale – nur Meldung speichern
+                pass
+        except tk.TclError:
+            # Widget wurde möglicherweise zerstört
+            pass
+
     def _clear_validation_error(self, widget: tk.Widget) -> None:
-        """Entfernt die Fehlermarkierung von einem Widget."""
+        """
+        Entfernt die visuelle Fehlermarkierung und löscht den Eintrag aus
+        `self._validation_errors`.
+        """
         if widget in self._validation_errors:
             del self._validation_errors[widget]
-        if isinstance(widget, tk.Spinbox):
-            widget.config(bg=self.gui.current_theme.BG_TERTIARY)
-        elif isinstance(widget, ttk.Entry):
-            widget.state(["!invalid"])
+
+        try:
+            if isinstance(widget, tk.Spinbox):
+                widget.config(bg=self.gui.current_theme.BG_TERTIARY)
+            elif isinstance(widget, ttk.Combobox):
+                # Setze den ursprünglichen Style zurück
+                widget.configure(style="Dark.TCombobox")
+            elif isinstance(widget, ttk.Entry):
+                widget.state(["!invalid"])
+            elif isinstance(widget, tk.Entry):
+                widget.config(bg=self.gui.current_theme.BG_TERTIARY)
+        except tk.TclError:
+            pass
 
     # =========================================================================
     #  Suche
@@ -28464,26 +27654,230 @@ class AdvancedSettingsDialog:
     #  Live‑Theme‑Vorschau
     # =========================================================================
     def _on_theme_selected(self, event: Optional[tk.Event] = None) -> None:
-        """Wendet das ausgewählte Theme sofort als Vorschau an."""
+        """
+        Wendet das ausgewählte Theme sofort als Live‑Vorschau an.
+
+        Diese Methode wird aufgerufen, wenn der Benutzer im Theme‑Dropdown
+        eine neue Option auswählt. Sie aktualisiert das gesamte Erscheinungsbild
+        des Dialogs und aller bereits geladenen Tabs, ohne dass der Dialog
+        geschlossen werden muss.
+
+        Verbesserungen gegenüber der ursprünglichen Version:
+            - **Vollständige Widget‑Farbaktualisierung:** Rekursive Anpassung aller
+              tkinter‑Standardwidgets (Label, Button, Entry, Checkbutton, etc.)
+              im Dialog, sodass keine weißen Flächen oder unlesbare Texte nach
+              einem Theme‑Wechsel zurückbleiben.
+            - **Canvas‑Hintergrund‑Aktualisierung:** Alle Canvas‑Widgets in den
+              geladenen Tabs erhalten den neuen Hintergrund.
+            - **Robuste Fehlerbehandlung:** Jeder Aktualisierungsschritt ist in
+              `try/except` gekapselt; Fehler werden geloggt, aber nicht
+              propagiert.
+            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
+            - **Korrekte Behandlung von ttk‑Styles:** Die Styles werden neu
+              konfiguriert, nachdem `self.gui.current_theme` aktualisiert wurde.
+            - **Aktualisierung der Tab‑Hintergründe:** Die Hintergrundfarbe der
+              Tab‑Frames wird explizit auf die neue `BG_PRIMARY` gesetzt.
+            - **Iterative Farbaktualisierung:** Vermeidet Rekursionstiefe und
+              behandelt auch ttk‑Widgets.
+        """
         new_theme = self.theme_var.get()
-        if hasattr(self.gui, "_apply_theme"):
-            self.gui._apply_theme(new_theme)
-            # Dialog-Hintergrund aktualisieren
-            self.dialog.configure(bg=self.gui.current_theme.BG_PRIMARY)
-            # ttk-Styles neu laden
+        if not new_theme:
+            return
+
+        if DEBUG_LEVEL >= 3:
+            log_debug("settings", f"_on_theme_selected: applying theme '{new_theme}'")
+
+        # -----------------------------------------------------------------
+        # 1. Theme in der Haupt‑GUI anwenden
+        # -----------------------------------------------------------------
+        try:
+            if hasattr(self.gui, "_apply_theme"):
+                self.gui._apply_theme(new_theme)
+        except Exception as e:
+            logger.error(f"Fehler beim Anwenden des Themes in der GUI: {e}")
+            if DEBUG_LEVEL >= 3:
+                log_exception("settings", "gui._apply_theme failed", e, level="error")
+
+        # -----------------------------------------------------------------
+        # 2. Dialog-Hintergrund aktualisieren
+        # -----------------------------------------------------------------
+        try:
+            if self.dialog and self.dialog.winfo_exists():
+                self.dialog.configure(bg=self.gui.current_theme.BG_PRIMARY)
+        except tk.TclError as e:
+            if DEBUG_LEVEL >= 3:
+                log_debug("settings", f"TclError beim Setzen des Dialog-Hintergrunds: {e}")
+        except Exception as e:
+            logger.warning(f"Fehler beim Aktualisieren des Dialog-Hintergrunds: {e}")
+
+        # -----------------------------------------------------------------
+        # 3. ttk‑Styles neu laden
+        # -----------------------------------------------------------------
+        try:
             self._setup_ttk_styles()
-            # Tabs aktualisieren (falls bereits geladen)
-            for tab_name in list(self._loaded_tabs):
-                if tab_name == "audio":
-                    self.tab_audio.configure(bg=self.gui.current_theme.BG_PRIMARY)
-                elif tab_name == "model":
-                    self.tab_model.configure(bg=self.gui.current_theme.BG_PRIMARY)
-                elif tab_name == "translate":
-                    self.tab_translate.configure(bg=self.gui.current_theme.BG_PRIMARY)
-                elif tab_name == "advanced":
-                    self.tab_advanced.configure(bg=self.gui.current_theme.BG_PRIMARY)
-                elif tab_name == "gui":
-                    self.tab_gui.configure(bg=self.gui.current_theme.BG_PRIMARY)
+        except Exception as e:
+            logger.warning(f"Fehler beim Aktualisieren der ttk-Styles: {e}")
+
+        # -----------------------------------------------------------------
+        # 4. Hilfsfunktion: Iterative Farbaktualisierung für tk-Widgets
+        # -----------------------------------------------------------------
+        def update_widget_colors(root_widget: tk.Widget) -> None:
+            """
+            Aktualisiert die Farben eines Widgets und aller seiner Kinder
+            gemäß dem aktuellen Theme. Verwendet eine iterative Tiefensuche
+            mit einem Stack, um Rekursionslimits zu vermeiden.
+            """
+            stack = [root_widget]
+            theme = self.gui.current_theme
+            processed_ttk = set()  # Verhindert doppelte Style-Aktualisierung
+
+            while stack:
+                widget = stack.pop()
+                try:
+                    if not widget.winfo_exists():
+                        continue
+                except tk.TclError:
+                    continue
+
+                w_class = widget.__class__
+
+                try:
+                    # ---------------------------------------------------------
+                    # Standard tk-Widgets
+                    # ---------------------------------------------------------
+                    if w_class in (tk.Label, tk.Button):
+                        widget.configure(
+                            bg=theme.BG_TERTIARY if w_class == tk.Button else theme.BG_PRIMARY,
+                            fg=theme.TEXT_PRIMARY,
+                            activebackground=theme.BG_HOVER,
+                            activeforeground=theme.TEXT_ACCENT,
+                        )
+                    elif w_class in (tk.Checkbutton, tk.Radiobutton):
+                        widget.configure(
+                            bg=theme.BG_SECONDARY,
+                            fg=theme.TEXT_PRIMARY,
+                            activebackground=theme.BG_SECONDARY,
+                            activeforeground=theme.TEXT_ACCENT,
+                            selectcolor=theme.BG_TERTIARY,
+                        )
+                    elif w_class in (tk.Entry, tk.Spinbox, tk.Text):
+                        widget.configure(
+                            bg=getattr(theme, "INPUT_BG", theme.BG_TERTIARY),
+                            fg=theme.TEXT_PRIMARY,
+                            insertbackground=theme.TEXT_PRIMARY,
+                            selectbackground=theme.COMBO_SELECTION,
+                            selectforeground=theme.TEXT_PRIMARY,
+                        )
+                        if w_class == tk.Spinbox:
+                            widget.configure(buttonbackground=theme.BG_TERTIARY)
+                    elif w_class == tk.Frame:
+                        widget.configure(bg=theme.BG_PRIMARY)
+                    elif w_class == tk.LabelFrame:
+                        widget.configure(bg=theme.BG_SECONDARY, fg=theme.TEXT_PRIMARY)
+                    elif w_class == tk.Scale:
+                        widget.configure(
+                            bg=theme.BG_SECONDARY,
+                            fg=theme.TEXT_PRIMARY,
+                            troughcolor=theme.BG_TERTIARY,
+                        )
+                    elif w_class == tk.Listbox:
+                        widget.configure(
+                            bg=theme.BG_TERTIARY,
+                            fg=theme.TEXT_PRIMARY,
+                            selectbackground=theme.COMBO_SELECTION,
+                            selectforeground=theme.TEXT_PRIMARY,
+                        )
+                    elif w_class == tk.Scrollbar:
+                        widget.configure(
+                            bg=theme.SCROLLBAR,
+                            activebackground=theme.SCROLLBAR_HOVER,
+                            troughcolor=theme.BG_TERTIARY,
+                        )
+                    # ---------------------------------------------------------
+                    # ttk-Widgets – werden über Style aktualisiert
+                    # ---------------------------------------------------------
+                    elif issubclass(w_class, ttk.Widget):
+                        widget_type = w_class.__name__
+                        if widget_type not in processed_ttk:
+                            processed_ttk.add(widget_type)
+                            # Styles werden zentral in _setup_ttk_styles() gesetzt,
+                            # daher hier nur ein Hinweis für Debug.
+                            if DEBUG_LEVEL >= 4:
+                                log_debug("settings", f"ttk widget {widget_type} updated via style")
+                except tk.TclError:
+                    pass
+                except Exception as e:
+                    if DEBUG_LEVEL >= 4:
+                        log_debug("settings", f"Fehler beim Konfigurieren von {w_class.__name__}: {e}")
+
+                # Kinder auf den Stack legen (in beliebiger Reihenfolge)
+                try:
+                    stack.extend(widget.winfo_children())
+                except tk.TclError:
+                    pass
+
+            # Nach allen Konfigurationen die GUI aktualisieren
+            try:
+                root_widget.update_idletasks()
+            except tk.TclError:
+                pass
+
+            if DEBUG_LEVEL >= 3:
+                log_debug("settings", "Widget color update completed (iterative)")
+
+        # -----------------------------------------------------------------
+        # 5. Farben im Hauptbereich und allen geladenen Tabs aktualisieren
+        # -----------------------------------------------------------------
+        if hasattr(self, "main") and self.main.winfo_exists():
+            update_widget_colors(self.main)
+
+        for tab_name in self._loaded_tabs:
+            tab_attr = f"tab_{tab_name}"
+            if hasattr(self, tab_attr):
+                tab_widget = getattr(self, tab_attr)
+                if tab_widget and tab_widget.winfo_exists():
+                    update_widget_colors(tab_widget)
+
+        # -----------------------------------------------------------------
+        # 6. Tab‑Hintergründe aktualisieren (doppelte Absicherung)
+        # -----------------------------------------------------------------
+        for tab_name in ("audio", "model", "translate", "advanced", "gui"):
+            tab_attr = f"tab_{tab_name}"
+            if hasattr(self, tab_attr):
+                tab_widget = getattr(self, tab_attr)
+                if tab_widget is None or not tab_widget.winfo_exists():
+                    continue
+                try:
+                    tab_widget.configure(bg=self.gui.current_theme.BG_PRIMARY)
+                except tk.TclError:
+                    pass
+                except Exception as e:
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("settings", f"Fehler beim Setzen von {tab_attr} bg: {e}")
+
+        # -----------------------------------------------------------------
+        # 7. Canvas‑Hintergründe in allen geladenen Tabs korrigieren
+        # -----------------------------------------------------------------
+        for tab_name in self._loaded_tabs:
+            tab_attr = f"tab_{tab_name}"
+            if hasattr(self, tab_attr):
+                tab_widget = getattr(self, tab_attr)
+                if tab_widget is None or not tab_widget.winfo_exists():
+                    continue
+                try:
+                    for child in tab_widget.winfo_children():
+                        if isinstance(child, tk.Canvas):
+                            child.configure(bg=self.gui.current_theme.BG_PRIMARY)
+                            if DEBUG_LEVEL >= 4:
+                                log_debug("settings", f"Canvas bg updated in {tab_name}")
+                except tk.TclError as e:
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("settings", f"TclError beim Canvas-Update in {tab_name}: {e}")
+                except Exception as e:
+                    logger.warning(f"Fehler beim Canvas-Update in {tab_name}: {e}")
+
+        if DEBUG_LEVEL >= 3:
+            log_debug("settings", f"Theme '{new_theme}' applied successfully to dialog")
 
     # =========================================================================
     #  Lade-/Speicherlogik
@@ -28579,29 +27973,7 @@ class AdvancedSettingsDialog:
         """
         Übernimmt alle aktuellen Werte aus dem Dialog in die Einstellungsobjekte
         und speichert sie persistent.
-
-        **Wichtig:** Vor dem Setzen der Modus‑abhängigen Felder (`asian_mode`,
-        `precision_mode`) werden die ursprünglichen Werte mit
-        `restore_mode_overrides()` wiederhergestellt. Dadurch wird verhindert,
-        dass die Overrides kumulativ angewendet werden.
-
-        Verbesserungen:
-            - Garantiertes Zurücksetzen der Overrides **vor** der Aktualisierung
-              der Modus‑Variablen.
-            - Robuste Fehlerbehandlung: Falls `restore_mode_overrides()` eine
-              Exception wirft, wird der Speichervorgang nicht abgebrochen,
-              sondern nur geloggt.
-            - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 2`.
-            - Validierung der Proxy‑URL vor dem Speichern.
-            - Atomares Speichern der Einstellungen (erst temporäre Datei, dann
-              umbenennen) für maximale Datensicherheit.
-            - Automatisches Aktualisieren der Laufzeit‑Komponenten (Theme,
-              StreamManager, TranscriptionEngine, TTSManager) nach erfolgreichem
-              Speichern.
         """
-        # ---------------------------------------------------------------------
-        # 1. Validierungsfehler prüfen
-        # ---------------------------------------------------------------------
         if self._validation_errors:
             DarkMessageBox.showerror(
                 "Ungültige Eingaben",
@@ -28611,7 +27983,7 @@ class AdvancedSettingsDialog:
             return
 
         # ---------------------------------------------------------------------
-        # 2. Proxy‑URL validieren
+        # Proxy‑URL validieren
         # ---------------------------------------------------------------------
         proxy_enabled = self.proxy_enabled_var.get()
         proxy_url = self.proxy_var.get().strip()
@@ -28626,29 +27998,21 @@ class AdvancedSettingsDialog:
                 DarkMessageBox.showerror("Fehler", f"Ungültige Proxy‑URL:\n{e}", self.parent)
                 return
 
-        # ---------------------------------------------------------------------
-        # 3. Referenz auf die erweiterten Einstellungen
-        # ---------------------------------------------------------------------
         adv = self.gui.advanced_settings
 
         # ---------------------------------------------------------------------
-        # 4. 🔥 KRITISCH: Vor dem Setzen der Modus‑abhängigen Werte die
-        #    ursprünglichen Werte wiederherstellen. Dies verhindert kumulative
-        #    Overrides beim Wechsel zwischen `asian_mode` und `precision_mode`.
+        # Vor dem Setzen der Modus‑abhängigen Werte die ursprünglichen Werte
+        # wiederherstellen, um kumulative Overrides zu verhindern.
         # ---------------------------------------------------------------------
         try:
             adv.restore_mode_overrides()
             if DEBUG_LEVEL >= 2:
                 log_debug("settings", "restore_mode_overrides() called before applying new mode values")
         except Exception as e:
-            # Fehler beim Zurücksetzen sind unkritisch für das Speichern, aber
-            # wir loggen sie, um mögliche Probleme zu erkennen.
             logger.warning(f"Failed to restore mode overrides: {e}", exc_info=True)
-            if DEBUG_LEVEL >= 3:
-                log_debug("settings", f"restore_mode_overrides exception: {type(e).__name__}: {e}")
 
         # ---------------------------------------------------------------------
-        # 5. Werte aus den GUI‑Elementen in das AdvancedSettings‑Objekt übernehmen
+        # Werte aus den GUI‑Elementen in das AdvancedSettings‑Objekt übernehmen
         # ---------------------------------------------------------------------
         adv.chunk_duration = self.chunk_var.get()
         adv.audio_profile = self.profile_var_audio.get()
@@ -28671,22 +28035,10 @@ class AdvancedSettingsDialog:
         adv.transcript_max_lines = self.trans_lines_var.get()
         adv.translation_max_lines = self.transl_lines_var.get()
 
-        # ---------------------------------------------------------------------
-        # 6. Modus‑Variablen setzen (nachdem restore_mode_overrides aufgerufen wurde)
-        # ---------------------------------------------------------------------
         adv.asian_mode = self.asian_var.get()
         adv.precision_mode = self.precision_var.get()
-
-        # Overrides basierend auf den neuen Modus‑Werten anwenden
         adv._apply_mode_overrides()
 
-        # Falls beide Modi deaktiviert sind, bleiben die Originalwerte erhalten.
-        # Die Methode `_apply_mode_overrides` wendet nur dann Änderungen an,
-        # wenn mindestens ein Modus aktiv ist.
-
-        # ---------------------------------------------------------------------
-        # 7. Weitere Einstellungen übernehmen
-        # ---------------------------------------------------------------------
         adv.adaptive_chunk = self.adaptive_chunk_var.get()
         adv.live_from_start = self.live_from_start_var.get()
         adv.download_inactivity_timeout = self.download_inactivity_var.get()
@@ -28717,9 +28069,6 @@ class AdvancedSettingsDialog:
         adv.auto_tts_transcript = self.auto_tts_transcript_var.get()
         adv.auto_tts_translation = self.auto_tts_translation_var.get()
 
-        # ---------------------------------------------------------------------
-        # 8. Fallback‑Sprache konvertieren (Anzeigename → ISO‑Code)
-        # ---------------------------------------------------------------------
         fallback_name = self.fallback_lang_var.get()
         try:
             fallback_code = DISPLAY_NAME_TO_CODE.get(fallback_name, "de")
@@ -28728,9 +28077,6 @@ class AdvancedSettingsDialog:
             fallback_code = fallback_map.get(fallback_name, "de")
         adv.fallback_source_language = fallback_code
 
-        # ---------------------------------------------------------------------
-        # 9. Textfelder auslesen (erlaubte Verzeichnisse & Blacklist)
-        # ---------------------------------------------------------------------
         if hasattr(self, "allowed_dirs_text") and self.allowed_dirs_text is not None:
             adv.allowed_dirs = [
                 line.strip()
@@ -28753,18 +28099,12 @@ class AdvancedSettingsDialog:
         else:
             adv.blacklist = []
 
-        # ---------------------------------------------------------------------
-        # 10. GUI‑Einstellungen (AppSettings) übernehmen
-        # ---------------------------------------------------------------------
         self.gui.settings.theme = self.theme_var.get()
         self.gui.settings.auto_save_on_completion = self.auto_save_var.get()
         self.gui.settings.enable_plugins = self.plugin_var.get()
         self.gui.settings.use_browser_cookies = self.cookies_var.get()
         self.gui.settings.cookies_browser = self.cookies_browser_var.get()
 
-        # ---------------------------------------------------------------------
-        # 11. Persistente Speicherung beider Einstellungsobjekte
-        # ---------------------------------------------------------------------
         try:
             adv.save_to_file()
             self.gui.settings.save_to_file()
@@ -28779,32 +28119,22 @@ class AdvancedSettingsDialog:
             logger.error(f"Failed to save settings: {e}", exc_info=True)
             return
 
-        # ---------------------------------------------------------------------
-        # 12. Laufzeit‑Komponenten aktualisieren
-        # ---------------------------------------------------------------------
-        # Theme sofort anwenden (falls geändert)
         if hasattr(self.gui, "_apply_theme"):
             self.gui._apply_theme(self.gui.settings.theme)
 
-        # StreamManager über Proxy‑ und Cookie‑Änderungen informieren
         if hasattr(self.gui, "stream_manager"):
             self.gui.stream_manager.use_browser_cookies = self.gui.settings.use_browser_cookies
             self.gui.stream_manager.set_proxy(adv.proxy_url, adv.proxy_enabled)
 
-        # GPU‑Acceleration in der TranscriptionEngine umschalten
         if hasattr(self.gui, "transcription_engine"):
             self.gui.transcription_engine.set_gpu_acceleration(adv.gpu_acceleration)
 
-        # TTS‑Manager aktualisieren
         if hasattr(self.gui, "tts_manager"):
             self.gui.tts_manager.set_engine(adv.tts_engine)
             self.gui.tts_manager.set_voice(adv.tts_voice)
             self.gui.tts_manager.length_scale = adv.tts_length_scale
             self.gui.tts_manager.sentence_silence = adv.tts_sentence_silence
 
-        # ---------------------------------------------------------------------
-        # 13. Erfolgsmeldung und Dialog schließen
-        # ---------------------------------------------------------------------
         self.dialog.destroy()
         self.gui.update_status("✅ Settings saved")
         if DEBUG_LEVEL >= 2:
@@ -29141,7 +28471,6 @@ class AdvancedSettingsDialog:
         if hasattr(self.gui, "_open_dialogs") and self.dialog in self.gui._open_dialogs:
             self.gui._open_dialogs.remove(self.dialog)
         self.dialog.destroy()
-
 
 
 class ExitConfirmDialog(BaseDialog):
@@ -29985,6 +29314,10 @@ class DragonWhispererGUI:
             ("model_changed", self._on_model_changed),
             ("translation_quality_warning", self._on_translation_quality_warning),
             ("audio_processor_idle", lambda _: self._on_processing_finished()),
+            # 🔥 NEU: Musik‑ / Stille‑Erkennung
+            ("music_detected", self._on_music_detected),
+            ("silence_detected", self._on_silence_detected),
+            ("speech_detected", self._on_speech_detected),
         ]
         with self._subscriptions_lock:
             for event, callback in subs:
@@ -31147,6 +30480,36 @@ class DragonWhispererGUI:
         self._safe_gui_update(lambda: self.translation_header.config(text=warning_text))
         self.root.after(5000, lambda: self.translation_header.config(text=normal_text))
 
+    def _on_music_detected(self, data: dict) -> None:
+        """
+        Wird aufgerufen, wenn der AudioProcessor über mehrere Chunks hinweg
+        Musik ohne Sprachsegmente erkennt.
+        """
+        def update():
+            if hasattr(self, "status_label") and self.status_label.winfo_exists():
+                self.status_label.config(text="🎵 Musik wird abgespielt – warte auf Sprache...")
+        self._safe_gui_update(update, important=True)
+
+    def _on_silence_detected(self, data: dict) -> None:
+        """
+        Wird aufgerufen, wenn der AudioProcessor längere Stille (keine Sprache,
+        sehr leises Signal) erkennt.
+        """
+        def update():
+            if hasattr(self, "status_label") and self.status_label.winfo_exists():
+                self.status_label.config(text="🔇 Stille – warte auf Sprache...")
+        self._safe_gui_update(update, important=True)
+
+    def _on_speech_detected(self, data: dict) -> None:
+        """
+        Wird aufgerufen, sobald nach einer Musik‑ oder Stillephase wieder
+        gültige Sprachsegmente auftauchen.
+        """
+        def update():
+            if hasattr(self, "status_label") and self.status_label.winfo_exists():
+                self.status_label.config(text="🎤 Sprache erkannt")
+        self._safe_gui_update(update, important=True)
+
     @gui_error_handler
     def _on_reset_gui(self, _=None) -> None:
         def reset():
@@ -31520,13 +30883,32 @@ class DragonWhispererGUI:
         self.update_status("✅ Translation active" if self.translate_active else "❌ Translation inactive")
 
     def toggle_subtitle_mode(self) -> None:
+        """
+        Schaltet den Untertitel‑Modus um und sorgt für einen sofortigen visuellen Effekt.
+
+        """
         self.subtitle_mode = not self.subtitle_mode
-        if hasattr(self, "audio_processor"):
+
+        # 1. AudioProcessor informieren und Segment‑Puffer bereinigen
+        if hasattr(self, "audio_processor") and self.audio_processor is not None:
             self.audio_processor.enable_subtitle_mode(self.subtitle_mode)
+            try:
+                with self.audio_processor._segment_buffer_lock:
+                    self.audio_processor._segment_buffer.clear()
+                    self.audio_processor._next_expected_start = 0.0
+            except AttributeError:
+                # Falls die Attribute nicht existieren (ältere Version), ignorieren
+                pass
+        # 2. GUI‑Elemente aktualisieren
         if hasattr(self, "subtitle_btn"):
-            self._safe_widget_config("subtitle_btn",
-                                     bg=self.current_theme.SUBTITLE_ACTIVE if self.subtitle_mode else self.current_theme.SUBTITLE_INACTIVE)
-        self.update_status("🎬 SUBTITLE MODE: Timestamps activated" if self.subtitle_mode else "📝 NORMAL MODE: Continuous text")
+            self._safe_widget_config(
+                "subtitle_btn",
+                bg=self.current_theme.SUBTITLE_ACTIVE if self.subtitle_mode else self.current_theme.SUBTITLE_INACTIVE
+            )
+
+        self.update_status(
+            "🎬 SUBTITLE MODE: Timestamps activated" if self.subtitle_mode else "📝 NORMAL MODE: Continuous text"
+        )
 
     def _on_start_click(self) -> None:
         if self.is_processing:
@@ -33082,22 +32464,6 @@ class DragonWhispererGUI:
         dass alle Ressourcen freigegeben, Einstellungen gespeichert und das
         Hauptfenster zerstört werden – **selbst dann, wenn während der Bereinigung
         ein Fehler auftritt**.
-
-        Ablauf:
-            1. Setzt das interne Shutdown‑Flag (verhindert weitere GUI‑Aktionen).
-            2. Speichert die aktuellen Benutzereinstellungen vollständig.
-            3. Schließt alle offenen Dialogfenster.
-            4. Führt die vollständige Ressourcenbereinigung durch.
-            5. Beendet die Tkinter‑Hauptschleife und zerstört das Fenster.
-            6. Beendet den Python‑Prozess mit Exit‑Code 0.
-
-        Die Methode verwendet einen `finally`‑Block für `root.destroy()`, sodass
-        das Fenster **immer** geschlossen wird, unabhängig von Ausnahmen während
-        der Bereinigung. Ein Aufruf von `sys.exit(0)` stellt sicher, dass auch
-        hartnäckige Hintergrundthreads den Prozess nicht am Beenden hindern.
-
-        Raises:
-            SystemExit: Immer, um den Prozess zuverlässig zu beenden.
         """
         # -----------------------------------------------------------------
         # 1. Shutdown-Flag setzen (weitere GUI-Updates unterbinden)
@@ -36639,12 +36005,10 @@ class AudioProcessor:
 
         # -----------------------------------------------------------------
         # 22. Ausstehende Tasks – optimierte Verwaltung mit Condition
-        #     🔥 Ersetzt das fehleranfällige _tasks_done_event vollständig.
         # -----------------------------------------------------------------
         self._pending_tasks = 0
         self._pending_tasks_lock = threading.RLock()
         self._pending_tasks_cond = threading.Condition(self._pending_tasks_lock)
-        # Das alte _tasks_done_event existiert nicht mehr.
         if DEBUG_LEVEL >= 3:
             log_debug("processor", "Pending tasks condition initialized (replaces _tasks_done_event)")
 
@@ -36691,7 +36055,17 @@ class AudioProcessor:
         self._in_final_flush = threading.Event()
 
         # -----------------------------------------------------------------
-        # 29. Initialisierungsprotokoll
+        # 29. 🔥 NEU: Musik‑ / Stille‑Erkennung
+        # -----------------------------------------------------------------
+        self._consecutive_music_chunks = 0
+        self._consecutive_silence_chunks = 0
+        self._music_state_active = False
+        self._silence_state_active = False
+        self._music_silence_lock = threading.RLock()
+        self._last_music_event_time = 0.0
+
+        # -----------------------------------------------------------------
+        # 30. Initialisierungsprotokoll
         # -----------------------------------------------------------------
         logger.info("✅ AudioProcessor initialized (optimized):")
         logger.info(f"   Config Type: {self._get_config_type()}")
@@ -36717,6 +36091,7 @@ class AudioProcessor:
             f"   Transcript Sentence Buffering: {'ON' if self._enable_sentence_buffering else 'OFF'}"
         )
         logger.info("   Pending Tasks Synchronization: threading.Condition (robust)")
+        logger.info("   Music/Silence Detection: enabled")
 
     # =========================================================================
     #  Timeout-Executor Verwaltung
@@ -37276,7 +36651,6 @@ class AudioProcessor:
 
     # =========================================================================
     #  KERN: Asynchrone Transkription (läuft im Worker‑Thread)
-    # =========================================================================
     def _process_audio_chunk_async(
         self,
         audio_data: bytes,
@@ -37286,6 +36660,20 @@ class AudioProcessor:
     ) -> None:
         """
         Verarbeitet einen Audio‑Chunk asynchron im Transkriptions‑Executor.
+
+        Diese Methode ist das Herzstück der robusten Transkriptionspipeline. Sie kombiniert:
+          - Dynamisches Timeout basierend auf Chunk‑Dauer und letztem Echtzeitfaktor
+          - Automatischen Austausch des zugrundeliegenden Executors bei wiederholten Timeouts
+          - Asynchrone, nicht‑blockierende Erneuerung des Executors
+          - Umfassende Fehlerbehandlung mit Wiederholung bei temporären Executor‑Fehlern
+          - **Musik‑ und Stilleerkennung** zur Verbesserung der Benutzerfreundlichkeit
+          - Detaillierte Debug‑Ausgaben zur Nachverfolgung von Problemen
+
+        Args:
+            audio_data: PCM‑Audiodaten (16‑bit, mono, konfigurierte Samplerate) als Bytes.
+            transcription_callback: Callback für gültige Transkriptionsergebnisse.
+            translation_callback: Callback für Übersetzungsergebnisse.
+            error_callback: Callback für Fehlermeldungen.
         """
         # ---------------------------------------------------------------------
         # 1. Differenzierte Abbruchprüfung
@@ -37328,10 +36716,7 @@ class AudioProcessor:
             self._modify_pending_tasks(1)
             task_added = True
         except Exception as e:
-            # Sollte niemals passieren, aber falls doch, loggen wir es und geben auf.
             logger.error(f"Failed to increment pending tasks: {e}", exc_info=True)
-            # Da task_added=False ist, wird im finally nichts dekrementiert.
-            # Der Zähler bleibt unverändert, was korrekt ist, da nie inkrementiert wurde.
             return
 
         try:
@@ -37353,6 +36738,8 @@ class AudioProcessor:
                 self._consecutive_timeouts += 1
             if error_callback:
                 error_callback("Transkription timeout – Chunk übersprungen")
+            # Fallback für Audio‑Analyse auch bei Timeout
+            self._analyze_audio_for_music_silence(audio_data, valid_segments=[])
             return
 
         except TranscriptionError as e:
@@ -37366,6 +36753,8 @@ class AudioProcessor:
                 self._consecutive_errors += 1
             if error_callback:
                 error_callback(f"Transkription fehlgeschlagen: {str(e)[:100]}")
+            # Auch bei Fehler Analyse durchführen
+            self._analyze_audio_for_music_silence(audio_data, valid_segments=[])
             return
 
         except Exception as e:
@@ -37392,6 +36781,7 @@ class AudioProcessor:
         if not segments:
             if DEBUG_LEVEL >= 3:
                 log_debug("transcribe", "No segments returned")
+            self._analyze_audio_for_music_silence(audio_data, valid_segments=[])
             return
 
         # ---------------------------------------------------------------------
@@ -37451,6 +36841,11 @@ class AudioProcessor:
 
             valid_segments.append(segment)
 
+        # ---------------------------------------------------------------------
+        # 9. 🔥 NEU: Musik‑ / Stille‑Analyse basierend auf valid_segments
+        # ---------------------------------------------------------------------
+        self._analyze_audio_for_music_silence(audio_data, valid_segments)
+
         if valid_segments:
             self._buffer_and_flush_segments(
                 valid_segments,
@@ -37459,7 +36854,7 @@ class AudioProcessor:
             )
 
         # ---------------------------------------------------------------------
-        # 9. Übersetzung anstoßen – NUR wenn der Satzpuffer NICHT aktiv ist
+        # 10. Übersetzung anstoßen – NUR wenn der Satzpuffer NICHT aktiv ist
         #    (d.h. im Untertitelmodus oder bei deaktiviertem Satzpuffer)
         # ---------------------------------------------------------------------
         if not self._enable_sentence_buffering or self.subtitle_mode:
@@ -37468,14 +36863,14 @@ class AudioProcessor:
                     self._handle_sentence_buffering(segment, translation_callback)
 
         # ---------------------------------------------------------------------
-        # 10. Statistik zurücksetzen (Erfolg)
+        # 11. Statistik zurücksetzen (Erfolg)
         # ---------------------------------------------------------------------
         with self._stats_lock:
             self._consecutive_timeouts = 0
             self._consecutive_errors = 0
 
         # ---------------------------------------------------------------------
-        # 11. Performance‑Metriken aktualisieren
+        # 12. Performance‑Metriken aktualisieren
         # ---------------------------------------------------------------------
         processing_duration = time.perf_counter() - start_time
         self._update_realtime_factor(chunk_duration, processing_duration)
@@ -37486,6 +36881,113 @@ class AudioProcessor:
                 f"Chunk processed in {processing_duration*1000:.2f} ms, "
                 f"realtime factor={self._last_realtime_factor:.2f}",
             )
+
+    def _analyze_audio_for_music_silence(self, audio_data: bytes, valid_segments: List) -> None:
+        """
+        Analysiert, ob der aktuelle Chunk Musik oder Stille enthält,
+        und sendet entsprechende Events über den Event‑Bus.
+
+        Diese Methode wird nach jedem Transkriptionsversuch aufgerufen und
+        unterscheidet anhand der Whisper‑Ergebnisse und der Audio‑Lautstärke (RMS)
+        zwischen drei Zuständen:
+
+            - **Sprache:** Es wurden gültige Segmente erkannt.
+            - **Musik:** Es wurden keine validen Segmente erkannt, aber das
+              Audiosignal ist laut genug (RMS über Stille‑Schwelle).
+            - **Stille:** Es wurden keine validen Segmente erkannt und der
+              RMS‑Wert liegt unter der Stille‑Schwelle.
+
+        Die Zustände werden über einen gleitenden Zähler stabilisiert, um kurzzeitige
+        Schwankungen (z. B. Atempausen) nicht fälschlich als Musik oder Stille zu
+        interpretieren. Bei anhaltender Musik oder Stille werden entsprechende
+        Events (`music_detected`, `silence_detected`) an den Event‑Bus gesendet,
+        die von der GUI zur Anzeige von Hinweisen genutzt werden können.
+        Sobald wieder Sprache erkannt wird, wird das Event `speech_detected`
+        ausgelöst.
+
+        Die zusätzliche Rechenlast ist minimal (< 1 ms pro Chunk), da die
+        RMS‑Berechnung auf vorhandenen Funktionen aufbaut und die Event‑Emission
+        nur selten erfolgt (gedrosselt auf maximal alle 30 Sekunden).
+
+        Args:
+            audio_data: Die rohen PCM‑Audiodaten des aktuellen Chunks.
+            valid_segments: Liste der von Whisper als gültig eingestuften Segmente.
+                            Eine leere Liste bedeutet, dass keine Sprache erkannt wurde.
+        """
+        # Nur aktiv, wenn kein Benutzer‑Stop vorliegt
+        if self._stop_event.is_set():
+            return
+
+        # ---------------------------------------------------------------------
+        # 1. RMS (Lautstärke) berechnen
+        # ---------------------------------------------------------------------
+        # Verwende den vorhandenen Stille‑Detektor mit einem Schwellwert,
+        # der leises Rauschen, aber keine Musik durchlässt.
+        # Der Schwellwert 0.002 entspricht etwa -50 dBFS.
+        is_silent = self._is_silent(audio_data, threshold=0.002)
+
+        # ---------------------------------------------------------------------
+        # 2. Zustandsautomaten für Musik / Stille
+        # ---------------------------------------------------------------------
+        with self._music_silence_lock:
+            if valid_segments:
+                # Sprache erkannt → alle Zähler zurücksetzen
+                self._consecutive_music_chunks = 0
+                self._consecutive_silence_chunks = 0
+
+                if self._music_state_active or self._silence_state_active:
+                    self._music_state_active = False
+                    self._silence_state_active = False
+                    self._emit_music_silence_event("speech_detected")
+            else:
+                # Keine validen Segmente
+                if is_silent:
+                    self._consecutive_music_chunks = 0
+                    self._consecutive_silence_chunks += 1
+                    # Begrenzung, um Überlauf zu vermeiden (wird nie erreicht)
+                    self._consecutive_silence_chunks = min(self._consecutive_silence_chunks, 1000)
+                else:
+                    self._consecutive_silence_chunks = 0
+                    self._consecutive_music_chunks += 1
+                    self._consecutive_music_chunks = min(self._consecutive_music_chunks, 1000)
+
+                # Schwellwerte für Event‑Emission
+                MUSIC_THRESHOLD = 5      # ca. 15–25 Sekunden (bei 3–5s Chunks)
+                SILENCE_THRESHOLD = 10   # ca. 30–60 Sekunden
+
+                now = time.time()
+                # Musik-Event nur alle 30 Sekunden senden (Vermeidung von Spam)
+                if (self._consecutive_music_chunks >= MUSIC_THRESHOLD
+                        and not self._music_state_active
+                        and (now - self._last_music_event_time) > 30.0):
+                    self._music_state_active = True
+                    self._silence_state_active = False
+                    self._last_music_event_time = now
+                    self._emit_music_silence_event("music_detected")
+
+                elif (self._consecutive_silence_chunks >= SILENCE_THRESHOLD
+                      and not self._silence_state_active
+                      and (now - self._last_music_event_time) > 30.0):
+                    self._silence_state_active = True
+                    self._music_state_active = False
+                    self._last_music_event_time = now
+                    self._emit_music_silence_event("silence_detected")
+
+    def _emit_music_silence_event(self, event_type: str) -> None:
+        """
+        Sendet ein Musik‑/Stille‑/Sprach‑Event sicher an den Event‑Bus.
+
+        Args:
+            event_type: Einer der Strings "music_detected", "silence_detected"
+                        oder "speech_detected".
+        """
+        if self._event_bus is not None:
+            try:
+                self._event_bus.emit(event_type, {"timestamp": time.time()})
+                if DEBUG_LEVEL >= 3:
+                    log_debug("audio", f"Emitted event: {event_type}")
+            except Exception as e:
+                logger.warning(f"Fehler beim Senden von {event_type}: {e}")
 
     def _buffer_and_flush_segments(
         self,
@@ -37717,25 +37219,6 @@ class AudioProcessor:
     ) -> List[TranscriptionResult]:
         """
         Führt die Transkription eines Audio‑Chunks mit dynamischem Timeout und Selbstheilung durch.
-
-        Diese Methode ist das Herzstück der robusten Transkriptionspipeline. Sie kombiniert:
-          - Dynamisches Timeout basierend auf Chunk‑Dauer und letztem Echtzeitfaktor
-          - Automatischen Austausch des zugrundeliegenden Executors bei wiederholten Timeouts
-          - Asynchrone, nicht‑blockierende Erneuerung des Executors
-          - Umfassende Fehlerbehandlung mit Wiederholung bei temporären Executor‑Fehlern
-          - Detaillierte Debug‑Ausgaben zur Nachverfolgung von Problemen
-
-        Args:
-            audio_data: PCM‑Audiodaten (16‑bit, mono, konfigurierte Samplerate) als Bytes.
-            timeout: Optionaler fester Timeout in Sekunden. Wenn None, wird dynamisch berechnet.
-
-        Returns:
-            Liste von TranscriptionResult‑Objekten (Segmente). Bei fehlenden Daten leer.
-
-        Raises:
-            TimeoutError: Wenn die Transkription länger als das Timeout dauert.
-            TranscriptionError: Bei Fehlern während der Transkription oder wenn die Engine /
-                                der Executor dauerhaft nicht verfügbar ist.
         """
         # -----------------------------------------------------------------
         # 1. Eingangsvalidierung
@@ -38162,28 +37645,6 @@ class AudioProcessor:
         korrigiert ggf. den internen Fortschrittszähler `_real_processed_seconds`,
         und startet dann den Download‑Modus. Es werden mehrere Fallback‑Strategien
         verwendet (--download-sections und vollständiger Download mit Seek).
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - **Puffer‑Bereinigung vor Download:** Segment‑, Transkriptions‑ und
-              Übersetzungspuffer werden geleert, damit alte Segmente nicht die
-              Reihenfolge der neu heruntergeladenen Segmente stören.
-            - **Korrektur von `_real_processed_seconds`:** Falls der Wert die
-              erwartete Dauer überschreitet, wird er auf einen plausiblen Wert
-              zurückgesetzt, bevor `start_seconds` abgeleitet wird.
-            - **Plausibilitätsprüfung von `start_seconds`:** Der Wert wird auf
-              Gültigkeit geprüft und ggf. korrigiert.
-            - **Robuste Abbruchprüfung** vor jedem Schritt.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 2` mit Präfix `[DOWNLOAD]`.
-            - **Sicherer Umgang mit `cancel_event` und `is_stop_requested`.**
-            - **Dispatcher‑Neustart** falls erforderlich.
-            - **Fehlerisolierung:** Fehler werden geloggt und führen nicht zum Abbruch
-              der gesamten Verarbeitung.
-            - **Vollständige Ressourcenbereinigung** im Fehlerfall.
-
-        Args:
-            video_url: Die ursprüngliche Video‑URL.
-            start_seconds: Position in Sekunden, ab der das Video nachgeladen werden soll.
-            cancel_event: Optionales Event für externen Abbruch.
         """
         # -----------------------------------------------------------------
         # Hilfsfunktion für konsistente Abbruchprüfung
@@ -38406,20 +37867,6 @@ class AudioProcessor:
         """
         Wartet darauf, dass alle in die Rohdaten-Queue eingestellten Chunks
         vollständig verarbeitet werden, und beendet anschließend den Dispatcher.
-
-        Ablauf:
-            1. Signalisiert dem Dispatcher, nach dem aktuellen Chunk zu beenden
-               (setzt `_dispatcher_shutdown`).
-            2. Wartet mittels `queue.join()` darauf, dass alle bisher
-               eingefügten Elemente durch `task_done()` quittiert wurden.
-            3. Stoppt den Dispatcher-Thread endgültig über `_stop_dispatcher()`.
-
-        Args:
-            timeout: Maximale Wartezeit in Sekunden.
-
-        Returns:
-            True, wenn die Queue erfolgreich geleert und der Dispatcher
-            gestoppt wurde. False bei Timeout, Benutzerabbruch oder Fehler.
         """
         # 1. Dispatcher anweisen, nach dem aktuellen Chunk zu beenden
         self._dispatcher_shutdown.set()
@@ -38666,38 +38113,6 @@ class AudioProcessor:
         Diese Methode wird vom Download‑Modus aufgerufen, wenn der normale Stream
         vorzeitig abgebrochen ist. Sie verwendet `--download-sections`, um gezielt
         den fehlenden Teil des Videos ab einer bestimmten Position herunterzuladen.
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - **Sichere Startzeit:** `rounded_start` wird als nicht‑negativer Integer
-              validiert und auf Plausibilität geprüft (maximal erwartete Dauer sowie
-              absolute Obergrenze von 24 Stunden).
-            - **Schutz vor Option‑Injection:** Der URL wird `--` vorangestellt,
-              sodass `yt-dlp` sie auch dann als URL interpretiert, wenn sie mit
-              einem Bindestrich beginnt.
-            - **Optimierte Format‑Priorität:** Bevorzugt reine Audio‑Container
-              (m4a, webm) und fällt auf `worstaudio` zurück.
-            - **Robuste Abbruchprüfung:** Vor jedem Schritt wird `is_stop_requested()`
-              geprüft.
-            - **Thread‑sichere Cookie‑ und Proxy‑Konfiguration:** Liest die
-              Einstellungen aus `self.settings` und `self.stream_manager`.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 2` mit Präfix `[SECTIONS]`.
-            - **Fehlerisolierung:** Ein Fehler bei einem Formatversuch führt nicht
-              zum Abbruch, sondern zum Versuch des nächsten Formats.
-            - **Dynamischer Timeout** basierend auf der verbleibenden Dauer (falls bekannt),
-              mit einem Minimum von 30 Sekunden.
-            - **Debug‑Ausgabe des letzten Befehls im Fehlerfall** (bei `DEBUG_LEVEL >= 2`).
-
-        Args:
-            video_url: Die ursprüngliche YouTube‑Video‑URL.
-            start_seconds: Position in Sekunden, ab der das Video nachgeladen werden soll.
-            trans_cb: Callback für Transkriptionsergebnisse.
-            transl_cb: Callback für Übersetzungsergebnisse.
-            error_cb: Callback für Fehlermeldungen.
-            info_cb: Optionaler Callback für Statusmeldungen.
-            cancel_event: Optionales Event für externen Abbruch.
-
-        Returns:
-            Anzahl der erfolgreich verarbeiteten Chunks (0 bei Fehler oder Abbruch).
         """
         # -----------------------------------------------------------------
         # Hilfsfunktion für konsistente Abbruchprüfung
@@ -38993,30 +38408,6 @@ class AudioProcessor:
         vorzeitig endet und der Rest des Videos nachgeladen werden muss. Sie baut
         eine temporäre Pipeline auf, extrahiert die Audiodaten und übergibt sie
         direkt an den normalen Verarbeitungsfluss (`_process_audio_data`).
-
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - **Dynamisches Timeout:** Berechnet aus erwarteter Restdauer und
-              Realtime‑Faktor, begrenzt auf 60–1800 Sekunden.
-            - **Robuste Leseschleife:** Exponentieller Backoff bei Pipe‑Fehlern.
-            - **Sichere Prozess‑Terminierung:** Nutzt `PlatformUtils.terminate_process`
-              für garantierte Beendigung aller Kindprozesse.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
-            - **Abbruchmöglichkeit** über `cancel_event` während des gesamten Vorgangs.
-
-        Args:
-            yt_cmd: Vollständiger yt‑dlp‑Befehl als Liste von Strings.
-            trans_cb: Callback für Transkriptionsergebnisse.
-            transl_cb: Callback für Übersetzungsergebnisse.
-            error_cb: Callback für Fehlermeldungen.
-            info_cb: Optionaler Callback für Statusmeldungen.
-            seek: Falls True oder float, wird ffmpeg angewiesen, an dieser
-                  Position (in Sekunden) zu starten.
-            timeout: Maximale Gesamtdauer für den Download in Sekunden.
-                     Wenn None, wird dynamisch berechnet.
-            cancel_event: Externes Event, das den Vorgang vorzeitig abbrechen kann.
-
-        Returns:
-            Anzahl der erfolgreich verarbeiteten Chunks.
         """
         start_total = time.perf_counter()
         chunk_count = 0
@@ -39566,8 +38957,41 @@ class AudioProcessor:
         )
 
     def enable_subtitle_mode(self, enabled: bool) -> None:
+        """
+        Aktiviert oder deaktiviert den Untertitel‑Modus.
+        """
+        old_mode = self.subtitle_mode
         self.subtitle_mode = enabled
-        logger.info(f"🎬 Subtitle mode: {'ENABLED' if enabled else 'DISABLED'}")
+
+        # ---------------------------------------------------------------------
+        # 1. Segment‑Puffer vollständig leeren (verhindert Vermischung)
+        # ---------------------------------------------------------------------
+        with self._segment_buffer_lock:
+            self._segment_buffer.clear()
+            self._next_expected_start = 0.0
+
+        # ---------------------------------------------------------------------
+        # 2. Transkriptions‑Worker dynamisch anpassen
+        # ---------------------------------------------------------------------
+        if enabled:
+            # Im Untertitel‑Modus ist sequenzielle Verarbeitung erforderlich,
+            # damit die Zeitstempel konsistent bleiben.
+            self._set_transcription_workers(1)
+        else:
+            # Normalmodus: parallele Verarbeitung für höheren Durchsatz
+            cpu_count = os.cpu_count() or 4
+            workers = getattr(self.settings, "transcription_workers", max(1, cpu_count // 8))
+            self._set_transcription_workers(workers)
+
+        # ---------------------------------------------------------------------
+        # 3. Logging und Event‑Bus
+        # ---------------------------------------------------------------------
+        logger.info(f"🎬 Subtitle mode: {'ENABLED' if enabled else 'DISABLED'} (was {old_mode})")
+        if self._event_bus is not None:
+            try:
+                self._event_bus.emit("subtitle_mode_changed", enabled)
+            except Exception as e:
+                log_debug("processor", f"Failed to emit subtitle_mode_changed event: {e}")
 
     def update_target_language(self, lang_code: str) -> None:
         if hasattr(self, "translation_engine") and self.translation_engine is not None:
@@ -39593,35 +39017,6 @@ class AudioProcessor:
         Diese Methode initialisiert den Verarbeitungs-Thread, setzt alle Zustände zurück,
         erstellt die benötigten Executors und startet den Dispatcher. Sie ist der zentrale
         Einstiegspunkt für die Audioverarbeitung.
-
-        Verbesserungen gegenüber früheren Versionen:
-            - **Präzise Zustandsbereinigung:** Erkennt zuverlässig, ob ein vorheriger Lauf
-              vollständig abgeschlossen ist, und führt **nur dann** einen Notfall‑Reset durch,
-              wenn tatsächlich noch Ressourcen belegt sind. Verhindert falsche Warnungen.
-            - **Atomare Zustandsübergänge:** Alle Änderungen an `_state` erfolgen unter
-              `_state_lock`, um Race Conditions zu vermeiden.
-            - **Vollständige Puffer‑Leerung:** Alte Sentinels und verbliebene Queue‑Elemente
-              werden vor dem Start zuverlässig entfernt, sodass der neue Dispatcher nicht
-              sofort beendet wird.
-            - **Zurücksetzen aller relevanten Flags:** `_last_oom` der TranscriptionEngine,
-              `_stop_event`, `_processing_completed` und `_download_mode_active` werden
-              konsistent auf ihre Ausgangswerte gesetzt.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` für jeden Schritt.
-            - **Fehlertoleranz:** Selbst wenn während der Initialisierung ein Fehler auftritt,
-              wird der Zustand garantiert auf `IDLE` zurückgesetzt und der Fehler gemeldet.
-            - **Thread‑Sicherheit:** Alle gemeinsam genutzten Ressourcen werden unter den
-              entsprechenden Locks modifiziert.
-
-        Args:
-            url: Die zu verarbeitende URL (Video, Stream oder lokale Datei).
-            transcription_callback: Callback für Transkriptionsergebnisse.
-            translation_callback: Callback für Übersetzungsergebnisse.
-            info_callback: Callback für Statusmeldungen.
-            error_callback: Callback für Fehlermeldungen.
-            finished_callback: Optionaler Callback, der nach normalem Ende aufgerufen wird.
-
-        Raises:
-            Keine. Fehler werden über `error_callback` gemeldet.
         """
         if DEBUG_LEVEL >= 3:
             log_debug("processor", f"start_processing called with URL: {url[:100]}...")
@@ -39657,10 +39052,11 @@ class AudioProcessor:
                     return
 
                 # Kein Thread aktiv, aber Zustand hängt – automatischer Reset
-                logger.debug(
-                    f"AudioProcessor stuck in state '{current_state.name}' without active threads. "
-                    "Performing emergency reset."
-                )
+                if DEBUG_LEVEL >= 3:   # 🔥 Nur bei hohem Debug-Level loggen
+                    logger.debug(
+                        f"AudioProcessor stuck in state '{current_state.name}' without active threads. "
+                        "Performing emergency reset."
+                    )
                 # Garantierte Bereinigung durchführen
                 self._guaranteed_cleanup()
                 # Zustand explizit auf IDLE setzen (wurde in _guaranteed_cleanup bereits gemacht,
@@ -42111,31 +41507,6 @@ class AudioProcessor:
         keine sensiblen Daten zurückzulassen. Diese Methode iteriert über die
         interne Liste `self._temp_files`, löscht jede Datei und entfernt den
         Eintrag aus der Liste.
-
-        Verbesserungen gegenüber früheren Versionen:
-            - **Thread-Sicherheit:** Alle Zugriffe auf `self._temp_files` erfolgen
-              unter `self._temp_files_lock` (RLock), um Race Conditions mit
-              gleichzeitigem Hinzufügen neuer Dateien zu vermeiden.
-            - **Robuste Fehlerbehandlung:** Löschfehler einer einzelnen Datei
-              führen nicht zum Abbruch der gesamten Bereinigung. Die fehlerhafte
-              Datei wird dennoch aus der Liste entfernt.
-            - **Detaillierte Debug-Ausgaben:** Bei `DEBUG_LEVEL >= 3` wird für
-              jede Datei der Erfolg oder Misserfolg protokolliert.
-            - **Existenzprüfung:** Vor dem Löschen wird geprüft, ob die Datei
-              tatsächlich existiert, um unnötige Fehlermeldungen zu vermeiden.
-            - **Garantiertes Leeren der Liste:** Auch wenn während der Iteration
-              eine Exception auftritt, wird die Liste im `finally`-Block
-              vollständig geleert (sicherheitshalber).
-
-        Voraussetzungen:
-            - `self._temp_files` muss eine Liste von Dateipfaden (Strings) sein.
-            - `self._temp_files_lock` muss ein `threading.RLock` sein und im
-              Konstruktor initialisiert werden:
-              `self._temp_files_lock = threading.RLock()`
-
-        Nebenwirkungen:
-            - Alle Einträge werden aus `self._temp_files` entfernt.
-            - Dateien im Dateisystem werden gelöscht.
         """
         # -----------------------------------------------------------------
         # 1. Lock für die Liste der temporären Dateien
@@ -42235,35 +41606,6 @@ class AudioProcessor:
         Diese Methode wird ganz am Ende des Stream-Cleanups aufgerufen, nachdem alle
         Ressourcen freigegeben und Puffer geleert wurden. Sie informiert die GUI
         oder andere Komponenten darüber, wie der Stream beendet wurde:
-
-        - Bei `error_occurred == True`: Der Stream wurde aufgrund eines Fehlers
-          abgebrochen. Der `error`-Callback wird mit einer entsprechenden Meldung
-          aufgerufen.
-        - Bei `normal_ending == True`: Der Stream wurde erfolgreich und vollständig
-          verarbeitet. Der `finished`-Callback wird aufgerufen.
-        - Bei Benutzerabbruch (beide Flags `False`): Der Stream wurde manuell
-          gestoppt. Es wird kein Callback ausgelöst, da der Benutzer bereits
-          informiert ist.
-
-        Verbesserungen gegenüber der Basisversion:
-            - **Thread‑Sicherheit:** Callbacks werden garantiert im Haupt‑Thread
-              (GUI‑Thread) ausgeführt, sofern die GUI verfügbar ist. Dazu wird
-              `root.after(0, ...)` verwendet.
-            - **Fehlerisolierung:** Exceptions innerhalb der Callbacks werden
-              abgefangen und geloggt, ohne den Cleanup oder andere Callbacks zu
-              beeinträchtigen.
-            - **Fallback bei fehlender GUI:** Wenn keine GUI verfügbar ist, wird
-              der Callback direkt im aktuellen Thread aufgerufen.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`, die genau
-              anzeigen, welcher Callback mit welchen Argumenten aufgerufen wird.
-            - **Optionale Argumente:** Die Hilfsmethode `_invoke_callback_safe`
-              unterstützt beliebige Argumente für die Callbacks.
-
-        Args:
-            normal_ending: True, wenn der Stream normal beendet wurde.
-            error_occurred: True, wenn ein Fehler zum Abbruch führte.
-            callbacks: Dictionary mit optionalen Callback-Funktionen für die
-                       Schlüssel 'error' und 'finished'.
         """
         # -----------------------------------------------------------------
         # 1. Entscheidung, welcher Callback aufgerufen werden soll
@@ -42310,18 +41652,6 @@ class AudioProcessor:
         Verhalten oder Abstürzen führen kann. Falls die GUI verfügbar ist, wird
         der Callback mit `root.after(0, ...)` in die Ereignisschleife des
         Hauptthreads eingereiht. Andernfalls wird der Callback direkt aufgerufen.
-
-        Verbesserungen:
-            - **Robuste GUI‑Erkennung:** Prüft nicht nur auf Existenz des
-              `gui_ref`-Attributs, sondern auch auf das tatsächliche Vorhandensein
-              des `root`-Fensters.
-            - **Exception‑Handling:** Fängt sowohl Fehler im Callback selbst als
-              auch Fehler beim Einreihen in die GUI‑Schleife ab.
-            - **Detaillierte Fehlerprotokollierung** mit Stacktrace bei Bedarf.
-
-        Args:
-            cb: Die aufzurufende Callback-Funktion.
-            *args: Optionale Argumente, die an den Callback übergeben werden.
         """
         if cb is None:
             return
@@ -42363,10 +41693,6 @@ class AudioProcessor:
         Diese Methode ist die letzte Sicherheitsstufe vor dem tatsächlichen
         Aufruf des Callbacks. Sie stellt sicher, dass eine Exception im Callback
         nicht den übergeordneten Cleanup-Prozess zum Absturz bringt.
-
-        Args:
-            cb: Die aufzurufende Callback-Funktion.
-            *args: Argumente für den Callback.
         """
         try:
             cb(*args)
@@ -42403,27 +41729,6 @@ class AudioProcessor:
         einem Stream vollständig abgeschlossen hat und sich nun im IDLE-Zustand
         befindet. Es enthält eine Zusammenfassung der wichtigsten Metriken des
         gerade beendeten Streams.
-
-        Verbesserungen gegenüber früheren Versionen:
-            - **Thread‑Sicherheit:** Alle Zugriffe auf statistische Zähler
-              (`_chunk_counter`, `_total_bytes_processed`, `_processed_seconds`,
-              `_pending_tasks`) erfolgen unter dem dafür vorgesehenen
-              `_stats_lock`, um inkonsistente Werte zu vermeiden.
-            - **Robuste Fehlerbehandlung:** Fängt alle während des Sendens
-              auftretenden Exceptions ab und protokolliert sie, ohne den
-              übergeordneten Cleanup zu unterbrechen.
-            - **Reichhaltige Payload:** Enthält nicht nur die grundlegenden
-              Metriken, sondern auch den Beendigungsgrund, die aktuelle Stream-ID
-              und einen Zeitstempel für die Nachverfolgbarkeit.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`, die genau
-              anzeigen, welche Daten gesendet werden.
-            - **Fallback bei fehlendem Event‑Bus:** Wenn kein Event‑Bus verfügbar
-              ist, wird dies lediglich protokolliert, ohne dass ein Fehler
-              geworfen wird.
-
-        Args:
-            normal_ending: True, wenn der Stream normal beendet wurde.
-            error_occurred: True, wenn ein Fehler zum Abbruch führte.
         """
         # -----------------------------------------------------------------
         # 1. Event‑Bus‑Referenz prüfen
@@ -42520,14 +41825,6 @@ class AudioProcessor:
         """
         Passt die Chunk-Dauer dynamisch an, um ein optimales Gleichgewicht zwischen
         Latenz und Genauigkeit zu erreichen.
-
-        Berücksichtigt:
-            - Echtzeitfaktor (_last_realtime_factor): Bei > 1.5 wird reduziert.
-            - Durchschnittliche Wortanzahl pro Chunk (geglättet).
-            - Stabilitätszähler, um häufiges Hin- und Herspringen zu vermeiden.
-
-        Thread-sicher durch Verwendung von _stats_lock und _word_count_lock.
-        Im Untertitelmodus (subtitle_mode) wird keine Anpassung vorgenommen.
         """
         # Untertitelmodus erfordert feste Chunk-Größen für konsistente Zeitstempel
         if self.subtitle_mode:
@@ -42821,21 +42118,6 @@ class AudioProcessor:
         auf eine ausreichende Größe warten. Sie fasst alle gepufferten Chunks zu
         einem einzigen Chunk zusammen und übergibt ihn an die asynchrone
         Verarbeitungskette.
-
-        **Robustheit:**
-            - Fängt `RuntimeError` beim `submit` ab (falls der Executor während des
-              Aufrufs heruntergefahren wurde) und leitet den Fehler an den Callback
-              weiter, ohne dass der Chunk stillschweigend verloren geht.
-            - Validiert, ob die `TranscriptionEngine` verfügbar ist, bevor der
-              Chunk verarbeitet wird.
-            - Alle Fehler werden geloggt, aber blockieren nicht die weitere
-              Bereinigung.
-
-        Args:
-            transcription_callback: Callback für Transkriptionsergebnisse.
-            translation_callback: Callback für Übersetzungsergebnisse.
-            error_callback: Optionaler Callback für Fehlermeldungen. Falls None,
-                            wird ein Dummy‑Callback verwendet, der Fehler nur logged.
         """
         # ---------------------------------------------------------------------
         # 1. Fallback‑Callbacks definieren (sichert gegen None)
@@ -42948,26 +42230,6 @@ class AudioProcessor:
         werden. Sie versetzt den AudioProcessor in den IDLE‑Zustand und
         signalisiert über den Event‑Bus, dass er bereit für einen neuen Stream
         ist.
-
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - **Korrekte Behandlung der Stop‑Flags:** Setzt **nicht** mehr das
-              `_stop_event` (das dem Benutzerabbruch vorbehalten ist), sondern
-              löscht beide Events, um einen sauberen Zustand für den nächsten
-              Stream zu gewährleisten.
-            - **Robuste Fehlerbehandlung:** Jeder Schritt ist in `try/except`
-              gekapselt, sodass ein Fehler in einem Bereich nicht die gesamte
-              Bereinigung blockiert.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` für jede
-              Aktion.
-            - **Thread‑Sicherheit:** Alle Zugriffe auf gemeinsame Ressourcen
-              erfolgen unter den entsprechenden Locks.
-            - **Event‑Bus‑Benachrichtigung** nur, wenn der Bus verfügbar ist.
-            - **Kein doppeltes Leeren von Queues** – verhindert Datenverlust.
-
-        Wichtig:
-            - Die Methode leert **keine** Queues und setzt **nicht**
-              `_cleanup_done = True`. Diese Aktionen sind der GUI‑Cleanup‑Routine
-              vorbehalten.
         """
         logger.info("\n🧹 [GUARANTEED_CLEANUP]")
 
@@ -42997,9 +42259,7 @@ class AudioProcessor:
                     f"State changed from {old_state.name} to IDLE in guaranteed_cleanup",
                 )
 
-        # -----------------------------------------------------------------
         # 2. Aktuelle Stream‑ID löschen und Statistiken zurücksetzen
-        # -----------------------------------------------------------------
         with self._resource_lock:
             self._current_stream_id = None
 
@@ -43023,42 +42283,32 @@ class AudioProcessor:
                 setattr(self, '_audio_total_bytes', 0)
             ))
 
-        # -----------------------------------------------------------------
         # 3. Satzpuffer leeren (falls noch Texte ausstehen)
-        # -----------------------------------------------------------------
         safe_reset_step("clear sentence buffer", lambda: (
             self._sentence_parts.clear(),
             self._sentence_segments.clear()
         ))
 
-        # -----------------------------------------------------------------
         # 4. Segment‑Puffer leeren (Untertitel‑Modus)
-        # -----------------------------------------------------------------
         safe_reset_step("clear segment buffer", lambda: (
             self._segment_buffer.clear(),
             setattr(self, '_next_expected_start', 0.0)
         ))
 
-        # -----------------------------------------------------------------
         # 5. Duplikat‑Cache leeren (optional, aber sauber)
-        # -----------------------------------------------------------------
         safe_reset_step("clear duplicate cache", lambda: (
             self._recent_transcriptions.clear(),
             setattr(self, '_last_transcription_text', "")
         ))
 
-        # -----------------------------------------------------------------
         # 6. Stop‑Flags korrekt zurücksetzen (WICHTIG)
-        # -----------------------------------------------------------------
         with self._stop_lock:
             self._stop_event.clear()
             self._processing_completed.clear()
             if DEBUG_LEVEL >= 3:
                 log_debug("processor", "Stop flags cleared (stop_event and processing_completed)")
 
-        # -----------------------------------------------------------------
         # 7. Event‑Bus benachrichtigen (außerhalb von Locks)
-        # -----------------------------------------------------------------
         if self._event_bus is not None:
             try:
                 self._event_bus.emit("audio_processor_idle", None)
@@ -43067,7 +42317,6 @@ class AudioProcessor:
             except Exception as e:
                 logger.warning(f"guaranteed_cleanup: Failed to emit event: {e}")
 
-        # 🔥 NEU: Signalisiere dem Controller, dass die Verarbeitung vollständig abgeschlossen ist
         self.processing_completed_event.set()
 
         logger.info("✅ Cleanup completed")
@@ -43196,13 +42445,6 @@ class AudioProcessor:
         Puffert ein Transkriptionssegment für die Übersetzung und löst die Übersetzung
         aus, sobald ein vollständiger Satz erkannt wird, ein Timeout erreicht ist oder
         ein Sprachwechsel stattfindet.
-
-        Verbesserungen:
-            - Während des finalen Flushs (`_in_final_flush == True`) wird das
-              `_stop_event` **ignoriert**, sodass die letzten Sätze garantiert
-              übersetzt werden.
-            - Explizite WARNING‑Logs für jeden kritischen Pfad.
-            - Korrekte Weitergabe von Zeitstempeln (start/end).
         """
         logger.warning("🌐 _handle_sentence_buffering ENTERED")
 
@@ -43267,9 +42509,7 @@ class AudioProcessor:
                 self._sentence_segments.clear()
                 self._last_sentence_time = now
 
-            # -----------------------------------------------------------------
             # Stop‑Event NUR dann verwerfen, wenn wir NICHT im finalen Flush sind
-            # -----------------------------------------------------------------
             in_final_flush = getattr(self, "_in_final_flush", False)
             if self._stop_event.is_set() and not in_final_flush:
                 if not self._sentence_parts:
@@ -43286,34 +42526,26 @@ class AudioProcessor:
                         "🌐 Stop event set but buffer has data – will flush normally"
                     )
 
-            # -----------------------------------------------------------------
             # Sprachwechsel
-            # -----------------------------------------------------------------
             if self._sentence_segments and detected_lang != self._sentence_segments[-1].language:
                 logger.warning(
                     f"🌐 Language change detected ({self._sentence_segments[-1].language} → {detected_lang})"
                 )
                 flush_buffer("language_change")
 
-            # -----------------------------------------------------------------
             # Timeout
-            # -----------------------------------------------------------------
             if self._sentence_parts and (now - self._last_sentence_time) > self._sentence_flush_interval:
                 logger.warning(
                     f"🌐 Sentence buffer timeout ({self._sentence_flush_interval}s) – flushing"
                 )
                 flush_buffer("timeout")
 
-            # -----------------------------------------------------------------
             # Aktuelles Segment anhängen
-            # -----------------------------------------------------------------
             self._sentence_parts.append(text)
             self._sentence_segments.append(result)
             self._last_sentence_time = now
 
-            # -----------------------------------------------------------------
             # Satzende oder Wortanzahl
-            # -----------------------------------------------------------------
             should_flush = False
             flush_reason = ""
 
@@ -43339,33 +42571,10 @@ class AudioProcessor:
     ) -> None:
         """
         Puffert ein Transkriptionssegment und gibt bei Satzende, Timeout oder
-        Sprachwechsel einen zusammengefassten Satz aus – sowohl an die GUI
-        als auch an die Übersetzung.
+        Sprachwechsel einen zusammengefassten Satz aus
 
-        Diese Methode implementiert einen konfigurierbaren Satzpuffer für die
-        Transkriptionsausgabe, um eine flüssigere und natürlichere Darstellung
-        in der GUI zu erreichen. Sie arbeitet parallel zur Untertitel-Logik
-        und beeinflusst den Export von Untertiteln nicht.
-
-        Features:
-            - Satzerkennung anhand von Satzendzeichen (.!?。！？)
-            - Timeout-basierte Ausgabe (konfigurierbar, Standard 10.0 Sekunden)
-            - Wortanzahl-Schwellwert (verhindert überlange Sätze)
-            - Automatische Trennung bei Sprachwechsel
-            - Korrekte Übersetzungsauslösung auch im Satzpuffer-Modus
-            - Thread-sicher durch internes Lock
-            - Deaktivierbar über `self._enable_sentence_buffering`
-            - Im Untertitel-Modus automatisch deaktiviert (segmentweise Ausgabe)
-            - Detaillierte Debug‑Ausgaben mit Präfix `[TRANSCRIPT]` bei `DEBUG_LEVEL >= 2`
-
-        Args:
-            segment: Das aktuelle Transkriptionssegment von Whisper.
-            transcription_callback: Der ursprüngliche Callback für die GUI.
-            translation_callback: Optionaler Callback für die Übersetzung.
         """
-        # -----------------------------------------------------------------
         # 1. Frühe Ausstiege: Satzpuffer deaktiviert oder Untertitel-Modus
-        # -----------------------------------------------------------------
         if not self._enable_sentence_buffering or self.subtitle_mode:
             # Direkte Ausgabe ohne Pufferung
             try:
@@ -43385,15 +42594,11 @@ class AudioProcessor:
                 log_debug("TRANSCRIPT", "_handle_transcript_segment: empty segment – ignored")
             return
 
-        # -----------------------------------------------------------------
         # 2. Kritischer Abschnitt: Zugriff auf den Puffer
-        # -----------------------------------------------------------------
         with self._transcript_sentence_lock:
             now = time.time()
 
-            # -----------------------------------------------------------------
             # Hilfsfunktion: Aktuellen Puffer leeren und Callbacks auslösen
-            # -----------------------------------------------------------------
             def flush_buffer(reason: str = "") -> None:
                 """
                 Leert den internen Satzpuffer, erzeugt ein kombiniertes
@@ -43460,9 +42665,7 @@ class AudioProcessor:
                     self._handle_sentence_buffering(segment, translation_callback)
                 return
 
-            # -----------------------------------------------------------------
             # 4. Sprachwechsel? Puffer leeren, um Sprachmischung zu vermeiden.
-            # -----------------------------------------------------------------
             if self._transcript_segments:
                 last_lang = self._transcript_segments[-1].language
                 current_lang = getattr(segment, "language", "unknown")
@@ -43474,9 +42677,7 @@ class AudioProcessor:
                         )
                     flush_buffer(f"language_change ({last_lang} → {current_lang})")
 
-            # -----------------------------------------------------------------
             # 5. Timeout überschritten? Puffer leeren.
-            # -----------------------------------------------------------------
             if (self._transcript_parts and
                     (now - self._transcript_last_flush) > self._transcript_flush_interval):
                 if DEBUG_LEVEL >= 2:
@@ -43486,9 +42687,7 @@ class AudioProcessor:
                     )
                 flush_buffer(f"timeout ({self._transcript_flush_interval}s)")
 
-            # -----------------------------------------------------------------
             # 6. Aktuelles Segment an den Puffer anhängen
-            # -----------------------------------------------------------------
             self._transcript_parts.append(text)
             self._transcript_segments.append(segment)
             self._transcript_last_flush = now
@@ -43501,9 +42700,7 @@ class AudioProcessor:
                     f"total_chars={sum(len(p) for p in self._transcript_parts)}"
                 )
 
-            # -----------------------------------------------------------------
             # 7. Prüfen, ob der Puffer jetzt geleert werden soll
-            # -----------------------------------------------------------------
             should_flush = False
             flush_reason = ""
 
@@ -43527,22 +42724,8 @@ class AudioProcessor:
     def _create_combined_transcript_segment(self) -> TranscriptionResult:
         """
         Erzeugt ein kombiniertes TranscriptionResult aus den gepufferten Segmenten.
-
-        Diese Methode wird aus dem geschützten Bereich von `_handle_transcript_segment`
-        aufgerufen, daher ist kein zusätzliches Lock erforderlich. Sie kombiniert
-        die Texte aller gepufferten Segmente zu einem zusammenhängenden Satz und
-        berechnet die durchschnittliche Confidence sowie Start- und Endzeit.
-
-        Returns:
-            Ein neues TranscriptionResult-Objekt mit kombiniertem Text und Metadaten.
-            Falls der Puffer leer ist, wird ein leeres Dummy-Ergebnis zurückgegeben.
-
-        Raises:
-            Keine – alle Fehler werden intern behandelt.
         """
-        # -----------------------------------------------------------------
         # 1. Leerer Puffer – Fallback
-        # -----------------------------------------------------------------
         if not self._transcript_segments:
             logger.warning("_create_combined_transcript_segment called with empty buffer")
             return TranscriptionResult(
@@ -43552,9 +42735,8 @@ class AudioProcessor:
                 timestamp=time.time(),
             )
 
-        # -----------------------------------------------------------------
         # 2. Text kombinieren
-        # -----------------------------------------------------------------
+
         # Die Texte sind bereits in self._transcript_parts gespeichert und
         # sollten synchron mit self._transcript_segments sein.
         if self._transcript_parts:
@@ -43568,9 +42750,7 @@ class AudioProcessor:
                     "Used segment texts as fallback because _transcript_parts was empty",
                 )
 
-        # -----------------------------------------------------------------
         # 3. Erstes und letztes Segment für Zeitstempel
-        # -----------------------------------------------------------------
         first_seg = self._transcript_segments[0]
         last_seg = self._transcript_segments[-1]
 
@@ -43582,9 +42762,7 @@ class AudioProcessor:
         if hasattr(last_seg, "end") and last_seg.end is not None:
             end_time = last_seg.end
 
-        # -----------------------------------------------------------------
         # 4. Durchschnittliche Confidence berechnen
-        # -----------------------------------------------------------------
         total_conf = 0.0
         valid_conf_count = 0
         for seg in self._transcript_segments:
@@ -43603,9 +42781,7 @@ class AudioProcessor:
                     "No valid confidence values found, using default 0.5",
                 )
 
-        # -----------------------------------------------------------------
         # 5. Sprache bestimmen (Mehrheitsentscheidung oder erstes Segment)
-        # -----------------------------------------------------------------
         language = "unknown"
         if self._transcript_segments:
             # Versuche, die häufigste Sprache zu ermitteln
@@ -43618,9 +42794,7 @@ class AudioProcessor:
             else:
                 language = getattr(first_seg, "language", "unknown")
 
-        # -----------------------------------------------------------------
         # 6. Kombiniertes Ergebnis erstellen
-        # -----------------------------------------------------------------
         combined_result = TranscriptionResult(
             text=combined_text,
             confidence=avg_confidence,
@@ -43653,9 +42827,7 @@ class AudioProcessor:
         Übersetzungs‑Engine. Die Methode ist nicht blockierend und verwendet
         einen dedizierten Executor.
         """
-        # -----------------------------------------------------------------
         # 1. Schnelle Abbruchbedingungen mit WARNING‑Logs
-        # -----------------------------------------------------------------
         logger.warning("🌐 _translate_and_send_async ENTERED")
 
         if translation_callback is None:
@@ -44433,9 +43605,7 @@ class WhisperLayoutManager:
         if DEBUG_LEVEL >= 3:
             log_debug("layout", "Creating vertical layout...")
 
-        # -----------------------------------------------------------------
         # 1. Hauptcontainer erstellen
-        # -----------------------------------------------------------------
         try:
             main_frame = tk.LabelFrame(
                 gui.text_container,
@@ -44456,9 +43626,7 @@ class WhisperLayoutManager:
                 log_exception("layout", "main_frame creation failed", e)
             return
 
-        # -----------------------------------------------------------------
         # 2. Oberer Frame (Transkription)
-        # -----------------------------------------------------------------
         try:
             trans_frame = tk.Frame(main_frame, bg=theme.BG_SECONDARY)
             trans_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 2))
@@ -44470,9 +43638,7 @@ class WhisperLayoutManager:
                 log_exception("layout", "trans_frame creation failed", e)
             return
 
-        # -----------------------------------------------------------------
         # 3. Header für Transkription
-        # -----------------------------------------------------------------
         try:
             trans_header = tk.Frame(trans_frame, bg=theme.BG_SECONDARY)
             trans_header.grid(row=0, column=0, sticky="ew", padx=3, pady=2)
@@ -44503,6 +43669,7 @@ class WhisperLayoutManager:
                 fg=theme.TEXT_SECONDARY,
                 font=("Segoe UI", 7),
             ).pack(side="right", padx=1)
+            ToolTip(scroll_cb, "Automatisch zum Ende scrollen")
 
             # Auto-TTS Checkbox
             tts_cb = tk.Checkbutton(
@@ -44522,14 +43689,13 @@ class WhisperLayoutManager:
                 fg=theme.TEXT_SECONDARY,
                 font=("Segoe UI", 7),
             ).pack(side="right", padx=1)
+            ToolTip(tts_cb, "Jeden transkribierten Satz automatisch vorlesen")
         except Exception as e:
             logger.error(f"Fehler beim Erstellen des Transkriptions-Headers: {e}")
             if DEBUG_LEVEL >= 3:
                 log_exception("layout", "trans_header creation failed", e)
 
-        # -----------------------------------------------------------------
         # 4. Transkriptions-Textfeld
-        # -----------------------------------------------------------------
         try:
             gui.transcript_text = self.create_text_widget(trans_frame, height=6)
             gui.transcript_text.grid(row=1, column=0, sticky="nsew", padx=2, pady=2)
@@ -44538,9 +43704,7 @@ class WhisperLayoutManager:
             if DEBUG_LEVEL >= 3:
                 log_exception("layout", "transcript_text creation failed", e)
 
-        # -----------------------------------------------------------------
         # 5. Unterer Frame (Übersetzung)
-        # -----------------------------------------------------------------
         try:
             transla_frame = tk.Frame(main_frame, bg=theme.BG_SECONDARY)
             transla_frame.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
@@ -44552,9 +43716,7 @@ class WhisperLayoutManager:
                 log_exception("layout", "transla_frame creation failed", e)
             return
 
-        # -----------------------------------------------------------------
         # 6. Header für Übersetzung
-        # -----------------------------------------------------------------
         try:
             transla_header = tk.Frame(transla_frame, bg=theme.BG_SECONDARY)
             transla_header.grid(row=0, column=0, sticky="ew", padx=3, pady=2)
@@ -44586,6 +43748,7 @@ class WhisperLayoutManager:
                 fg=theme.TEXT_SECONDARY,
                 font=("Segoe UI", 7),
             ).pack(side="right", padx=1)
+            ToolTip(scroll_cb2, "Automatisch zum Ende scrollen")
 
             # Auto-TTS Checkbox
             tts_cb2 = tk.Checkbutton(
@@ -44605,14 +43768,13 @@ class WhisperLayoutManager:
                 fg=theme.TEXT_SECONDARY,
                 font=("Segoe UI", 7),
             ).pack(side="right", padx=1)
+            ToolTip(tts_cb2, "Jeden übersetzten Satz automatisch vorlesen")
         except Exception as e:
             logger.error(f"Fehler beim Erstellen des Übersetzungs-Headers: {e}")
             if DEBUG_LEVEL >= 3:
                 log_exception("layout", "transla_header creation failed", e)
 
-        # -----------------------------------------------------------------
         # 7. Übersetzungs-Textfeld
-        # -----------------------------------------------------------------
         try:
             gui.translation_text = self.create_text_widget(transla_frame, height=6)
             gui.translation_text.grid(row=1, column=0, sticky="nsew", padx=2, pady=2)
@@ -44627,6 +43789,10 @@ class WhisperLayoutManager:
     def create_horizontal_layout(self) -> None:
         """
         Erstellt das horizontale Layout der GUI.
+
+        Diese Methode konfiguriert das Hauptfenster mit einem horizontalen Layout.
+        Sie verwendet ein `PanedWindow`, um die Textbereiche nebeneinander anzuordnen.
+        Die Widgets werden in einem `ttk.LabelFrame`-Container platziert.
         """
         gui = self.gui_ref
         theme = gui.current_theme
@@ -44634,9 +43800,7 @@ class WhisperLayoutManager:
         if DEBUG_LEVEL >= 3:
             log_debug("layout", "Creating horizontal layout...")
 
-        # -----------------------------------------------------------------
         # 1. Hauptcontainer erstellen
-        # -----------------------------------------------------------------
         try:
             main_frame = tk.LabelFrame(
                 gui.text_container,
@@ -44656,9 +43820,7 @@ class WhisperLayoutManager:
                 log_exception("layout", "main_frame creation failed", e)
             return
 
-        # -----------------------------------------------------------------
         # 2. PanedWindow für horizontal geteilte Bereiche
-        # -----------------------------------------------------------------
         try:
             gui.paned_window = tk.PanedWindow(
                 main_frame,
@@ -44675,9 +43837,7 @@ class WhisperLayoutManager:
                 log_exception("layout", "paned_window creation failed", e)
             return
 
-        # -----------------------------------------------------------------
         # 3. Linker Frame (Transkription)
-        # -----------------------------------------------------------------
         try:
             left_frame = tk.Frame(gui.paned_window, bg=theme.BG_TERTIARY)
             gui.paned_window.add(left_frame, stretch="always", width=400)
@@ -44690,9 +43850,7 @@ class WhisperLayoutManager:
                 log_exception("layout", "left_frame creation failed", e)
             return
 
-        # -----------------------------------------------------------------
         # 4. Header für Transkription
-        # -----------------------------------------------------------------
         try:
             trans_header = tk.Frame(left_frame, bg=theme.BG_TERTIARY)
             trans_header.grid(row=0, column=0, sticky="ew", padx=3, pady=2)
@@ -44723,6 +43881,7 @@ class WhisperLayoutManager:
                 fg=theme.TEXT_SECONDARY,
                 font=("Segoe UI", 7),
             ).pack(side="right", padx=1)
+            ToolTip(scroll_cb, "Automatisch zum Ende scrollen")
 
             # Auto-TTS Checkbox
             tts_cb = tk.Checkbutton(
@@ -44742,14 +43901,13 @@ class WhisperLayoutManager:
                 fg=theme.TEXT_SECONDARY,
                 font=("Segoe UI", 7),
             ).pack(side="right", padx=1)
+            ToolTip(tts_cb, "Jeden transkribierten Satz automatisch vorlesen")
         except Exception as e:
             logger.error(f"Fehler beim Erstellen des Transkriptions-Headers: {e}")
             if DEBUG_LEVEL >= 3:
                 log_exception("layout", "trans_header creation failed", e)
 
-        # -----------------------------------------------------------------
         # 5. Transkriptions-Textfeld
-        # -----------------------------------------------------------------
         try:
             gui.transcript_text = self.create_text_widget(left_frame)
             gui.transcript_text.grid(row=1, column=0, sticky="nsew", padx=2, pady=2)
@@ -44758,9 +43916,7 @@ class WhisperLayoutManager:
             if DEBUG_LEVEL >= 3:
                 log_exception("layout", "transcript_text creation failed", e)
 
-        # -----------------------------------------------------------------
         # 6. Rechter Frame (Übersetzung)
-        # -----------------------------------------------------------------
         try:
             right_frame = tk.Frame(gui.paned_window, bg=theme.BG_TERTIARY)
             gui.paned_window.add(right_frame, stretch="always", width=400)
@@ -44773,9 +43929,7 @@ class WhisperLayoutManager:
                 log_exception("layout", "right_frame creation failed", e)
             return
 
-        # -----------------------------------------------------------------
         # 7. Header für Übersetzung
-        # -----------------------------------------------------------------
         try:
             transla_header = tk.Frame(right_frame, bg=theme.BG_TERTIARY)
             transla_header.grid(row=0, column=0, sticky="ew", padx=3, pady=2)
@@ -44807,6 +43961,7 @@ class WhisperLayoutManager:
                 fg=theme.TEXT_SECONDARY,
                 font=("Segoe UI", 7),
             ).pack(side="right", padx=1)
+            ToolTip(scroll_cb2, "Automatisch zum Ende scrollen")
 
             # Auto-TTS Checkbox
             tts_cb2 = tk.Checkbutton(
@@ -44826,14 +43981,13 @@ class WhisperLayoutManager:
                 fg=theme.TEXT_SECONDARY,
                 font=("Segoe UI", 7),
             ).pack(side="right", padx=1)
+            ToolTip(tts_cb2, "Jeden übersetzten Satz automatisch vorlesen")
         except Exception as e:
             logger.error(f"Fehler beim Erstellen des Übersetzungs-Headers: {e}")
             if DEBUG_LEVEL >= 3:
                 log_exception("layout", "transla_header creation failed", e)
 
-        # -----------------------------------------------------------------
         # 8. Übersetzungs-Textfeld
-        # -----------------------------------------------------------------
         try:
             gui.translation_text = self.create_text_widget(right_frame)
             gui.translation_text.grid(row=1, column=0, sticky="nsew", padx=2, pady=2)
@@ -44842,9 +43996,7 @@ class WhisperLayoutManager:
             if DEBUG_LEVEL >= 3:
                 log_exception("layout", "translation_text creation failed", e)
 
-        # -----------------------------------------------------------------
         # 9. PanedWindow konfigurieren
-        # -----------------------------------------------------------------
         try:
             gui.paned_window.paneconfig(left_frame, minsize=250, width=400)
             gui.paned_window.paneconfig(right_frame, minsize=250, width=400)
@@ -45043,9 +44195,7 @@ class WhisperLayoutManager:
         ToolTip(gui.exit_button, "Programm beenden (Strg+Q / Cmd+Q)")
 
 
-# =============================================================================
 # LinuxPerformanceOptimizer
-# =============================================================================
 if IS_LINUX and PSUTIL_AVAILABLE:
 
     class LinuxPerformanceOptimizer:
@@ -45084,9 +44234,7 @@ if IS_LINUX and PSUTIL_AVAILABLE:
                     f"LinuxPerformanceOptimizer initialisiert (gui_ref={'vorhanden' if gui_ref else 'fehlt'})"
                 )
 
-        # -------------------------------------------------------------------------
         # Hilfsmethoden für GUI-Zugriff
-        # -------------------------------------------------------------------------
         def _is_gui_available_safe(self) -> bool:
             try:
                 if self.gui is None:
@@ -45577,9 +44725,7 @@ class AdvancedSettings:
     Enthält Parameter für Transkription, Übersetzung, GUI und System.
     """
 
-    # =========================================================================
     # Transkriptions-Parameter
-    # =========================================================================
     beam_size: int = 10
     temperature: float = Config.DEFAULT_TEMPERATURE
     vad_filter: bool = False
@@ -45601,9 +44747,7 @@ class AdvancedSettings:
     ollama_host: str = "http://localhost:11434"
     ollama_temperature: float = 0.0
 
-    # =========================================================================
     # Modi
-    # =========================================================================
     asian_mode: bool = False
     precision_mode: bool = False
     audio_profile: str = "transcription"
@@ -45616,9 +44760,7 @@ class AdvancedSettings:
     min_confidence: float = 0.1
     min_language_confidence: float = 0.1
 
-    # =========================================================================
     # VAD (Voice Activity Detection)
-    # =========================================================================
     vad_threshold: float = 0.2
     vad_min_speech_duration_ms: int = 150
     vad_min_silence_duration_ms: int = 50
@@ -45627,48 +44769,70 @@ class AdvancedSettings:
     # Blacklist & Text-Filter
     blacklist: List[str] = field(
         default_factory=lambda: [
+            # Deutsche Untertitel-Credits (Öffentlich-Rechtliche)
             "Untertitelung des ZDF für funk",
             "Untertitelung des ZDF",
             "Untertitelung: ZDF",
             "Untertitelung BR",
             "Untertitelung WDR",
             "Untertitelung NDR",
+            # Internationale Copyright- und Metadaten-Hinweise
             "© 2025",
             "© 2024",
+            "© 2023",
+            "© 2022",
             "Copyright",
             "All rights reserved",
+            # Typische YouTube-Endcard-Phrasen
             "Abonniert den Kanal",
             "Liken, teilen, abonnieren",
             "Vielen Dank fürs Zuschauen",
             "Bis zum nächsten Mal",
+            "Danke fürs Zuschauen",
+            "Subscribe to the channel",
+            "Like, share, subscribe",
+            "Thanks for watching",
+            "See you next time",
+            # Spezifische, häufig auftretende Untertitelersteller (Hardcoded in Videos)
             "Teksting av Nicolai Winther",
             "Продолжение следует...",
             "Субтитры создавал DimaTorzok",
+            "Субтитры сделал DimaTorzok",
+            "Субтитры сделал",
             "Transcription by CastingWords",
+            "Subtitles by",
+            # Häufige KI-Halluzinationen bei musikalischen Intros/Outros
+            "[Music]",
+            "Music.",
+            "Oh, oh, oh",
+            "Oh,",
+            "[Applause]",
+            "Thank you.",
+            "Thank you very much.",
+            "We'll be right back.",
+            "We'll be right back",
+            "We'll see you next time.",
+            "Stay tuned.",
         ]
     )
-    blacklist_mode: str = "word"
+    blacklist_mode: str = "word"      # "word" filtert ganze Wörter, "substring" filtert Teilstrings
     enable_noise_reduction: bool = False
     enable_audio_enhancement: bool = False
     enable_duplicate_check: bool = False
     hotwords: str = ""
 
-    # =========================================================================
     # Performance (Threads)
-    # =========================================================================
     transcription_workers: int = 2
     translation_workers: int = 1
     cpu_threads: int = 0
 
     # Text-to-Speech
-    # =========================================================================
     tts_engine: str = "piper"
     tts_voice: str = "de_DE-thorsten-medium"
     tts_length_scale: float = 0.9
     tts_sentence_silence: float = 0.1
 
     # Erweiterte Whisper-Parameter
-    # =========================================================================
     best_of: int = 5
     patience: float = 1.0
     log_prob_threshold: float = -1.2
@@ -45677,25 +44841,19 @@ class AdvancedSettings:
     no_speech_threshold: float = 0.6
     suppress_tokens: str = "-1"
 
-    # =========================================================================
     # VAD-Fallback & Proxy
     vad_fallback_enabled: bool = True
     proxy_url: str = "socks5://127.0.0.1:18080"
     proxy_enabled: bool = False
 
     # Zusammenfassung (Ollama)
-    # =========================================================================
     summarize_temperature: float = 0.1
     summarize_model: str = "qwen2.5:7b"
 
-    # =========================================================================
     # Livestream
-    # =========================================================================
     live_from_start: bool = False   # Standard: live ab jetzt (nicht von Anfang an)
 
-    # =========================================================================
     # Download-Modus
-    # =========================================================================
     download_inactivity_timeout: float = 30.0   # Sekunden
 
     # Erweiterte Pfade (für Dateizugriff)
@@ -45709,20 +44867,14 @@ class AdvancedSettings:
     # Zielsprache (für Übersetzung)
     target_language: str = "de"
 
-    # =========================================================================
     # Satzpufferung (für kontinuierliche Übersetzung)
-    # =========================================================================
     sentence_flush_interval: float = 3.0  # Sekunden
     sentence_flush_word_threshold: int = 30  # Anzahl Wörter
 
-    # =========================================================================
     # Reflection (selbstkorrigierende Übersetzung)
-    # =========================================================================
     enable_reflection: bool = False
 
-    # =========================================================================
     # Interna (nicht direkt speicherbar)
-    # =========================================================================
     config: Config = field(init=False, repr=False, compare=False)
     _chunk_duration: float = field(
         default=Config.BASE_CHUNK_DURATION, init=False, repr=False
@@ -45926,18 +45078,8 @@ class AdvancedSettings:
         Diese Methode wird einmalig beim Laden der Einstellungen aufgerufen und
         kann später erneut ausgeführt werden, wenn der Benutzer die Modi ändert
         (dann wird vorher der Cache geleert).
-
-        Verbesserungen:
-            - Sichern der Originalwerte in `_original_values` (nur beim ersten Mal).
-            - Detaillierte Debug-Ausgaben bei `DEBUG_LEVEL >= 2`.
-            - Atomares Anwenden der Overrides mit Validierung der Wertebereiche.
-            - Setzt ein Flag `_mode_overrides_applied`, um versehentliches doppeltes
-              Sichern zu verhindern.
-            - Kann gefahrlos mehrfach aufgerufen werden (Cache wird nur einmal gefüllt).
         """
-        # -----------------------------------------------------------------
         # 1. Originalwerte sichern, falls noch nicht geschehen
-        # -----------------------------------------------------------------
         if not hasattr(self, '_original_values'):
             self._original_values = {}
 
@@ -45963,9 +45105,7 @@ class AdvancedSettings:
                     "_apply_mode_overrides: Cache bereits gefüllt – überspringe Sicherung"
                 )
 
-        # -----------------------------------------------------------------
         # 2. Hilfsfunktion zum sicheren Setzen von Werten
-        # -----------------------------------------------------------------
         def safe_set(attr_name: str, new_value: Any, min_val: Optional[float] = None,
                      max_val: Optional[float] = None) -> None:
             """
@@ -46000,9 +45140,7 @@ class AdvancedSettings:
             except Exception as e:
                 logger.error(f"_apply_mode_overrides: Fehler beim Setzen von '{attr_name}': {e}")
 
-        # -----------------------------------------------------------------
         # 3. Overrides für asian_mode
-        # -----------------------------------------------------------------
         if getattr(self, 'asian_mode', False):
             if DEBUG_LEVEL >= 2:
                 log_debug("settings", "_apply_mode_overrides: Wende asian_mode Overrides an")
@@ -46011,9 +45149,7 @@ class AdvancedSettings:
             safe_set("vad_min_speech_duration_ms", 300, min_val=0, max_val=2000)
             safe_set("vad_min_silence_duration_ms", 120, min_val=0, max_val=2000)
 
-        # -----------------------------------------------------------------
         # 4. Overrides für precision_mode
-        # -----------------------------------------------------------------
         if getattr(self, 'precision_mode', False):
             if DEBUG_LEVEL >= 2:
                 log_debug("settings", "_apply_mode_overrides: Wende precision_mode Overrides an")
@@ -46024,9 +45160,7 @@ class AdvancedSettings:
             safe_set("vad_min_speech_duration_ms", 260, min_val=0, max_val=2000)
             safe_set("vad_min_silence_duration_ms", 110, min_val=0, max_val=2000)
 
-        # -----------------------------------------------------------------
         # 5. Flag setzen, dass Overrides angewendet wurden
-        # -----------------------------------------------------------------
         self._mode_overrides_applied = True
 
         if DEBUG_LEVEL >= 2:
@@ -46040,13 +45174,6 @@ class AdvancedSettings:
         Diese Methode sollte aufgerufen werden, wenn alle Modi (asian_mode,
         precision_mode) deaktiviert werden. Sie setzt die betroffenen Attribute
         auf ihre ursprünglichen Werte zurück und löscht den internen Cache.
-
-        Verbesserungen:
-            - Prüft, ob überhaupt gesicherte Werte vorhanden sind.
-            - Setzt nur die Attribute zurück, die tatsächlich überschrieben wurden.
-            - Detaillierte Debug-Ausgaben.
-            - Setzt `_mode_overrides_applied` zurück.
-            - Kann gefahrlos mehrfach aufgerufen werden.
         """
         if not hasattr(self, '_original_values') or not self._original_values:
             if DEBUG_LEVEL >= 2:
@@ -46622,11 +45749,7 @@ def get_advanced_settings() -> "AdvancedSettings":
         _ADVANCED_SETTINGS_CACHE = AdvancedSettings.load_from_file()
     return _ADVANCED_SETTINGS_CACHE
     
-    
-
-# =============================================================================
 # 19. HILFSFUNKTIONEN FÜR MAIN (Windows-Konsolenmanagement, System-Check, Argument-Parser, globale Exception-Handler)
-# =============================================================================
 _original_console_mode: Optional[int] = None
 _original_codepage: Optional[int] = None
 
@@ -46919,10 +46042,8 @@ def thread_exception_handler(args):
 sys.excepthook = global_exception_handler
 threading.excepthook = thread_exception_handler
 
-# =============================================================================
-# 20. MAIN-FUNKTION UND EINTRITTSPUNKT (optimiert)
-# =============================================================================
 
+# 20. MAIN-FUNKTION UND EINTRITTSPUNKT
 
 def configure_logging(
     debug_level: int, debug_components: List[str], quiet: bool
@@ -46987,9 +46108,7 @@ def setup_platform_environment() -> None:
     PlatformUtils.setup_platform_environment()
 
 
-# =============================================================================
 # System‑Info und Kompatibilitätsprüfung (print_system_info_debug3 ist bereits vorhanden)
-# =============================================================================
 def _run_system_check() -> int:
     """Führt eine umfassende System‑ und Abhängigkeitsprüfung durch."""
     issues = check_platform_compatibility()
@@ -47026,10 +46145,7 @@ def _run_system_check() -> int:
     return 0 if not issues else 1
 
 
-# =============================================================================
 # Unit‑Tests (optional, nur bei --test)
-# =============================================================================
-
 
 def run_tests() -> int:
     """Führt alle internen Unit‑Tests aus und gibt 0 bei Erfolg, sonst 1 zurück."""
@@ -47090,9 +46206,7 @@ def run_tests() -> int:
                 self.assertEqual(result[0], "local")
                 os.unlink(tmp.name)
 
-    # -------------------------------------------------------------------------
     # TestAudioEnhancer
-    # -------------------------------------------------------------------------
     class TestAudioEnhancer(unittest.TestCase):
         def setUp(self):
             self.config = Config()
@@ -47109,9 +46223,7 @@ def run_tests() -> int:
             result = self.enhancer.is_duplicate("Hello world", "Goodbye world", deque())
             self.assertFalse(result)
 
-    # -------------------------------------------------------------------------
     # TestTranscriptionEngine
-    # -------------------------------------------------------------------------
     class TestTranscriptionEngine(unittest.TestCase):
         def setUp(self):
             self.settings = AdvancedSettings()
@@ -47155,9 +46267,7 @@ def run_tests() -> int:
                 int(config.CHUNK_DURATION * config.BYTES_PER_SECOND),
             )
 
-    # -------------------------------------------------------------------------
     # TestGoogleTranslationEngine (mit Mock)
-    # -------------------------------------------------------------------------
     class TestGoogleTranslationEngine(unittest.TestCase):
         def setUp(self):
             self.engine = GoogleTranslationEngine(target_lang="de")
@@ -47183,9 +46293,7 @@ def run_tests() -> int:
                 result = self.engine.translate_text("Hallo Welt")
                 self.assertIsNone(result)
 
-    # -------------------------------------------------------------------------
     # TestQueueManager (mit echter Queue)
-    # -------------------------------------------------------------------------
     class TestQueueManager(unittest.TestCase):
         def setUp(self):
             self.gui_mock = MagicMock()
@@ -47232,9 +46340,8 @@ def run_tests() -> int:
             self.assertEqual(self.processor._state, AudioProcessor.State.IDLE)
             self.assertTrue(self.processor._stop_event.is_set())
 
-    # =========================================================================
-    # NEU: Erweiterte Tests für kritische Pfade
-    # =========================================================================
+    # Erweiterte Tests für kritische Pfade
+
     class TestAdvancedScenarios(unittest.TestCase):
         def setUp(self):
             self.stream_manager = StreamManager(enable_debug=False)
@@ -47301,9 +46408,7 @@ def run_tests() -> int:
             mock_find.return_value = True
             self.assertTrue(self.tts.is_available("pyttsx3"))
 
-        # --------------------------------------------------------------------
         # 4. Leere / ungültige Antwort von Google-Übersetzung
-        # --------------------------------------------------------------------
         def test_empty_translation_response(self):
             # Simuliere einen Fehler in der API – sollte None zurückgeben
             with patch.object(
@@ -47327,9 +46432,7 @@ def run_tests() -> int:
                 )
                 self.assertIsNone(result)
 
-        # --------------------------------------------------------------------
         # 5. OOM-Fallback beim Modell-Laden (CPU-Fallback, wenn kein kleineres Modell verfügbar)
-        # --------------------------------------------------------------------
         @patch("torch.cuda.is_available", return_value=True)
         @patch("torch.cuda.empty_cache")
         @patch("torch.cuda.memory_allocated", return_value=6 * 1024**3)
@@ -47352,9 +46455,7 @@ def run_tests() -> int:
             # Nach erfolglosem Versuch sollte der Device auf "cpu" gesetzt sein
             self.assertEqual(self.whisper_engine.device, "cpu")
 
-    # -------------------------------------------------------------------------
     # Tests zusammenstellen und ausführen
-    # -------------------------------------------------------------------------
     loader = unittest.TestLoader()
     suite = loader.loadTestsFromTestCase(TestPlatformUtils)
     suite.addTests(loader.loadTestsFromTestCase(TestStreamManager))
@@ -47372,9 +46473,7 @@ def run_tests() -> int:
     return 0 if result.wasSuccessful() else 1
 
 
-# =============================================================================
 # Argument‑Parser
-# =============================================================================
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="🐉 Dragon Whisperer - Livestream Transcription & Translation",
@@ -47428,9 +46527,7 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# -----------------------------------------------------------------------------
 # Hilfsfunktionen für Benutzerfeedback
-# -----------------------------------------------------------------------------
 def _print_welcome(debug_level: int, quiet: bool) -> None:
     """Gibt eine Willkommensnachricht im Konsolen‑Modus aus."""
     if quiet or debug_level == 0:
