@@ -20152,57 +20152,73 @@ class QueueManager:
 # =============================================================================
 class StatusBar:
     """
-    Statusleiste am unteren Rand des Hauptfensters.
+    Hochwertige, themenfähige Statusleiste für Dragon Whisperer.
+    Erzeugt alle Bedienelemente und registriert sie automatisch in der GUI.
     """
 
     def __init__(
-        self, parent: tk.Frame, gui: "DragonWhispererGUI", demo_mode: bool = False
+        self,
+        parent: tk.Frame,
+        gui: "DragonWhispererGUI",
+        demo_mode: bool = False,
     ) -> None:
         """
-        Initialisiert die Statusleiste.
-
-        Args:
-            parent: Das übergeordnete Widget (normalerweise das Hauptfenster).
-            gui: Referenz auf die Haupt-GUI (für Zugriff auf Controller, Einstellungen etc.).
-            demo_mode: Ob die Anwendung im Demo‑Modus läuft (Whisper fehlt).
+        Initialisiert die Statusleiste und platziert sie im Raster des
+        übergeordneten Containers.
         """
         self.gui = gui
         self.root = gui.root
         self.demo_mode = demo_mode
-        self.frame = tk.Frame(parent, bg=gui.current_theme.BG_SECONDARY, height=36)
-        self.frame.grid_propagate(True)
+        self._theme = gui.current_theme
 
-        # Trennlinie oben
-        separator = tk.Frame(self.frame, height=2, bg=gui.current_theme.DRAGON_GREEN)
+        # Hauptcontainer – wird direkt im parent platziert
+        self.frame = tk.Frame(
+            parent,
+            bg=self._theme.BG_SECONDARY,
+            height=36,
+        )
+        self.frame.grid_propagate(True)  # Höhe kann durch Inhalt variieren
+        self.frame.grid(row=4, column=0, sticky="ew", pady=(2, 0))
+
+        # Trennlinie (dünner grüner Balken)
+        separator = tk.Frame(self.frame, height=2, bg=self._theme.DRAGON_GREEN)
         separator.pack(fill="x", side="top")
 
-        # Hauptcontainer
-        main_container = tk.Frame(self.frame, bg=gui.current_theme.BG_SECONDARY)
+        # Hauptinhalt – drei Spalten mit unterschiedlichen Gewichten
+        main_container = tk.Frame(self.frame, bg=self._theme.BG_SECONDARY)
         main_container.pack(fill="x", expand=True, padx=8, pady=3)
         main_container.columnconfigure(0, weight=0)
         main_container.columnconfigure(1, weight=1)
         main_container.columnconfigure(2, weight=0)
 
         # Linke Buttons (Schnellzugriff)
-        left_panel = tk.Frame(main_container, bg=gui.current_theme.BG_SECONDARY)
+        left_panel = tk.Frame(main_container, bg=self._theme.BG_SECONDARY)
         left_panel.grid(row=0, column=0, sticky="w", padx=2)
         self._create_left_buttons(left_panel)
 
         # Mittlerer Bereich (Progressbar + Systeminfo)
-        center_panel = tk.Frame(main_container, bg=gui.current_theme.BG_SECONDARY)
+        center_panel = tk.Frame(main_container, bg=self._theme.BG_SECONDARY)
         center_panel.grid(row=0, column=1, sticky="ew", padx=3)
         self._create_center_panel(center_panel)
 
-        # Rechte Buttons (Exit, TTS, Hilfe, VAD, Live-Modus)
-        right_panel = tk.Frame(main_container, bg=gui.current_theme.BG_SECONDARY)
+        # Rechte Buttons (Exit, TTS, Hilfe, etc.)
+        right_panel = tk.Frame(main_container, bg=self._theme.BG_SECONDARY)
         right_panel.grid(row=0, column=2, sticky="e", padx=2)
         self._create_right_buttons(right_panel)
 
+        # WICHTIG: Registriere das Frame unter dem erwarteten Namen,
+        # damit bestehende Referenzen (z. B. in create_layout) weiterhin funktionieren.
+        self.gui.status_bar_frame = self.frame
+
+        if DEBUG_LEVEL >= 3:
+            log_debug("statusbar", "StatusBar initialisiert und platziert")
+
+    # -------------------------------------------------------------------------
+    # Linke Schaltflächen
+    # -------------------------------------------------------------------------
     def _create_left_buttons(self, parent: tk.Frame) -> None:
-        """
-        Erstellt die Schnellzugriffs-Buttons auf der linken Seite der Statusleiste.
-        """
-        quick_actions = [
+        """Erstellt die Schnellzugriffs‑Buttons auf der linken Seite."""
+        actions = [
             ("🗑️", self.gui.clear_all, "Alles löschen (Ctrl+Shift+C)"),
             ("💾", self.gui.save_transcript, "Transkription speichern (Ctrl+S)"),
             ("📝", self.gui.export_subtitles, "Untertitel exportieren (Ctrl+E)"),
@@ -20211,31 +20227,32 @@ class StatusBar:
             ("🌐", self.gui.show_translation_dialog, "Text übersetzen (Ctrl+T)"),
             ("🤖", self.gui.show_summarize_dialog, "Zusammenfassung mit Ollama"),
         ]
-        for i, (icon, command, tooltip) in enumerate(quick_actions):
+
+        for idx, (icon, command, tooltip) in enumerate(actions):
             btn = tk.Button(
                 parent,
                 text=icon,
                 command=command,
-                bg=self.gui.current_theme.BG_TERTIARY,
-                fg=self.gui.current_theme.TEXT_PRIMARY,
+                bg=self._theme.BG_TERTIARY,
+                fg=self._theme.TEXT_PRIMARY,
                 relief="flat",
                 font=("Segoe UI", 9),
                 cursor="hand2",
                 padx=2,
                 pady=1,
-                activebackground=self.gui.current_theme.BG_HOVER,
+                activebackground=self._theme.BG_HOVER,
                 width=2,
             )
-            btn.grid(row=0, column=i, padx=1, sticky="w")
+            btn.grid(row=0, column=idx, padx=1, sticky="w")
             ToolTip(btn, tooltip)
 
-        # System‑Check‑Button (🔍)
+        # System‑Check‑Button (optional)
         check_btn = tk.Button(
             parent,
             text="🔍",
             command=self.gui.run_system_check,
-            bg=self.gui.current_theme.BG_TERTIARY,
-            fg=self.gui.current_theme.TEXT_PRIMARY,
+            bg=self._theme.BG_TERTIARY,
+            fg=self._theme.TEXT_PRIMARY,
             relief="flat",
             font=("Segoe UI", 9),
             cursor="hand2",
@@ -20243,17 +20260,19 @@ class StatusBar:
             pady=1,
             width=2,
         )
-        check_btn.grid(row=0, column=len(quick_actions), padx=1, sticky="w")
+        check_btn.grid(row=0, column=len(actions), padx=1, sticky="w")
         ToolTip(check_btn, "System-Abhängigkeiten prüfen")
 
-        # Installations‑Button (nur im Demo‑Modus oder wenn Übersetzer fehlt)
+        col_offset = len(actions) + 1
+
+        # Installations‑Button nur im Demo‑Modus oder wenn Übersetzer fehlt
         if self.demo_mode or not TRANSLATOR_AVAILABLE:
             install_btn = tk.Button(
                 parent,
                 text="📦",
                 command=self.gui.show_install_dialog,
-                bg=self.gui.current_theme.BG_TERTIARY,
-                fg=self.gui.current_theme.TEXT_PRIMARY,
+                bg=self._theme.BG_TERTIARY,
+                fg=self._theme.TEXT_PRIMARY,
                 relief="flat",
                 font=("Segoe UI", 9),
                 cursor="hand2",
@@ -20261,36 +20280,38 @@ class StatusBar:
                 pady=1,
                 width=2,
             )
-            install_btn.grid(row=0, column=len(quick_actions) + 1, padx=1, sticky="w")
+            install_btn.grid(row=0, column=col_offset, padx=1, sticky="w")
             ToolTip(install_btn, "Fehlende Pakete installieren")
+            col_offset += 1
 
-        # Demo‑Modus‑Hinweis (roter Balken)
+        # Demo‑Modus‑Hinweis
         if self.demo_mode:
             demo_label = tk.Label(
                 parent,
                 text="⚠️ DEMO-MODUS",
-                bg=self.gui.current_theme.BG_TERTIARY,
+                bg=self._theme.BG_TERTIARY,
                 fg="red",
                 font=("Segoe UI", 8, "bold"),
                 padx=5,
                 pady=2,
             )
-            demo_label.grid(row=0, column=len(quick_actions) + 2, padx=5, sticky="w")
+            demo_label.grid(row=0, column=col_offset, padx=5, sticky="w")
             ToolTip(
                 demo_label,
                 "Keine Whisper-Bibliothek verfügbar – nur Platzhalter-Transkriptionen",
             )
 
+    # -------------------------------------------------------------------------
+    # Mittlerer Bereich (Fortschritt + Systeminfo)
+    # -------------------------------------------------------------------------
     def _create_center_panel(self, parent: tk.Frame) -> None:
-        """
-        Erstellt den mittleren Bereich der Statusleiste mit Progressbar und Systeminfo.
-        """
+        """Erstellt den mittleren Bereich der Statusleiste mit Progressbar und Systeminfo."""
         # Fortschrittsbalken
         self.gui.progress_bar = ttk.Progressbar(
             parent,
             mode="determinate",
             length=110,
-            style="Dark.Horizontal.TProgressbar"
+            style="Dark.Horizontal.TProgressbar",
         )
         self.gui.progress_bar.pack(side="left", padx=(3, 3))
         ToolTip(self.gui.progress_bar, "Fortschritt der Audioverarbeitung")
@@ -20300,8 +20321,8 @@ class StatusBar:
             parent,
             text="",
             font=("Segoe UI", 7),
-            bg=self.gui.current_theme.BG_SECONDARY,
-            fg=self.gui.current_theme.TEXT_SECONDARY,
+            bg=self._theme.BG_SECONDARY,
+            fg=self._theme.TEXT_SECONDARY,
         )
         self.gui.progress_label.pack(side="left", padx=(0, 5))
 
@@ -20313,14 +20334,15 @@ class StatusBar:
             parent,
             text=default_text,
             font=("Segoe UI", 7, "normal"),
-            bg=self.gui.current_theme.BG_SECONDARY,
-            fg=self.gui.current_theme.TEXT_SECONDARY,
+            bg=self._theme.BG_SECONDARY,
+            fg=self._theme.TEXT_SECONDARY,
             padx=2,
         )
         self.gui.system_info_label.pack(side="left", fill="x", expand=True)
 
+    # Rechte Schaltflächen (Exit, TTS, Hilfe, VAD, Live‑Modus)
     def _create_right_buttons(self, parent: tk.Frame) -> None:
-        """Erstellt die rechten Buttons der Statusleiste (Exit, TTS, Hilfe, VAD, Live-Modus)."""
+        """Erstellt die rechten Buttons der Statusleiste."""
         # Exit-Button
         self.gui.exit_button = tk.Button(
             parent,
@@ -20338,13 +20360,13 @@ class StatusBar:
         self.gui.exit_button.pack(side="right")
         ToolTip(self.gui.exit_button, "Programm beenden (Strg+Q / Cmd+Q)")
 
-        # TTS-Speichern-Button
+        # TTS‑Speichern‑Button
         self.gui.save_tts_btn = tk.Button(
             parent,
             text="💾🎤",
             command=self.gui.save_tts_as_mp3,
-            bg=self.gui.current_theme.BG_TERTIARY,
-            fg=self.gui.current_theme.TEXT_PRIMARY,
+            bg=self._theme.BG_TERTIARY,
+            fg=self._theme.TEXT_PRIMARY,
             relief="flat",
             font=("Segoe UI", 9),
             cursor="hand2",
@@ -20355,13 +20377,13 @@ class StatusBar:
         self.gui.save_tts_btn.pack(side="right", padx=2)
         ToolTip(self.gui.save_tts_btn, "Ausgewählten Text als MP3 speichern")
 
-        # TTS-Vorlese-Button
+        # TTS‑Vorlese‑Button
         self.gui.tts_btn = tk.Button(
             parent,
             text="🔊",
             command=self.gui.speak_current_text,
-            bg=self.gui.current_theme.BG_TERTIARY,
-            fg=self.gui.current_theme.TEXT_PRIMARY,
+            bg=self._theme.BG_TERTIARY,
+            fg=self._theme.TEXT_PRIMARY,
             relief="flat",
             font=("Segoe UI", 9),
             cursor="hand2",
@@ -20372,13 +20394,13 @@ class StatusBar:
         self.gui.tts_btn.pack(side="right", padx=2)
         ToolTip(self.gui.tts_btn, "Ausgewählten Text vorlesen (TTS)")
 
-        # Lautstärke-Button (öffnet kleines Popup)
+        # Lautstärke‑Button (öffnet kleines Popup)
         self.gui.volume_btn = tk.Button(
             parent,
             text="🔊",
             command=self.gui.open_volume_popup,
-            bg=self.gui.current_theme.BG_TERTIARY,
-            fg=self.gui.current_theme.TEXT_PRIMARY,
+            bg=self._theme.BG_TERTIARY,
+            fg=self._theme.TEXT_PRIMARY,
             relief="flat",
             font=("Segoe UI", 9),
             cursor="hand2",
@@ -20389,13 +20411,13 @@ class StatusBar:
         self.gui.volume_btn.pack(side="right", padx=2)
         ToolTip(self.gui.volume_btn, "Lautstärke einstellen")
 
-        # Hilfe-Button
+        # Hilfe‑Button
         help_btn = tk.Button(
             parent,
             text="⌨️",
             command=self.gui.show_shortcuts_help,
-            bg=self.gui.current_theme.BG_TERTIARY,
-            fg=self.gui.current_theme.TEXT_PRIMARY,
+            bg=self._theme.BG_TERTIARY,
+            fg=self._theme.TEXT_PRIMARY,
             relief="flat",
             font=("Segoe UI", 9),
             cursor="hand2",
@@ -20406,13 +20428,13 @@ class StatusBar:
         help_btn.pack(side="right", padx=2)
         ToolTip(help_btn, "Tastenkürzel anzeigen (F1)")
 
-        # Korrektur-Button (Ollama)
+        # Korrektur‑Button (Ollama)
         self.gui.correct_btn = tk.Button(
             parent,
             text="🔧",
             command=self.gui.correct_transcript_with_ollama,
-            bg=self.gui.current_theme.BG_TERTIARY,
-            fg=self.gui.current_theme.TEXT_PRIMARY,
+            bg=self._theme.BG_TERTIARY,
+            fg=self._theme.TEXT_PRIMARY,
             relief="flat",
             font=("Segoe UI", 9),
             cursor="hand2",
@@ -20423,13 +20445,13 @@ class StatusBar:
         self.gui.correct_btn.pack(side="right", padx=2)
         ToolTip(self.gui.correct_btn, "Transkript mit Ollama korrigieren")
 
-        # VAD-Fallback-Button
+        # VAD‑Fallback‑Button
         self.gui.vad_fallback_btn = tk.Button(
             parent,
             text="🔁 VAD ON",
             command=self.gui.toggle_vad_fallback,
-            bg=self.gui.current_theme.BG_TERTIARY,
-            fg=self.gui.current_theme.TEXT_PRIMARY,
+            bg=self._theme.BG_TERTIARY,
+            fg=self._theme.TEXT_PRIMARY,
             relief="flat",
             font=("Segoe UI", 7),
             padx=2,
@@ -20442,13 +20464,13 @@ class StatusBar:
             "VAD-Fallback aktivieren/deaktivieren (wenn aus, werden leere Chunks ignoriert)",
         )
 
-        # Live-Modus-Button (Chunk-Dauer umschalten)
+        # Live‑Modus‑Button (Chunk-Dauer umschalten)
         self.gui.live_mode_btn = tk.Button(
             parent,
             text="⏱️ 20s",
             command=self.gui.toggle_live_mode,
-            bg=self.gui.current_theme.BG_TERTIARY,
-            fg=self.gui.current_theme.TEXT_PRIMARY,
+            bg=self._theme.BG_TERTIARY,
+            fg=self._theme.TEXT_PRIMARY,
             relief="flat",
             font=("Segoe UI", 7),
             padx=2,
@@ -20457,6 +20479,42 @@ class StatusBar:
         )
         self.gui.live_mode_btn.pack(side="right", padx=2)
         ToolTip(self.gui.live_mode_btn, "Chunk-Dauer umschalten (20s/10s)")
+
+    # -------------------------------------------------------------------------
+    # Theme‑Aktualisierung (kann von außen aufgerufen werden)
+    # -------------------------------------------------------------------------
+    def apply_theme(self) -> None:
+        """
+        Wendet das aktuelle ``gui.current_theme`` auf alle Widgets der
+        Statusleiste an. Nützlich nach globalen Theme‑Wechseln.
+        """
+        self._theme = self.gui.current_theme
+        self.frame.configure(bg=self._theme.BG_SECONDARY)
+        # Rekursive Farbaktualisierung aller Kinder
+        self._update_widget_tree(self.frame)
+
+    def _update_widget_tree(self, parent: tk.Widget) -> None:
+        """Rekursive Aktualisierung der Hintergrund‑ und Textfarben."""
+        for widget in parent.winfo_children():
+            try:
+                if isinstance(widget, tk.Frame):
+                    widget.configure(bg=self._theme.BG_SECONDARY)
+                elif isinstance(widget, tk.Label):
+                    widget.configure(
+                        bg=self._theme.BG_SECONDARY,
+                        fg=self._theme.TEXT_PRIMARY,
+                    )
+                elif isinstance(widget, tk.Button):
+                    widget.configure(
+                        bg=self._theme.BG_TERTIARY,
+                        fg=self._theme.TEXT_PRIMARY,
+                        activebackground=self._theme.BG_HOVER,
+                    )
+                # ttk.Progressbar wird über Style gesteuert – keine Änderung nötig
+            except tk.TclError:
+                pass
+            if hasattr(widget, "winfo_children"):
+                self._update_widget_tree(widget)
 
 
 class TTSManager:
@@ -28912,7 +28970,6 @@ class DragonWhispererGUI:
                 value=self.advanced_settings.vad_fallback_enabled
             )
             self.status_bar = StatusBar(self.root, self, demo_mode=self.demo_mode)
-            self.status_bar.frame.grid(row=4, column=0, sticky="ew", pady=(2, 0))
             self._update_vad_fallback_button()
             self._update_live_mode_button()
             self._start_gui_updaters()
@@ -42970,9 +43027,6 @@ class WhisperLayoutManager:
 
         self.create_compact_control_panel(input_frame)
 
-        self.setup_status_bar()
-        gui.status_bar_frame.grid(row=4, column=0, sticky="ew", pady=(2, 0))
-
         self.create_text_areas()
         gui.text_container.grid(
             row=3, column=0, sticky="nsew", padx=12, pady=8
@@ -43697,168 +43751,6 @@ class WhisperLayoutManager:
         # 🔥 KEIN pack() oder grid() hier – das erledigt der Aufrufer!
         ContextMenuMixin(text_widget)
         return text_widget
-
-    def setup_status_bar(self) -> None:
-        gui = self.gui_ref
-        theme = gui.current_theme
-        gui.status_bar_frame = tk.Frame(
-            self.root, bg=theme.BG_SECONDARY, height=50
-        )
-        gui.status_bar_frame.grid_propagate(True)
-
-        separator = tk.Frame(
-            gui.status_bar_frame,
-            height=2,
-            bg=theme.DRAGON_GREEN,
-        )
-        separator.pack(fill="x", side="top")
-
-        main_container = tk.Frame(
-            gui.status_bar_frame, bg=theme.BG_SECONDARY
-        )
-        main_container.pack(fill="x", expand=True, padx=12, pady=8)
-        main_container.columnconfigure(0, weight=0)
-        main_container.columnconfigure(1, weight=1)
-        main_container.columnconfigure(2, weight=0)
-
-        def _add_button(parent, text, command, tooltip, **kwargs):
-            btn = tk.Button(
-                parent,
-                text=text,
-                command=command,
-                bg=theme.BG_TERTIARY,
-                fg=theme.TEXT_PRIMARY,
-                relief="flat",
-                font=Fonts.SMALL,
-                cursor="hand2",
-                padx=4,
-                pady=2,
-                activebackground=theme.BG_HOVER,
-                **kwargs
-            )
-            ToolTip(btn, tooltip)
-            return btn
-
-        left_panel = tk.Frame(main_container, bg=theme.BG_SECONDARY)
-        left_panel.grid(row=0, column=0, sticky="w", padx=5)
-
-        quick_actions = [
-            ("🗑️", gui.clear_all, "Alles löschen"),
-            ("💾", gui.save_transcript, "Transkription speichern"),
-            ("📝", gui.export_subtitles, "Untertitel exportieren"),
-            ("📊", gui.show_simple_stats, "Statistiken anzeigen"),
-            ("⚙️", gui.show_advanced_settings, "Erweiterte Einstellungen"),
-            ("🌐", gui.show_translation_dialog, "Text übersetzen"),
-            ("🤖", gui.show_summarize_dialog, "Mit Ollama zusammenfassen"),
-        ]
-        for i, (icon, cmd, tip) in enumerate(quick_actions):
-            btn = _add_button(left_panel, icon, cmd, tip)
-            btn.grid(row=0, column=i, padx=1, sticky="w")
-
-        if getattr(gui, "demo_mode", False) or not TRANSLATOR_AVAILABLE:
-            install_btn = _add_button(left_panel, "📦", gui.show_install_dialog, "Fehlende Pakete installieren")
-            install_btn.grid(row=0, column=len(quick_actions), padx=1, sticky="w")
-
-        center_panel = tk.Frame(main_container, bg=theme.BG_SECONDARY)
-        center_panel.grid(row=0, column=1, sticky="ew", padx=5)
-
-        gui.progress_bar = ttk.Progressbar(
-            center_panel,
-            mode="determinate",
-            length=150,
-            style="Dark.Horizontal.TProgressbar",
-        )
-        gui.progress_bar.pack(side="left", padx=(10, 10))
-
-        gui.progress_label = tk.Label(
-            center_panel,
-            text="",
-            font=Fonts.SMALL,
-            bg=theme.BG_SECONDARY,
-            fg=theme.TEXT_SECONDARY,
-        )
-        gui.progress_label.pack(side="left", padx=(0, 10))
-
-        if IS_WINDOWS:
-            default_text = "🪟 Windows | CPU: --% | RAM: --MB | GPU: --% | Model: --"
-        elif IS_MACOS:
-            if IS_ARM:
-                default_text = "🍎 macOS (Apple Silicon) | CPU: --% | RAM: --MB | GPU: --% | Model: --"
-            else:
-                default_text = "🍎 macOS (Intel) | CPU: --% | RAM: --MB | GPU: --% | Model: --"
-        elif IS_LINUX:
-            default_text = "🐧 Linux | CPU: --% | RAM: --MB | GPU: --% | Model: --"
-        else:
-            default_text = "🌐 Unknown OS | CPU: --% | RAM: --MB | GPU: --% | Model: --"
-
-        gui.system_info_label = tk.Label(
-            center_panel,
-            text=default_text,
-            font=Fonts.SMALL,
-            bg=theme.BG_SECONDARY,
-            fg=theme.TEXT_SECONDARY,
-            padx=5,
-        )
-        gui.system_info_label.pack(side="left", fill="x", expand=True)
-
-        right_panel = tk.Frame(main_container, bg=theme.BG_SECONDARY)
-        right_panel.grid(row=0, column=2, sticky="e", padx=5)
-
-        gui.vram_unload_btn = _add_button(
-            right_panel, "🧠", gui.force_unload_model,
-            "Whisper-Modell aus Grafikspeicher entladen\n(spart VRAM bei Inaktivität)"
-        )
-        gui.vram_unload_btn.pack(side="right", padx=2)
-        if (hasattr(gui, 'transcription_engine') and 
-            gui.transcription_engine and 
-            gui.transcription_engine.model is None):
-            gui.vram_unload_btn.config(state="disabled")
-
-        gui.live_mode_btn = _add_button(
-            right_panel, "⏱️ 20s", gui.toggle_live_mode,
-            "Chunk-Dauer umschalten (20s/10s)"
-        )
-        gui.live_mode_btn.pack(side="right", padx=2)
-
-        gui.vad_fallback_btn = _add_button(
-            right_panel, "🔁 VAD ON", gui.toggle_vad_fallback,
-            "VAD-Fallback aktivieren/deaktivieren"
-        )
-        gui.vad_fallback_btn.pack(side="right", padx=2)
-
-        gui.tts_btn = _add_button(
-            right_panel, "🔊", gui.speak_current_text,
-            "Ausgewählten Text vorlesen (TTS)"
-        )
-        gui.tts_btn.pack(side="right", padx=2)
-
-        help_btn = _add_button(
-            right_panel, "⌨️", gui.show_shortcuts_help,
-            "Tastenkürzel anzeigen (F1)"
-        )
-        help_btn.pack(side="right", padx=2)
-
-        gui.correct_btn = _add_button(
-            right_panel, "🔧", gui.correct_transcript_with_ollama,
-            "Transkript mit Ollama korrigieren"
-        )
-        gui.correct_btn.pack(side="right", padx=2)
-
-        gui.exit_button = tk.Button(
-            right_panel,
-            text=" ⏻ EXIT ",
-            command=gui.controller.safe_exit,
-            bg="#dc3545",
-            fg="white",
-            font=("Segoe UI", 9, "bold"),
-            relief="raised",
-            cursor="hand2",
-            padx=12,
-            pady=3,
-            activebackground="#c82333",
-        )
-        gui.exit_button.pack(side="right")
-        ToolTip(gui.exit_button, "Programm beenden (Strg+Q / Cmd+Q)")
 
 
 # LinuxPerformanceOptimizer
@@ -44585,9 +44477,7 @@ class AdvancedSettings:
         Minimalzustand hergestellt.
         """
         try:
-            # -----------------------------------------------------------------
             # 1. Fallback für Quellsprache sicherstellen
-            # -----------------------------------------------------------------
             if not hasattr(self, 'fallback_source_language') or self.fallback_source_language is None:
                 try:
                     app_settings = AppSettings.load_from_file()
@@ -44605,9 +44495,7 @@ class AdvancedSettings:
                 )
                 self.fallback_source_language = "de"
 
-            # -----------------------------------------------------------------
             # 2. Ollama‑Temperatur validieren (0.0 – 2.0)
-            # -----------------------------------------------------------------
             if hasattr(self, 'ollama_temperature'):
                 if not (0.0 <= self.ollama_temperature <= 2.0):
                     logger.warning(
@@ -44635,21 +44523,16 @@ class AdvancedSettings:
                 if DEBUG_LEVEL >= 2:
                     log_debug("settings", f"target_language auf 'de' zurückgesetzt (war: {getattr(self, 'target_language', None)})")
 
-            # -----------------------------------------------------------------
             # 5. Blacklist-Modus validieren
-            # -----------------------------------------------------------------
             if not hasattr(self, 'blacklist_mode') or self.blacklist_mode not in ("word", "substring"):
                 self.blacklist_mode = "word"
 
-            # -----------------------------------------------------------------
             # 6. TTS-Engine validieren
-            # -----------------------------------------------------------------
             if not hasattr(self, 'tts_engine') or self.tts_engine not in ("piper", "pyttsx3", "espeak"):
                 self.tts_engine = "piper"
 
-            # -----------------------------------------------------------------
+
             # 7. Weitere numerische Werte auf Plausibilität prüfen (clamping)
-            # -----------------------------------------------------------------
             if hasattr(self, 'chunk_duration'):
                 min_dur = Config.MIN_CHUNK_DURATION
                 max_dur = Config.MAX_CHUNK_DURATION
@@ -44836,10 +44719,6 @@ class AdvancedSettings:
         """
         Stellt die ursprünglichen Werte wieder her, die vor dem ersten Aufruf von
         `_apply_mode_overrides` gesichert wurden.
-
-        Diese Methode sollte aufgerufen werden, wenn alle Modi (asian_mode,
-        precision_mode) deaktiviert werden. Sie setzt die betroffenen Attribute
-        auf ihre ursprünglichen Werte zurück und löscht den internen Cache.
         """
         if not hasattr(self, '_original_values') or not self._original_values:
             if DEBUG_LEVEL >= 2:
@@ -45070,13 +44949,6 @@ class AdvancedSettings:
     def invalidate_cache(cls, filename: str = "dragon_advanced_settings.json") -> None:
         """
         Entfernt einen Eintrag aus dem internen Cache.
-
-        Diese Methode sollte aufgerufen werden, nachdem die Einstellungen gespeichert
-        wurden, um sicherzustellen, dass nachfolgende Ladevorgänge die aktuellen Daten
-        erhalten.
-
-        Args:
-            filename: Name der JSON-Datei (Standard: 'dragon_advanced_settings.json').
         """
         if not hasattr(cls, "_cache"):
             return
@@ -45126,9 +44998,7 @@ class AdvancedSettings:
         except Exception as e:
             logger.error(f"❌ Fehler beim Speichern der Einstellungen: {e}")
 
-    # -------------------------------------------------------------------------
     # Validierung und Reparatur
-    # -------------------------------------------------------------------------
     def validate(self) -> List[str]:
         issues = []
         if not (1 <= self.beam_size <= 20):
@@ -45252,9 +45122,7 @@ class AdvancedSettings:
             logger.info("✅ No repairs needed")
         return repairs
 
-    # -------------------------------------------------------------------------
     # Hilfsmethoden
-    # -------------------------------------------------------------------------
     def set_config_type(self, config_type: str) -> bool:
         if config_type == self.config_type:
             return True
