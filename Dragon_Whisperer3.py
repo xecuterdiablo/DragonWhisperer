@@ -1766,7 +1766,7 @@ class Fonts:
     SUBTITLE = ("Segoe UI", 10, "bold")
     PRIMARY = ("Segoe UI", 9)
     SECONDARY = ("Segoe UI", 8)
-    MONOSPACE = ("Cascadia Code", "Consolas", "Monospace", 9)
+    MONOSPACE = ("Cascadia Code", 9)
     BUTTON = ("Segoe UI", 9, "bold")
     STATUS = ("Segoe UI", 8)
     SMALL = ("Segoe UI", 7)
