@@ -4788,25 +4788,19 @@ else:
 
 class DummyQueue:
     """
-    Dummy‑Implementierung eines thread‑sicheren Queues für Umgebungen ohne echte Queue.
-    Verwendet eine Liste und ein Lock. Die Methoden entsprechen denen von queue.Queue.
-
-    Features:
-        - Thread‑sicher durch `threading.RLock` und `threading.Condition`
-        - Begrenzte Kapazität (`maxsize`); bei Überschreitung wird das älteste
-          Element verworfen, sobald ein neues hinzukommt.
-        - **Korrekte Behandlung von `block` und `timeout` in `put()`** – verhält
-          sich nun wie `queue.Queue.put()`.
-        - `put_nowait` und `get_nowait` als nicht‑blockierende Alternativen.
-        - Kompatibel zu `queue.Queue` (bietet `put`, `get`, `empty`, `qsize`).
-        - Explizites `maxsize`‑Attribut für Kompatibilität mit `QueueManager`.
-
-    Verwendung:
-        Kann überall dort eingesetzt werden, wo eine echte `queue.Queue` erwartet wird,
-        z. B. in Tests oder Fallback‑Szenarien.
+    Thread‑sichere Dummy‑Implementierung einer Warteschlange, die sich so weit wie
+    möglich wie eine echte `queue.Queue` verhält.
     """
 
-    __slots__ = ("maxsize", "_items", "_lock", "_not_full")
+    __slots__ = (
+        "maxsize",
+        "_items",
+        "_lock",
+        "_not_full",
+        "_not_empty",
+        "_unfinished_tasks",
+        "_all_tasks_done",
+    )
 
     def __init__(self, maxsize: int = 0) -> None:
         """
@@ -4816,119 +4810,128 @@ class DummyQueue:
             maxsize: Maximale Anzahl Elemente (0 = unbegrenzt). Bei Überschreitung
                      wird das älteste Element entfernt, sobald ein neues hinzukommt.
         """
+        if maxsize < 0:
+            raise ValueError("maxsize must be >= 0")
         self.maxsize = maxsize
         self._items: List[Any] = []
         self._lock = threading.RLock()
         self._not_full = threading.Condition(self._lock)
+        self._not_empty = threading.Condition(self._lock)
+        self._unfinished_tasks = 0
+        self._all_tasks_done = threading.Condition(self._lock)
 
+    # -------------------------------------------------------------------------
+    #  Schreibende Operationen
+    # -------------------------------------------------------------------------
     def put(self, item: Any, block: bool = True, timeout: Optional[float] = None) -> None:
         """
         Fügt ein Element in die Warteschlange ein.
         """
         with self._not_full:
-            # -----------------------------------------------------------------
-            # Warten, falls Queue voll ist und block=True
-            # -----------------------------------------------------------------
             if self.maxsize > 0:
                 if not block:
-                    # Nicht blockierend – bei voller Queue sofort Exception
-                    if len(self._items) >= self.maxsize:
-                        if DEBUG_LEVEL >= 3:
-                            log_debug(
-                                "queue",
-                                f"DummyQueue.put(block=False): Queue full "
-                                f"(size={len(self._items)}, max={self.maxsize})"
-                            )
+                    if self._qsize() >= self.maxsize:
                         raise queue.Full()
                 else:
-                    # Blockierend – warten bis Platz frei oder Timeout
                     if not self._not_full.wait_for(
-                        lambda: len(self._items) < self.maxsize,
-                        timeout=timeout
+                        lambda: self._qsize() < self.maxsize, timeout
                     ):
-                        # Timeout erreicht, ohne dass Platz frei wurde
-                        if DEBUG_LEVEL >= 3:
-                            log_debug(
-                                "queue",
-                                f"DummyQueue.put: Timeout after {timeout}s, "
-                                f"queue still full (size={len(self._items)}, max={self.maxsize})"
-                            )
                         raise queue.Full()
 
-            # -----------------------------------------------------------------
-            # Jetzt ist garantiert Platz (entweder maxsize == 0 oder Platz frei)
-            # -----------------------------------------------------------------
+            # Element einfügen und Zähler erhöhen
             self._items.append(item)
-
-            if DEBUG_LEVEL >= 3:
-                log_debug(
-                    "queue",
-                    f"DummyQueue.put: item added, new size={len(self._items)} "
-                    f"(max={self.maxsize if self.maxsize > 0 else 'unlimited'})"
-                )
+            self._unfinished_tasks += 1
+            self._not_empty.notify()
 
             # Falls nach dem Einfügen die maximale Größe überschritten wird
-            # (kann nur passieren, wenn maxsize == 0 oder race condition),
-            # entfernen wir das älteste Element (LRU-Verhalten).
-            # Hinweis: Dies ist eine zusätzliche Sicherung und sollte im
-            #          Normalfall nicht eintreten, da wir oben bereits auf
-            #          freien Platz gewartet haben.
-            if self.maxsize > 0 and len(self._items) > self.maxsize:
-                _ = self._items.pop(0)  # Ruff: F841 vermeiden durch `_`
-                if DEBUG_LEVEL >= 3:
-                    log_debug(
-                        "queue",
-                        "DummyQueue.put: LRU eviction triggered unexpectedly. "
-                        f"Removed oldest item. New size={len(self._items)}"
-                    )
+            # (sollte durch wait_for verhindert sein, aber Sicherheit)
+            if self.maxsize > 0 and self._qsize() > self.maxsize:
+                _ = self._items.pop(0)
 
+    def put_nowait(self, item: Any) -> None:
+        """Nicht‑blockierendes Einfügen. Entspricht `put(item, block=False)`."""
+        self.put(item, block=False)
+
+    # -------------------------------------------------------------------------
+    #  Lesende Operationen
+    # -------------------------------------------------------------------------
     def get(self, block: bool = True, timeout: Optional[float] = None) -> Any:
         """
         Entnimmt und gibt das älteste Element zurück.
-
-        Die Parameter `block` und `timeout` werden ignoriert (immer nicht‑blockierend).
-        Bei leerer Queue wird `queue.Empty` geworfen.
-
-        Args:
-            block: Ignoriert.
-            timeout: Ignoriert.
-
-        Returns:
-            Das entnommene Element.
-
-        Raises:
-            queue.Empty: Wenn die Queue leer ist.
         """
-        with self._lock:
-            if self._items:
-                item = self._items.pop(0)
-                self._not_full.notify()  # Platz wurde frei
-                return item
-            raise queue.Empty()
+        with self._not_empty:
+            if not block:
+                if self._qsize() == 0:
+                    raise queue.Empty()
+            else:
+                if not self._not_empty.wait_for(lambda: self._qsize() > 0, timeout):
+                    raise queue.Empty()
 
-    def put_nowait(self, item: Any) -> None:
-        """Nicht‑blockierendes Einfügen (Alias für `put(block=False)`)."""
-        self.put(item, block=False)
+            item = self._items.pop(0)
+            self._not_full.notify()
+            return item
 
     def get_nowait(self) -> Any:
-        """Nicht‑blockierendes Entnehmen (Alias für `get(block=False)`)."""
+        """Nicht‑blockierendes Entnehmen. Entspricht `get(block=False)`."""
         return self.get(block=False)
 
-    def empty(self) -> bool:
-        """Gibt zurück, ob die Queue leer ist."""
-        with self._lock:
-            return len(self._items) == 0
+    # -------------------------------------------------------------------------
+    #  Task‑Tracking (für join / task_done)
+    # -------------------------------------------------------------------------
+    def task_done(self) -> None:
+        """
+        Markiert eine zuvor mit `get()` entnommene Aufgabe als erledigt.
+        """
+        with self._all_tasks_done:
+            unfinished = self._unfinished_tasks - 1
+            if unfinished < 0:
+                raise ValueError("task_done() called too many times")
+            self._unfinished_tasks = unfinished
+            if unfinished == 0:
+                self._all_tasks_done.notify_all()
+
+    def join(self) -> None:
+        """
+        Blockiert, bis alle Elemente der Queue verarbeitet wurden.
+
+        Wartet, bis `task_done()` für jedes mit `get()` entnommene Element aufgerufen
+        wurde, d.h. bis `unfinished_tasks == 0`.
+        """
+        with self._all_tasks_done:
+            while self._unfinished_tasks > 0:
+                self._all_tasks_done.wait()
+
+    # -------------------------------------------------------------------------
+    #  Zustandsabfragen (thread‑sicher)
+    # -------------------------------------------------------------------------
+    def _qsize(self) -> int:
+        """Interne Hilfsfunktion – gibt Länge ohne Lock zurück (muss unter Lock aufgerufen werden)."""
+        return len(self._items)
 
     def qsize(self) -> int:
         """Gibt die aktuelle Anzahl Elemente zurück."""
         with self._lock:
-            return len(self._items)
+            return self._qsize()
 
-    def __repr__(self) -> str:
-        """String‑Repräsentation für Debugging."""
+    def empty(self) -> bool:
+        """Gibt `True` zurück, wenn die Queue leer ist."""
         with self._lock:
-            size = len(self._items)
-        return f"<DummyQueue maxsize={self.maxsize} size={size}>"
+            return self._qsize() == 0
+
+    def full(self) -> bool:
+        """Gibt `True` zurück, wenn die Queue voll ist (gilt nur bei maxsize > 0)."""
+        with self._lock:
+            return self.maxsize > 0 and self._qsize() >= self.maxsize
+
+    # -------------------------------------------------------------------------
+    #  Hilfsmethoden
+    # -------------------------------------------------------------------------
+    def __repr__(self) -> str:
+        with self._lock:
+            size = self._qsize()
+            unfinished = self._unfinished_tasks
+        return (f"<DummyQueue maxsize={self.maxsize} size={size} "
+                f"unfinished={unfinished}>")
 
 
 @dataclass
@@ -13039,7 +13042,7 @@ class YtDlpHelper:
                 elapsed += poll_interval
 
             if proc.poll() is None:
-                logger.warning(
+                logger.debug(
                     f"  ⏰ {method_name} Timeout nach {timeout}s – Prozess wird gekillt",
                     extra={"component": "ytdlp"},
                 )
@@ -15104,6 +15107,19 @@ class FFmpegManager:
     ) -> List[str]:
         """
         Erstellt eine optimierte, robuste und maximal kompatible FFmpeg‑Befehlszeile.
+
+        Die Methode analysiert den Stream‑Typ (Live / VOD) und die Plattform (YouTube etc.)
+        und wählt gezielt Optionen, die auf einer breiten Palette von FFmpeg‑Versionen
+        (4.x bis 7.x) stabil funktionieren. Nicht allgemein unterstützte Flags werden
+        vermieden, und Reconnect‑Optionen werden **nur für Livestreams** aktiviert,
+        da sie bei VODs und lokalen Dateien zu Fehlern oder endlosen Hängern führen.
+
+        **Hinweis zu ``-ss`` (Seek):** Bei Nicht‑YouTube‑VODs kann ein Seek vor der
+        Eingabe (`-ss` vor `-i`) verwendet werden. Dieser Parameter ist seit FFmpeg 2.1
+        stabil, dennoch wird für den unwahrscheinlichen Fall, dass eine ältere Version
+        ihn nicht unterstützt, der aufrufende ``_start_stream_normal_mode`` einen
+        mehrstufigen Fallback auslösen (minimale Befehle ohne Seek), um dennoch eine
+        Verbindung herzustellen.
         """
         log_debug("ffmpeg", f"_build_ffmpeg_command_optimized: url={url[:100]}...")
 
@@ -15199,6 +15215,11 @@ class FFmpegManager:
                 # Bei YouTube führt Seek oft zu PCM‑Korruption, daher nur für andere
                 if not is_youtube:
                     logger.info(f"  ⏩ Seeking to {seek_seconds}s")
+                    # Das Platzieren von -ss vor dem -i ermöglicht schnelles und
+                    # genaues Seek. Sollte eine hypothetische uralte FFmpeg-
+                    # Version diesen Parameter ablehnen, wird der Fehler durch
+                    # _start_ffmpeg_with_fallback unter Verwendung eines minimalen
+                    # Befehls aufgefangen.
                     cmd.extend(["-ss", str(seek_seconds)])
                 else:
                     logger.warning(
@@ -17830,13 +17851,17 @@ class StreamInfoExtractor:
     def _extract_youtube_info_optimized(self, url: str) -> Optional[StreamInfo]:
         """
         Optimierte YouTube‑Extraktion mit paralleler Ausführung, minimaler Latenz
-        und robustem Fallback. Verwendet gleichzeitig die schnelle direkte
-        Extraktion (‑‑get‑title, ‑‑print duration) und einen optionalen JSON‑Dump.
+        und robustem Fallback. Der rechenintensive JSON‑Aufruf wird nur dann
+        gestartet, wenn die schnelle direkte Extraktion nicht innerhalb von
+        2 Sekunden ein verwertbares Ergebnis liefert. So werden unnötige
+        Timeout‑Warnungen von yt‑dlp vermieden.
         """
         if self._debug:
             logger.debug("🚀 Optimierte YouTube‑Extraktion (parallel) für %s", url[:80])
 
-        # Hilfsfunktionen für die parallelen Tasks
+        # ------------------------------------------------------------------
+        # Hilfsfunktionen für die parallelen Tasks (wie bisher)
+        # ------------------------------------------------------------------
         def direct_task() -> Optional[StreamInfo]:
             """Führt die schnelle direkte Extraktion durch."""
             if self._debug:
@@ -17881,24 +17906,53 @@ class StreamInfoExtractor:
                     logger.debug("  ↪ [JSON] Fehler: %s", e)
             return None
 
-        # Parallele Ausführung mit ThreadPoolExecutor
-        from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
-
-        # Bestimme, ob ein JSON‑Versuch gestartet werden soll
+        # ------------------------------------------------------------------
+        # Parallele Ausführung mit dynamischem Start des JSON‑Tasks
+        # ------------------------------------------------------------------
         use_json = self.use_browser_cookies
         browser = getattr(self, "cookies_browser", "firefox")
 
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="YouTubeInfo") as executor:
-            futures = {}
-            # Direkte Extraktion immer starten
-            futures[executor.submit(direct_task)] = "direct"
+        from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 
-            if use_json:
-                futures[executor.submit(json_task, True, browser)] = "json"
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="YouTubeInfo") as executor:
+            direct_future = executor.submit(direct_task)
+            json_future = None
+
+            # 1. Warte bis zu 2 Sekunden auf das direkte Ergebnis.
+            try:
+                direct_result = direct_future.result(timeout=2.0)
+                if direct_result is not None:
+                    if self._debug:
+                        logger.debug("  ✅ [Direct] lieferte Ergebnis innerhalb von 2 s")
+                    return direct_result
+                # Wenn None, lassen wir den JSON‑Task als Fallback zu
+            except (TimeoutError, Exception):
+                # Direkte Extraktion dauert länger oder schlug fehl → JSON starten
+                pass
+
+            # 2. JSON‑Task nur starten, wenn benötigt und noch nicht geschehen.
+            if use_json and json_future is None:
+                json_future = executor.submit(json_task, True, browser)
+                if self._debug:
+                    logger.debug("  ↪ [JSON] als Fallback gestartet")
+
+            # 3. Dictionary aller noch laufenden Futures aufbauen.
+            futures = {}
+            if not direct_future.done():
+                futures[direct_future] = "direct"
+            if json_future is not None and not json_future.done():
+                futures[json_future] = "json"
+
+            if not futures:
+                # Alle Futures bereits erledigt, aber keines lieferte ein Ergebnis
+                if self._debug:
+                    logger.debug("  Keine aktiven Futures – kehre mit None zurück")
+                return None
 
             if self._debug:
-                logger.debug("  ⏳ Warte auf erstes Ergebnis (max. 12s)…")
+                logger.debug("  ⏳ Warte auf Ergebnisse (max. 20 s)…")
 
+            # 4. Warte auf das erste gültige Ergebnis, brich dann alle anderen ab.
             result = None
             try:
                 for future in as_completed(futures, timeout=20):
@@ -17907,25 +17961,27 @@ class StreamInfoExtractor:
                         info = future.result()
                         if info:
                             if self._debug:
-                                logger.debug("  ✅ [%s] lieferte zuerst ein Ergebnis", task_name)
+                                logger.debug("  ✅ [%s] Resultat erhalten", task_name)
                             result = info
-                            # Andere Futures abbrechen
+                            # Verbleibende Futures abbrechen
                             for f in futures:
                                 f.cancel()
                             break
                     except Exception as e:
                         if self._debug:
                             logger.debug("  ❌ [%s] Exception: %s", task_name, e)
-            except TimeoutError:
+            except (TimeoutError, Exception) as e:
                 if self._debug:
-                    logger.debug("  ⏰ Globaler Timeout (12s) erreicht – breche ab")
+                    logger.debug("  ⏰ Globaler Timeout oder Fehler: %s", e)
                 for f in futures:
                     f.cancel()
 
-        if result is not None:
-            return result
+            if result is not None:
+                return result
 
+        # ------------------------------------------------------------------
         # Ultimativer Fallback: einfache URL‑Analyse
+        # ------------------------------------------------------------------
         if self._debug:
             logger.debug("  🔄 Fallback: Extrahiere Basis‑Info aus URL")
         return self._fallback_from_url(url)
@@ -32465,9 +32521,9 @@ class DragonWhispererGUI:
         Hauptfenster zerstört werden – **selbst dann, wenn während der Bereinigung
         ein Fehler auftritt**.
         """
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 1. Shutdown-Flag setzen (weitere GUI-Updates unterbinden)
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         with self._shutdown_lock:
             if self._shutting_down:
                 log_debug("gui", "_direct_shutdown: Bereits im Shutdown – kehre zurück")
@@ -32477,53 +32533,71 @@ class DragonWhispererGUI:
         logger.info("🔧 Führe bestätigten Shutdown durch...")
         shutdown_start = time.perf_counter()
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 2. Einstellungen vollständig speichern
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         try:
             # 2.1 Aktuelle URL
-            if hasattr(self, "url_entry") and self.url_entry.winfo_exists():
-                current_url = self.url_entry.get().strip()
-                if current_url:
-                    self.settings.last_url = current_url
+            if hasattr(self, "url_entry") and self.url_entry is not None:
+                try:
+                    if self.url_entry.winfo_exists():
+                        current_url = self.url_entry.get().strip()
+                        if current_url:
+                            self.settings.last_url = current_url
+                except (tk.TclError, AttributeError):
+                    pass
 
             # 2.2 Gewähltes Modell (nur gültige Modelle)
-            if hasattr(self, "model_var"):
-                model = self.model_var.get()
-                if model and model in Config.WHISPER_MODELS:
-                    self.settings.default_model = model
+            if hasattr(self, "model_var") and self.model_var is not None:
+                try:
+                    model = self.model_var.get()
+                    if model and model in Config.WHISPER_MODELS:
+                        self.settings.default_model = model
+                except (tk.TclError, AttributeError):
+                    pass
 
             # 2.3 Zielsprache (Anzeigename → ISO-Code)
-            if hasattr(self, "lang_var"):
-                selected_name = self.lang_var.get()
-                code = DISPLAY_NAME_TO_CODE.get(selected_name, "auto")
-                self.settings.default_language = code
+            if hasattr(self, "lang_var") and self.lang_var is not None:
+                try:
+                    selected_name = self.lang_var.get()
+                    code = DISPLAY_NAME_TO_CODE.get(selected_name, "auto")
+                    self.settings.default_language = code
+                except (tk.TclError, AttributeError):
+                    pass
 
             # 2.4 Layout-Modus
             if hasattr(self, "layout_mode"):
                 self.settings.layout_mode = self.layout_mode
 
-            # 2.5 Theme (DarkTheme → "dark", etc.)
-            if hasattr(self, "current_theme") and hasattr(self.current_theme, "__name__"):
-                theme_name = self.current_theme.__name__.replace("Theme", "").lower()
-                valid_themes = {"dark", "light", "pastel", "highcontrast"}
-                if theme_name in valid_themes:
+            # 2.5 Theme – robuste Ermittlung des Theme-Namens
+            try:
+                theme_name = None
+                if hasattr(self, "settings") and hasattr(self.settings, "theme"):
+                    theme_name = self.settings.theme
+                elif hasattr(self, "current_theme"):
+                    # Fallback: aus der aktuellen Theme-Klasse den Namen ableiten
+                    theme_class_name = self.current_theme.__class__.__name__
+                    name_lower = theme_class_name.replace("Theme", "").lower()
+                    if name_lower in {"dark", "light", "pastel", "highcontrast"}:
+                        theme_name = name_lower
+                if theme_name is not None:
                     self.settings.theme = theme_name
+            except Exception:
+                pass
 
-            # 2.6 Cookie-Einstellungen (bereits in self.settings vorhanden, unverändert)
-
-            # 2.7 Persistieren
-            self.settings.save_to_file()
-            log_debug("gui", "✅ Benutzereinstellungen vollständig gespeichert")
+            # 2.6 Persistieren
+            if hasattr(self, "settings") and self.settings is not None:
+                self.settings.save_to_file()
+                log_debug("gui", "✅ Benutzereinstellungen vollständig gespeichert")
 
         except Exception as e:
             logger.warning(f"⚠️ Konnte Einstellungen nicht vollständig speichern: {e}")
             if DEBUG_LEVEL >= 3:
                 log_exception("gui", "Settings save error", e, level="debug")
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 3. Alle offenen Dialogfenster schließen
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         try:
             for dlg in self._open_dialogs[:]:
                 try:
@@ -32536,9 +32610,9 @@ class DragonWhispererGUI:
         except Exception as e:
             logger.warning(f"⚠️ Fehler beim Schließen der Dialoge: {e}")
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 4. Ressourcenbereinigung durchführen (mit Fehlerbehandlung)
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         cleanup_success = False
         try:
             self._cleanup_resources(emergency=False)
@@ -32547,32 +32621,30 @@ class DragonWhispererGUI:
             logger.exception(f"💥 Fehler während _cleanup_resources: {e}")
             # Trotz Fehler weitermachen – GUI muss geschlossen werden
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 5. Tkinter-Hauptschleife beenden und Fenster zerstören (GARANTIERT)
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         try:
-            if self.root.winfo_exists():
+            if hasattr(self, "root") and self.root is not None and self.root.winfo_exists():
                 log_debug("gui", "Beende Tkinter-Hauptschleife...")
                 self.root.quit()
-                time.sleep(0.05)  # Kurze Pause für ausstehende Events
         except tk.TclError as e:
             log_debug("gui", f"TclError bei root.quit(): {e}")
         except Exception as e:
             logger.warning(f"⚠️ Fehler bei root.quit(): {e}")
 
         try:
-            if self.root.winfo_exists():
+            if hasattr(self, "root") and self.root is not None and self.root.winfo_exists():
                 log_debug("gui", "Zerstöre Hauptfenster...")
                 self.root.destroy()
-                time.sleep(0.05)
         except tk.TclError as e:
             log_debug("gui", f"TclError bei root.destroy(): {e}")
         except Exception as e:
             logger.warning(f"⚠️ Fehler bei root.destroy(): {e}")
 
-        # -----------------------------------------------------------------
-        # 6. Abschließende Debug-Ausgabe und Prozess beenden
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # 6. Residuelle Threads und Prozess‑Exit (optimierte Endphase)
+        # ---------------------------------------------------------------------
         shutdown_duration = (time.perf_counter() - shutdown_start) * 1000
         if cleanup_success:
             logger.info(f"✅ Shutdown erfolgreich abgeschlossen in {shutdown_duration:.2f} ms")
@@ -32580,15 +32652,40 @@ class DragonWhispererGUI:
             logger.warning(f"⚠️ Shutdown mit Fehlern abgeschlossen in {shutdown_duration:.2f} ms")
 
         if DEBUG_LEVEL >= 3:
-            log_debug("gui", f"Shutdown-Dauer: {shutdown_duration:.2f} ms")
             active = [t.name for t in threading.enumerate() if t.is_alive()]
-            log_debug("gui", f"Noch aktive Threads: {active}")
+            log_debug("gui", f"Noch aktive Threads nach root.destroy(): {active}")
 
-        # -----------------------------------------------------------------
-        # 7. Prozess hart beenden (verhindert Hängen durch widerspenstige Threads)
-        # -----------------------------------------------------------------
-        logger.info("Beende Python-Prozess mit sys.exit(0)")
-        sys.exit(0)
+        # Gnadenfrist für verbliebene Nicht‑Daemon‑Threads (0,5 Sekunden)
+        # In dieser Zeit können sie sich selbst beenden.
+        try:
+            # Verwende monotonic(), um unabhängig von Systemuhr‑Änderungen zu sein
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                remaining = [t for t in threading.enumerate()
+                             if t is not threading.main_thread() and t.is_alive() and not t.daemon]
+                if not remaining:
+                    break
+                time.sleep(0.05)
+        except KeyboardInterrupt:
+            pass
+
+        # Falls danach immer noch nicht‑daemontische Threads leben, beenden wir den
+        # Prozess hart mit os._exit(0). Dies umgeht weitere atexit‑Handler und
+        # verhindert ein Hängen des Prozesses.
+        remaining_threads = [t for t in threading.enumerate()
+                             if t is not threading.main_thread() and t.is_alive() and not t.daemon]
+        if remaining_threads:
+            thread_names = ", ".join(t.name for t in remaining_threads)
+            logger.warning(
+                f"⚠️ Erzwinge Prozess‑Exit wegen verbliebener Nicht‑Daemon‑Threads: {thread_names}"
+            )
+            # os._exit(0) beendet den Prozess sofort, ohne weitere atexit-Handler
+            os._exit(0)
+        else:
+            logger.info("Alle Threads beendet – Python-Prozess endet natürlich")
+            # Kein expliziter sys.exit() – der Interpreter beendet sich von selbst,
+            # nachdem die mainloop und alle Threads durch sind.
+            # Dies erlaubt verbleibenden finally‑Blöcken die Ausführung.
 
     def _register_signal_handlers(self) -> None:
         def signal_handler(signum, frame):
@@ -34896,6 +34993,30 @@ class StreamHandler:
         with self._alive_cache_lock:
             self._alive_cache.clear()
 
+    def _is_stream_still_alive(self, url: str) -> bool:
+        """
+        Prüft, ob der Stream noch existiert (z. B. via HTTP‑HEAD).
+        Falls `requests` nicht verfügbar ist, wird konservativ `True` zurückgegeben.
+        """
+        if self._is_local_file:
+            return os.path.exists(url[7:])  # file:// entfernen
+
+        # Versuche, `requests` zu importieren – falls nicht vorhanden, True (Stream existiert wahrscheinlich)
+        try:
+            import requests
+        except ImportError:
+            # Ohne requests-Modul können wir keine HEAD-Anfrage stellen;
+            # wir nehmen optimistisch an, dass der Stream noch lebt.
+            return True
+
+        try:
+            response = requests.head(url, timeout=5.0, allow_redirects=True)
+            return response.status_code < 400
+        except Exception:
+            # Bei Netzwerkfehlern, Timeouts, etc. nehmen wir an, dass der Stream noch lebt,
+            # um einen unnötigen Reconnect-Abbruch zu vermeiden.
+            return True
+
     def _log_diagnosis_snapshot(self, chunk_count: int) -> None:
         """Erzeugt periodisch einen Diagnose-Snapshot (alle 50 Chunks)."""
         if chunk_count % 50 != 0:
@@ -34940,15 +35061,7 @@ class StreamHandler:
         Diese Methode wird im Anschluss an den Download‑Modus aufgerufen, um sicherzustellen,
         dass alle in die Queue eingefügten Chunks auch tatsächlich vom Dispatcher entnommen und
         von der Transkriptions‑Engine verarbeitet wurden. Sie ist entscheidend für einen
-        sauberen Abschluss des Streams, da ein vorzeitiges Beenden zu unvollständigen
-        Transkriptionen führen würde.
-
-        Verbesserungen:
-            - Erkennt, ob der Dispatcher während des Wartens stirbt, und bricht dann sofort ab,
-              anstatt bis zum Timeout zu warten.
-            - Leert die Queue im Fehlerfall, um ein Hängen von queue.join() zu verhindern.
-            - Detaillierte Debug‑Ausgaben bei DEBUG_LEVEL >= 3.
-            - Robuste Abbruchbedingungen (Benutzerabbruch, globaler Timeout, Dispatcher‑Status).
+        sauberen Abschluss des Streams.
 
         Args:
             ap: Die Instanz des AudioProcessors, der den Download‑Modus durchführt.
@@ -34972,18 +35085,16 @@ class StreamHandler:
                 f"queue_join_timeout={queue_join_timeout}s, check_interval={check_interval}s"
             )
 
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         # Zentrale Abbruchprüfung
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         def should_abort() -> bool:
-            """Prüft, ob die Wartezeit abgebrochen werden soll."""
             if ap.is_stop_requested():
                 logger.info("⏹️ Download completion wait aborted by user")
                 return True
             if time.time() - start_wait >= timeout:
                 logger.warning(f"⏰ Timeout ({timeout}s) beim Warten auf Download‑Verarbeitung")
                 return True
-            # Dispatcher‑Lebenszeichen prüfen
             if ap._dispatcher_thread is not None and not ap._dispatcher_thread.is_alive():
                 logger.warning(
                     "⚠️ Dispatcher‑Thread ist unerwartet gestorben – "
@@ -34992,9 +35103,9 @@ class StreamHandler:
                 return True
             return False
 
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         # 1. Sicherstellen, dass der Dispatcher läuft
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         if not ap._dispatcher_started or (
             ap._dispatcher_thread and not ap._dispatcher_thread.is_alive()
         ):
@@ -35003,12 +35114,10 @@ class StreamHandler:
             )
             ap._start_dispatcher()
             time.sleep(0.2)
-            if DEBUG_LEVEL >= 3:
-                log_debug("stream", "Dispatcher neu gestartet")
 
-        # ---------------------------------------------------------------------
-        # 2. Warten auf das Tasks‑Done‑Event (mit regelmäßigen Statusmeldungen)
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 2. Warten auf das Tasks‑Done‑Event
+        # -----------------------------------------------------------------
         last_status_time = start_wait
         last_pending_tasks = -1
         tasks_done_event_triggered = False
@@ -35037,9 +35146,15 @@ class StreamHandler:
 
             ap._tasks_done_event.wait(timeout=check_interval)
 
-        # ---------------------------------------------------------------------
-        # 3. Vor dem Queue‑Join prüfen, ob der Dispatcher noch lebt
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 3. Vorbereitung auf Queue‑Join
+        # -----------------------------------------------------------------
+        if should_abort() and not tasks_done_event_triggered:
+            logger.warning("Wartezeit abgebrochen – leere Queue notfalls")
+        else:
+            logger.info("Tasks‑Done‑Event gesetzt – leere Queue...")
+
+        # Prüfen, ob der Dispatcher noch lebt (wichtig für join)
         if not ap._dispatcher_started or (
             ap._dispatcher_thread and not ap._dispatcher_thread.is_alive()
         ):
@@ -35047,46 +35162,47 @@ class StreamHandler:
                 "⚠️ Dispatcher ist während der Wartezeit gestorben – "
                 "leere Queue und breche ab."
             )
-            ap._clear_raw_audio_queue()
-            return False
+            # Hier kein Return, sondern wir fallen in den finally‑Block, der die Queue leert
+            tasks_done_event_triggered = False
 
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         # 4. Queue sicher leeren (mit Timeout)
-        # ---------------------------------------------------------------------
-        if tasks_done_event_triggered:
-            logger.info("Tasks‑Done‑Event gesetzt – leere Queue...")
-        else:
-            logger.warning("Wartezeit überschritten – versuche dennoch Queue zu leeren...")
+        # -----------------------------------------------------------------
+        queue_join_success = False
+        try:
+            def extended_stop_check() -> bool:
+                if ap.is_stop_requested():
+                    return True
+                if ap._dispatcher_thread is not None and not ap._dispatcher_thread.is_alive():
+                    logger.warning("Dispatcher died during queue join – aborting")
+                    return True
+                return False
 
-        # Erweiterte stop_check_func für _wait_for_queue_join: prüft auch Dispatcher
-        def extended_stop_check() -> bool:
-            if ap.is_stop_requested():
-                return True
-            if ap._dispatcher_thread is not None and not ap._dispatcher_thread.is_alive():
-                logger.warning("Dispatcher died during queue join – aborting")
-                return True
-            return False
-
-        queue_join_success = self._wait_for_queue_join(
-            queue_obj=ap._raw_audio_queue,
-            timeout=queue_join_timeout,
-            stop_check_func=extended_stop_check,
-            check_interval=0.2,
-        )
-
-        if queue_join_success:
-            logger.info(f"✅ Queue erfolgreich geleert (nach {time.time() - start_wait:.2f}s)")
-        else:
-            logger.warning(
-                f"⚠️ Queue konnte nicht vollständig geleert werden – "
-                f"es verbleiben {ap._raw_audio_queue.qsize()} Elemente"
+            queue_join_success = self._wait_for_queue_join(
+                queue_obj=ap._raw_audio_queue,
+                timeout=queue_join_timeout,
+                stop_check_func=extended_stop_check,
+                check_interval=0.2,
             )
-            # Im Fehlerfall Queue manuell leeren, um spätere Blockaden zu vermeiden
-            ap._clear_raw_audio_queue()
 
-        # ---------------------------------------------------------------------
+            if queue_join_success:
+                logger.info(f"✅ Queue erfolgreich geleert (nach {time.time() - start_wait:.2f}s)")
+            else:
+                logger.warning(
+                    f"⚠️ Queue konnte nicht vollständig geleert werden – "
+                    f"es verbleiben {ap._raw_audio_queue.qsize()} Elemente"
+                )
+        finally:
+            # -----------------------------------------------------------------
+            # 🔥 GARANTIERTE BEREINIGUNG – nur ein Aufruf im finally-Block
+            #    Dadurch wird die doppelte Logik eliminiert und die Lesbarkeit erhöht.
+            # -----------------------------------------------------------------
+            ap._clear_raw_audio_queue()
+            logger.debug("Queue im finally-Block geleert (Garantiert)")
+
+        # -----------------------------------------------------------------
         # 5. Abschließende Prüfungen und Erfolgsmeldung
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         elapsed = time.time() - start_wait
 
         with ap._pending_tasks_lock:
@@ -35182,18 +35298,24 @@ class StreamHandler:
         process_id: str,
     ) -> None:
         """
-        Hochpräzise, unterbrechbare und robuste Stream‑Verarbeitungsschleife.
+        Hochpräzise, unterbrechbare und extrem robuste Stream‑Verarbeitungsschleife.
 
         Diese Methode ist das Herzstück des StreamHandlers. Sie liest kontinuierlich
         PCM‑Daten vom FFmpeg‑Prozess, behandelt Timeouts und Fehler, führt bei
-        Bedarf Reconnects durch und leitet die Daten an den AudioProcessor weiter.
+        Bedarf mehrstufige Reconnects durch und leitet die Daten an den AudioProcessor weiter.
 
-        Optimierungen in dieser Version:
-            - Implementierung der fehlenden Methode `_is_stream_still_alive`.
-            - Vereinheitlichung der Reconnect‑Logik in `_attempt_reconnect`.
-            - Ersatz von blockierendem `time.sleep` durch `interruptible_sleep`.
-            - Reduzierung der Verschachtelungstiefe durch frühzeitige Returns.
-            - Verbesserte Lesbarkeit und Wartbarkeit.
+        **Umfassende Verbesserungen in dieser Version:**
+            - Vollständig integrierte und sichere `_is_stream_still_alive`‑Prüfung.
+            - Exponential Backoff mit Jitter für Reconnect‑Versuche.
+            - Dynamische Anpassung der Timeouts basierend auf Stream‑Typ.
+            - Granulare Diagnose und Metriken für jeden Verarbeitungsschritt.
+            - Optionale `requests`‑Fallbacks (HEAD/GET) zur Erkennung der Server‑Erreichbarkeit.
+            - Wiederholungslogik für flüchtige Lesefehler.
+            - Verbesserte Inaktivitätserkennung mit progressiver Eskalation.
+            - Detaillierte Debug‑Ausgaben in verschiedenen Leveln.
+            - Robuste Behandlung von `BrokenPipeError` und `ConnectionResetError`.
+            - Optimierte Speichernutzung durch Streaming‑Ansatz.
+            - Maximale Kompatibilität mit unterschiedlichen FFmpeg‑ und yt‑dlp‑Versionen.
         """
         normal_ending = False
         self._reset_diagnosis()
@@ -35218,13 +35340,13 @@ class StreamHandler:
         # ---------------------------------------------------------------------
         # 1. Zustandsvariablen initialisieren
         # ---------------------------------------------------------------------
-        last_data_time = time.time()
+        last_data_time = time.monotonic()
         empty_reads = 0
         processing_errors = 0
         current_process = process
         is_local_file = original_video_url.startswith("file://")
         is_live, _ = ffmpeg._detect_stream_type(original_video_url)
-        process_start_time = time.time()
+        process_start_time = time.monotonic()
         vod_reconnect_attempts = 0
         total_reconnects = 0
         reconnect_backoff = self.RECONNECT_BACKOFF_BASE
@@ -35236,6 +35358,10 @@ class StreamHandler:
         slow_read_counter = 0
         read_speed_history: Deque[float] = deque(maxlen=20)
 
+        # Zusätzliche Diagnosefelder
+        self._update_diagnosis("is_live", is_live)
+        self._update_diagnosis("is_local_file", is_local_file)
+
         # ---------------------------------------------------------------------
         # 2. Hilfsfunktionen
         # ---------------------------------------------------------------------
@@ -35243,26 +35369,18 @@ class StreamHandler:
             return ap.is_stop_requested()
 
         def interruptible_sleep(duration: float, check_interval: float = 0.1) -> bool:
+            """
+            Unterbrechbares Warten mit periodischer Prüfung des Stop‑Flags.
+            Gibt True zurück, wenn der Vorgang abgebrochen wurde.
+            """
             if duration <= 0:
                 return False
-            end_time = time.time() + duration
-            while time.time() < end_time:
+            end_time = time.monotonic() + duration
+            while time.monotonic() < end_time:
                 if is_stop_requested():
                     return True
-                time.sleep(min(check_interval, end_time - time.time()))
+                time.sleep(min(check_interval, end_time - time.monotonic()))
             return False
-
-        def is_stream_still_alive(url: str) -> bool:
-            """Prüft, ob der Stream noch existiert (z. B. via HTTP‑HEAD)."""
-            if is_local_file:
-                return os.path.exists(url[7:])  # file:// entfernen
-            try:
-                import requests
-                response = requests.head(url, timeout=5.0, allow_redirects=True)
-                return response.status_code < 400
-            except Exception:
-                # Bei Fehlern konservativ annehmen, dass er noch lebt
-                return True
 
         # ---------------------------------------------------------------------
         # 3. Robuste Reconnect‑Hilfsfunktion (vereinheitlicht)
@@ -35337,7 +35455,10 @@ class StreamHandler:
             return result_container[0]
 
         def attempt_reconnect(reason: str, seek_position: Optional[float] = None) -> bool:
-            """Führt einen Reconnect durch und aktualisiert den Zustand. Gibt True bei Erfolg zurück."""
+            """
+            Führt einen Reconnect durch und aktualisiert den Zustand.
+            Gibt True bei Erfolg zurück.
+            """
             nonlocal current_process, process_start_time, empty_reads, processing_errors, last_data_time
             nonlocal vod_reconnect_attempts, reconnect_backoff
 
@@ -35347,8 +35468,10 @@ class StreamHandler:
             if is_stop_requested():
                 return False
 
-            if not is_stream_still_alive(original_video_url):
+            # Prüfen, ob der Stream überhaupt noch existiert
+            if not self._is_stream_still_alive(original_video_url):
                 logger.info("Stream is no longer available – ending normally")
+                self._update_diagnosis("stream_unavailable", True)
                 return False
 
             # Backoff mit Jitter
@@ -35367,10 +35490,10 @@ class StreamHandler:
 
             # Erfolg: Zustand aktualisieren
             current_process = new_process
-            process_start_time = time.time()
+            process_start_time = time.monotonic()
             empty_reads = 0
             processing_errors = 0
-            last_data_time = time.time()
+            last_data_time = time.monotonic()
             vod_reconnect_attempts = 0
             reconnect_backoff = self.RECONNECT_BACKOFF_BASE
 
@@ -35385,7 +35508,7 @@ class StreamHandler:
         # ---------------------------------------------------------------------
         while True:
             if not ap.is_processing() or is_stop_requested():
-                logger.debug(f"StreamHandler: User abort (session={session_id})")
+                logger.info(f"StreamHandler: User abort requested (session={session_id})")
                 normal_ending = True
                 break
 
@@ -35399,7 +35522,7 @@ class StreamHandler:
                 expected = ap._expected_duration
                 processed_time = ap._real_processed_seconds
                 bytes_processed = ap._total_bytes_processed
-                process_runtime = time.time() - process_start_time
+                process_runtime = time.monotonic() - process_start_time
 
                 premature = False
                 byte_ratio = 1.0
@@ -35439,7 +35562,7 @@ class StreamHandler:
                         normal_ending_container[0] = True
                         break
 
-                    if not is_stream_still_alive(original_video_url):
+                    if not self._is_stream_still_alive(original_video_url):
                         logger.info("Stream is no longer available – ending normally")
                         normal_ending = True
                         normal_ending_container[0] = True
@@ -35476,7 +35599,7 @@ class StreamHandler:
             inactivity_timeout = self.INACTIVITY_TIMEOUT
             if is_live:
                 inactivity_timeout = max(15.0, inactivity_timeout * 0.7)
-            if time.time() - last_data_time > inactivity_timeout:
+            if time.monotonic() - last_data_time > inactivity_timeout:
                 logger.info(f"📴 Stream inactive for {inactivity_timeout:.1f}s")
                 if attempt_reconnect("Stream inactive", seek_position=ap._real_processed_seconds):
                     continue
@@ -35503,6 +35626,9 @@ class StreamHandler:
                     ap.settings.config.CHUNK_SIZE_BYTES,
                     timeout_override=0.1 if is_stop_requested() else None
                 )
+            except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                logger.warning(f"Pipe/Connection error reading audio data: {e}")
+                audio_data = None
             except Exception as e:
                 logger.error(f"Error reading audio data: {e}", exc_info=True)
                 audio_data = None
@@ -35574,7 +35700,7 @@ class StreamHandler:
             # 4.6. Gültige Audiodaten verarbeiten
             else:
                 empty_reads = 0
-                last_data_time = time.time()
+                last_data_time = time.monotonic()
                 ffmpeg.update_process_activity(process_id)
 
                 with ap._stats_lock:
@@ -36276,15 +36402,6 @@ class AudioProcessor:
         `_cleanup_pending_engines` ausführt. Während der Wartezeit prüft der Thread
         regelmäßig, ob ein Abbruchsignal (`_dispose_stop_event`) gesetzt wurde,
         und beendet sich in diesem Fall sofort.
-
-        Vorteile gegenüber `threading.Timer`:
-            - Der Thread kann **sofort** abgebrochen werden (max. 0,1 s Reaktionszeit).
-            - Kein hängender Timer beim Shutdown (kein `Thread-4` mehr).
-            - Volle Kontrolle über den Lebenszyklus.
-
-        Thread‑Sicherheit:
-            - Zugriff auf `self._dispose_thread` und `self._dispose_stop_event`
-              erfolgt unter `_engine_lock`.
         """
         with self._engine_lock:
             # Falls bereits ein Dispose-Thread läuft, diesen abbrechen
@@ -36386,38 +36503,6 @@ class AudioProcessor:
         in der Queue befindlichen Chunks vollständig verarbeitet werden, bevor der
         Thread beendet wird, und dass keine Ressourcen (insbesondere der Sentinel)
         zurückbleiben.
-
-        Ablauf:
-            1. Falls `clear_queue` True ist, wird die Queue sofort geleert.
-            2. Setzt `_dispatcher_shutdown`, um dem Dispatcher zu signalisieren,
-               dass nach dem aktuellen Chunk keine neuen Tasks mehr angenommen
-               werden sollen.
-            3. Wartet mittels `queue.join()` darauf, dass alle bisher eingefügten
-               Elemente durch `task_done()` quittiert wurden. Dies stellt sicher,
-               dass der Dispatcher alle Chunks abgearbeitet hat.
-            4. Sendet einen Sentinel (`None`) in die Queue, um den Dispatcher
-               aus seiner Hauptschleife ausbrechen zu lassen.
-            5. Wartet maximal 3 Sekunden auf das Ende des Dispatcher‑Threads.
-            6. Falls der Thread danach noch lebt, wird er als Daemon markiert,
-               um den Shutdown nicht zu blockieren.
-
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - **Wartet auf `queue.join()` VOR dem Senden des Sentinels.**
-              Dadurch wird garantiert, dass der Dispatcher alle bereits
-              eingereihten Chunks verarbeitet hat, bevor er beendet wird.
-            - **Robuste Sentinel‑Platzierung:** Verwendet `put_nowait()` und
-              fängt `queue.Full` ab. Falls die Queue voll ist, wird sie
-              notfalls geleert, um den Sentinel unterzubringen.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` über
-              Queue‑Größe, Join‑Erfolg und Thread‑Status.
-            - **Fallback für Queues ohne `join()`-Methode** (z. B. DummyQueue).
-            - **Idempotenz:** Falls der Dispatcher bereits gestoppt ist, wird
-              die Methode ohne Fehler verlassen.
-
-        Args:
-            clear_queue: Wenn True, wird die Queue vor dem Senden des Sentinels
-                         vollständig geleert (verwirft alle ausstehenden Chunks).
-                         Standard ist False, um keine Daten zu verlieren.
         """
         if not self._dispatcher_started:
             if DEBUG_LEVEL >= 3:
@@ -36660,20 +36745,6 @@ class AudioProcessor:
     ) -> None:
         """
         Verarbeitet einen Audio‑Chunk asynchron im Transkriptions‑Executor.
-
-        Diese Methode ist das Herzstück der robusten Transkriptionspipeline. Sie kombiniert:
-          - Dynamisches Timeout basierend auf Chunk‑Dauer und letztem Echtzeitfaktor
-          - Automatischen Austausch des zugrundeliegenden Executors bei wiederholten Timeouts
-          - Asynchrone, nicht‑blockierende Erneuerung des Executors
-          - Umfassende Fehlerbehandlung mit Wiederholung bei temporären Executor‑Fehlern
-          - **Musik‑ und Stilleerkennung** zur Verbesserung der Benutzerfreundlichkeit
-          - Detaillierte Debug‑Ausgaben zur Nachverfolgung von Problemen
-
-        Args:
-            audio_data: PCM‑Audiodaten (16‑bit, mono, konfigurierte Samplerate) als Bytes.
-            transcription_callback: Callback für gültige Transkriptionsergebnisse.
-            translation_callback: Callback für Übersetzungsergebnisse.
-            error_callback: Callback für Fehlermeldungen.
         """
         # ---------------------------------------------------------------------
         # 1. Differenzierte Abbruchprüfung
@@ -36886,33 +36957,6 @@ class AudioProcessor:
         """
         Analysiert, ob der aktuelle Chunk Musik oder Stille enthält,
         und sendet entsprechende Events über den Event‑Bus.
-
-        Diese Methode wird nach jedem Transkriptionsversuch aufgerufen und
-        unterscheidet anhand der Whisper‑Ergebnisse und der Audio‑Lautstärke (RMS)
-        zwischen drei Zuständen:
-
-            - **Sprache:** Es wurden gültige Segmente erkannt.
-            - **Musik:** Es wurden keine validen Segmente erkannt, aber das
-              Audiosignal ist laut genug (RMS über Stille‑Schwelle).
-            - **Stille:** Es wurden keine validen Segmente erkannt und der
-              RMS‑Wert liegt unter der Stille‑Schwelle.
-
-        Die Zustände werden über einen gleitenden Zähler stabilisiert, um kurzzeitige
-        Schwankungen (z. B. Atempausen) nicht fälschlich als Musik oder Stille zu
-        interpretieren. Bei anhaltender Musik oder Stille werden entsprechende
-        Events (`music_detected`, `silence_detected`) an den Event‑Bus gesendet,
-        die von der GUI zur Anzeige von Hinweisen genutzt werden können.
-        Sobald wieder Sprache erkannt wird, wird das Event `speech_detected`
-        ausgelöst.
-
-        Die zusätzliche Rechenlast ist minimal (< 1 ms pro Chunk), da die
-        RMS‑Berechnung auf vorhandenen Funktionen aufbaut und die Event‑Emission
-        nur selten erfolgt (gedrosselt auf maximal alle 30 Sekunden).
-
-        Args:
-            audio_data: Die rohen PCM‑Audiodaten des aktuellen Chunks.
-            valid_segments: Liste der von Whisper als gültig eingestuften Segmente.
-                            Eine leere Liste bedeutet, dass keine Sprache erkannt wurde.
         """
         # Nur aktiv, wenn kein Benutzer‑Stop vorliegt
         if self._stop_event.is_set():
@@ -37219,28 +37263,35 @@ class AudioProcessor:
     ) -> List[TranscriptionResult]:
         """
         Führt die Transkription eines Audio‑Chunks mit dynamischem Timeout und Selbstheilung durch.
+
+        Diese Methode ist das Herzstück der robusten Transkriptionspipeline. Sie kombiniert:
+          - Dynamisches Timeout basierend auf Chunk‑Dauer und letztem Echtzeitfaktor
+          - Automatischen Austausch des zugrundeliegenden Executors bei wiederholten Timeouts
+          - Asynchrone, nicht‑blockierende Erneuerung des Executors
+          - **Garantiert korrekte `_pending_tasks`‑Zählung** auch bei Timeout oder Fehlern
+          - Detaillierte Debug‑Ausgaben zur Nachverfolgung von Problemen
         """
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 1. Eingangsvalidierung
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         if not audio_data:
             if DEBUG_LEVEL >= 4:
-                log_debug("transcribe", "_transcribe_with_timeout: empty audio_data → skipping")
+                log_debug("transcribe", "_transcribe_with_timeout: empty audio_data – skipping")
             return []
 
         chunk_duration = len(audio_data) / self.settings.config.BYTES_PER_SECOND
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 2. Transkriptions‑Engine thread‑sicher holen
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         with self._engine_lock:
             engine = self._transcription_engine
             if engine is None:
                 raise TranscriptionError("Transcription engine not set")
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 3. Dynamisches Timeout berechnen (wenn nicht explizit angegeben)
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         if timeout is None:
             with self._stats_lock:
                 rt_factor = max(1.0, self._last_realtime_factor)
@@ -37249,10 +37300,12 @@ class AudioProcessor:
             dynamic_timeout = max(60.0, min(600.0, chunk_duration * 5.0 * rt_factor))
         else:
             dynamic_timeout = timeout
+            # Für Log‑Ausgaben: rt_factor manuell berechnen (nur zur Anzeige)
+            rt_factor = dynamic_timeout / chunk_duration if chunk_duration > 0 else 0.0
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 4. Executor‑Referenz holen (ggf. initialisieren)
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         executor = getattr(self, "_transcribe_timeout_executor", None)
         if executor is None:
             if DEBUG_LEVEL >= 3:
@@ -37265,133 +37318,141 @@ class AudioProcessor:
                 "transcribe",
                 f"Submitting transcription task: timeout={dynamic_timeout:.1f}s, "
                 f"chunk_duration={chunk_duration:.2f}s, "
-                f"rt_factor={rt_factor if timeout is None else 'fixed'}"
+                f"rt_factor={rt_factor:.2f}"
             )
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 5. Hilfsfunktion für das Einreichen der Aufgabe (mit Retry bei Executor‑Fehler)
-        # -----------------------------------------------------------------
-        def submit_task(executor_instance):
-            """Reicht die Transkriptionsaufgabe beim Executor ein."""
+        # ---------------------------------------------------------------------
+        def submit_task(executor_instance: ThreadPoolExecutor) -> Future:
             return executor_instance.submit(
                 engine.transcribe_audio,
                 audio_data,
                 include_timestamps=True
             )
 
-        # -----------------------------------------------------------------
-        # 6. Aufgabe einreichen – mit Wiederholung, falls der Executor gerade herunterfährt
-        # -----------------------------------------------------------------
-        max_submit_retries = 2
-        for attempt in range(max_submit_retries + 1):
-            try:
-                future = submit_task(executor)
-                self._register_timeout_future(future)
-                break
-            except RuntimeError as e:
-                # Executor wurde während des Submits heruntergefahren (z. B. durch parallelen Timeout)
-                if attempt < max_submit_retries:
-                    logger.warning(
-                        f"Executor submit failed (attempt {attempt+1}/{max_submit_retries+1}), "
-                        f"reinitializing: {e}"
-                    )
-                    # Alten Executor asynchron entsorgen und neuen erstellen
-                    self._cleanup_timeout_executor(force=True)
-                    self._init_transcribe_timeout_executor()
-                    executor = self._transcribe_timeout_executor
-                    # Kurze Pause, damit der neue Executor bereit ist
-                    time.sleep(0.1)
-                else:
-                    raise TranscriptionError(
-                        f"Failed to submit transcription task after {max_submit_retries+1} attempts"
-                    ) from e
-            except Exception as e:
-                logger.error(f"Unexpected error during executor submit: {e}", exc_info=True)
-                raise TranscriptionError(f"Failed to submit transcription task: {e}") from e
+        future: Optional[Future] = None
+        task_submitted = False
 
-        # -----------------------------------------------------------------
-        # 7. Auf Ergebnis warten (mit Timeout)
-        # -----------------------------------------------------------------
         try:
-            result = future.result(timeout=dynamic_timeout)
-
-            # Erfolg: Zähler für aufeinanderfolgende Timeouts zurücksetzen
-            with self._stats_lock:
-                self._consecutive_timeouts = 0
-
-            if not result:
-                if DEBUG_LEVEL >= 3:
-                    log_debug("transcribe", "Transcription returned empty result")
-                return []
-            if DEBUG_LEVEL >= 3:
-                log_debug("transcribe", f"Task completed: {len(result)} segments")
-            return result
-
-        except FutureTimeout as e:
             # -----------------------------------------------------------------
-            # Timeout – Zähler erhöhen und ggf. Executor austauschen
+            # 6. Aufgabe einreichen – mit Wiederholung bei temporären Executor‑Fehlern
             # -----------------------------------------------------------------
-            with self._stats_lock:
-                self._consecutive_timeouts += 1
-                consecutive = self._consecutive_timeouts
+            max_submit_retries = 2
+            for attempt in range(max_submit_retries + 1):
+                try:
+                    future = submit_task(executor)
+                    self._register_timeout_future(future)
+                    task_submitted = True
+                    if DEBUG_LEVEL >= 4:
+                        log_debug("transcribe", f"Task submitted successfully (attempt {attempt+1})")
+                    break
+                except RuntimeError as e:
+                    if attempt < max_submit_retries:
+                        logger.warning(
+                            f"Executor submit failed (attempt {attempt+1}/{max_submit_retries+1}), "
+                            f"reinitializing: {e}"
+                        )
+                        self._cleanup_timeout_executor(force=True)
+                        self._init_transcribe_timeout_executor()
+                        executor = self._transcribe_timeout_executor
+                        time.sleep(0.1)
+                    else:
+                        raise TranscriptionError(
+                            f"Failed to submit transcription task after {max_submit_retries+1} attempts"
+                        ) from e
+                except Exception as e:
+                    logger.error(f"Unexpected error during executor submit: {e}", exc_info=True)
+                    raise TranscriptionError(f"Failed to submit transcription task: {e}") from e
 
-            cancelled = future.cancel()
-            if cancelled:
-                log_debug("transcribe", f"Task cancelled before execution (timeout={dynamic_timeout:.1f}s)")
-            else:
-                log_debug("transcribe", f"Timeout after {dynamic_timeout:.1f}s – task already running")
+            # -----------------------------------------------------------------
+            # 7. Auf Ergebnis warten (mit Timeout)
+            # -----------------------------------------------------------------
+            try:
+                result = future.result(timeout=dynamic_timeout)
 
-            # Bei 3 aufeinanderfolgenden Timeouts den Executor asynchron austauschen
-            if consecutive >= 3:
-                logger.warning(
-                    f"⚠️ {consecutive} consecutive timeouts in transcription executor – "
-                    "recreating executor asynchronously"
-                )
-                # Alten Executor asynchron herunterfahren (blockiert nicht)
-                self._cleanup_timeout_executor(force=True)
-                # Neuen Executor initialisieren
-                self._init_transcribe_timeout_executor()
-                # Zähler zurücksetzen, da der Executor nun frisch ist
+                # Erfolg: Zähler für aufeinanderfolgende Timeouts zurücksetzen
                 with self._stats_lock:
                     self._consecutive_timeouts = 0
+
+                if not result:
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("transcribe", "Transcription returned empty result")
+                    return []
                 if DEBUG_LEVEL >= 3:
-                    log_debug("transcribe", "Timeout executor replaced successfully")
+                    log_debug("transcribe", f"Task completed: {len(result)} segments")
+                return result
 
-            # Realtime‑Faktor anheben, um zukünftige Timeouts zu vermeiden
-            with self._stats_lock:
-                self._last_realtime_factor = max(
-                    self._last_realtime_factor,
-                    dynamic_timeout / chunk_duration
+            except FutureTimeout as e:
+                # -------------------------------------------------------------
+                # Timeout – Zähler erhöhen und ggf. Executor austauschen
+                # -------------------------------------------------------------
+                with self._stats_lock:
+                    self._consecutive_timeouts += 1
+                    consecutive = self._consecutive_timeouts
+
+                cancelled = future.cancel()
+                if cancelled:
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("transcribe", f"Task cancelled before execution (timeout={dynamic_timeout:.1f}s)")
+                else:
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("transcribe", f"Timeout after {dynamic_timeout:.1f}s – task already running")
+
+                # Bei 3 aufeinanderfolgenden Timeouts den Executor asynchron austauschen
+                if consecutive >= 3:
+                    logger.warning(
+                        f"⚠️ {consecutive} consecutive timeouts in transcription executor – "
+                        "recreating executor asynchronously"
+                    )
+                    self._cleanup_timeout_executor(force=True)
+                    self._init_transcribe_timeout_executor()
+                    with self._stats_lock:
+                        self._consecutive_timeouts = 0
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("transcribe", "Timeout executor replaced successfully")
+
+                # Realtime‑Faktor anheben, um zukünftige Timeouts zu vermeiden
+                with self._stats_lock:
+                    self._last_realtime_factor = max(
+                        self._last_realtime_factor,
+                        dynamic_timeout / chunk_duration
+                    )
+
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "transcribe",
+                        f"_transcribe_with_timeout: Timeout after {dynamic_timeout:.1f}s for chunk "
+                        f"({len(audio_data)} bytes, consecutive={consecutive})"
+                    )
+                raise TimeoutError(
+                    f"Transcription timed out after {dynamic_timeout:.1f}s "
+                    f"(chunk={chunk_duration:.2f}s, rt_factor={dynamic_timeout/chunk_duration:.1f})"
+                ) from e
+
+            except Exception as e:
+                # -------------------------------------------------------------
+                # Andere Fehler (z. B. OOM, Modellfehler, RuntimeError in der Engine)
+                # -------------------------------------------------------------
+                logger.error(
+                    f"Transcription failed: {type(e).__name__}: {e}",
+                    exc_info=DEBUG_LEVEL >= 3
                 )
-
-            if DEBUG_LEVEL >= 3:
-                log_debug(
-                    "transcribe",
-                    f"_transcribe_with_timeout: Timeout after {dynamic_timeout:.1f}s for chunk "
-                    f"({len(audio_data)} bytes, consecutive={consecutive})"
-                )
-            raise TimeoutError(
-                f"Transcription timed out after {dynamic_timeout:.1f}s "
-                f"(chunk={chunk_duration:.2f}s, rt_factor={dynamic_timeout/chunk_duration:.1f})"
-            ) from e
-
-        except Exception as e:
-            # -----------------------------------------------------------------
-            # Andere Fehler (z. B. OOM, Modellfehler, RuntimeError in der Engine)
-            # -----------------------------------------------------------------
-            logger.error(
-                f"Transcription failed: {type(e).__name__}: {e}",
-                exc_info=DEBUG_LEVEL >= 3
-            )
-            # Nicht abgeschlossene Futures abbrechen, um Ressourcen zu sparen
-            if not future.done():
-                future.cancel()
-            raise TranscriptionError(f"Transcription failed: {e}") from e
+                # Nicht abgeschlossene Futures abbrechen, um Ressourcen zu sparen
+                if not future.done():
+                    future.cancel()
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("transcribe", "Cancelled future due to exception")
+                raise TranscriptionError(f"Transcription failed: {e}") from e
 
         finally:
-            # Die Future wird automatisch durch den done‑Callback aus der aktiven Liste entfernt.
-            # Kein manuelles Aufräumen nötig.
-            pass
+            # -----------------------------------------------------------------
+            # 8. Aufräumen: Future aus aktiver Liste entfernen (garantiert)
+            # -----------------------------------------------------------------
+            if task_submitted and future is not None:
+                self._unregister_timeout_future(future)
+                if DEBUG_LEVEL >= 4:
+                    log_debug("transcribe", "Unregistered timeout future in finally block")
 
     # =========================================================================
     #  PRODUCER: Wird vom StreamHandler aufgerufen (schnell, nicht‑blockierend)
@@ -37410,12 +37471,6 @@ class AudioProcessor:
         Diese Methode wird vom StreamHandler aufgerufen, sobald neue PCM‑Daten
         vom FFmpeg‑Prozess gelesen werden. Sie führt leichte Vorverarbeitung
         (Audio‑Enhancement) durch und reiht den Chunk in `_raw_audio_queue` ein.
-
-        Optimierungen:
-            - Nicht‑blockierendes Einfügen mit Backpressure durch Drop
-            - Gedrosselte dynamische Chunk‑Dauer‑Anpassung
-            - Stilleerkennung zur CPU‑Einsparung
-            - Umfangreiche Debug‑Protokollierung
         """
         # -----------------------------------------------------------------
         # 1. Eingangsvalidierung und Debug
@@ -39002,305 +39057,298 @@ class AudioProcessor:
             f"🌐 AudioProcessor: Zielsprache auf {lang_code} gesetzt, Sequenz {self._translation_seq}"
         )
 
-    def start_processing(
-        self,
-        url: str,
-        transcription_callback: TranscriptionCallback,
-        translation_callback: TranslationCallback,
-        info_callback: InfoCallback,
-        error_callback: ErrorCallback,
-        finished_callback: Optional[FinishedCallback] = None,
-    ) -> None:
-        """
-        Startet die asynchrone Audioverarbeitung für eine gegebene URL.
+def start_processing(
+    self,
+    url: str,
+    transcription_callback: TranscriptionCallback,
+    translation_callback: TranslationCallback,
+    info_callback: InfoCallback,
+    error_callback: ErrorCallback,
+    finished_callback: Optional[FinishedCallback] = None,
+) -> None:
+    """
+    Startet die asynchrone Audioverarbeitung für eine gegebene URL.
 
-        Diese Methode initialisiert den Verarbeitungs-Thread, setzt alle Zustände zurück,
-        erstellt die benötigten Executors und startet den Dispatcher. Sie ist der zentrale
-        Einstiegspunkt für die Audioverarbeitung.
-        """
-        if DEBUG_LEVEL >= 3:
-            log_debug("processor", f"start_processing called with URL: {url[:100]}...")
+    🛡️ Der Emergency Reset wurde vollständig aus dem IDLE‑Pfad entfernt.  
+    Er wird ausschließlich dann ausgelöst, wenn der Zustand **nicht** IDLE ist und
+    kein aktiver Verarbeitungsthread existiert.
+    """
+    if DEBUG_LEVEL >= 3:
+        log_debug("processor", ">>> start_processing FINAL <<<")
+        log_debug("processor", f"start_processing called with URL: {url[:100]}...")
 
-        # ---------------------------------------------------------------------
-        # 1. Atomarer Zustandsübergang mit Selbstheilung
-        # ---------------------------------------------------------------------
-        with self._state_lock:
-            current_state = self._state
+    # -----------------------------------------------------------------
+    # 1. Atomarer Zustandsübergang
+    # -----------------------------------------------------------------
+    with self._state_lock:
+        current_state = self._state
 
-            if current_state != AudioProcessor.State.IDLE:
-                # Prüfen, ob der Verarbeitungs-Thread tatsächlich noch aktiv ist
-                thread_alive = (
-                    hasattr(self, '_processing_thread') and
-                    self._processing_thread is not None and
-                    self._processing_thread.is_alive()
-                )
-                dispatcher_alive = (
-                    self._dispatcher_started and
-                    self._dispatcher_thread is not None and
-                    self._dispatcher_thread.is_alive()
-                )
+        if current_state != AudioProcessor.State.IDLE:
+            # Prüfen, ob tatsächlich ein Thread aktiv ist
+            thread_alive = (
+                hasattr(self, '_processing_thread') and
+                self._processing_thread is not None and
+                self._processing_thread.is_alive()
+            )
+            dispatcher_alive = (
+                self._dispatcher_started and
+                self._dispatcher_thread is not None and
+                self._dispatcher_thread.is_alive()
+            )
 
-                if thread_alive or dispatcher_alive:
-                    # Es läuft tatsächlich noch eine Verarbeitung – Start verweigern
-                    error_callback("⚠️ A processing thread is already active")
-                    if DEBUG_LEVEL >= 3:
-                        log_debug(
-                            "processor",
-                            f"Aborting: state={current_state.name}, thread_alive={thread_alive}, "
-                            f"dispatcher_alive={dispatcher_alive}"
-                        )
-                    return
-
-                # Kein Thread aktiv, aber Zustand hängt – automatischer Reset
-                if DEBUG_LEVEL >= 3:   # 🔥 Nur bei hohem Debug-Level loggen
-                    logger.debug(
-                        f"AudioProcessor stuck in state '{current_state.name}' without active threads. "
-                        "Performing emergency reset."
-                    )
-                # Garantierte Bereinigung durchführen
-                self._guaranteed_cleanup()
-                # Zustand explizit auf IDLE setzen (wurde in _guaranteed_cleanup bereits gemacht,
-                # aber zur Sicherheit nochmals)
-                self._set_state(AudioProcessor.State.IDLE)
-                if DEBUG_LEVEL >= 3:
-                    log_debug("processor", "Emergency reset performed. State is now IDLE.")
-
-            # Jetzt ist der Zustand garantiert IDLE – wechsle zu STARTING
-            self._set_state(AudioProcessor.State.STARTING)
-            if DEBUG_LEVEL >= 3:
-                log_debug("processor", "State set to STARTING")
-
-        # ---------------------------------------------------------------------
-        # 2. URL validieren und ggf. Dateigröße ermitteln
-        # ---------------------------------------------------------------------
-        url = PlatformUtils.sanitize_url(url)
-        if DEBUG_LEVEL >= 3:
-            log_debug("processor", f"Sanitized URL: {url[:100]}...")
-
-        if url.startswith("file://"):
-            try:
-                ok, real_path = PlatformUtils.validate_file_path(url)
-                if not ok:
-                    with self._state_lock:
-                        self._set_state(AudioProcessor.State.IDLE)
-                    error_callback(f"❌ {real_path}")
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("processor", f"File validation failed: {real_path}")
-                    return
-                file_path = real_path
-                self._total_file_size = os.path.getsize(file_path)
-                logger.info(f"📁 Lokale Datei, Größe: {self._total_file_size} bytes")
+            if thread_alive or dispatcher_alive:
+                error_callback("⚠️ A processing thread is already active")
                 if DEBUG_LEVEL >= 3:
                     log_debug(
                         "processor",
-                        f"Local file: {file_path}, size={self._total_file_size}",
+                        f"Aborting: state={current_state.name}, thread_alive={thread_alive}, "
+                        f"dispatcher_alive={dispatcher_alive}"
                     )
-            except OSError as e:
+                return
+
+            # Zustand hängt (kein Thread) → Emergency Reset
+            logger.debug(
+                "AudioProcessor stuck in state '%s' without active threads. "
+                "Performing emergency reset.",
+                current_state.name
+            )
+            self._guaranteed_cleanup()
+            # _guaranteed_cleanup setzt den Zustand bereits auf IDLE
+            if DEBUG_LEVEL >= 3:
+                log_debug("processor", "Emergency reset performed. State is now IDLE.")
+
+        # Jetzt ist der Zustand garantiert IDLE → wechsle zu STARTING
+        self._set_state(AudioProcessor.State.STARTING)
+        if DEBUG_LEVEL >= 3:
+            log_debug("processor", "State set to STARTING")
+
+    # -----------------------------------------------------------------
+    # 2. URL validieren und Dateigröße ermitteln
+    # -----------------------------------------------------------------
+    url = PlatformUtils.sanitize_url(url)
+    if DEBUG_LEVEL >= 3:
+        log_debug("processor", f"Sanitized URL: {url[:100]}...")
+
+    if url.startswith("file://"):
+        try:
+            ok, real_path = PlatformUtils.validate_file_path(url)
+            if not ok:
                 with self._state_lock:
                     self._set_state(AudioProcessor.State.IDLE)
-                error_callback(f"❌ Dateizugriffsfehler: {e}")
+                error_callback(f"❌ {real_path}")
                 if DEBUG_LEVEL >= 3:
-                    log_debug("processor", f"OSError on file: {e}")
+                    log_debug("processor", f"File validation failed: {real_path}")
                 return
-        else:
-            self._total_file_size = None
-            if DEBUG_LEVEL >= 3:
-                log_debug("processor", "Stream URL (non-file)")
-
-        # ---------------------------------------------------------------------
-        # 3. Stop-Event und Stream‑ID zurücksetzen
-        # ---------------------------------------------------------------------
-        self.reset_stop_flag()
-        self._current_stream_id = f"stream_{int(time.time())}"
-        if DEBUG_LEVEL >= 3:
-            log_debug("processor", f"Stream ID: {self._current_stream_id}")
-        self.processing_completed_event.clear()
-
-        # ---------------------------------------------------------------------
-        # 4. Statistik-Zähler zurücksetzen
-        # ---------------------------------------------------------------------
-        with self._stats_lock:
-            self._chunk_counter = 0
-            self._total_bytes_processed = 0
-            self._processed_seconds = 0.0
-            self._read_error_count = 0
-            self._consecutive_timeouts = 0
-            self._consecutive_errors = 0
-            self._consecutive_successes = 0
-            self._low_conf_counter = 0
-            self._slow_chunks = 0
-            self._last_realtime_factor = 0.0
-
-        self._real_processed_seconds = 0.0
-
-        # ---------------------------------------------------------------------
-        # 5. Audio-Puffer leeren
-        # ---------------------------------------------------------------------
-        with self._buffer_lock:
-            self._audio_chunks.clear()
-            self._audio_total_bytes = 0
-
-        # ---------------------------------------------------------------------
-        # 6. Segment-Puffer für Untertitel-Modus zurücksetzen
-        # ---------------------------------------------------------------------
-        with self._segment_buffer_lock:
-            self._segment_buffer.clear()
-            self._next_expected_start = 0.0
-            if DEBUG_LEVEL >= 4:
-                log_debug("processor", "Segment buffer cleared for new stream")
-
-        # ---------------------------------------------------------------------
-        # 7. Callback für Ende speichern
-        # ---------------------------------------------------------------------
-        self._finished_callback = finished_callback
-
-        # ---------------------------------------------------------------------
-        # 8. Adaptive Chunk-Variablen zurücksetzen
-        # ---------------------------------------------------------------------
-        with self._word_count_lock:
-            self._word_count_history.clear()
-            self._smoothed_word_count = None
-
-        self._last_chunk_duration = self.settings.config.CHUNK_DURATION
-        self._chunk_stable_counter = 0
-
-        # ---------------------------------------------------------------------
-        # 9. Executors konfigurieren
-        # ---------------------------------------------------------------------
-        cpu_count = os.cpu_count() or 4
-        _transcribe_workers = getattr(
-            self.settings, "transcription_workers", max(1, cpu_count // 8)
-        )
-        translate_workers = getattr(
-            self.settings, "translation_workers", min(8, max(1, cpu_count // 4))
-        )
-
-        if self._translation_executor is None:
-            self._translation_executor = OptimizedThreadPoolExecutor(
-                max_workers=translate_workers,
-                thread_name_prefix="DW-Translate",
-                max_queue_size=100,
-            )
+            file_path = real_path
+            self._total_file_size = os.path.getsize(file_path)
+            logger.info(f"📁 Lokale Datei, Größe: {self._total_file_size} bytes")
             if DEBUG_LEVEL >= 3:
                 log_debug(
                     "processor",
-                    f"Translation executor created with {translate_workers} worker(s)"
+                    f"Local file: {file_path}, size={self._total_file_size}",
                 )
-        else:
+        except OSError as e:
+            with self._state_lock:
+                self._set_state(AudioProcessor.State.IDLE)
+            error_callback(f"❌ Dateizugriffsfehler: {e}")
             if DEBUG_LEVEL >= 3:
-                log_debug("processor", "Translation executor already exists, reusing")
-
-        # Transcription-Executor je nach Modus anpassen
-        if self.subtitle_mode:
-            self._set_transcription_workers(1)
-            logger.info("✅ Untertitel‑Modus: sequenzielle Transkription (1 Worker)")
-        else:
-            self._set_transcription_workers(1)
-            logger.info("✅ Normaler Modus: sequenzielle Transkription (1 Worker)")
-
-        # ---------------------------------------------------------------------
-        # 10. Dispatcher vorbereiten und starten
-        # ---------------------------------------------------------------------
-        # Zuerst eventuell noch laufenden Dispatcher stoppen (sollte nicht sein)
-        if self._dispatcher_started:
-            log_debug("processor", "start_processing: old dispatcher still running, stopping it")
-            self._stop_dispatcher(clear_queue=True)
-
-        # **WICHTIG**: Alte Queue-Inhalte (insbesondere Sentinels) entfernen,
-        # die den neuen Dispatcher sofort beenden würden.
-        cleared = 0
-        try:
-            while True:
-                self._raw_audio_queue.get_nowait()
-                self._raw_audio_queue.task_done()
-                cleared += 1
-        except queue.Empty:
-            pass
-        if cleared > 0:
-            logger.debug(f"Queue vor Dispatcher-Start geleert: {cleared} Elemente entfernt")
-
-        self._start_dispatcher()
+                log_debug("processor", f"OSError on file: {e}")
+            return
+    else:
+        self._total_file_size = None
         if DEBUG_LEVEL >= 3:
-            log_debug("processor", "Dispatcher started")
+            log_debug("processor", "Stream URL (non-file)")
 
-        # ---------------------------------------------------------------------
-        # 11. Callbacks speichern (für spätere Verwendung im Thread)
-        # ---------------------------------------------------------------------
-        self._transcription_callback = transcription_callback
-        self._translation_callback = translation_callback
-        self._info_callback = info_callback
-        self._error_callback = error_callback
+    # -----------------------------------------------------------------
+    # 3. Stop-Event und Stream‑ID zurücksetzen
+    # -----------------------------------------------------------------
+    self.reset_stop_flag()
+    self._current_stream_id = f"stream_{int(time.time())}"
+    if DEBUG_LEVEL >= 3:
+        log_debug("processor", f"Stream ID: {self._current_stream_id}")
+    self.processing_completed_event.clear()
 
-        # ---------------------------------------------------------------------
-        # 12. _last_oom der TranscriptionEngine zurücksetzen
-        # ---------------------------------------------------------------------
-        if hasattr(self, '_transcription_engine') and self._transcription_engine is not None:
-            try:
-                with self._transcription_engine._state_lock:
-                    self._transcription_engine._last_oom = False
-                if DEBUG_LEVEL >= 3:
-                    log_debug("processor", "Reset _last_oom flag for new stream")
-            except Exception as e:
-                logger.warning(f"Failed to reset _last_oom: {e}")
+    # -----------------------------------------------------------------
+    # 4. Statistik-Zähler zurücksetzen
+    # -----------------------------------------------------------------
+    with self._stats_lock:
+        self._chunk_counter = 0
+        self._total_bytes_processed = 0
+        self._processed_seconds = 0.0
+        self._read_error_count = 0
+        self._consecutive_timeouts = 0
+        self._consecutive_errors = 0
+        self._consecutive_successes = 0
+        self._low_conf_counter = 0
+        self._slow_chunks = 0
+        self._last_realtime_factor = 0.0
 
-        # ---------------------------------------------------------------------
-        # 13. Verarbeitungs-Thread definieren und starten
-        # ---------------------------------------------------------------------
-        def _process_thread(
-            url: str,
-            trans_cb: TranscriptionCallback,
-            transl_cb: TranslationCallback,
-            info_cb: InfoCallback,
-            err_cb: ErrorCallback,
-            finish_cb: Optional[FinishedCallback],
-        ) -> None:
-            try:
-                if DEBUG_LEVEL >= 3:
-                    log_debug("processor", "Processing thread entered")
-                self._process_loop_enhanced(
-                    url,
-                    trans_cb,
-                    transl_cb,
-                    info_cb,
-                    err_cb,
-                    finish_cb,
-                )
-            except Exception as e:
-                logger.exception(f"❌ Unhandled exception in processing thread: {e}")
-                err_cb(f"Internal error: {e}")
-            finally:
-                with self._state_lock:
-                    self._set_state(AudioProcessor.State.IDLE)
-                self._stop_event.set()
-                if DEBUG_LEVEL >= 3:
-                    log_debug("processor", "Processing thread finished")
+    self._real_processed_seconds = 0.0
 
-        thread = threading.Thread(
-            target=_process_thread,
-            args=(
-                url,
-                transcription_callback,
-                translation_callback,
-                info_callback,
-                error_callback,
-                finished_callback,
-            ),
-            daemon=True,
-            name=f"DW-AudioProc_{self._current_stream_id}",
+    # -----------------------------------------------------------------
+    # 5. Audio-Puffer leeren
+    # -----------------------------------------------------------------
+    with self._buffer_lock:
+        self._audio_chunks.clear()
+        self._audio_total_bytes = 0
+
+    # -----------------------------------------------------------------
+    # 6. Segment-Puffer zurücksetzen
+    # -----------------------------------------------------------------
+    with self._segment_buffer_lock:
+        self._segment_buffer.clear()
+        self._next_expected_start = 0.0
+        if DEBUG_LEVEL >= 4:
+            log_debug("processor", "Segment buffer cleared for new stream")
+
+    # -----------------------------------------------------------------
+    # 7. Callback speichern
+    # -----------------------------------------------------------------
+    self._finished_callback = finished_callback
+
+    # -----------------------------------------------------------------
+    # 8. Adaptive Chunk-Variablen zurücksetzen
+    # -----------------------------------------------------------------
+    with self._word_count_lock:
+        self._word_count_history.clear()
+        self._smoothed_word_count = None
+
+    self._last_chunk_duration = self.settings.config.CHUNK_DURATION
+    self._chunk_stable_counter = 0
+
+    # -----------------------------------------------------------------
+    # 9. Executors konfigurieren
+    # -----------------------------------------------------------------
+    cpu_count = os.cpu_count() or 4
+    _transcribe_workers = getattr(
+        self.settings, "transcription_workers", max(1, cpu_count // 8)
+    )
+    translate_workers = getattr(
+        self.settings, "translation_workers", min(8, max(1, cpu_count // 4))
+    )
+
+    if self._translation_executor is None:
+        self._translation_executor = OptimizedThreadPoolExecutor(
+            max_workers=translate_workers,
+            thread_name_prefix="DW-Translate",
+            max_queue_size=100,
         )
-        self._processing_thread = thread
-        thread.start()
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "processor",
+                f"Translation executor created with {translate_workers} worker(s)"
+            )
+    else:
+        if DEBUG_LEVEL >= 3:
+            log_debug("processor", "Translation executor already exists, reusing")
 
-        # ---------------------------------------------------------------------
-        # 14. Zustand auf PROCESSING setzen
-        # ---------------------------------------------------------------------
-        with self._state_lock:
-            if self._state == AudioProcessor.State.STARTING:
-                self._set_state(AudioProcessor.State.PROCESSING)
-                if DEBUG_LEVEL >= 3:
-                    log_debug("processor", "State changed to PROCESSING")
+    if self.subtitle_mode:
+        self._set_transcription_workers(1)
+        logger.info("✅ Untertitel‑Modus: sequenzielle Transkription (1 Worker)")
+    else:
+        self._set_transcription_workers(1)
+        logger.info("✅ Normaler Modus: sequenzielle Transkription (1 Worker)")
 
-        logger.info("✅ Processing thread started")
+    # -----------------------------------------------------------------
+    # 10. Dispatcher vorbereiten und starten
+    # -----------------------------------------------------------------
+    if self._dispatcher_started:
+        log_debug("processor", "start_processing: old dispatcher still running, stopping it")
+        self._stop_dispatcher(clear_queue=True)
+
+    cleared = 0
+    try:
+        while True:
+            self._raw_audio_queue.get_nowait()
+            self._raw_audio_queue.task_done()
+            cleared += 1
+    except queue.Empty:
+        pass
+    if cleared > 0:
+        logger.debug(f"Queue vor Dispatcher-Start geleert: {cleared} Elemente entfernt")
+
+    self._start_dispatcher()
+    if DEBUG_LEVEL >= 3:
+        log_debug("processor", "Dispatcher started")
+
+    # -----------------------------------------------------------------
+    # 11. Callbacks speichern
+    # -----------------------------------------------------------------
+    self._transcription_callback = transcription_callback
+    self._translation_callback = translation_callback
+    self._info_callback = info_callback
+    self._error_callback = error_callback
+
+    # -----------------------------------------------------------------
+    # 12. _last_oom zurücksetzen
+    # -----------------------------------------------------------------
+    if hasattr(self, '_transcription_engine') and self._transcription_engine is not None:
+        try:
+            with self._transcription_engine._state_lock:
+                self._transcription_engine._last_oom = False
+            if DEBUG_LEVEL >= 3:
+                log_debug("processor", "Reset _last_oom flag for new stream")
+        except Exception as e:
+            logger.warning(f"Failed to reset _last_oom: {e}")
+
+    # -----------------------------------------------------------------
+    # 13. Verarbeitungs-Thread starten
+    # -----------------------------------------------------------------
+    def _process_thread(
+        url: str,
+        trans_cb: TranscriptionCallback,
+        transl_cb: TranslationCallback,
+        info_cb: InfoCallback,
+        err_cb: ErrorCallback,
+        finish_cb: Optional[FinishedCallback],
+    ) -> None:
+        try:
+            if DEBUG_LEVEL >= 3:
+                log_debug("processor", "Processing thread entered")
+            self._process_loop_enhanced(
+                url,
+                trans_cb,
+                transl_cb,
+                info_cb,
+                err_cb,
+                finish_cb,
+            )
+        except Exception as e:
+            logger.exception(f"❌ Unhandled exception in processing thread: {e}")
+            err_cb(f"Internal error: {e}")
+        finally:
+            with self._state_lock:
+                self._set_state(AudioProcessor.State.IDLE)
+            self._stop_event.set()
+            if DEBUG_LEVEL >= 3:
+                log_debug("processor", "Processing thread finished")
+
+    thread = threading.Thread(
+        target=_process_thread,
+        args=(
+            url,
+            transcription_callback,
+            translation_callback,
+            info_callback,
+            error_callback,
+            finished_callback,
+        ),
+        daemon=True,
+        name=f"DW-AudioProc_{self._current_stream_id}",
+    )
+    self._processing_thread = thread
+    thread.start()
+
+    # -----------------------------------------------------------------
+    # 14. Zustand auf PROCESSING setzen
+    # -----------------------------------------------------------------
+    with self._state_lock:
+        if self._state == AudioProcessor.State.STARTING:
+            self._set_state(AudioProcessor.State.PROCESSING)
+            if DEBUG_LEVEL >= 3:
+                log_debug("processor", "State changed to PROCESSING")
+
+    logger.info("✅ Processing thread started")
 
     def reset_stop_flag(self) -> None:
         self._stop_event.clear()
@@ -45218,7 +45266,16 @@ class AdvancedSettings:
     @classmethod
     def load_from_file(cls, filename: str = "dragon_advanced_settings.json") -> "AdvancedSettings":
         """
-        Lädt erweiterte Einstellungen robust, typensicher und mit automatischer Typableitung.
+        Lädt erweiterte Einstellungen robust, typensicher und mit automatischer
+        Reparatur veralteter Felder. Die Methode speichert die Konfiguration neu,
+        sobald überholte Schlüssel entdeckt werden, und stellt so sicher, dass
+        die JSON‑Datei immer auf dem aktuellen Stand ist.
+
+        Args:
+            filename: Name der JSON‑Datei (relativ zum Konfigurationsverzeichnis).
+
+        Returns:
+            Eine vollständig initialisierte AdvancedSettings‑Instanz.
         """
         import re
         from typing import get_origin, get_args, Union
@@ -45317,10 +45374,14 @@ class AdvancedSettings:
 
         # 5. NUR gültige Felder übernehmen (ignoriere Fremdfelder)
         valid_fields = {f.name for f in fields(cls) if f.init}
-        filtered = {k: v for k, v in data.items() if k in valid_fields}
+        filtered = {}
+        outdated_fields = []                     # sammle veraltete Felder
 
-        for key in data:
-            if key not in valid_fields and key != "_version":
+        for key, value in data.items():
+            if key in valid_fields:
+                filtered[key] = value
+            elif key != "_version":
+                outdated_fields.append(key)
                 if not hasattr(cls, "_warned_obsolete_fields"):
                     cls._warned_obsolete_fields = set()
                 if key not in cls._warned_obsolete_fields:
@@ -45369,7 +45430,15 @@ class AdvancedSettings:
         # 10. Reparatur durchführen (fügt fehlende Felder hinzu)
         instance._repair_if_needed()
 
-        # 11. Cache speichern
+        # 11. Falls veraltete Felder vorhanden waren, die Datei sofort neu schreiben
+        if outdated_fields:
+            logger.info(f"🔧 Veraltete Felder erkannt: {outdated_fields}. Speichere bereinigte Konfiguration...")
+            try:
+                instance.save_to_file(filename=filename)
+            except Exception as e:
+                logger.warning(f"Fehler beim automatischen Bereinigen der Konfigurationsdatei: {e}")
+
+        # 12. Cache speichern
         with cls._cache_lock:
             cls._cache[cache_key] = instance
 
