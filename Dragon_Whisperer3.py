@@ -147,9 +147,7 @@ def _apply_patches() -> None:
     import urllib3._collections
     import urllib3.connection
 
-    # -------------------------------------------------------------------------
     # 1. PoolManager.__init__
-    # -------------------------------------------------------------------------
     _original_pool_init = urllib3.poolmanager.PoolManager.__init__
 
     def _patched_pool_init(self, *args, **kwargs):
@@ -158,9 +156,7 @@ def _apply_patches() -> None:
 
     urllib3.poolmanager.PoolManager.__init__ = _patched_pool_init
 
-    # -------------------------------------------------------------------------
     # 2. ProxyManager.__init__
-    # -------------------------------------------------------------------------
     if hasattr(urllib3.poolmanager, 'ProxyManager'):
         _original_proxy_init = urllib3.poolmanager.ProxyManager.__init__
 
@@ -170,9 +166,7 @@ def _apply_patches() -> None:
 
         urllib3.poolmanager.ProxyManager.__init__ = _patched_proxy_init
 
-    # -------------------------------------------------------------------------
     # 3. PoolKey.__new__
-    # -------------------------------------------------------------------------
     if hasattr(urllib3.connectionpool, 'PoolKey'):
         _original_poolkey_new = urllib3.connectionpool.PoolKey.__new__
 
@@ -183,9 +177,7 @@ def _apply_patches() -> None:
 
         urllib3.connectionpool.PoolKey.__new__ = _patched_poolkey_new
 
-    # -------------------------------------------------------------------------
     # 4. PoolKey.__init__ (Sicherheitspatch)
-    # -------------------------------------------------------------------------
     if (hasattr(urllib3.connectionpool, 'PoolKey') and
         hasattr(urllib3.connectionpool.PoolKey, '__init__')):
         _original_poolkey_init = urllib3.connectionpool.PoolKey.__init__
@@ -196,9 +188,7 @@ def _apply_patches() -> None:
 
         urllib3.connectionpool.PoolKey.__init__ = _patched_poolkey_init
 
-    # -------------------------------------------------------------------------
     # 5. connection_from_pool_key
-    # -------------------------------------------------------------------------
     if hasattr(urllib3.poolmanager.PoolManager, 'connection_from_pool_key'):
         _original_connection_from_pool_key = (
             urllib3.poolmanager.PoolManager.connection_from_pool_key
@@ -211,9 +201,7 @@ def _apply_patches() -> None:
             _patched_connection_from_pool_key
         )
 
-    # -------------------------------------------------------------------------
     # 6. RecentlyUsedContainer (für ältere urllib3-Versionen)
-    # -------------------------------------------------------------------------
     if hasattr(urllib3._collections, 'RecentlyUsedContainer'):
         _original_container_init = urllib3._collections.RecentlyUsedContainer.__init__
 
@@ -223,9 +211,7 @@ def _apply_patches() -> None:
 
         urllib3._collections.RecentlyUsedContainer.__init__ = _patched_container_init
 
-    # -------------------------------------------------------------------------
     # 7. ConnectionPool.urlopen (kann ebenfalls key_threadpool erhalten)
-    # -------------------------------------------------------------------------
     if hasattr(urllib3.connectionpool, 'ConnectionPool'):
         _original_urlopen = urllib3.connectionpool.ConnectionPool.urlopen
 
@@ -237,6 +223,8 @@ def _apply_patches() -> None:
 
     _patch_applied = True
 
+    if DEBUG_LEVEL >= 4:
+        log_debug("monkey", "urllib3 monkey-patch applied successfully")
 
 def apply() -> None:
     """
@@ -325,35 +313,25 @@ def unpatch() -> None:
 
     # Debug-Ausgabe mit Schutz gegen undefinierte Variablen
     try:
-        if DEBUG_LEVEL >= 3:
+        if DEBUG_LEVEL >= 4:
             log_debug("monkey", "urllib3 monkey-patch removed")
     except NameError:
         pass
 
-
-# =============================================================================
 # Automatische Anwendung beim Import dieses Moduls
-# =============================================================================
-# Standardmäßig wird der Patch beim Import angewendet, falls erforderlich.
-# Dies stellt sicher, dass alle nachfolgenden urllib3-Operationen fehlerfrei
-# funktionieren.
 apply()
 
 warnings.filterwarnings(
     "ignore", category=UserWarning, module="multiprocessing.resource_tracker"
 )
 
-# =============================================================================
 # 2. DRITTBIBLIOTHEKEN
-# =============================================================================
 try:
     import requests
 except ImportError:
     requests = None
 
-# =============================================================================
 # 3. TKINTER (GUI)
-# =============================================================================
 try:
     import tkinter as tk
     from tkinter import filedialog, scrolledtext, ttk, simpledialog
@@ -363,9 +341,7 @@ except ImportError:
     GUI_AVAILABLE = False
     tk = ttk = scrolledtext = filedialog = None
 
-# =============================================================================
 # 4. KOMMANDOZEILEN-PARAMETER (DEBUG, QUIET)
-# =============================================================================
 DEBUG_LEVEL = 0
 DEBUG_COMPONENTS = []
 
@@ -381,9 +357,7 @@ for arg in sys.argv:
 
 QUIET_MODE = "--quiet" in sys.argv or "-q" in sys.argv
 
-# =============================================================================
 # 5. LOGGING KONFIGURATION
-# =============================================================================
 logging.basicConfig(
     level=logging.WARNING,
     format="[%(asctime)s.%(msecs)03d] [%(levelname)s] %(message)s",
@@ -407,9 +381,7 @@ if QUIET_MODE:
 warnings.filterwarnings("ignore", message=".*pynvml.*")
 warnings.filterwarnings("ignore", message=".*The pynvml package is deprecated.*")
 
-# =============================================================================
 # 6. PLATTFORMERKENNUNG & UMWELTVARIABLEN
-# =============================================================================
 SYSTEM = platform.system()
 IS_WINDOWS = SYSTEM == "Windows"
 IS_MACOS = SYSTEM == "Darwin"
@@ -860,9 +832,7 @@ def get_other_language_names() -> List[str]:
     return _OTHER_NAMES.copy()
 
 
-# =============================================================================
 # 9. BASISKLASSEN UND HILFSKLASSEN (EventBus, PeriodicTaskMixin, BaseDialog, ContextMenuMixin, Themes, Fonts)
-# =============================================================================
 class EventBus:
     """
     Thread-sicherer Event-Bus mit exakten und Muster-Abonnements.
@@ -980,9 +950,7 @@ class EventBus:
                     return True
             return False
 
-    # -------------------------------------------------------------------------
     # Events senden
-    # -------------------------------------------------------------------------
     def emit(self, event_type: str, data: Any = None) -> None:
         """
         Sendet ein Event an alle Abonnenten.
@@ -1032,9 +1000,7 @@ class EventBus:
                 if fnmatch.fnmatch(event_type, pattern):
                     run_callback(cb, data)
 
-    # -------------------------------------------------------------------------
     # Kontext-Manager
-    # -------------------------------------------------------------------------
     @contextmanager
     def subscription_context(self, event_type: str, callback: Callable[[Any], None]):
         """
@@ -1062,9 +1028,7 @@ class EventBus:
         finally:
             self.unsubscribe_pattern(pattern, callback)
 
-    # -------------------------------------------------------------------------
     # Verwaltung
-    # -------------------------------------------------------------------------
     def clear(self) -> None:
         """Entfernt alle Abonnements."""
         with self._lock:
@@ -1760,7 +1724,6 @@ class HighContrastTheme:
     STATUS_BAR_FG = "#ffff00"
     STATUS_BAR_ACCENT = "#00ffff"
 
-
 class Fonts:
     TITLE = ("Segoe UI", 12, "bold")
     SUBTITLE = ("Segoe UI", 10, "bold")
@@ -2010,9 +1973,7 @@ class MonokaiTheme:
 
 CURRENT_THEME = DarkTheme()
 
-# =============================================================================
 # 10. KONFIGURATION (ConfigDefaults, Config, RealtimeConfig, HighAccuracyConfig, YouTubeOptimizedConfig, get_config)
-# =============================================================================
 
 
 class ConfigDefaults:
@@ -2032,9 +1993,7 @@ class ConfigDefaults:
     BYTES_PER_SAMPLE: int = 2
     """Bytes pro Sample (bei 16-bit = 2)."""
 
-    # =========================================================================
     # Allgemeine Konfiguration
-    # =========================================================================
     DEFAULT_BEAM_SIZE: int = 10
     """Standard-Beam-Size für Whisper-Decodierung (höher = genauer, aber langsamer)."""
 
@@ -2397,9 +2356,7 @@ class ConfigDefaults:
     STALLED_RECONNECT_LOG_INTERVAL: float = 10.0
     """Intervall für Logs bei hängenden Reconnects in Sekunden."""
 
-    # =========================================================================
     # Zusätzliche Debug-Informationen (nur für Entwicklung)
-    # =========================================================================
     @classmethod
     def print_debug_info(cls) -> None:
         """Gibt eine Übersicht aller Konfigurationswerte für Debugging-Zwecke aus."""
@@ -2443,9 +2400,7 @@ class Config(ConfigDefaults):
     Dynamische Konfiguration für Dragon Whisperer.
     """
 
-    # -------------------------------------------------------------------------
     #  Basisattribute (überschreiben oder ergänzen)
-    # -------------------------------------------------------------------------
     _base_chunk_duration: int = ConfigDefaults.BASE_CHUNK_DURATION
     CHUNK_OVERLAP: float = ConfigDefaults.CHUNK_OVERLAP
     MIN_CHUNK_DURATION: int = ConfigDefaults.MIN_CHUNK_DURATION
@@ -2457,9 +2412,7 @@ class Config(ConfigDefaults):
         init=False, default=float(ConfigDefaults.BASE_CHUNK_DURATION)
     )
 
-    # -------------------------------------------------------------------------
     #  Audio-Filter
-    # -------------------------------------------------------------------------
     AUDIO_FILTER: str = "aresample=16000"
     LANGUAGE_FILTERS: Dict[str, str] = field(
         default_factory=lambda: {
@@ -2477,9 +2430,7 @@ class Config(ConfigDefaults):
         }
     )
 
-    # -------------------------------------------------------------------------
     #  Plattform- und YouTube-Konfiguration
-    # -------------------------------------------------------------------------
     YOUTUBE_HEADERS: Dict[str, str] = field(
         default_factory=lambda: ConfigDefaults.YOUTUBE_HEADERS.copy()
     )
@@ -2487,33 +2438,25 @@ class Config(ConfigDefaults):
         default_factory=lambda: ConfigDefaults.PLATFORM_CONFIG.copy()
     )
 
-    # -------------------------------------------------------------------------
     #  Audio-Enhancement
-    # -------------------------------------------------------------------------
     AUDIO_ENHANCEMENT_ENABLED: bool = False
     MIN_RMS_THRESHOLD: float = ConfigDefaults.MIN_RMS_THRESHOLD
     TARGET_RMS: float = ConfigDefaults.TARGET_RMS
     MAX_GAIN: float = ConfigDefaults.MAX_GAIN
     CLIPPING_THRESHOLD: float = ConfigDefaults.CLIPPING_THRESHOLD
 
-    # -------------------------------------------------------------------------
     #  Duplikaterkennung
-    # -------------------------------------------------------------------------
     DUPLICATE_CHECK_ENABLED: bool = False
     RECENT_TRANSCRIPTIONS_SIZE: int = ConfigDefaults.RECENT_TRANSCRIPTIONS_SIZE
     MIN_TEXT_LENGTH: int = ConfigDefaults.MIN_TEXT_LENGTH
     MIN_UNIQUE_WORDS_RATIO: float = ConfigDefaults.MIN_UNIQUE_WORDS_RATIO
 
-    # -------------------------------------------------------------------------
     #  Untertitel
-    # -------------------------------------------------------------------------
     SUBTITLE_BUFFER_SIZE: int = ConfigDefaults.SUBTITLE_BUFFER_SIZE
     ENABLE_TIMED_TRANSCRIPTIONS: bool = ConfigDefaults.ENABLE_TIMED_TRANSCRIPTIONS
     ENABLE_TIMED_TRANSLATIONS: bool = ConfigDefaults.ENABLE_TIMED_TRANSLATIONS
 
-    # -------------------------------------------------------------------------
     #  Logging
-    # -------------------------------------------------------------------------
     ENABLE_DEBUG_LOGGING: bool = ConfigDefaults.ENABLE_DEBUG_LOGGING
     LOG_CHUNK_PROCESSING: bool = ConfigDefaults.LOG_CHUNK_PROCESSING
     LOG_AUDIO_STATS: bool = ConfigDefaults.LOG_AUDIO_STATS
@@ -2521,27 +2464,19 @@ class Config(ConfigDefaults):
     LOG_STREAM_EVENTS: bool = ConfigDefaults.LOG_STREAM_EVENTS
     PERFORMANCE_LOG_INTERVAL: int = ConfigDefaults.PERFORMANCE_LOG_INTERVAL
 
-    # -------------------------------------------------------------------------
     #  Caching
-    # -------------------------------------------------------------------------
     MAX_CACHE_SIZE_MB: int = ConfigDefaults.MAX_CACHE_SIZE_MB
     CACHE_ENABLED: bool = ConfigDefaults.CACHE_ENABLED
 
-    # -------------------------------------------------------------------------
     #  Whisper-Modelle (direkt als Klassenattribut für bessere Performance)
-    # -------------------------------------------------------------------------
     WHISPER_MODELS: List[str] = field(
         default_factory=lambda: ConfigDefaults.WHISPER_MODELS.copy()
     )
 
-    # -------------------------------------------------------------------------
     #  Interner Cache für BYTES_PER_SECOND (Performance-Optimierung)
-    # -------------------------------------------------------------------------
     _cached_bytes_per_second: Optional[int] = field(default=None, init=False, repr=False)
 
-    # -------------------------------------------------------------------------
     #  Properties für dynamische Werte
-    # -------------------------------------------------------------------------
     @property
     def CHUNK_DURATION(self) -> float:
         """Aktuelle Chunk-Dauer in Sekunden (dynamisch änderbar)."""
@@ -3094,9 +3029,7 @@ def get_config(config_type: str = "default") -> Config:
     return config
 
 
-# =============================================================================
 # 11. HILFSKLASSEN (FastLazyLoader, PlatformStderrFilter, PlatformUtils, DummyQueue, SimplePerformanceTracker, OptimizedThreadPoolExecutor, TTLCache, LRUCache, CacheManager, DebugFilter, AppContext, log_exception, MemoryManager, Decorators)
-# =============================================================================
 class FastLazyLoader:
     """
     Thread‑sicherer Lazy‑Loader für Module mit Caching und Verfügbarkeitsprüfung.
@@ -3593,8 +3526,6 @@ class PlatformUtils:
         - Prozess‑Terminierung mit psutil‑Fallback.
         - Detaillierte Debug‑Logs bei DEBUG_LEVEL >= 3.
         - Thread‑sichere Operationen über Klassen‑Locks.
-
-    Alle öffentlichen Methoden sind als Klassenmethoden ausgeführt und thread‑sicher.
     """
 
     # =========================================================================
@@ -17896,21 +17827,16 @@ class StreamInfoExtractor:
 
     # -------------------------------------------------------------------------
     # YouTube-optimierte Extraktion
-    # -------------------------------------------------------------------------
     def _extract_youtube_info_optimized(self, url: str) -> Optional[StreamInfo]:
         """
         Optimierte YouTube‑Extraktion mit paralleler Ausführung, minimaler Latenz
         und robustem Fallback. Verwendet gleichzeitig die schnelle direkte
         Extraktion (‑‑get‑title, ‑‑print duration) und einen optionalen JSON‑Dump.
-        Sobald eine Methode erfolgreich ist, wird das Ergebnis sofort verwendet
-        und die andere abgebrochen.
         """
         if self._debug:
             logger.debug("🚀 Optimierte YouTube‑Extraktion (parallel) für %s", url[:80])
 
-        # -----------------------------------------------------------------
         # Hilfsfunktionen für die parallelen Tasks
-        # -----------------------------------------------------------------
         def direct_task() -> Optional[StreamInfo]:
             """Führt die schnelle direkte Extraktion durch."""
             if self._debug:
@@ -17941,7 +17867,7 @@ class StreamInfoExtractor:
             try:
                 stdout = YtDlpHelper.run_command(
                     cmd,
-                    timeout=15,
+                    timeout=8,
                     method_name="YouTube JSON (parallel)",
                 )
                 if stdout:
@@ -17967,9 +17893,6 @@ class StreamInfoExtractor:
             # Direkte Extraktion immer starten
             futures[executor.submit(direct_task)] = "direct"
 
-            # JSON nur, wenn Cookies aktiv (kann auch ohne Cookies versucht werden,
-            # aber der direkte Weg ist fast immer ausreichend; wir sparen uns den
-            # JSON‑Versuch ohne Cookies, da er selten erfolgreicher ist als der direkte)
             if use_json:
                 futures[executor.submit(json_task, True, browser)] = "json"
 
@@ -20692,7 +20615,7 @@ class StatusBar:
         self.gui.progress_bar = ttk.Progressbar(
             parent,
             mode="determinate",
-            length=150,  # 🔥 Vergrößert von 90 auf 150 Pixel
+            length=110,
             style="Dark.Horizontal.TProgressbar"
         )
         self.gui.progress_bar.pack(side="left", padx=(3, 3))
@@ -32507,22 +32430,6 @@ class DragonWhispererGUI:
         dass alle Ressourcen freigegeben, Einstellungen gespeichert und das
         Hauptfenster zerstört werden – **selbst dann, wenn während der Bereinigung
         ein Fehler auftritt**.
-
-        Ablauf:
-            1. Setzt das interne Shutdown‑Flag (verhindert weitere GUI‑Aktionen).
-            2. Speichert die aktuellen Benutzereinstellungen vollständig.
-            3. Schließt alle offenen Dialogfenster.
-            4. Führt die vollständige Ressourcenbereinigung durch.
-            5. Beendet die Tkinter‑Hauptschleife und zerstört das Fenster.
-            6. Beendet den Python‑Prozess mit Exit‑Code 0.
-
-        Die Methode verwendet einen `finally`‑Block für `root.destroy()`, sodass
-        das Fenster **immer** geschlossen wird, unabhängig von Ausnahmen während
-        der Bereinigung. Ein Aufruf von `sys.exit(0)` stellt sicher, dass auch
-        hartnäckige Hintergrundthreads den Prozess nicht am Beenden hindern.
-
-        Raises:
-            SystemExit: Immer, um den Prozess zuverlässig zu beenden.
         """
         # -----------------------------------------------------------------
         # 1. Shutdown-Flag setzen (weitere GUI-Updates unterbinden)
@@ -37142,25 +37049,6 @@ class AudioProcessor:
     ) -> List[TranscriptionResult]:
         """
         Führt die Transkription eines Audio‑Chunks mit dynamischem Timeout und Selbstheilung durch.
-
-        Diese Methode ist das Herzstück der robusten Transkriptionspipeline. Sie kombiniert:
-          - Dynamisches Timeout basierend auf Chunk‑Dauer und letztem Echtzeitfaktor
-          - Automatischen Austausch des zugrundeliegenden Executors bei wiederholten Timeouts
-          - Asynchrone, nicht‑blockierende Erneuerung des Executors
-          - Umfassende Fehlerbehandlung mit Wiederholung bei temporären Executor‑Fehlern
-          - Detaillierte Debug‑Ausgaben zur Nachverfolgung von Problemen
-
-        Args:
-            audio_data: PCM‑Audiodaten (16‑bit, mono, konfigurierte Samplerate) als Bytes.
-            timeout: Optionaler fester Timeout in Sekunden. Wenn None, wird dynamisch berechnet.
-
-        Returns:
-            Liste von TranscriptionResult‑Objekten (Segmente). Bei fehlenden Daten leer.
-
-        Raises:
-            TimeoutError: Wenn die Transkription länger als das Timeout dauert.
-            TranscriptionError: Bei Fehlern während der Transkription oder wenn die Engine /
-                                der Executor dauerhaft nicht verfügbar ist.
         """
         # -----------------------------------------------------------------
         # 1. Eingangsvalidierung
@@ -37587,28 +37475,6 @@ class AudioProcessor:
         korrigiert ggf. den internen Fortschrittszähler `_real_processed_seconds`,
         und startet dann den Download‑Modus. Es werden mehrere Fallback‑Strategien
         verwendet (--download-sections und vollständiger Download mit Seek).
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - **Puffer‑Bereinigung vor Download:** Segment‑, Transkriptions‑ und
-              Übersetzungspuffer werden geleert, damit alte Segmente nicht die
-              Reihenfolge der neu heruntergeladenen Segmente stören.
-            - **Korrektur von `_real_processed_seconds`:** Falls der Wert die
-              erwartete Dauer überschreitet, wird er auf einen plausiblen Wert
-              zurückgesetzt, bevor `start_seconds` abgeleitet wird.
-            - **Plausibilitätsprüfung von `start_seconds`:** Der Wert wird auf
-              Gültigkeit geprüft und ggf. korrigiert.
-            - **Robuste Abbruchprüfung** vor jedem Schritt.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 2` mit Präfix `[DOWNLOAD]`.
-            - **Sicherer Umgang mit `cancel_event` und `is_stop_requested`.**
-            - **Dispatcher‑Neustart** falls erforderlich.
-            - **Fehlerisolierung:** Fehler werden geloggt und führen nicht zum Abbruch
-              der gesamten Verarbeitung.
-            - **Vollständige Ressourcenbereinigung** im Fehlerfall.
-
-        Args:
-            video_url: Die ursprüngliche Video‑URL.
-            start_seconds: Position in Sekunden, ab der das Video nachgeladen werden soll.
-            cancel_event: Optionales Event für externen Abbruch.
         """
         # -----------------------------------------------------------------
         # Hilfsfunktion für konsistente Abbruchprüfung
@@ -37831,20 +37697,6 @@ class AudioProcessor:
         """
         Wartet darauf, dass alle in die Rohdaten-Queue eingestellten Chunks
         vollständig verarbeitet werden, und beendet anschließend den Dispatcher.
-
-        Ablauf:
-            1. Signalisiert dem Dispatcher, nach dem aktuellen Chunk zu beenden
-               (setzt `_dispatcher_shutdown`).
-            2. Wartet mittels `queue.join()` darauf, dass alle bisher
-               eingefügten Elemente durch `task_done()` quittiert wurden.
-            3. Stoppt den Dispatcher-Thread endgültig über `_stop_dispatcher()`.
-
-        Args:
-            timeout: Maximale Wartezeit in Sekunden.
-
-        Returns:
-            True, wenn die Queue erfolgreich geleert und der Dispatcher
-            gestoppt wurde. False bei Timeout, Benutzerabbruch oder Fehler.
         """
         # 1. Dispatcher anweisen, nach dem aktuellen Chunk zu beenden
         self._dispatcher_shutdown.set()
@@ -38091,38 +37943,6 @@ class AudioProcessor:
         Diese Methode wird vom Download‑Modus aufgerufen, wenn der normale Stream
         vorzeitig abgebrochen ist. Sie verwendet `--download-sections`, um gezielt
         den fehlenden Teil des Videos ab einer bestimmten Position herunterzuladen.
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - **Sichere Startzeit:** `rounded_start` wird als nicht‑negativer Integer
-              validiert und auf Plausibilität geprüft (maximal erwartete Dauer sowie
-              absolute Obergrenze von 24 Stunden).
-            - **Schutz vor Option‑Injection:** Der URL wird `--` vorangestellt,
-              sodass `yt-dlp` sie auch dann als URL interpretiert, wenn sie mit
-              einem Bindestrich beginnt.
-            - **Optimierte Format‑Priorität:** Bevorzugt reine Audio‑Container
-              (m4a, webm) und fällt auf `worstaudio` zurück.
-            - **Robuste Abbruchprüfung:** Vor jedem Schritt wird `is_stop_requested()`
-              geprüft.
-            - **Thread‑sichere Cookie‑ und Proxy‑Konfiguration:** Liest die
-              Einstellungen aus `self.settings` und `self.stream_manager`.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 2` mit Präfix `[SECTIONS]`.
-            - **Fehlerisolierung:** Ein Fehler bei einem Formatversuch führt nicht
-              zum Abbruch, sondern zum Versuch des nächsten Formats.
-            - **Dynamischer Timeout** basierend auf der verbleibenden Dauer (falls bekannt),
-              mit einem Minimum von 30 Sekunden.
-            - **Debug‑Ausgabe des letzten Befehls im Fehlerfall** (bei `DEBUG_LEVEL >= 2`).
-
-        Args:
-            video_url: Die ursprüngliche YouTube‑Video‑URL.
-            start_seconds: Position in Sekunden, ab der das Video nachgeladen werden soll.
-            trans_cb: Callback für Transkriptionsergebnisse.
-            transl_cb: Callback für Übersetzungsergebnisse.
-            error_cb: Callback für Fehlermeldungen.
-            info_cb: Optionaler Callback für Statusmeldungen.
-            cancel_event: Optionales Event für externen Abbruch.
-
-        Returns:
-            Anzahl der erfolgreich verarbeiteten Chunks (0 bei Fehler oder Abbruch).
         """
         # -----------------------------------------------------------------
         # Hilfsfunktion für konsistente Abbruchprüfung
@@ -38418,30 +38238,6 @@ class AudioProcessor:
         vorzeitig endet und der Rest des Videos nachgeladen werden muss. Sie baut
         eine temporäre Pipeline auf, extrahiert die Audiodaten und übergibt sie
         direkt an den normalen Verarbeitungsfluss (`_process_audio_data`).
-
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - **Dynamisches Timeout:** Berechnet aus erwarteter Restdauer und
-              Realtime‑Faktor, begrenzt auf 60–1800 Sekunden.
-            - **Robuste Leseschleife:** Exponentieller Backoff bei Pipe‑Fehlern.
-            - **Sichere Prozess‑Terminierung:** Nutzt `PlatformUtils.terminate_process`
-              für garantierte Beendigung aller Kindprozesse.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
-            - **Abbruchmöglichkeit** über `cancel_event` während des gesamten Vorgangs.
-
-        Args:
-            yt_cmd: Vollständiger yt‑dlp‑Befehl als Liste von Strings.
-            trans_cb: Callback für Transkriptionsergebnisse.
-            transl_cb: Callback für Übersetzungsergebnisse.
-            error_cb: Callback für Fehlermeldungen.
-            info_cb: Optionaler Callback für Statusmeldungen.
-            seek: Falls True oder float, wird ffmpeg angewiesen, an dieser
-                  Position (in Sekunden) zu starten.
-            timeout: Maximale Gesamtdauer für den Download in Sekunden.
-                     Wenn None, wird dynamisch berechnet.
-            cancel_event: Externes Event, das den Vorgang vorzeitig abbrechen kann.
-
-        Returns:
-            Anzahl der erfolgreich verarbeiteten Chunks.
         """
         start_total = time.perf_counter()
         chunk_count = 0
@@ -39051,35 +38847,6 @@ class AudioProcessor:
         Diese Methode initialisiert den Verarbeitungs-Thread, setzt alle Zustände zurück,
         erstellt die benötigten Executors und startet den Dispatcher. Sie ist der zentrale
         Einstiegspunkt für die Audioverarbeitung.
-
-        Verbesserungen gegenüber früheren Versionen:
-            - **Präzise Zustandsbereinigung:** Erkennt zuverlässig, ob ein vorheriger Lauf
-              vollständig abgeschlossen ist, und führt **nur dann** einen Notfall‑Reset durch,
-              wenn tatsächlich noch Ressourcen belegt sind. Verhindert falsche Warnungen.
-            - **Atomare Zustandsübergänge:** Alle Änderungen an `_state` erfolgen unter
-              `_state_lock`, um Race Conditions zu vermeiden.
-            - **Vollständige Puffer‑Leerung:** Alte Sentinels und verbliebene Queue‑Elemente
-              werden vor dem Start zuverlässig entfernt, sodass der neue Dispatcher nicht
-              sofort beendet wird.
-            - **Zurücksetzen aller relevanten Flags:** `_last_oom` der TranscriptionEngine,
-              `_stop_event`, `_processing_completed` und `_download_mode_active` werden
-              konsistent auf ihre Ausgangswerte gesetzt.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` für jeden Schritt.
-            - **Fehlertoleranz:** Selbst wenn während der Initialisierung ein Fehler auftritt,
-              wird der Zustand garantiert auf `IDLE` zurückgesetzt und der Fehler gemeldet.
-            - **Thread‑Sicherheit:** Alle gemeinsam genutzten Ressourcen werden unter den
-              entsprechenden Locks modifiziert.
-
-        Args:
-            url: Die zu verarbeitende URL (Video, Stream oder lokale Datei).
-            transcription_callback: Callback für Transkriptionsergebnisse.
-            translation_callback: Callback für Übersetzungsergebnisse.
-            info_callback: Callback für Statusmeldungen.
-            error_callback: Callback für Fehlermeldungen.
-            finished_callback: Optionaler Callback, der nach normalem Ende aufgerufen wird.
-
-        Raises:
-            Keine. Fehler werden über `error_callback` gemeldet.
         """
         if DEBUG_LEVEL >= 3:
             log_debug("processor", f"start_processing called with URL: {url[:100]}...")
@@ -39115,10 +38882,11 @@ class AudioProcessor:
                     return
 
                 # Kein Thread aktiv, aber Zustand hängt – automatischer Reset
-                logger.debug(
-                    f"AudioProcessor stuck in state '{current_state.name}' without active threads. "
-                    "Performing emergency reset."
-                )
+                if DEBUG_LEVEL >= 3:   # 🔥 Nur bei hohem Debug-Level loggen
+                    logger.debug(
+                        f"AudioProcessor stuck in state '{current_state.name}' without active threads. "
+                        "Performing emergency reset."
+                    )
                 # Garantierte Bereinigung durchführen
                 self._guaranteed_cleanup()
                 # Zustand explizit auf IDLE setzen (wurde in _guaranteed_cleanup bereits gemacht,
@@ -43925,12 +43693,6 @@ class WhisperLayoutManager:
         Diese Methode konfiguriert das Hauptfenster mit einem horizontalen Layout.
         Sie verwendet ein `PanedWindow`, um die Textbereiche nebeneinander anzuordnen.
         Die Widgets werden in einem `ttk.LabelFrame`-Container platziert.
-
-        Optimierungen:
-            - Tooltips für Auto‑TTS‑Checkboxen hinzugefügt.
-            - Robuste Fehlerbehandlung mit aussagekräftigen Logs.
-            - Verwendung von `Fonts` für konsistente Schriftarten.
-            - Debug‑Ausgaben bei `DEBUG_LEVEL >= 3`.
         """
         gui = self.gui_ref
         theme = gui.current_theme
@@ -44989,9 +44751,7 @@ class AdvancedSettings:
     # Livestream
     live_from_start: bool = False   # Standard: live ab jetzt (nicht von Anfang an)
 
-    # =========================================================================
     # Download-Modus
-    # =========================================================================
     download_inactivity_timeout: float = 30.0   # Sekunden
 
     # Erweiterte Pfade (für Dateizugriff)
@@ -45005,20 +44765,14 @@ class AdvancedSettings:
     # Zielsprache (für Übersetzung)
     target_language: str = "de"
 
-    # =========================================================================
     # Satzpufferung (für kontinuierliche Übersetzung)
-    # =========================================================================
     sentence_flush_interval: float = 3.0  # Sekunden
     sentence_flush_word_threshold: int = 30  # Anzahl Wörter
 
-    # =========================================================================
     # Reflection (selbstkorrigierende Übersetzung)
-    # =========================================================================
     enable_reflection: bool = False
 
-    # =========================================================================
     # Interna (nicht direkt speicherbar)
-    # =========================================================================
     config: Config = field(init=False, repr=False, compare=False)
     _chunk_duration: float = field(
         default=Config.BASE_CHUNK_DURATION, init=False, repr=False
@@ -45222,18 +44976,8 @@ class AdvancedSettings:
         Diese Methode wird einmalig beim Laden der Einstellungen aufgerufen und
         kann später erneut ausgeführt werden, wenn der Benutzer die Modi ändert
         (dann wird vorher der Cache geleert).
-
-        Verbesserungen:
-            - Sichern der Originalwerte in `_original_values` (nur beim ersten Mal).
-            - Detaillierte Debug-Ausgaben bei `DEBUG_LEVEL >= 2`.
-            - Atomares Anwenden der Overrides mit Validierung der Wertebereiche.
-            - Setzt ein Flag `_mode_overrides_applied`, um versehentliches doppeltes
-              Sichern zu verhindern.
-            - Kann gefahrlos mehrfach aufgerufen werden (Cache wird nur einmal gefüllt).
         """
-        # -----------------------------------------------------------------
         # 1. Originalwerte sichern, falls noch nicht geschehen
-        # -----------------------------------------------------------------
         if not hasattr(self, '_original_values'):
             self._original_values = {}
 
@@ -45259,9 +45003,7 @@ class AdvancedSettings:
                     "_apply_mode_overrides: Cache bereits gefüllt – überspringe Sicherung"
                 )
 
-        # -----------------------------------------------------------------
         # 2. Hilfsfunktion zum sicheren Setzen von Werten
-        # -----------------------------------------------------------------
         def safe_set(attr_name: str, new_value: Any, min_val: Optional[float] = None,
                      max_val: Optional[float] = None) -> None:
             """
@@ -45296,9 +45038,7 @@ class AdvancedSettings:
             except Exception as e:
                 logger.error(f"_apply_mode_overrides: Fehler beim Setzen von '{attr_name}': {e}")
 
-        # -----------------------------------------------------------------
         # 3. Overrides für asian_mode
-        # -----------------------------------------------------------------
         if getattr(self, 'asian_mode', False):
             if DEBUG_LEVEL >= 2:
                 log_debug("settings", "_apply_mode_overrides: Wende asian_mode Overrides an")
@@ -45307,9 +45047,7 @@ class AdvancedSettings:
             safe_set("vad_min_speech_duration_ms", 300, min_val=0, max_val=2000)
             safe_set("vad_min_silence_duration_ms", 120, min_val=0, max_val=2000)
 
-        # -----------------------------------------------------------------
         # 4. Overrides für precision_mode
-        # -----------------------------------------------------------------
         if getattr(self, 'precision_mode', False):
             if DEBUG_LEVEL >= 2:
                 log_debug("settings", "_apply_mode_overrides: Wende precision_mode Overrides an")
@@ -45320,9 +45058,7 @@ class AdvancedSettings:
             safe_set("vad_min_speech_duration_ms", 260, min_val=0, max_val=2000)
             safe_set("vad_min_silence_duration_ms", 110, min_val=0, max_val=2000)
 
-        # -----------------------------------------------------------------
         # 5. Flag setzen, dass Overrides angewendet wurden
-        # -----------------------------------------------------------------
         self._mode_overrides_applied = True
 
         if DEBUG_LEVEL >= 2:
@@ -45336,13 +45072,6 @@ class AdvancedSettings:
         Diese Methode sollte aufgerufen werden, wenn alle Modi (asian_mode,
         precision_mode) deaktiviert werden. Sie setzt die betroffenen Attribute
         auf ihre ursprünglichen Werte zurück und löscht den internen Cache.
-
-        Verbesserungen:
-            - Prüft, ob überhaupt gesicherte Werte vorhanden sind.
-            - Setzt nur die Attribute zurück, die tatsächlich überschrieben wurden.
-            - Detaillierte Debug-Ausgaben.
-            - Setzt `_mode_overrides_applied` zurück.
-            - Kann gefahrlos mehrfach aufgerufen werden.
         """
         if not hasattr(self, '_original_values') or not self._original_values:
             if DEBUG_LEVEL >= 2:
@@ -45918,11 +45647,7 @@ def get_advanced_settings() -> "AdvancedSettings":
         _ADVANCED_SETTINGS_CACHE = AdvancedSettings.load_from_file()
     return _ADVANCED_SETTINGS_CACHE
     
-    
-
-# =============================================================================
 # 19. HILFSFUNKTIONEN FÜR MAIN (Windows-Konsolenmanagement, System-Check, Argument-Parser, globale Exception-Handler)
-# =============================================================================
 _original_console_mode: Optional[int] = None
 _original_codepage: Optional[int] = None
 
@@ -46281,9 +46006,7 @@ def setup_platform_environment() -> None:
     PlatformUtils.setup_platform_environment()
 
 
-# =============================================================================
 # System‑Info und Kompatibilitätsprüfung (print_system_info_debug3 ist bereits vorhanden)
-# =============================================================================
 def _run_system_check() -> int:
     """Führt eine umfassende System‑ und Abhängigkeitsprüfung durch."""
     issues = check_platform_compatibility()
@@ -46320,10 +46043,7 @@ def _run_system_check() -> int:
     return 0 if not issues else 1
 
 
-# =============================================================================
 # Unit‑Tests (optional, nur bei --test)
-# =============================================================================
-
 
 def run_tests() -> int:
     """Führt alle internen Unit‑Tests aus und gibt 0 bei Erfolg, sonst 1 zurück."""
