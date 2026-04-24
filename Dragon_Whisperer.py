@@ -22701,31 +22701,11 @@ class StatisticsDialog(BaseDialog):
 
 class SummarizeDialog(BaseDialog):
     """
-    Dialog zur Zusammenfassung von Texten mit Ollama (thread‑sicher, optimiert).
-
-    Features:
-        - Automatische Erkennung verfügbarer Modelle
-        - Mehrsprachige Zusammenfassung (Deutsch, Englisch, Spanisch, Koreanisch,
-          Chinesisch, Japanisch) – erweiterbar über zentrale Prompt‑Map
-        - Parallele Chunk‑Verarbeitung langer Texte (> 2000 Wörter) mit begrenzter Parallelität
-        - Fortschrittsbalken und detaillierte Statusanzeige
-        - Abbruchmöglichkeit während der gesamten Verarbeitung (kooperativ)
-        - Blacklist‑Filterung der finalen Zusammenfassung unter Erhalt der Formatierung
-        - Speichern und Kopieren der Ergebnisse
-        - Direkte Übersetzung der Zusammenfassung
-        - Wahl zwischen kompakter und ausführlicher Zusammenfassung (persistent gespeichert)
-        - Vollständige Ressourcenfreigabe beim Schließen
-        - Wiederholungslogik bei Server‑Fehlern (exponentieller Backoff)
-        - Token‑Limit‑Warnung für große Prompts (mit dynamischer Abfrage des Kontextlimits)
-        - Schutz vor versehentlichem Überschreiben manuell editierter Prompts
-        - Vorkompilierte Blacklist‑Patterns für bessere Performance
-        - Zeichenbegrenzung für asiatische Sprachen in der Textaufteilung
-        - Automatisches Backup der letzten Zusammenfassung (Notfall‑Wiederherstellung)
-        - Garantierte Ressourcenfreigabe in allen Fehlerpfaden
-        - Debug‑Ausgaben bei --debug=3
+    Exzellenter Dialog für Zusammenfassungen und Kommentare mit Ollama.
+    Erweiterung: Prompt‑Vorlagen mit Dropdown, Speicher- und Löschfunktion.
     """
 
-    # Sprach‑Prompt‑Map (zentrale Definition)
+    # Mehrsprachige Zusammenfassungs-Prompts
     SUMMARY_LANGUAGE_PROMPTS = {
         "Deutsch": (
             "Fasse den folgenden Text in 3-5 Sätzen auf Deutsch zusammen. "
@@ -22775,16 +22755,31 @@ class SummarizeDialog(BaseDialog):
 
     SUPPORTED_SUMMARY_LANGUAGES = list(SUMMARY_LANGUAGE_PROMPTS.keys())
 
-    # Konstante für maximale Zeichen pro Chunk (für Sprachen ohne Worttrennung)
-    MAX_CHARS_PER_CHUNK = 8000
+    # Vordefinierte Prompt‑Vorlagen (Name -> Prompt)
+    TEMPLATES = {
+        "Kritischer Kommentar (höflich)": (
+            "Du erhältst die Zusammenfassung eines Videos. Erstelle daraus einen ehrlichen, "
+            "respektvollen YouTube‑Kommentar. Beginne mit einer persönlichen Note (z.B. "
+            "'Dein Video lief bei mir über Autoplay…'). Nenne konkret, was dir gefehlt hat "
+            "oder dich nicht überzeugt hat, ohne zu verletzen. Stelle eine offene Frage, "
+            "die den Creator zum Nachdenken anregt. Maximal 120 Wörter.\n\n{text}"
+        ),
+        "Motivierender Kommentar": (
+            "Erstelle aus der Zusammenfassung einen positiven, motivierenden Kommentar. "
+            "Hebe hervor, was gut gelungen ist, und ermutige den Creator, weiterzumachen. "
+            "Zeige ehrliche Wertschätzung. Maximal 100 Wörter.\n\n{text}"
+        ),
+        "Neutrale Zusammenfassung": (
+            "Fasse den folgenden Text in 3-5 Sätzen zusammen. "
+            "Konzentriere dich auf die Hauptaussagen, ignoriere Wiederholungen.\n\n{text}"
+        ),
+    }
 
-    # Cache für dynamisch abgerufene Kontextlimits
+    TEMPLATES_FILENAME = "summarize_templates.json"
+    MAX_CHARS_PER_CHUNK = 8000
     _context_limit_cache: Dict[str, int] = {}
     _context_limit_cache_lock = threading.RLock()
 
-    # -------------------------------------------------------------------------
-    # Initialisierung
-    # -------------------------------------------------------------------------
     def __init__(self, parent: Any, text: str, gui_ref: Any) -> None:
         self.text = text
         self.gui = gui_ref
@@ -22833,7 +22828,7 @@ class SummarizeDialog(BaseDialog):
         self._current_chunk = 0
         self._prompt = ""
         self._temp = 0.1
-        self._full_summary_parts: List[str] = []  # Effiziente String‑Konkatenation
+        self._full_summary_parts: List[str] = []
         self.full_summary = ""
         self._destroyed = False
 
@@ -22852,6 +22847,12 @@ class SummarizeDialog(BaseDialog):
         # Backup‑Datei für Notfall‑Wiederherstellung
         self._backup_file = os.path.join(tempfile.gettempdir(), "dragon_summary_backup.txt")
 
+        # Eigene Vorlagen laden
+        self._user_templates: Dict[str, str] = {}
+        self._load_user_templates()
+        self._template_names: List[str] = []
+        self._build_template_list()
+
         super().__init__(
             parent, "Zusammenfassung mit Ollama", width=800, height=700, modal=True
         )
@@ -22862,11 +22863,10 @@ class SummarizeDialog(BaseDialog):
             limit = self._get_model_context_limit(self.saved_model)
             log_debug("SUMMARIZE", f"Kontextlimit für {self.saved_model}: {limit}")
 
-        # Prüfen, ob ein Backup vorhanden ist
         self._check_backup()
 
+    # Blacklist-Patterns
     def _prepare_blacklist_patterns(self) -> None:
-        """Kompiliert die Blacklist-Patterns einmalig für bessere Performance."""
         if not hasattr(self.gui, "advanced_settings") or self.gui.advanced_settings is None:
             return
         blacklist = self.gui.advanced_settings.blacklist
@@ -22885,59 +22885,45 @@ class SummarizeDialog(BaseDialog):
             except re.error as e:
                 logger.warning(f"Ungültiges Blacklist-Pattern '{phrase}': {e}")
 
-    def _check_backup(self) -> None:
-        """Prüft auf eine vorhandene Backup‑Datei und bietet Wiederherstellung an."""
-        if not os.path.exists(self._backup_file):
-            return
-        # Nur wiederherstellen, wenn Datei jünger als 1 Stunde
-        try:
-            if time.time() - os.path.getmtime(self._backup_file) > 3600:
-                return
-        except OSError:
-            return
-        if DarkMessageBox.askyesno(
-            "Zusammenfassung wiederherstellen?",
-            "Es wurde eine nicht gespeicherte Zusammenfassung gefunden.\n"
-            "Möchten Sie den Inhalt wiederherstellen?",
-            parent=self.dialog if hasattr(self, 'dialog') else None
-        ):
+    # Vorlagen‑Verwaltung
+    def _load_user_templates(self) -> None:
+        path = self._get_templates_path()
+        if path.exists():
             try:
-                with open(self._backup_file, "r", encoding="utf-8") as f:
-                    saved = f.read()
-                self._full_summary_parts = [saved]
-                self.full_summary = saved
-                if DEBUG_LEVEL >= 2:
-                    log_debug("SUMMARIZE", "Backup wiederhergestellt")
-                # Nach dem Öffnen des Dialogs die GUI aktualisieren (muss im Hauptthread geschehen)
-                if hasattr(self, 'dialog') and self.dialog:
-                    self.dialog.after(100, self._restore_backup_to_gui)
-            except Exception as e:
-                logger.warning(f"Fehler beim Wiederherstellen des Backups: {e}")
+                with open(path, "r", encoding="utf-8") as f:
+                    self._user_templates = json.load(f)
+            except Exception:
+                self._user_templates = {}
+        else:
+            self._user_templates = {}
 
-    def _restore_backup_to_gui(self) -> None:
-        """Stellt das Backup in der GUI wieder her."""
-        if self._destroyed:
-            return
+    def _save_user_templates(self) -> None:
+        path = self._get_templates_path()
         try:
-            if hasattr(self, 'summary_text') and self.summary_text.winfo_exists():
-                self.summary_text.delete("1.0", "end")
-                self.summary_text.insert("1.0", self.full_summary)
-            self._reset_ui()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._user_templates, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            logger.warning(f"Fehler beim Anzeigen des Backups: {e}")
+            logger.error(f"Konnte Vorlagen nicht speichern: {e}")
 
-    def _save_backup(self) -> None:
-        """Speichert die aktuelle Zusammenfassung als Backup."""
-        with self._lock:
-            if not self.full_summary:
-                return
-            try:
-                with open(self._backup_file, "w", encoding="utf-8") as f:
-                    f.write(self.full_summary)
-                if DEBUG_LEVEL >= 3:
-                    log_debug("SUMMARIZE", "Backup gespeichert")
-            except Exception as e:
-                logger.warning(f"Fehler beim Speichern des Backups: {e}")
+    def _get_templates_path(self) -> Path:
+        return PlatformUtils.get_platform_config_dir() / self.TEMPLATES_FILENAME
+
+    def _build_template_list(self) -> None:
+        predefined = list(self.TEMPLATES.keys())
+        user = sorted(self._user_templates.keys())
+        combined = predefined[:]
+        for name in user:
+            if name not in combined:
+                combined.append(name)
+        self._template_names = combined
+
+    def _get_template_prompt(self, name: str) -> str:
+        if name in self._user_templates:
+            return self._user_templates[name]
+        if name in self.TEMPLATES:
+            return self.TEMPLATES[name]
+        return ""
 
     # UI‑Aufbau
     def build_ui(self) -> None:
@@ -23052,7 +23038,7 @@ class SummarizeDialog(BaseDialog):
         lang_combo.bind("<<ComboboxSelected>>", lambda e: self._set_default_prompt())
         ToolTip(lang_combo, "Sprache der Zusammenfassung")
 
-        # 4. Stil‑Auswahl (kompakt / ausführlich) – mit gespeicherter Präferenz
+        # 4. Stil‑Auswahl
         style_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
         style_frame.pack(fill="x", pady=5)
         tk.Label(
@@ -23061,7 +23047,6 @@ class SummarizeDialog(BaseDialog):
             bg=CURRENT_THEME.BG_PRIMARY,
             fg=CURRENT_THEME.TEXT_PRIMARY,
         ).pack(side="left")
-        # Initialwert aus der gespeicherten Einstellung
         initial_style = "Kompakt (3-5 Sätze)" if self._saved_style == "Kompakt" else "Ausführlich (detaillierte Liste)"
         self.style_var = tk.StringVar(value=initial_style)
         style_combo = ttk.Combobox(
@@ -23094,7 +23079,108 @@ class SummarizeDialog(BaseDialog):
         else:
             self.title_checkbox.bind("<ButtonRelease-1>", lambda e: self._set_default_prompt())
 
-        # 6. Prompt‑Textfeld
+        # 6. Prompt‑Vorlagen (NEU)
+        template_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
+        template_frame.pack(fill="x", pady=(5, 0))
+
+        tk.Label(
+            template_frame,
+            text="Vorlage:",
+            bg=CURRENT_THEME.BG_PRIMARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+        ).pack(side="left")
+
+        self.template_var = tk.StringVar()
+        self.template_combo = ttk.Combobox(
+            template_frame,
+            textvariable=self.template_var,
+            values=self._template_names,
+            width=25,
+            state="readonly",
+            style="Dark.TCombobox",
+        )
+        self.template_combo.pack(side="left", padx=5)
+        self.template_combo.bind("<<ComboboxSelected>>", self._on_template_selected)
+        ToolTip(self.template_combo, "Wähle eine gespeicherte Prompt‑Vorlage")
+
+        self.apply_template_btn = tk.Button(
+            template_frame,
+            text="↻ Übernehmen",
+            command=self._apply_template_forced,
+            bg=CURRENT_THEME.BG_TERTIARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.SMALL,
+            padx=5,
+            state="disabled",
+        )
+        self.apply_template_btn.pack(side="left", padx=5)
+        ToolTip(self.apply_template_btn, "Gewählte Vorlage trotz manueller Änderungen übernehmen")
+
+        save_template_btn = tk.Button(
+            template_frame,
+            text="💾 Vorlage speichern",
+            command=self._save_current_as_template,
+            bg=CURRENT_THEME.BG_TERTIARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.SMALL,
+            padx=5,
+        )
+        save_template_btn.pack(side="left", padx=5)
+        ToolTip(save_template_btn, "Aktuellen Prompt als benutzerdefinierte Vorlage speichern")
+
+        delete_template_btn = tk.Button(
+            template_frame,
+            text="🗑️ Löschen",
+            command=self._delete_current_template,
+            bg=CURRENT_THEME.BG_TERTIARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.SMALL,
+            padx=5,
+        )
+        delete_template_btn.pack(side="left", padx=5)
+        ToolTip(delete_template_btn, "Ausgewählte benutzerdefinierte Vorlage löschen")
+
+        # Buttons für Import/Export
+        import_export_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
+        import_export_frame.pack(fill="x", pady=(2, 0))
+
+        import_btn = tk.Button(
+            import_export_frame,
+            text="📥 Importieren",
+            command=self.import_templates,
+            bg=CURRENT_THEME.BG_TERTIARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.SMALL,
+            padx=5,
+        )
+        import_btn.pack(side="left", padx=2)
+        ToolTip(import_btn, "Prompt‑Vorlagen aus JSON‑Datei importieren")
+
+        export_btn = tk.Button(
+            import_export_frame,
+            text="📤 Exportieren",
+            command=self.export_templates,
+            bg=CURRENT_THEME.BG_TERTIARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.SMALL,
+            padx=5,
+        )
+        export_btn.pack(side="left", padx=2)
+        ToolTip(export_btn, "Eigene Prompt‑Vorlagen als JSON exportieren")
+
+        # Vorschau‑Label für Vorlagen
+        self.template_preview_label = tk.Label(
+            self.main,
+            text="",
+            bg=CURRENT_THEME.BG_PRIMARY,
+            fg=CURRENT_THEME.TEXT_SECONDARY,
+            font=Fonts.SMALL,
+            wraplength=750,
+            justify="left",
+        )
+        self.template_preview_label.pack(fill="x", pady=(2, 0))
+
+        # 7. Prompt‑Textfeld
         tk.Label(
             self.main,
             text="Prompt (optional):",
@@ -23111,15 +23197,16 @@ class SummarizeDialog(BaseDialog):
         )
         self.prompt_text.pack(fill="x", pady=(0, 10))
 
-        # Event für manuelle Bearbeitung
         def on_prompt_edit(event):
             self._prompt_manually_edited = True
+            self.apply_template_btn.config(state="normal")
         self.prompt_text.bind("<Key>", on_prompt_edit)
 
+        # Initialer Prompt gemäß Sprache & Stil
         self._set_default_prompt()
         ToolTip(self.prompt_text, "Optionaler Prompt – wird an das Modell gesendet")
 
-        # 7. Fortschrittsbalken
+        # 8. Fortschrittsbalken
         self.progress_var = tk.DoubleVar(value=0.0)
         self.progress_bar = ttk.Progressbar(
             self.main,
@@ -23129,7 +23216,7 @@ class SummarizeDialog(BaseDialog):
         )
         self.progress_bar.pack(fill="x", pady=(0, 5))
 
-        # 8. Ausgabe
+        # 9. Ausgabe
         tk.Label(
             self.main,
             text="Zusammenfassung:",
@@ -23147,7 +23234,7 @@ class SummarizeDialog(BaseDialog):
         self.summary_text.pack(fill="both", expand=True, pady=10)
         ContextMenuMixin(self.summary_text)
 
-        # 9. Buttons
+        # 10. Buttons
         btn_frame = tk.Frame(self.main, bg=CURRENT_THEME.BG_PRIMARY)
         btn_frame.pack(fill="x", pady=5)
 
@@ -23225,7 +23312,7 @@ class SummarizeDialog(BaseDialog):
         )
         self.close_btn.pack(side="left", padx=5)
 
-        # 10. Statuszeile
+        # 11. Statuszeile
         self.status_label = tk.Label(
             self.main,
             text="",
@@ -23235,24 +23322,152 @@ class SummarizeDialog(BaseDialog):
         )
         self.status_label.pack(pady=5)
 
-    # Prompt‑Generierung (unterstützt Stil‑Auswahl, respektiert manuelle Änderungen)
+    # Vorlagen‑Aktionen
+    def _on_template_selected(self, event=None) -> None:
+        """
+        Wird ausgelöst, wenn der Benutzer eine Vorlage aus der Dropdown‑Liste wählt.
+        """
+        name = self.template_var.get().strip()
+        if not name:
+            if DEBUG_LEVEL >= 3:
+                log_debug("SUMMARIZE", "_on_template_selected: leere Auswahl")
+            return
+
+        # Prompt‑Text aus den Vorlagen holen (benutzerdefiniert vor eingebaut)
+        prompt_text = self._get_template_prompt(name)
+        if not prompt_text:
+            msg = f"❌ Vorlage '{name}' nicht gefunden"
+            self.status_label.config(text=msg)
+            if DEBUG_LEVEL >= 2:
+                log_debug("SUMMARIZE", f"_on_template_selected: {msg}")
+            self._clear_preview_label()
+            return
+
+        # Vorschau‑Label aktualisieren
+        if hasattr(self, "template_preview_label") and self.template_preview_label is not None:
+            try:
+                preview = prompt_text[:200].replace("\n", " ")
+                display = f"📝 {preview}…" if len(prompt_text) > 200 else f"📝 {preview}"
+                self.template_preview_label.config(text=display)
+            except Exception as e:
+                if DEBUG_LEVEL >= 3:
+                    log_debug("SUMMARIZE", f"Fehler beim Setzen der Vorschau: {e}")
+
+        # Entscheiden, ob der Prompt sofort übernommen werden kann
+        if self._prompt_manually_edited:
+            self.status_label.config(
+                text="ℹ️ Manuelle Bearbeitung aktiv – klicke '↻ Übernehmen' zum Ersetzen"
+            )
+            self.apply_template_btn.config(state="normal")
+            if DEBUG_LEVEL >= 3:
+                log_debug("SUMMARIZE", "Manuelle Bearbeitung aktiv – Übernahme zurückgehalten")
+            return
+
+        # Prompt direkt einsetzen
+        self._apply_prompt(prompt_text)
+        if DEBUG_LEVEL >= 3:
+            log_debug("SUMMARIZE", f"Vorlage '{name}' direkt übernommen ({len(prompt_text)} Zeichen)")
+
+    def _clear_preview_label(self) -> None:
+        """Setzt das Vorschau‑Label zurück, falls vorhanden."""
+        if hasattr(self, "template_preview_label") and self.template_preview_label is not None:
+            try:
+                self.template_preview_label.config(text="")
+            except Exception:
+                pass
+
+    def _apply_template_forced(self) -> None:
+        name = self.template_var.get().strip()
+        if not name:
+            return
+        prompt_text = self._get_template_prompt(name)
+        if not prompt_text:
+            self.status_label.config(text="❌ Vorlage nicht gefunden")
+            return
+        self._apply_prompt(prompt_text)
+
+    def _apply_prompt(self, prompt_text: str) -> None:
+        self.prompt_text.delete("1.0", "end")
+        self.prompt_text.insert("1.0", prompt_text)
+        self._prompt_manually_edited = False
+        self.apply_template_btn.config(state="disabled")
+        self.status_label.config(text="✅ Vorlage geladen")
+
+    def _save_current_as_template(self) -> None:
+        current_prompt = self.prompt_text.get("1.0", "end-1c").strip()
+        if not current_prompt:
+            self.status_label.config(text="❌ Prompt ist leer")
+            return
+        name = self.template_var.get().strip()
+        if not name or (name in self.TEMPLATES and name not in self._user_templates):
+            name = simpledialog.askstring(
+                "Vorlage speichern",
+                "Name für die neue Vorlage:",
+                parent=self.dialog
+            )
+        if not name:
+            return
+        self._user_templates[name] = current_prompt
+        self._save_user_templates()
+        self._build_template_list()
+        self.template_combo["values"] = self._template_names
+        self.template_var.set(name)
+        self._prompt_manually_edited = False
+        self.apply_template_btn.config(state="disabled")
+        self.status_label.config(text=f"✅ Vorlage '{name}' gespeichert")
+
+    def _delete_current_template(self) -> None:
+        name = self.template_var.get().strip()
+        if not name or name not in self._user_templates:
+            self.status_label.config(text="❌ Nur eigene Vorlagen können gelöscht werden")
+            return
+        if DarkMessageBox.askyesno(
+            "Löschen bestätigen",
+            f"Möchtest du die Vorlage '{name}' wirklich löschen?",
+            parent=self.dialog,
+        ):
+            del self._user_templates[name]
+            self._save_user_templates()
+            self._build_template_list()
+            self.template_combo["values"] = self._template_names
+            self.template_var.set("")
+            self.status_label.config(text=f"🗑️ Vorlage '{name}' gelöscht")
+
+    # Prompt‑Generierung gemäß Sprache & Stil
     def _set_default_prompt(self, force: bool = False) -> None:
-        # Wenn der Benutzer den Prompt manuell geändert hat und kein force, nichts tun
+        """
+        Setzt den Standard‑Prompt basierend auf der gewählten Sprache und dem Stil.
+        Berücksichtigt asiatische Sprachen, optionalen Videotitel und respektiert
+        manuelle Bearbeitungen (außer bei ``force=True``).
+
+        Args:
+            force: Wenn True, wird der Prompt auch dann gesetzt, wenn der Benutzer
+                   ihn bereits manuell editiert hat.
+        """
+        # 1. Manuelle Bearbeitung respektieren (sofern nicht erzwungen)
         if self._prompt_manually_edited and not force:
             if DEBUG_LEVEL >= 3:
                 log_debug("SUMMARIZE", "Prompt manuell editiert – wird nicht überschrieben")
             return
 
+        # 2. Sprache und Stil ermitteln (mit Fallback)
         target = self.summary_lang_var.get()
+        style = self.style_var.get()
+
+        if DEBUG_LEVEL >= 3:
+            log_debug("SUMMARIZE", f"_set_default_prompt: target='{target}', style='{style}'")
+
+        # Mehrsprachige Prompt‑Map abrufen, Fallback auf Englisch
         base_prompt = self.SUMMARY_LANGUAGE_PROMPTS.get(
             target,
             f"Summarize the following text in 3-5 sentences in {target}. "
             f"Focus on the main points, ignore repetitions and filler words. "
             f"Use complete, idiomatic sentences.\n\n"
-            f"IMPORTANT: The output MUST be in {target.upper()} and must NOT contain characters from other languages."
+            f"IMPORTANT: The output MUST be in {target.upper()} and must NOT contain "
+            f"characters from other languages."
         )
 
-        style = self.style_var.get()
+        # 3. Stil‑Anpassungen (kompakt vs. ausführlich)
         if "Ausführlich" in style:
             base_prompt = base_prompt.replace(
                 "in 3-5 Sätzen", "in einer ausführlichen, strukturierten Form"
@@ -23267,31 +23482,78 @@ class SummarizeDialog(BaseDialog):
             )
             base_prompt += "\n\nErstelle eine detaillierte Liste der Hauptpunkte, idealerweise als Aufzählung."
 
+        # 4. Optionaler Videotitel als Kontext
+        title_prefix = ""
         if self.use_title_var.get() and self.stream_title:
             title_prefix = f"Der Titel des Videos lautet: '{self.stream_title}'.\n\n"
-        else:
-            title_prefix = ""
 
         full_prompt = title_prefix + base_prompt
+
+        # 5. Prompt im Textfeld anzeigen und Flag aktualisieren
         self.prompt_text.delete("1.0", "end")
         self.prompt_text.insert("1.0", full_prompt)
-        self._prompt_manually_edited = False  # Zurücksetzen, da jetzt Default gesetzt
+        self._prompt_manually_edited = False
 
         if DEBUG_LEVEL >= 3:
-            log_debug("SUMMARIZE", "Default-Prompt gesetzt")
+            log_debug("SUMMARIZE", f"Default-Prompt gesetzt ({len(full_prompt)} Zeichen)")
+
+    def _check_backup(self) -> None:
+        """Prüft auf eine vorhandene Backup‑Datei und bietet Wiederherstellung an."""
+        if not os.path.exists(self._backup_file):
+            return
+        try:
+            if time.time() - os.path.getmtime(self._backup_file) > 3600:
+                return
+        except OSError:
+            return
+        if DarkMessageBox.askyesno(
+            "Zusammenfassung wiederherstellen?",
+            "Es wurde eine nicht gespeicherte Zusammenfassung gefunden.\n"
+            "Möchten Sie den Inhalt wiederherstellen?",
+            parent=self.dialog if hasattr(self, 'dialog') else None
+        ):
+            try:
+                with open(self._backup_file, "r", encoding="utf-8") as f:
+                    saved = f.read()
+                self._full_summary_parts = [saved]
+                self.full_summary = saved
+                if DEBUG_LEVEL >= 2:
+                    log_debug("SUMMARIZE", "Backup wiederhergestellt")
+                if hasattr(self, 'dialog') and self.dialog:
+                    self.dialog.after(100, self._restore_backup_to_gui)
+            except Exception as e:
+                logger.warning(f"Fehler beim Wiederherstellen des Backups: {e}")
+
+    def _restore_backup_to_gui(self) -> None:
+        """Stellt das Backup in der GUI wieder her."""
+        if self._destroyed:
+            return
+        try:
+            if hasattr(self, 'summary_text') and self.summary_text.winfo_exists():
+                self.summary_text.delete("1.0", "end")
+                self.summary_text.insert("1.0", self.full_summary)
+            self._reset_ui()
+        except Exception as e:
+            logger.warning(f"Fehler beim Anzeigen des Backups: {e}")
+
+    def _save_backup(self) -> None:
+        """Speichert die aktuelle Zusammenfassung als Backup."""
+        with self._lock:
+            if not self.full_summary:
+                return
+            try:
+                with open(self._backup_file, "w", encoding="utf-8") as f:
+                    f.write(self.full_summary)
+                if DEBUG_LEVEL >= 3:
+                    log_debug("SUMMARIZE", "Backup gespeichert")
+            except Exception as e:
+                logger.warning(f"Fehler beim Speichern des Backups: {e}")
 
     # Optimierte Text‑Aufteilung (respektiert Satzgrenzen und Zeichenlimit)
     def _split_text(self, text: str, max_words: int = 2000) -> List[str]:
-        """
-        Teilt einen langen Text in sinnvolle Chunks auf, wobei Satzgrenzen
-        bevorzugt werden. Nur wenn ein einzelner Satz länger als max_words ist,
-        wird er an Wortgrenzen geteilt. Zusätzlich wird eine maximale Zeichenlänge
-        pro Chunk eingehalten (für Sprachen ohne Worttrennung).
-        """
         if not text or not text.strip():
             return []
 
-        # 1. An Satzgrenzen aufteilen
         sentences = re.split(r"(?<=[.!?。！？])\s+", text)
         chunks = []
         current_chunk_words = []
@@ -23301,31 +23563,25 @@ class SummarizeDialog(BaseDialog):
             words = sentence.split()
             sentence_word_count = len(words)
 
-            # Wenn der Satz allein schon zu lang ist, muss er weiter geteilt werden
             if sentence_word_count > max_words:
-                # Erst aktuellen Chunk abschließen, falls vorhanden
                 if current_chunk_words:
                     chunks.append(" ".join(current_chunk_words))
                     current_chunk_words = []
                     current_word_count = 0
-                # Satz in kleinere Stücke teilen
                 for i in range(0, sentence_word_count, max_words):
                     part = " ".join(words[i:i+max_words])
                     self._add_chunk_with_char_limit(part, chunks)
                 continue
 
-            # Passt der Satz noch in den aktuellen Chunk?
             if current_word_count + sentence_word_count <= max_words:
                 current_chunk_words.extend(words)
                 current_word_count += sentence_word_count
             else:
-                # Chunk voll – abschließen und neuen beginnen
                 chunk_text = " ".join(current_chunk_words)
                 self._add_chunk_with_char_limit(chunk_text, chunks)
                 current_chunk_words = words
                 current_word_count = sentence_word_count
 
-        # Letzten Chunk hinzufügen
         if current_chunk_words:
             chunk_text = " ".join(current_chunk_words)
             self._add_chunk_with_char_limit(chunk_text, chunks)
@@ -23333,40 +23589,42 @@ class SummarizeDialog(BaseDialog):
         return chunks if chunks else [text]
 
     def _add_chunk_with_char_limit(self, chunk_text: str, chunks: List[str]) -> None:
-        """Teilt einen Chunk weiter auf, falls er das Zeichenlimit überschreitet."""
         if len(chunk_text) <= self.MAX_CHARS_PER_CHUNK:
             chunks.append(chunk_text)
         else:
-            # Grob nach Zeichen aufteilen (für CJK-Sprachen sind Zeichen ≈ Wörter)
             for i in range(0, len(chunk_text), self.MAX_CHARS_PER_CHUNK):
                 sub_chunk = chunk_text[i:i+self.MAX_CHARS_PER_CHUNK]
                 chunks.append(sub_chunk)
             if DEBUG_LEVEL >= 3:
                 log_debug("SUMMARIZE", f"Chunk mit {len(chunk_text)} Zeichen in {len(chunks)} Teile aufgeteilt")
 
-    # Token‑Limit‑Warnung (grobe Heuristik + dynamische Abfrage)
     def _estimate_tokens(self, text: str) -> int:
         return len(text) // 3
 
     def _get_model_context_limit(self, model: str) -> int:
-        """Ermittelt das Kontextlimit des Modells (mit Caching)."""
+        """
+        Ermittelt das Kontextlimit eines Ollama‑Modells sicher und priorisiert:
+        """
         with self._context_limit_cache_lock:
             if model in self._context_limit_cache:
                 return self._context_limit_cache[model]
 
-        # Standardwerte für bekannte Modelle
-        limits = {
+        # Bekannte Limits – Schlüssel sind der VOLLSTÄNDIGE Modellname
+        known_limits = {
             "llama3.1:8b": 128000,
             "qwen2.5:7b": 128000,
             "glm4:9b": 128000,
             "llama3:8b": 8192,
             "mistral": 8192,
         }
-        base_model = model.split(":")[0]
-        limit = limits.get(base_model, 4096)
-
-        # Optional: Dynamische Abfrage über Ollama-API (nur wenn Server erreichbar)
-        if self.summarizer.is_server_reachable():
+        # 1. Exakter Treffer?
+        limit = known_limits.get(model)
+        # 2. Über den Basisnamen (z. B. "qwen2.5")?
+        if limit is None:
+            base = model.split(":")[0]
+            limit = known_limits.get(base)
+        # 3. Dynamisch per API
+        if (limit is None or limit == 4096) and self.summarizer.is_server_reachable():
             try:
                 import requests
                 response = requests.get(
@@ -23376,12 +23634,16 @@ class SummarizeDialog(BaseDialog):
                 )
                 if response.status_code == 200:
                     data = response.json()
-                    if "model_info" in data and "context_length" in data["model_info"]:
-                        limit = data["model_info"]["context_length"]
+                    api_limit = data.get("model_info", {}).get("context_length")
+                    if api_limit:
+                        limit = api_limit
                         if DEBUG_LEVEL >= 3:
                             log_debug("SUMMARIZE", f"Kontextlimit für {model}: {limit} (via API)")
             except Exception:
                 pass
+        # 4. Absoluter Fallback
+        if limit is None:
+            limit = 4096
 
         with self._context_limit_cache_lock:
             self._context_limit_cache[model] = limit
@@ -23392,7 +23654,6 @@ class SummarizeDialog(BaseDialog):
         estimated = self._estimate_tokens(total_prompt)
         return estimated <= limit * 0.9
 
-    # Parallele Chunk‑Verarbeitung (mit garantierter Ressourcenfreigabe)
     def _summarize_chunk_with_retry(
         self, chunk_text: str, prompt: str, temperature: float, max_retries: int = 2
     ) -> Optional[str]:
@@ -23553,7 +23814,6 @@ class SummarizeDialog(BaseDialog):
             log_debug("SUMMARIZE", f"Chunks verarbeitet, {len(valid_results)} gültig")
         self._create_final_summary(combined, prompt, temp)
 
-    # Finale Zusammenfassung (mit Stil‑Berücksichtigung)
     def _create_final_summary(self, combined_chunks: str, base_prompt: str, temp: float) -> None:
         target_lang = self.summary_lang_var.get()
         style = self.style_var.get()
@@ -23572,7 +23832,6 @@ class SummarizeDialog(BaseDialog):
         if DEBUG_LEVEL >= 2:
             log_debug("SUMMARIZE", "Starte finale Zusammenfassung")
 
-        # Cancel-Button aktivieren und indeterminierten Fortschritt starten
         self._safe_after(0, lambda: self.cancel_btn.config(state="normal"))
         self._safe_after(0, lambda: self.progress_bar.config(mode="indeterminate"))
         self._safe_after(0, lambda: self.progress_bar.start(10))
@@ -23589,7 +23848,7 @@ class SummarizeDialog(BaseDialog):
             with self._lock:
                 self.full_summary = "".join(self._full_summary_parts)
             self._apply_blacklist_to_summary()
-            self._save_backup()  # Backup speichern
+            self._save_backup()
             self._safe_after(0, lambda: self.progress_var.set(100))
             self._safe_after(0, self._reset_ui)
 
@@ -23624,7 +23883,6 @@ class SummarizeDialog(BaseDialog):
         filtered = summary
         for pattern in self._blacklist_patterns:
             filtered = pattern.sub("", filtered)
-        # Formatierung erhalten (nur Spaces/Tabs normalisieren, Zeilenumbrüche bewahren)
         filtered = re.sub(r"[ \t]+", " ", filtered)
         filtered = re.sub(r"\n{3,}", "\n\n", filtered)
         filtered = "\n".join(line.strip() for line in filtered.splitlines())
@@ -23660,7 +23918,6 @@ class SummarizeDialog(BaseDialog):
         except tk.TclError:
             pass
 
-    # Callbacks für OllamaSummarizer (Worker‑Thread)
     def on_chunk(self, chunk: str) -> None:
         if self._destroyed:
             return
@@ -23693,54 +23950,79 @@ class SummarizeDialog(BaseDialog):
                 pass
         self._safe_after(0, update)
 
-    # Benutzeraktionen
     def start_summarize(self) -> None:
         if self._destroyed:
+            if DEBUG_LEVEL >= 3:
+                log_debug("SUMMARIZE", "start_summarize: Dialog bereits zerstört – Abbruch")
             return
+
         if not self.summarizer.is_server_reachable():
             self.status_label.config(text="❌ Ollama-Server nicht erreichbar.")
+            if DEBUG_LEVEL >= 2:
+                log_debug("SUMMARIZE", "start_summarize: Ollama-Server nicht erreichbar")
             return
 
         model = self.model_var.get().strip()
         if model == "--- Modell auswählen ---" or model.startswith("(keine"):
             self.status_label.config(text="❌ Bitte ein gültiges Modell auswählen")
+            if DEBUG_LEVEL >= 2:
+                log_debug("SUMMARIZE", f"start_summarize: Ungültiges Modell ausgewählt '{model}'")
             return
+
         if not self.summarizer.is_model_available(model):
             self.status_label.config(text=f"❌ Modell '{model}' nicht auf Server gefunden.")
+            if DEBUG_LEVEL >= 2:
+                log_debug("SUMMARIZE", f"start_summarize: Modell '{model}' nicht gefunden")
             return
 
         self.summarizer.model = model
         self.summarizer.host = self.gui.advanced_settings.ollama_host
+
         target_lang = self.summary_lang_var.get()
-        system_prompt = f"Du bist ein Assistent, der Texte auf {target_lang} zusammenfasst. Antworte ausschließlich auf {target_lang}."
+        system_prompt = (
+            f"Du bist ein Assistent, der Texte auf {target_lang} zusammenfasst. "
+            f"Antworte ausschließlich auf {target_lang}."
+        )
         self.summarizer.system_prompt = system_prompt
+
         self._prompt = self.prompt_text.get("1.0", "end-1c").strip()
+        if "{text}" in self._prompt:
+            self._prompt = self._prompt.format(text=self.text)
+            if DEBUG_LEVEL >= 3:
+                log_debug("SUMMARIZE", f"Platzhalter '{{text}}' ersetzt (neue Promptlänge={len(self._prompt)})")
         self._temp = self.temp_var.get()
 
         total_prompt = system_prompt + "\n\n" + self._prompt + "\n\n" + self.text
         if not self._check_token_limit(model, total_prompt):
+            est_tokens = self._estimate_tokens(total_prompt)
+            limit = self._get_model_context_limit(model)
+            if DEBUG_LEVEL >= 2:
+                log_debug("SUMMARIZE", f"Token-Limit-Warnung: est={est_tokens}, limit={limit}")
             if not DarkMessageBox.askyesno(
                 "Warnung: Großes Prompt",
-                f"Die Eingabe überschreitet möglicherweise das Kontextlimit von {model}.\n"
-                "Die Zusammenfassung könnte unvollständig sein oder fehlschlagen.\n\n"
+                f"Die Eingabe umfasst schätzungsweise {est_tokens} Tokens.\n"
+                f"Das Kontextlimit des Modells '{model}' beträgt {limit} Tokens.\n\n"
+                "Die Zusammenfassung könnte unvollständig sein oder fehlschlagen.\n"
                 "Trotzdem fortfahren?",
-                parent=self.dialog
+                parent=self.dialog,
             ):
+                if DEBUG_LEVEL >= 2:
+                    log_debug("SUMMARIZE", "Benutzer hat Token‑Limit‑Fortsetzung abgelehnt")
                 return
 
         with self._lock:
             self._full_summary_parts = []
             self.full_summary = ""
 
-        # Platzhalter setzen
         self._safe_after(0, lambda: self.summary_text.delete("1.0", "end"))
         self._safe_after(0, lambda: self.summary_text.insert("1.0", "[Zusammenfassung wird erstellt...]"))
 
         if DEBUG_LEVEL >= 2:
-            log_debug("SUMMARIZE", f"Starte Zusammenfassung mit Modell {model}, Stil {self.style_var.get()}")
+            log_debug("SUMMARIZE", f"Starte Zusammenfassung: model={model}, temp={self._temp}, style={self.style_var.get()}, prompt_len={len(self._prompt)}")
 
         word_count = len(self.text.split())
         max_words = 3000 if "Ausführlich" in self.style_var.get() else 2000
+
         if word_count > max_words:
             self.status_label.config(text="⏳ Text wird in Abschnitte zerlegt...")
             self.summarize_btn.config(state="disabled", text="⏳ Warte...")
@@ -23751,6 +24033,11 @@ class SummarizeDialog(BaseDialog):
             self._request_cancel.clear()
 
             chunks = self._split_text(self.text, max_words=max_words)
+            if not chunks:
+                self.status_label.config(text="❌ Fehler beim Aufteilen des Textes")
+                self._reset_ui()
+                return
+
             self.status_label.config(text=f"⏳ Verarbeite {len(chunks)} Abschnitte parallel...")
             self.progress_var.set(0)
 
@@ -23766,6 +24053,8 @@ class SummarizeDialog(BaseDialog):
                     name="SummarizeChunks",
                 )
                 self._worker_thread.start()
+            if DEBUG_LEVEL >= 2:
+                log_debug("SUMMARIZE", f"Chunk-Verarbeitung gestartet: {len(chunks)} Chunks")
         else:
             self.summarize_btn.config(state="disabled", text="⏳ Warte...")
             self.cancel_btn.config(state="normal")
@@ -23796,23 +24085,87 @@ class SummarizeDialog(BaseDialog):
                 complete_callback=on_complete,
                 cancel_event=self._request_cancel,
             )
+            if DEBUG_LEVEL >= 2:
+                log_debug("SUMMARIZE", "Direkte Zusammenfassung gestartet")
 
     def cancel_request(self) -> None:
+        """
+        Bricht die laufende Zusammenfassung ab und sichert Teilergebnisse.
+        """
+        log_debug("SUMMARIZE", "cancel_request aufgerufen")
+
+        # 1. Alle Worker über das zentrale Event informieren
         with self._lock:
             self._request_cancel.set()
-        if self._chunk_executor:
-            time.sleep(0.5)
-            with self._lock:
-                if self._chunk_executor:
-                    self._chunk_executor.shutdown(wait=False, cancel_futures=True)
-                    self._chunk_executor = None
-        if hasattr(self, "summarizer"):
-            self.summarizer.stop()
-        if DEBUG_LEVEL >= 2:
-            log_debug("SUMMARIZE", "Zusammenfassung abgebrochen")
-        self.status_label.config(text="⏹️ Abbruch eingeleitet...")
-        self.cancel_btn.config(state="disabled")
-        self._safe_after(500, self._reset_ui)
+
+        # 2. Chunk‑Executor geordnet herunterfahren, laufende Futures abbrechen
+        executor = None
+        with self._lock:
+            executor = self._chunk_executor
+            self._chunk_executor = None
+
+        if executor is not None:
+            try:
+                time.sleep(0.1)
+                executor.shutdown(wait=False, cancel_futures=True)
+                log_debug("SUMMARIZE", "Chunk‑Executor heruntergefahren")
+            except Exception as e:
+                logger.warning(f"Fehler beim Herunterfahren des Chunk‑Executors: {e}")
+                try:
+                    executor.shutdown(wait=False)
+                except Exception:
+                    pass
+
+        # 3. OllamaSummarizer stoppen
+        if hasattr(self, "summarizer") and self.summarizer is not None:
+            try:
+                self.summarizer.stop()
+                log_debug("SUMMARIZE", "OllamaSummarizer gestoppt")
+            except Exception as e:
+                logger.warning(f"Fehler beim Stoppen des Summarizers: {e}")
+
+        # 4. Teilergebnisse sichern
+        with self._lock:
+            partial = "".join(self._full_summary_parts)
+            if partial:
+                self.full_summary = partial
+                log_debug("SUMMARIZE", f"Teilergebnisse gesichert: {len(partial)} Zeichen")
+            else:
+                log_debug("SUMMARIZE", "Keine Teilergebnisse vorhanden")
+
+        if partial:
+            try:
+                self._apply_blacklist_to_summary()
+            except Exception as e:
+                logger.warning(f"Fehler beim Anwenden der Blacklist auf Teilergebnisse: {e}")
+
+        # 5. UI‑Status aktualisieren
+        def update_gui():
+            if self._destroyed:
+                return
+            try:
+                self.cancel_btn.config(state="disabled")
+                with self._lock:
+                    has_summary = bool(self.full_summary)
+                self.copy_btn.config(state="normal" if has_summary else "disabled")
+                self.save_btn.config(state="normal" if has_summary else "disabled")
+                self.translate_btn.config(state="normal" if has_summary else "disabled")
+                self.summarize_btn.config(state="normal", text="🤖 Zusammenfassen")
+
+                if hasattr(self, "progress_bar") and self.progress_bar.winfo_exists():
+                    self.progress_bar.stop()
+                    self.progress_bar.config(mode="determinate", value=0)
+
+                if has_summary:
+                    self.status_label.config(text="⏹️ Abgebrochen – Teilergebnis verfügbar")
+                else:
+                    self.status_label.config(text="⏹️ Abgebrochen – keine Ergebnisse")
+            except tk.TclError:
+                pass
+
+        self._safe_after(0, update_gui)
+
+        log_debug("SUMMARIZE", "cancel_request abgeschlossen")
 
     def copy_summary(self) -> None:
         if self._destroyed:
@@ -23865,8 +24218,180 @@ class SummarizeDialog(BaseDialog):
             return
         TranslationDialog(self.dialog, engine, self.gui, initial_text=summary)
 
+    def import_templates(self) -> None:
+        """
+        Importiert Prompt‑Vorlagen aus einer JSON‑Datei und fügt sie den
+        benutzerdefinierten Vorlagen hinzu.
+        """
+        import tkinter.filedialog as fd
+
+        file_path = fd.askopenfilename(
+            title="Prompt‑Vorlagen importieren",
+            filetypes=[("JSON Dateien", "*.json"), ("Alle Dateien", "*.*")],
+        )
+        if not file_path:
+            if DEBUG_LEVEL >= 3:
+                log_debug("SUMMARIZE", "import_templates: Keine Datei ausgewählt")
+            return
+
+        if DEBUG_LEVEL >= 2:
+            log_debug("SUMMARIZE", f"import_templates: Lade Datei '{file_path}'")
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except json.JSONDecodeError as e:
+            msg = f"❌ Keine gültige JSON‑Datei: {e}"
+            self.status_label.config(text=msg)
+            logger.warning(msg)
+            if DEBUG_LEVEL >= 2:
+                log_debug("SUMMARIZE", f"import_templates: JSONDecodeError − {e}")
+            return
+        except (OSError, PermissionError) as e:
+            msg = f"❌ Datei konnte nicht gelesen werden: {e}"
+            self.status_label.config(text=msg)
+            logger.warning(msg)
+            if DEBUG_LEVEL >= 2:
+                log_debug("SUMMARIZE", f"import_templates: OS/Permission error − {e}")
+            return
+        except Exception as e:
+            msg = f"❌ Unerwarteter Fehler beim Lesen: {e}"
+            self.status_label.config(text=msg)
+            logger.error(msg, exc_info=True)
+            return
+
+        if not isinstance(data, dict):
+            self.status_label.config(text="❌ JSON‑Struktur ungültig (kein Objekt).")
+            return
+
+        invalid_items = [k for k, v in data.items() if not isinstance(k, str) or not isinstance(v, str)]
+        if invalid_items:
+            self.status_label.config(
+                text=f"❌ {len(invalid_items)} Einträge mit ungültigem Typ ignoriert."
+            )
+            for k in invalid_items:
+                del data[k]
+
+        if not data:
+            self.status_label.config(text="ℹ️ Keine gültigen Vorlagen in der Datei gefunden.")
+            return
+
+        existing_keys = set(self._user_templates.keys())
+        new_keys = set(data.keys())
+        conflicts = existing_keys.intersection(new_keys)
+
+        if conflicts:
+            conflict_list = "\n".join(sorted(conflicts)[:10])
+            if len(conflicts) > 10:
+                conflict_list += f"\n... und {len(conflicts) - 10} weitere"
+
+            overwrite = DarkMessageBox.askyesno(
+                "Vorlagen‑Konflikt",
+                f"Die folgenden Vorlagen existieren bereits:\n\n"
+                f"{conflict_list}\n\n"
+                "Möchtest du sie überschreiben?\n"
+                "  • Ja = vorhandene ersetzen\n"
+                "  • Nein = nur neue Vorlagen hinzufügen",
+                parent=self.dialog,
+            )
+            if overwrite is None:
+                self.status_label.config(text="ℹ️ Import abgebrochen")
+                return
+
+            if not overwrite:
+                for k in conflicts:
+                    del data[k]
+                if not data:
+                    self.status_label.config(text="ℹ️ Keine neuen Vorlagen zum Importieren.")
+                    return
+
+        imported_count = 0
+        for key, value in data.items():
+            if key in self._user_templates:
+                log_debug("SUMMARIZE", f"Überschreibe Vorlage '{key}'")
+            self._user_templates[key] = value
+            imported_count += 1
+
+        try:
+            self._save_user_templates()
+        except Exception as e:
+            logger.error(f"Konnte Vorlagen nicht speichern: {e}")
+            self.status_label.config(text="❌ Vorlagen importiert, aber Speichern fehlgeschlagen.")
+            self._build_template_list()
+            self.template_combo["values"] = self._template_names
+            return
+
+        self._build_template_list()
+        self.template_combo["values"] = self._template_names
+        self.status_label.config(text=f"✅ {imported_count} Vorlage(n) importiert")
+        if DEBUG_LEVEL >= 2:
+            log_debug("SUMMARIZE", f"import_templates: {imported_count} Vorlagen aus '{file_path}' importiert")
+
+    def export_templates(self) -> None:
+        """
+        Exportiert alle benutzerdefinierten Prompt‑Vorlagen in eine JSON‑Datei.
+        """
+        import tkinter.filedialog as fd
+
+        if not self._user_templates:
+            self.status_label.config(text="ℹ️ Keine benutzerdefinierten Vorlagen vorhanden.")
+            if DEBUG_LEVEL >= 2:
+                log_debug("SUMMARIZE", "export_templates: Keine Vorlagen zum Exportieren")
+            return
+
+        suggested_name = "dragon_summarize_templates_export.json"
+        file_path = fd.asksaveasfilename(
+            title="Prompt‑Vorlagen exportieren",
+            defaultextension=".json",
+            initialfile=suggested_name,
+            filetypes=[("JSON Dateien", "*.json"), ("Alle Dateien", "*.*")],
+        )
+        if not file_path:
+            if DEBUG_LEVEL >= 3:
+                log_debug("SUMMARIZE", "export_templates: Keine Zieldatei ausgewählt – Abbruch")
+            return
+
+        if DEBUG_LEVEL >= 2:
+            log_debug("SUMMARIZE", f"export_templates: Speichere nach '{file_path}'")
+
+        export_dir = Path(file_path).parent
+        try:
+            export_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            msg = f"❌ Verzeichnis '{export_dir}' konnte nicht erstellt werden: {e}"
+            self.status_label.config(text=msg)
+            logger.error(msg)
+            return
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(self._user_templates, f, indent=2, ensure_ascii=False)
+        except PermissionError as e:
+            msg = f"❌ Keine Schreibberechtigung für '{file_path}': {e}"
+            self.status_label.config(text=msg)
+            logger.error(msg)
+            if DEBUG_LEVEL >= 2:
+                log_debug("SUMMARIZE", f"export_templates: PermissionError − {e}")
+            return
+        except OSError as e:
+            msg = f"❌ Fehler beim Schreiben der Datei: {e}"
+            self.status_label.config(text=msg)
+            logger.error(msg)
+            if DEBUG_LEVEL >= 2:
+                log_debug("SUMMARIZE", f"export_templates: OSError − {e}")
+            return
+        except Exception as e:
+            msg = f"❌ Unerwarteter Fehler beim Export: {e}"
+            self.status_label.config(text=msg)
+            logger.error(msg, exc_info=True)
+            return
+
+        count = len(self._user_templates)
+        self.status_label.config(text=f"✅ {count} Vorlage(n) exportiert nach '{Path(file_path).name}'")
+        if DEBUG_LEVEL >= 2:
+            log_debug("SUMMARIZE", f"export_templates: {count} Vorlagen erfolgreich exportiert")
+
     def close(self) -> None:
-        # Stil‑Präferenz speichern
         if hasattr(self, "style_var"):
             style_value = self.style_var.get()
             if "Kompakt" in style_value:
@@ -23889,7 +24414,6 @@ class SummarizeDialog(BaseDialog):
                     self._chunk_executor.shutdown(wait=False, cancel_futures=True)
                     self._chunk_executor = None
 
-        # Worker-Thread joinen (unter Lock)
         with self._lock:
             worker = self._worker_thread
         if worker and worker.is_alive():
@@ -23901,7 +24425,6 @@ class SummarizeDialog(BaseDialog):
             except Exception:
                 pass
 
-        # Backup löschen, da erfolgreich gespeichert oder verworfen
         if os.path.exists(self._backup_file):
             try:
                 os.unlink(self._backup_file)
@@ -44259,8 +44782,8 @@ class AdvancedSettings:
 
     # Konfigurationstypen und Audio
     config_type: str = "high_accuracy"
-    transcript_max_lines: int = 400
-    translation_max_lines: int = 300
+    transcript_max_lines: int = 800
+    translation_max_lines: int = 600
     translation_engine: str = "google"
     ollama_model: str = "llama3.1:8b"
     ollama_host: str = "http://localhost:11434"
