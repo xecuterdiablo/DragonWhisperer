@@ -8714,10 +8714,6 @@ class AudioEnhancer:
     ) -> bool:
         """
         Prüft, ob der aktuelle Text ein Duplikat eines kürzlich transkribierten Textes ist.
-
-        Verwendet Normalisierung, Ähnlichkeitsvergleich (rapidfuzz/difflib) und
-        Wortvielfaltsanalyse. Die Duplikaterkennung kann über die Einstellungen
-        ein- und ausgeschaltet werden.
         """
         # Verwende die Einstellung aus AdvancedSettings
         if not self.settings.enable_duplicate_check:
@@ -8772,7 +8768,6 @@ class AudioEnhancer:
                         f"Geringe Wortvielfalt: {unique_ratio:.2%} < {self.config.MIN_UNIQUE_WORDS_RATIO:.2%}",
                     )
                 return True
-
         return False
 
     def _load_modules(self) -> None:
@@ -9561,16 +9556,78 @@ class TranscriptionEngine:
 
         return diag
 
-    # -------------------------------------------------------------------------
-    #  Private Hilfsmethoden (optimiert)
-    # -------------------------------------------------------------------------
+    #  Private Hilfsmethoden
     def _load_modules(self) -> None:
-        if self._np is None and NUMPY_AVAILABLE:
-            self._np = FastLazyLoader.load("numpy")
-        if self._scipy_signal is None and SCIPY_AVAILABLE:
-            self._scipy_signal = FastLazyLoader.load("scipy.signal")
-        if self._torch is None and TORCH_AVAILABLE:
-            self._torch = FastLazyLoader.load("torch")
+        """
+        Lädt die benötigten Bibliotheken (numpy, scipy.signal, torch) lazy
+        und speichert sie in Instanzattributen.
+        """
+        # 1. numpy (zwingend erforderlich, aber Fehler nicht fatal)
+        if self._np is None:
+            if NUMPY_AVAILABLE:
+                try:
+                    self._np = FastLazyLoader.load("numpy")
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("modules", "numpy erfolgreich geladen")
+                except Exception as e:
+                    logger.warning("numpy konnte nicht geladen werden: %s", e)
+                    self._np = None
+            else:
+                if DEBUG_LEVEL >= 2:
+                    log_debug("modules", "numpy nicht verfügbar – NUMPY_AVAILABLE=False")
+
+        # 2. scipy.signal (optional, für Audiosignalverarbeitung)
+        if self._scipy_signal is None:
+            if SCIPY_AVAILABLE:
+                try:
+                    self._scipy_signal = FastLazyLoader.load("scipy.signal")
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("modules", "scipy.signal erfolgreich geladen")
+                except Exception as e:
+                    logger.warning("scipy.signal konnte nicht geladen werden: %s", e)
+                    self._scipy_signal = None
+            else:
+                if DEBUG_LEVEL >= 2:
+                    log_debug("modules", "scipy.signal nicht verfügbar – SCIPY_AVAILABLE=False")
+
+        # 3. torch (optional, für GPU‑Beschleunigung)
+        if self._torch is None and not getattr(self, "_torch_load_failed", False):
+            if TORCH_AVAILABLE:
+                try:
+                    # Verwende den speziellen Handler, der auch Logging unterdrückt
+                    self._torch = FastLazyLoader.load("torch")
+                    if self._torch is None:
+                        # Falls der LazyLoader None zurückgibt (unwahrscheinlich)
+                        raise ImportError("torch could not be loaded")
+                    _ = self._torch.cuda.is_available()
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("modules", "torch erfolgreich geladen")
+                except Exception as e:
+                    logger.warning(
+                        "torch konnte nicht geladen werden: %s\n"
+                        "   GPU‑Beschleunigung ist nicht verfügbar. "
+                        "Falls Sie eine GPU nutzen möchten, stellen Sie sicher, "
+                        "dass PyTorch korrekt installiert ist und alle "
+                        "Abhängigkeiten (z. B. Visual C++ Redistributable) "
+                        "vorhanden sind.",
+                        e,
+                    )
+                    self._torch = None
+                    self._torch_load_failed = True  # merken, dass Laden fehlschlug
+            else:
+                if DEBUG_LEVEL >= 2:
+                    log_debug("modules", "torch nicht verfügbar – TORCH_AVAILABLE=False")
+
+        # 4. Optionales Logging des finalen Ladezustands
+        if DEBUG_LEVEL >= 3:
+            loaded = []
+            if self._np is not None:
+                loaded.append("numpy")
+            if self._scipy_signal is not None:
+                loaded.append("scipy.signal")
+            if self._torch is not None:
+                loaded.append("torch")
+            log_debug("modules", f"Geladene Module: {', '.join(loaded) if loaded else 'keine'}")
 
     def _check_cpu_features(self) -> Dict[str, bool]:
         """
@@ -18599,6 +18656,11 @@ class ExportManager:
 class ResourceManager:
     """
     Zentrale Verwaltung von Systemressourcen (Prozesse, Threads, temporäre Dateien).
+
+    **Verwendung:**
+        - ``register_*()``-Methoden fügen Ressourcen hinzu.
+        - ``dispose()`` (öffentlich) oder ``cleanup()`` führen die Bereinigung durch.
+        - ``_atexit_cleanup()`` stellt sicher, dass auch bei Programmabbruch aufgeräumt wird.
     """
 
     __slots__ = (
@@ -18624,7 +18686,6 @@ class ResourceManager:
         self._psutil = None
         try:
             import psutil
-
             self._psutil = psutil
         except ImportError:
             pass
@@ -18802,31 +18863,27 @@ class ResourceManager:
             temp_files_to_delete = self.temp_files[:]
         for temp_file in temp_files_to_delete:
             if time.time() - start_time > timeout:
-                logger.warning(
-                    "⚠️ Cleanup timeout – breche Löschen temporärer Dateien ab"
-                )
+                logger.warning("⚠️ Cleanup timeout – breche Löschen temporärer Dateien ab")
                 break
             try:
                 if os.path.exists(temp_file):
                     os.unlink(temp_file)
                     logger.debug(f"🗑️ Temporäre Datei gelöscht: {temp_file}")
             except (OSError, PermissionError) as e:
-                logger.warning(
-                    f"⚠️ Konnte temporäre Datei {temp_file} nicht löschen: {e}"
-                )
+                logger.warning(f"⚠️ Konnte temporäre Datei {temp_file} nicht löschen: {e}")
             finally:
                 with self._lock:
                     if temp_file in self.temp_files:
                         self.temp_files.remove(temp_file)
 
-        # 4. GPU-Cache leeren (optional)
+        # 4. GPU-Cache leeren (nur wenn Torch bereits funktionsfähig geladen wurde)
         try:
-            import torch
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                logger.debug("🧹 GPU-Cache geleert")
-        except ImportError:
+            if "torch" in sys.modules:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    logger.debug("🧹 GPU-Cache geleert")
+        except Exception:
             pass
 
         # 5. Garbage Collection
@@ -18835,8 +18892,15 @@ class ResourceManager:
         logger.info("✅ ResourceManager: Alle Ressourcen bereinigt")
         return True
 
+    # -------------------------------------------------------------------------
+    # Einheitliche dispose()-Schnittstelle für andere Manager
+    # -------------------------------------------------------------------------
     def dispose(self) -> None:
-        """Öffentliche Methode zum Entsorgen der Ressourcen (Alias für cleanup)."""
+        """
+        Öffentliche Methode zum Entsorgen der Ressourcen.
+        Wird von ``DragonWhispererGUI._cleanup_resources`` aufgerufen
+        und leitet intern auf ``cleanup()`` weiter.
+        """
         self.cleanup()
 
     # -------------------------------------------------------------------------
@@ -18854,7 +18918,6 @@ class ResourceManager:
             fallback_kill_wait=1.0,
             stats_callback=None,
         )
-
 
 class LanguageDetector:
     """
@@ -29999,40 +30062,127 @@ class DragonWhispererGUI:
             self.performance_optimizer = LinuxPerformanceOptimizer(gui_ref=self)
 
     def _init_engines(self) -> None:
-        """Initialisiert die Transkriptions‑, Übersetzungs‑ und Audio‑Engines."""
+        """
+        Initialisiert die Transkriptions‑, Übersetzungs‑ und Audio‑Engines
+        mit maximaler Robustheit und detaillierten Debug‑Informationen.
+        """
+        # 1. Transkriptions‑Engine erstellen (mit Fallback)
+        if DEBUG_LEVEL >= 2:
+            log_debug("init", "Creating transcription engine...")
+
+        engine_created = False
         if WHISPER_AVAILABLE:
-            self.transcription_engine = TranscriptionEngine(
-                self.advanced_settings,
-                cache_manager=self.app_context.cache_manager,
-                event_bus=self.event_bus,
-            )
+            try:
+                self.transcription_engine = TranscriptionEngine(
+                    self.advanced_settings,
+                    cache_manager=self.app_context.cache_manager,
+                    event_bus=self.event_bus,
+                )
+                engine_created = True
+                if DEBUG_LEVEL >= 2:
+                    log_debug("init", "TranscriptionEngine successfully created.")
+            except Exception as e:
+                logger.exception(
+                    "❌ TranscriptionEngine creation failed: %s\n"
+                    "   This can happen if PyTorch or its dependencies "
+                    "(e.g. Microsoft Visual C++ Redistributable) are missing "
+                    "or corrupted. The application will continue in Demo mode.",
+                    e
+                )
         else:
+            logger.warning("No Whisper backend available – will use DummyTranscriptionEngine.")
+
+        if not engine_created:
             self.transcription_engine = DummyTranscriptionEngine(
                 self.advanced_settings, cache_manager=self.app_context.cache_manager
             )
-        self.language_detector = LanguageDetector(self.transcription_engine)
-        self.translation_engine = self._create_translation_engine()
-        self.audio_processor = AudioProcessor(
-            controller_ref=self.controller,
-            ffmpeg_manager=self.ffmpeg_manager,
-            settings=self.advanced_settings,
-            stream_manager=self.stream_manager,
-        )
-        fallback_engine = None
-        if self.advanced_settings.translation_engine == "google" and OLLAMA_AVAILABLE:
-            fallback_engine = OllamaTranslationEngine(
+            # Demo‑Modus aktualisieren, falls wir jetzt gezwungen sind, Dummy zu nutzen
+            if not self.demo_mode:
+                self.demo_mode = True
+                logger.info("🔄 Switched to Demo mode because transcription engine could not be loaded.")
+
+        # 2. LanguageDetector mit der vorhandenen Engine erstellen
+        try:
+            self.language_detector = LanguageDetector(self.transcription_engine)
+            if DEBUG_LEVEL >= 2:
+                log_debug("init", "LanguageDetector created.")
+        except Exception as e:
+            logger.exception("Failed to create LanguageDetector: %s", e)
+            self.language_detector = None  # nicht kritisch
+
+        # 3. Übersetzungs‑Engine erstellen (mit Fallback)
+        if DEBUG_LEVEL >= 2:
+            log_debug("init", "Creating translation engine...")
+
+        try:
+            self.translation_engine = self._create_translation_engine()
+        except Exception as e:
+            logger.exception(
+                "❌ Translation engine creation failed: %s\n"
+                "   Using DummyTranslationEngine instead.",
+                e
+            )
+            self.translation_engine = DummyTranslationEngine(
                 target_lang=self.current_language,
                 settings=self.advanced_settings,
-                model=self.advanced_settings.ollama_model,
-                host=self.advanced_settings.ollama_host,
                 cache_manager=self.app_context.cache_manager,
             )
-        self.audio_processor.set_engines(
-            transcription_engine=self.transcription_engine,
-            translation_engine=self.translation_engine,
-            fallback_translation_engine=fallback_engine,
-            plugin_manager=None,
-        )
+
+        # 4. AudioProcessor erstellen
+        if DEBUG_LEVEL >= 2:
+            log_debug("init", "Creating AudioProcessor...")
+
+        fallback_translation_engine = None
+        if (
+            self.advanced_settings.translation_engine == "google"
+            and OLLAMA_AVAILABLE
+        ):
+            try:
+                fallback_translation_engine = OllamaTranslationEngine(
+                    target_lang=self.current_language,
+                    settings=self.advanced_settings,
+                    model=self.advanced_settings.ollama_model,
+                    host=self.advanced_settings.ollama_host,
+                    cache_manager=self.app_context.cache_manager,
+                )
+            except Exception as e:
+                logger.warning("Could not create fallback OllamaTranslationEngine: %s", e)
+
+        try:
+            self.audio_processor = AudioProcessor(
+                controller_ref=self.controller,
+                ffmpeg_manager=self.ffmpeg_manager,
+                settings=self.advanced_settings,
+                stream_manager=self.stream_manager,
+            )
+            self.audio_processor.set_engines(
+                transcription_engine=self.transcription_engine,
+                translation_engine=self.translation_engine,
+                fallback_translation_engine=fallback_translation_engine,
+                plugin_manager=None,
+            )
+            if DEBUG_LEVEL >= 2:
+                log_debug("init", "AudioProcessor created and engines configured.")
+        except Exception as e:
+            logger.exception("Failed to create AudioProcessor: %s", e)
+            raise
+
+        # 5. GUI‑Elemente an Demo‑Modus anpassen (falls aktiviert)
+        if self.demo_mode:
+            if hasattr(self, "model_combo") and self.model_combo.winfo_exists():
+                self.model_combo.config(state="disabled")
+                self.model_var.set("dummy (Demo)")
+            self.update_status("⚠️ Demo-Modus: Whisper nicht verfügbar – verwende Dummy-Transkriptionen")
+            if DEBUG_LEVEL >= 2:
+                log_debug("init", "Demo mode GUI adjustments applied.")
+        else:
+            # Normaler Modus: sicherstellen, dass Model-Combo aktiviert ist
+            if hasattr(self, "model_combo") and self.model_combo.winfo_exists():
+                self.model_combo.config(state="readonly")
+                self.model_var.set(self.settings.default_model)
+
+        if DEBUG_LEVEL >= 2:
+            log_debug("init", "Engine initialization complete.")
 
     def _setup_callbacks(self) -> None:
         """Platzhalter für zusätzliche Callbacks (z.B. für Plugins)."""
@@ -30048,16 +30198,12 @@ class DragonWhispererGUI:
         self.advanced_settings.chunk_duration = 20.0
         logger.debug("Präzisionsoptimierungen angewendet (VAD deaktiviert, Chunk-Dauer 20s, Duplikat-Schwellwert 0.98)")
 
-    # ------------------------------------------------------------------------
     # Theme‑Methoden
-    # ------------------------------------------------------------------------
     def _apply_theme(self, theme_name: str) -> None:
         """
         Wendet das ausgewählte Theme auf die gesamte GUI an.
         """
-        # -----------------------------------------------------------------
         # 1. Theme‑Klasse auswählen
-        # -----------------------------------------------------------------
         theme_map = {
             "dark": DarkTheme,
             "light": LightTheme,
