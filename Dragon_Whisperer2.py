@@ -25650,8 +25650,27 @@ class InstallDependencyDialog(BaseDialog):
     #  UI-Aufbau
     # -------------------------------------------------------------------------
     def build_ui(self) -> None:
+        """
+        Erstellt die vollständige Benutzeroberfläche des Installations‑Dialogs.
+
+        Enthält:
+            - Systempakete mit Hervorhebung kritischer Tools
+            - Python‑Pakete mit optionaler Vorauswahl
+            - Piper‑Stimmen
+            - Update‑Bereich
+            - Ausgabebereich
+            - Steuerungs‑Buttons
+        Am Ende wird die Mausrad‑Steuerung für **alle** Widgets im Dialog
+        eingerichtet, sodass das Scrollen im gesamten Fenster funktioniert.
+        Zusätzlich wird unter Windows ohne FFmpeg ein Hinweis zur einfachen
+        Winget‑Installation eingeblendet.
+        """
+        # -----------------------------------------------------------------
         # Scrollbarer Hauptbereich
-        canvas = tk.Canvas(self.main, bg=CURRENT_THEME.BG_PRIMARY, highlightthickness=0)
+        # -----------------------------------------------------------------
+        canvas = tk.Canvas(
+            self.main, bg=CURRENT_THEME.BG_PRIMARY, highlightthickness=0
+        )
         scrollbar = tk.Scrollbar(self.main, orient="vertical", command=canvas.yview)
         self.scrollable_frame = tk.Frame(canvas, bg=CURRENT_THEME.BG_PRIMARY)
 
@@ -25690,6 +25709,7 @@ class InstallDependencyDialog(BaseDialog):
 
         self.sys_vars: Dict[str, tk.BooleanVar] = {}
         for pkg_name, pkg_data in self.SYSTEM_PACKAGES.items():
+            # Prüfen, ob das Paket bereits verfügbar ist
             if pkg_name == "vlc":
                 installed = self._vlc_installed
             else:
@@ -25724,6 +25744,68 @@ class InstallDependencyDialog(BaseDialog):
                 if is_critical:
                     tip += "\n(⚠️ Für den Betrieb zwingend erforderlich)"
                 ToolTip(cb, tip)
+
+        # -----------------------------------------------------------------
+        # Spezieller Hinweis für Windows: FFmpeg einfach über Winget installieren
+        # -----------------------------------------------------------------
+        if (
+            IS_WINDOWS
+            and not shutil.which("ffmpeg")
+            and "ffmpeg" in self.SYSTEM_PACKAGES
+        ):
+            hint_frame = tk.Frame(
+                sys_frame,
+                bg=CURRENT_THEME.BG_SECONDARY,
+                padx=5,
+                pady=5,
+            )
+            hint_frame.pack(fill="x", pady=(8, 2))
+
+            tk.Label(
+                hint_frame,
+                text="📌 So installieren Sie FFmpeg ganz einfach unter Windows:",
+                bg=CURRENT_THEME.BG_SECONDARY,
+                fg=CURRENT_THEME.TEXT_ACCENT,
+                font=Fonts.SUBTITLE,
+                anchor="w",
+            ).pack(fill="x")
+
+            steps = (
+                "1. Startmenü öffnen, „cmd“ eingeben und Enter drücken\n"
+                "2. Im schwarzen Fenster folgenden Befehl ausführen:\n"
+                "   winget install ffmpeg\n"
+                "3. Nach Abschluss die Eingabeaufforderung schließen\n"
+                "4. Dragon Whisperer neu starten\n"
+            )
+            tk.Label(
+                hint_frame,
+                text=steps,
+                bg=CURRENT_THEME.BG_SECONDARY,
+                fg=CURRENT_THEME.TEXT_PRIMARY,
+                font=Fonts.PRIMARY,
+                justify="left",
+            ).pack(fill="x", pady=(4, 0))
+
+            # Button, um den Befehl direkt in die Zwischenablage zu kopieren
+            def _copy_ffmpeg_cmd():
+                try:
+                    self.dialog.clipboard_clear()
+                    self.dialog.clipboard_append("winget install ffmpeg")
+                    self.status_var.set("📋 Befehl kopiert!")
+                except tk.TclError:
+                    pass
+
+            copy_btn = tk.Button(
+                hint_frame,
+                text="📋 Befehl kopieren",
+                command=_copy_ffmpeg_cmd,
+                bg=CURRENT_THEME.BG_TERTIARY,
+                fg=CURRENT_THEME.TEXT_PRIMARY,
+                font=("Segoe UI", 8),
+                padx=8,
+                pady=2,
+            )
+            copy_btn.pack(side="left", pady=(4, 0))
 
         if self.pkg_manager == "manual":
             tk.Label(
@@ -25845,6 +25927,7 @@ class InstallDependencyDialog(BaseDialog):
             )
 
             if not fully_installed:
+                # Piper-Stimmen sind nie kritisch → kein Haken
                 var = tk.BooleanVar(value=False)
                 cb = tk.Checkbutton(
                     voice_buttons_frame,
@@ -26289,16 +26372,58 @@ class InstallDependencyDialog(BaseDialog):
         return result_container[0]
 
     def _install_python_packages(self, packages: List[str], upgrade: bool = False) -> bool:
+        """
+        Installiert oder aktualisiert eine Liste von Python‑Paketen via pip.
+        """
+        # -----------------------------------------------------------------
+        # 1. Eingangsvalidierung
+        # -----------------------------------------------------------------
+        if not packages:
+            self._append_output("ℹ️ Keine Python‑Pakete angegeben – überspringe.\n")
+            return True
+
+        # -----------------------------------------------------------------
+        # 2. Basisbefehl zusammenbauen
+        # -----------------------------------------------------------------
         python_exe = sys.executable
-        cmd = [python_exe, "-m", "pip", "install", "--no-cache-dir"]
+        cmd = [
+            python_exe,
+            "-m", "pip", "install",
+            "--no-cache-dir",
+            "--disable-pip-version-check",
+        ]
         if upgrade:
             cmd.append("--upgrade")
+        # User‑Flag nur außerhalb eines venv setzen
         if not self.in_venv:
             cmd.append("--user")
         cmd.extend(packages)
+
+        # -----------------------------------------------------------------
+        # 3. Umgebungsvariablen – maximal kompatibel
+        # -----------------------------------------------------------------
         env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        return self._run_subprocess(cmd, "pip install", env=env)
+        env["PYTHONUNBUFFERED"] = "1"   # Echtzeit‑Ausgabe im Log
+        env["PYTHONUTF8"] = "1"         # Behebt Encoding‑Fehler unter Windows (z. B. bei dimits)
+
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "install",
+                f"pip install: {' '.join(cmd)}",
+            )
+
+        # -----------------------------------------------------------------
+        # 4. Subprozess ausführen und Ergebnis zurückgeben
+        # -----------------------------------------------------------------
+        success = self._run_subprocess(cmd, f"pip install {' '.join(packages)}", env=env)
+
+        if not success and DEBUG_LEVEL >= 2:
+            log_debug(
+                "install",
+                f"pip install fehlgeschlagen für: {', '.join(packages)}",
+            )
+
+        return success
 
     def _download_piper_voices(self, voices: List[str]) -> bool:
         cache_dir = os.path.expanduser("~/.cache/piper")
@@ -32539,25 +32664,6 @@ class DragonWhispererGUI:
         in die interne Warteschlange (`_tts_queue`) ein. Ein separater
         Worker‑Thread (`_tts_worker`) entnimmt die Texte sequenziell und
         übergibt sie an den TTS-Manager.
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - **Kein Timer-Debouncing mehr:** Jeder Satz wird garantiert
-              gesprochen; schnell aufeinanderfolgende Sätze überschreiben sich
-              nicht mehr.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`, inklusive
-              Quelle, Textlänge und Warteschlangen-Größe.
-            - **Robuste Prüfung** auf `is_shutting_down()`, Existenz des
-              `tts_manager` und der Warteschlange.
-            - **Nicht-blockierendes Einfügen** mit `put_nowait` und Fallback
-              auf `put(block=False)`, um GUI-Blockaden zu vermeiden.
-            - **Maximale Textlänge** wird vor dem Einreihen auf
-              `MAX_TTS_LENGTH` (2000 Zeichen) begrenzt, um Piper nicht zu
-              überlasten.
-
-        Args:
-            text: Der vorzulesende Text (wird ggf. gekürzt).
-            source: Entweder "transcript" oder "translation". Bestimmt, welche
-                    Auto‑TTS‑Einstellung geprüft wird.
         """
         # -----------------------------------------------------------------
         # 1. Grundlegende Verfügbarkeitsprüfungen
