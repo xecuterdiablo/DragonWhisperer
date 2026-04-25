@@ -25573,12 +25573,43 @@ class InstallDependencyDialog(BaseDialog):
         "psutil",
     }
 
+
     SYSTEM_PACKAGES = {
-        "ffmpeg": {"apt": "ffmpeg", "pacman": "ffmpeg", "brew": "ffmpeg", "winget": "FFmpeg"},
-        "yt-dlp": {"apt": "yt-dlp", "pacman": "yt-dlp", "brew": "yt-dlp", "pip": "yt-dlp"},
-        "vlc": {"apt": "vlc", "pacman": "vlc", "brew": "vlc", "winget": "VideoLAN.VLC"},
-        "espeak": {"apt": "espeak", "pacman": "espeak", "brew": "espeak"},
-        "piper": {"apt": "piper", "pacman": "piper", "brew": "piper", "winget": "piper"},
+        # ffmpeg: unter Windows per Fallback (winget mit Quellangabe)
+        "ffmpeg": {
+            "apt": "ffmpeg",
+            "pacman": "ffmpeg",
+            "brew": "ffmpeg",
+            "fallback": "winget install --source winget Gyan.FFmpeg"
+        },
+        # yt-dlp: universell via pip
+        "yt-dlp": {
+            "apt": "yt-dlp",
+            "pacman": "yt-dlp",
+            "brew": "yt-dlp",
+            "pip": "yt-dlp"
+        },
+        # VLC: unter Windows direkt über winget
+        "vlc": {
+            "apt": "vlc",
+            "pacman": "vlc",
+            "brew": "vlc",
+            "winget": "VideoLAN.VLC"
+        },
+        # espeak: auf Windows nicht benötigt (pyttsx3/SAPI ist immer da)
+        "espeak": {
+            "apt": "espeak",
+            "pacman": "espeak",
+            "brew": "espeak"
+        },
+        # Piper: unter Windows per Fallback (winget mit Quellangabe)
+        "piper": {
+            "apt": "piper",
+            "pacman": "piper",
+            "brew": "piper",
+            "fallback": "winget install --source winget GitHub.Piper"
+        },
+        # Ollama: winget funktioniert, zusätzlich universeller Fallback
         "ollama": {
             "apt": "ollama",
             "pacman": "ollama",
@@ -33797,16 +33828,6 @@ class DragonWhispererGUI:
         Die Methode ist idempotent und kann mehrfach gefahrlos aufgerufen
         werden. Sie verwendet großzügige Timeouts, um ein Hängenbleiben
         zu vermeiden, und protokolliert jeden Schritt für die Fehlersuche.
-
-        Verbesserungen gegenüber einer einfachen Implementierung:
-            - **Idempotenz:** Prüft, ob die benötigten Attribute existieren.
-            - **Nicht-blockierender Sentinel:** Verwendet `put_nowait` und
-              fängt `queue.Full` ab, um Blockaden zu vermeiden.
-            - **Detaillierte Debug-Ausgaben** bei `DEBUG_LEVEL >= 3`.
-            - **Timeout für `join()`:** Verhindert endloses Warten.
-            - **Fallback auf Daemon:** Sollte der Thread nicht rechtzeitig
-              enden, wird er nicht weiter beachtet – der Shutdown kann
-              fortgesetzt werden.
         """
         # -----------------------------------------------------------------
         # 1. Idempotenz: Prüfen, ob die benötigten Attribute existieren
@@ -33884,21 +33905,6 @@ class DragonWhispererGUI:
         Diese Methode wird typischerweise von einem übergeordneten TTS-Feeder
         (z. B. der GUI) aufgerufen, um Texte für die Sprachsynthese zu sammeln.
         Die Wiedergabe erfolgt in der Reihenfolge des Eintreffens.
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - **Größere Queue:** Maximale Größe wurde auf 20 erhöht (vorher 1),
-              um mehrere aufeinanderfolgende Sätze puffern zu können.
-            - **Kein stilles Verwerfen:** Bei voller Queue wird **blockierend**
-              gewartet (mit Timeout), statt den ältesten Text zu löschen.
-            - **Robuste Shutdown-Prüfung:** Vor dem Einreihen wird geprüft, ob
-              der TTS-Manager bereits disposed oder gestoppt wurde.
-            - **Detaillierte Debug-Ausgaben** bei `DEBUG_LEVEL >= 3`, inklusive
-              Queue-Größe und Textvorschau.
-            - **Garantierter Callback-Aufruf:** Auch bei Fehlern (volle Queue,
-              Shutdown) wird der optionale Callback mit einer Fehlermeldung
-              aufgerufen.
-            - **Maximale Textlänge:** Texte, die `MAX_TEXT_LENGTH` (5000 Zeichen)
-              überschreiten, werden gekürzt, um Piper nicht zu überlasten.
 
         Args:
             text: Der vorzulesende Text. Leere oder nur aus Whitespace bestehende
@@ -35410,14 +35416,6 @@ class WhisperController:
         (`WHISPER_SUPPORTED_LANGUAGES`). Ungültige oder nicht unterstützte Codes
         führen zu einem Fallback auf automatische Spracherkennung (`None`).
 
-        Verbesserungen:
-            - Explizite Prüfung gegen `WHISPER_SUPPORTED_LANGUAGES`.
-            - Robuste Behandlung von fehlenden oder ungültigen Sprachcodes.
-            - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 3`.
-            - Thread‑sichere Synchronisation mit dem `AudioProcessor` über
-              `_sync_audio_processor_engine`.
-            - Absicherung gegen fehlende Engine‑Referenzen.
-
         Args:
             gui: Referenz auf die `DragonWhispererGUI`.
             src_lang_name: Der lesbare Name der Quellsprache (z. B. "Deutsch")
@@ -35589,14 +35587,6 @@ class WhisperController:
         über das Ende der Verarbeitung. Diese Methode wird erst ausgeführt, nachdem
         der AudioProcessor vollständig aufgeräumt hat – inklusive aller Transkriptions‑
         und Übersetzungs‑Tasks.
-
-        Verbesserungen:
-            - Explizite WARNING‑Logs zur Diagnose.
-            - Thread‑Sicherheit durch Verwendung von `_state_lock`.
-            - Setzt `_processing_thread` auf None.
-            - Emittiert `processing_finished` und `processing_state_changed` nur dann,
-              wenn der Zustand zuvor nicht bereits IDLE war.
-            - Robuste Fehlerbehandlung beim Emittieren von Events.
         """
         logger.warning("🌐 WhisperController._processing_finished ENTERED")
 
