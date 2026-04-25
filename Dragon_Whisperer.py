@@ -35767,16 +35767,6 @@ class WhisperController:
         Sie stellt sicher, dass der AudioProcessor und der FFmpegManager sauber
         heruntergefahren werden, und gibt alle zugehörigen Prozesse und Threads frei.
 
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - Verwendung von `kill_all_streams` statt `stop_all_streams`, um Blockaden
-              im FFmpegManager zu vermeiden.
-            - Kurzer Timeout (1 Sekunde) für `audio_processor.stop_processing`.
-            - Detaillierte Debug‑Ausgaben bei jedem Schritt zur Nachverfolgung.
-            - Vermeidung doppelter Stopps durch Prüfung auf `_stop_in_progress`.
-            - Setzt `_current_stream_id` nach dem Stoppen zurück.
-            - Abschließende Zustandsänderung auf IDLE (falls noch STOPPING).
-            - Event‑Bus Benachrichtigung über Stream‑Info‑Reset.
-
         Diese Methode ist thread‑sicher und kann mehrfach aufgerufen werden, ohne
         dass Ressourcen mehrfach freigegeben werden.
         """
@@ -35869,17 +35859,6 @@ class WhisperController:
 class StreamHandler:
     """
     Hochoptimierter Vermittler zwischen FFmpegManager und AudioProcessor.
-
-    Verantwortlich für:
-        - Kontinuierliches Lesen von PCM-Daten vom FFmpeg-Prozess
-        - Robuste Fehlerbehandlung (Timeouts, Prozessabstürze, Inaktivität)
-        - Mehrstufige Reconnect-Strategie mit exponentiellem Backoff
-        - Automatischen Übergang in den Download-Modus bei YouTube-VODs
-        - Präzise End-of-Stream-Erkennung (Byte- und Zeit-Ratio)
-        - Umfangreiche Diagnose und Metriken für Monitoring
-
-    Die Klasse ist vollständig thread-sicher durch Verwendung von weakref
-    für externe Abhängigkeiten und interne Locks für Diagnosedaten.
     """
 
     # -------------------------------------------------------------------------
@@ -36045,23 +36024,6 @@ class StreamHandler:
     ) -> bool:
         """
         Wartet nach einem Download darauf, dass alle Audiodaten vollständig verarbeitet werden.
-
-        Diese Methode wird im Anschluss an den Download‑Modus aufgerufen, um sicherzustellen,
-        dass alle in die Queue eingefügten Chunks auch tatsächlich vom Dispatcher entnommen und
-        von der Transkriptions‑Engine verarbeitet wurden. Sie ist entscheidend für einen
-        sauberen Abschluss des Streams.
-
-        Args:
-            ap: Die Instanz des AudioProcessors, der den Download‑Modus durchführt.
-            timeout: Maximale Gesamtwartezeit in Sekunden.
-            queue_join_timeout: Maximale Wartezeit für das Leeren der Queue (nachdem das
-                                Tasks‑Done‑Event gesetzt wurde oder Timeout erreicht ist).
-            check_interval: Intervall in Sekunden für Statusprüfungen.
-
-        Returns:
-            True, wenn alle Tasks rechtzeitig abgeschlossen wurden und die Queue erfolgreich
-            geleert werden konnte. False, wenn der Timeout überschritten wurde, der Benutzer
-            abgebrochen hat oder ein schwerwiegender Fehler auftrat.
         """
         logger.info("⏳ Warte auf Verarbeitung aller heruntergeladenen Chunks...")
         start_wait = time.time()
@@ -36787,11 +36749,6 @@ class StreamHandler:
 class AudioProcessor:
     """
     Optimierte Audioverarbeitung mit asynchroner, nicht‑blockierender Transkription.
-
-    Der AudioProcessor empfängt PCM‑Daten vom FFmpegManager, führt optionales
-    Audio‑Enhancement durch und leitet die Daten über eine Queue an einen
-    dedizierten Dispatcher‑Thread weiter. Dieser verteilt die Transkriptions‑
-    und Übersetzungsaufträge an separate Thread‑Pools.
     """
 
     # =========================================================================
@@ -36820,13 +36777,6 @@ class AudioProcessor:
     ) -> None:
         """
         Initialisiert den AudioProcessor mit optimierten, thread‑sicheren Strukturen.
-
-        Args:
-            controller_ref: Referenz auf den WhisperController (oder None).
-            ffmpeg_manager: Verwaltung der FFmpeg‑Prozesse.
-            settings: Erweiterte Einstellungen (optional).
-            use_browser_cookies: Ob Browser‑Cookies für yt‑dlp verwendet werden sollen.
-            stream_manager: Manager für Stream‑Erkennung und URL‑Extraktion (optional).
         """
         # -----------------------------------------------------------------
         # 1. Basisattribute
