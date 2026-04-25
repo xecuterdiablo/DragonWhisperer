@@ -21482,11 +21482,13 @@ class TTSManager:
             return False, f"Unbekannte Engine: {engine}"
 
     # Piper-Implementierung (primär)
-    def _get_piper_cache_dir(self) -> str:
-        """Ermittelt das plattformunabhängige Cache-Verzeichnis für Piper-Modelle."""
+    @staticmethod
+    def get_piper_cache_dir() -> str:
+        """Plattformübergreifendes Piper‑Cache‑Verzeichnis."""
         if IS_WINDOWS:
             base = os.environ.get("APPDATA", os.path.expanduser("~\\AppData\\Roaming"))
             return os.path.join(base, "piper")
+        # Linux / macOS / andere
         base = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
         return os.path.join(base, "piper")
 
@@ -21498,7 +21500,7 @@ class TTSManager:
         import time
         import json
 
-        cache_dir = Path(self._get_piper_cache_dir())
+        cache_dir = Path(TTSManager.get_piper_cache_dir())
         model_path = cache_dir / f"{voice_name}.onnx"
         json_path = cache_dir / f"{voice_name}.onnx.json"
 
@@ -21671,7 +21673,7 @@ class TTSManager:
 
     def _prepare_piper_model(self) -> Tuple[str, str]:
         """Bereitet Modell- und Konfigurationspfade vor, lädt ggf. JSON nach."""
-        cache_dir = self._get_piper_cache_dir()
+        cache_dir = TTSManager.get_piper_cache_dir()
         model_path = os.path.join(cache_dir, f"{self._voice}.onnx")
         json_path = model_path + ".json"
 
@@ -21961,7 +21963,7 @@ class TTSManager:
 
                 # Automatische Reparatur bei Protobuf-Fehler
                 if "InvalidProtobuf" in stderr or "Protobuf parsing failed" in stderr:
-                    model_path = os.path.join(self._get_piper_cache_dir(), f"{self._voice}.onnx")
+                    model_path = os.path.join(TTSManager.get_piper_cache_dir(), f"{self._voice}.onnx")
                     logger.warning(f"Beschädigtes Piper-Modell erkannt, lösche: {model_path}")
                     try:
                         os.unlink(model_path)
@@ -22367,7 +22369,7 @@ class TTSManager:
         Scannt das Piper-Cache-Verzeichnis und gibt eine Liste aller
         vollständig installierten Stimmen zurück (Model + JSON vorhanden).
         """
-        cache_dir = self._get_piper_cache_dir()
+        cache_dir = TTSManager.get_piper_cache_dir()
         if not os.path.isdir(cache_dir):
             return []
         voices = set()
@@ -25504,19 +25506,6 @@ class InstallDependencyDialog(BaseDialog):
     bietet Live-Feedback während langer Vorgänge und enthält eine spezielle
     Funktion zur Aktualisierung kritischer Pakete (z. B. numpy, faster-whisper).
 
-    **Optimierungen gegenüber der Basisversion:**
-        - Vorauswahl der Häkchen nur für **kritische** Pakete (ffmpeg, yt-dlp,
-          numpy, torch, faster-whisper, deep-translator). Optionale Tools (VLC,
-          Ollama, Piper, espeak) bleiben abgewählt.
-        - Verbesserte VLC‑Erkennung unter Windows (Standard‑Installationspfade).
-        - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 3`.
-        - Robuster Umgang mit nicht verfügbaren Paketmanagern und fehlenden
-          Berechtigungen.
-        - Optische Trennung zwischen kritischen und optionalen Paketen durch
-          Labels und Tooltips.
-        - Automatische Aktualisierung der Statusanzeige nach Installationen.
-        - Mausrad-Unterstützung im gesamten Dialog (Canvas‑basiertes Scrollen).
-
     Autor: Dragon Whisperer Team
     Version: 7.0 – „Der benutzerfreundliche Paket-Drache“
     """
@@ -25652,18 +25641,6 @@ class InstallDependencyDialog(BaseDialog):
     def build_ui(self) -> None:
         """
         Erstellt die vollständige Benutzeroberfläche des Installations‑Dialogs.
-
-        Enthält:
-            - Systempakete mit Hervorhebung kritischer Tools
-            - Python‑Pakete mit optionaler Vorauswahl
-            - Piper‑Stimmen
-            - Update‑Bereich
-            - Ausgabebereich
-            - Steuerungs‑Buttons
-        Am Ende wird die Mausrad‑Steuerung für **alle** Widgets im Dialog
-        eingerichtet, sodass das Scrollen im gesamten Fenster funktioniert.
-        Zusätzlich wird unter Windows ohne FFmpeg ein Hinweis zur einfachen
-        Winget‑Installation eingeblendet.
         """
         # -----------------------------------------------------------------
         # Scrollbarer Hauptbereich
@@ -25772,7 +25749,7 @@ class InstallDependencyDialog(BaseDialog):
 
             steps = (
                 "1. Startmenü öffnen, „cmd“ eingeben und Enter drücken\n"
-                "2. Im schwarzen Fenster folgenden Befehl ausführen:\n"
+                "2. In der Eingabeaufforderung folgenden Befehl ausführen:\n"
                 "   winget install --source winget Gyan.FFmpeg\n"
                 "3. Warten, bis die Installation abgeschlossen ist\n"
                 "4. Die Eingabeaufforderung schließen\n"
@@ -25792,7 +25769,9 @@ class InstallDependencyDialog(BaseDialog):
             def _copy_ffmpeg_cmd():
                 try:
                     self.dialog.clipboard_clear()
-                    self.dialog.clipboard_append("winget install --source winget Gyan.FFmpeg")
+                    self.dialog.clipboard_append(
+                        "winget install --source winget Gyan.FFmpeg"
+                    )
                     self.status_var.set("📋 Befehl kopiert!")
                 except tk.TclError:
                     pass
@@ -25904,19 +25883,43 @@ class InstallDependencyDialog(BaseDialog):
             justify="left",
         )
         info_label.pack(anchor="w", pady=(0, 5))
-        ToolTip(info_label,
-                "Manuelle Installation:\n"
-                "1. Besuchen Sie: https://huggingface.co/rhasspy/piper-voices\n"
-                "2. Navigieren Sie zu Sprache/Sprecher/Qualität.\n"
-                "3. Laden Sie .onnx und .onnx.json herunter.\n"
-                "4. Speichern Sie beide Dateien in ~/.cache/piper/\n"
-                "Nach einem Neustart wird die Stimme erkannt.")
+
+        # Dynamischer Tooltip mit plattformspezifischem Pfad
+        tooltip_path = None
+        try:
+            if hasattr(TTSManager, "get_piper_cache_dir"):
+                tooltip_path = TTSManager.get_piper_cache_dir()
+            else:
+                # Fallback, falls die statische Methode nicht vorhanden ist
+                tooltip_path = os.path.join(
+                    os.path.expanduser("~"),
+                    ".cache" if not IS_WINDOWS else "AppData\\Roaming",
+                    "piper"
+                )
+        except Exception as e:
+            # Absoluter Notfall-Fallback
+            tooltip_path = os.path.join(os.path.expanduser("~"), "piper_models")
+            logger.warning(
+                f"Fehler beim Ermitteln des Piper-Cache-Pfads: {e} – "
+                f"verwende {tooltip_path}"
+            )
+
+        manual_steps = (
+            "Manuelle Installation:\n"
+            "1. Besuchen Sie: https://huggingface.co/rhasspy/piper-voices\n"
+            "2. Navigieren Sie zu Sprache/Sprecher/Qualität.\n"
+            "3. Laden Sie .onnx und .onnx.json herunter.\n"
+            "4. Speichern Sie beide Dateien in:\n"
+            f"   {tooltip_path}\n"
+            "Nach einem Neustart wird die Stimme erkannt."
+        )
+        ToolTip(info_label, manual_steps)
 
         voice_buttons_frame = tk.Frame(voice_frame, bg=CURRENT_THEME.BG_SECONDARY)
         voice_buttons_frame.pack(fill="x")
 
         self.voice_vars: Dict[str, tk.BooleanVar] = {}
-        cache_dir = os.path.expanduser("~/.cache/piper")
+        cache_dir = TTSManager.get_piper_cache_dir()
         os.makedirs(cache_dir, exist_ok=True)
 
         row, col = 0, 0
@@ -26428,11 +26431,22 @@ class InstallDependencyDialog(BaseDialog):
         return success
 
     def _download_piper_voices(self, voices: List[str]) -> bool:
-        cache_dir = os.path.expanduser("~/.cache/piper")
+        """
+        Lädt die angegebenen Piper‑Stimmen (ONNX‑Modell + JSON‑Konfiguration)
+        von Hugging Face herunter und speichert sie im plattformspezifischen
+        Cache‑Verzeichnis (via ``TTSManager.get_piper_cache_dir()``).
+        """
+        # -----------------------------------------------------------------
+        # 1. Zielverzeichnis über die plattformunabhängige Methode ermitteln
+        # -----------------------------------------------------------------
+        cache_dir = TTSManager.get_piper_cache_dir()
         os.makedirs(cache_dir, exist_ok=True)
         base_url = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
         overall_success = True
 
+        # -----------------------------------------------------------------
+        # 2. Verfügbarkeit von `requests` prüfen
+        # -----------------------------------------------------------------
         use_requests = False
         try:
             import requests
@@ -26441,9 +26455,15 @@ class InstallDependencyDialog(BaseDialog):
             use_requests = False
             self._append_output("⚠️ requests nicht installiert – verwende wget/curl (langsamer)\n")
 
+        # -----------------------------------------------------------------
+        # 3. Über jede angeforderte Stimme iterieren
+        # -----------------------------------------------------------------
         for voice in voices:
             if self._stop_event.is_set():
+                self._append_output("⏹️ Download durch Benutzer abgebrochen.\n")
+                overall_success = False
                 break
+
             self._append_output(f"\n📥 Lade Stimme {voice} herunter...\n")
 
             model_file = f"{voice}.onnx"
@@ -26451,6 +26471,7 @@ class InstallDependencyDialog(BaseDialog):
             model_path = os.path.join(cache_dir, model_file)
             json_path = os.path.join(cache_dir, json_file)
 
+            # Remote‑Verzeichnisstruktur aus dem Stimmen‑Namen ableiten
             parts = voice.split('-')
             if len(parts) >= 3:
                 lang_full = parts[0]
@@ -26464,38 +26485,110 @@ class InstallDependencyDialog(BaseDialog):
 
             base_remote = f"{base_url}/{remote_dir}"
 
-            def download_file(remote_file, local_path, description):
+            # -----------------------------------------------------------------
+            # 4. Robuste Download‑Hilfsfunktion mit Wiederholungen
+            # -----------------------------------------------------------------
+            def download_file(remote_file: str, local_path: str, description: str) -> bool:
+                """
+                Lädt eine einzelne Datei mit bis zu 3 Wiederholungen herunter.
+                Gibt True zurück, wenn die Datei erfolgreich gespeichert wurde
+                und eine positive Größe besitzt.
+                """
                 url = f"{base_remote}/{remote_file}"
-                self._append_output(f"  Lade {remote_file}...\n")
-                try:
-                    if use_requests:
-                        r = requests.get(url, timeout=30)
-                        if r.status_code == 200:
-                            with open(local_path, 'wb') as f:
-                                f.write(r.content)
-                            return True
-                        else:
-                            self._append_output(f"    Fehler: HTTP {r.status_code}\n")
-                            return False
-                    else:
-                        if shutil.which("wget"):
-                            cmd = ["wget", "-q", "-O", local_path, url]
-                        elif shutil.which("curl"):
-                            cmd = ["curl", "-L", "-o", local_path, url]
-                        else:
-                            self._append_output("    ❌ weder wget noch curl gefunden\n")
-                            return False
-                        proc = subprocess.run(cmd, capture_output=True, timeout=60)
-                        if proc.returncode == 0 and os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-                            return True
-                        else:
-                            self._append_output(f"    Fehler: Rückgabecode {proc.returncode}\n")
-                            return False
-                except Exception as e:
-                    self._append_output(f"    Fehler: {e}\n")
-                    return False
+                self._append_output(f"  ⏳ Lade {remote_file}...\n")
+                max_attempts = 3
 
-            need_model = (not os.path.exists(model_path) or os.path.getsize(model_path) == 0)
+                for attempt in range(1, max_attempts + 1):
+                    if self._stop_event.is_set():
+                        self._append_output("    ⏹️ Abgebrochen\n")
+                        return False
+
+                    try:
+                        if use_requests:
+                            headers = {
+                                "User-Agent": (
+                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                    "Chrome/120.0.0.0 Safari/537.36"
+                                )
+                            }
+                            resp = requests.get(url, headers=headers, timeout=60)
+                            if resp.status_code == 200:
+                                with open(local_path, 'wb') as f:
+                                    f.write(resp.content)
+                                # Erfolg nur, wenn die Datei nicht leer ist
+                                if os.path.getsize(local_path) > 0:
+                                    if attempt > 1:
+                                        self._append_output(
+                                            f"    ✅ Download nach {attempt} Versuchen erfolgreich\n"
+                                        )
+                                    return True
+                                else:
+                                    self._append_output("    ⚠️ Datei ist leer, erneut versuchen...\n")
+                            elif resp.status_code == 404:
+                                self._append_output(f"    ❌ Datei nicht gefunden (404): {url}\n")
+                                return False
+                            else:
+                                self._append_output(
+                                    f"    ⚠️ HTTP {resp.status_code}, "
+                                    f"Versuch {attempt}/{max_attempts}\n"
+                                )
+                        else:
+                            # Fallback: wget oder curl
+                            if shutil.which("wget"):
+                                cmd = [
+                                    "wget", "-q", "--tries=3", "--timeout=60",
+                                    "-O", local_path, url
+                                ]
+                            elif shutil.which("curl"):
+                                cmd = [
+                                    "curl", "-L", "--retry", "3", "--max-time", "60",
+                                    "-o", local_path, url
+                                ]
+                            else:
+                                self._append_output("    ❌ weder wget noch curl gefunden\n")
+                                return False
+
+                            proc = subprocess.run(cmd, capture_output=True, timeout=90)
+                            if (
+                                proc.returncode == 0
+                                and os.path.exists(local_path)
+                                and os.path.getsize(local_path) > 0
+                            ):
+                                if attempt > 1:
+                                    self._append_output(
+                                        f"    ✅ Download nach {attempt} Versuchen erfolgreich\n"
+                                    )
+                                return True
+                            else:
+                                self._append_output(
+                                    f"    ⚠️ Fehler (Code {proc.returncode}), "
+                                    f"Versuch {attempt}/{max_attempts}\n"
+                                )
+
+                    except requests.exceptions.RequestException as e:
+                        self._append_output(f"    ⚠️ Netzwerkfehler: {e}\n")
+                    except subprocess.TimeoutExpired:
+                        self._append_output("    ⚠️ Timeout bei wget/curl\n")
+                    except Exception as e:
+                        self._append_output(f"    ❌ Unerwarteter Fehler: {e}\n")
+                        return False
+
+                    # Exponentielles Backoff vor dem nächsten Versuch
+                    if attempt < max_attempts:
+                        time.sleep(2 ** attempt)
+
+                self._append_output(
+                    f"    ❌ Download nach {max_attempts} Versuchen fehlgeschlagen\n"
+                )
+                return False
+
+            # -----------------------------------------------------------------
+            # 5. Modell‑Datei (.onnx) herunterladen (falls nötig)
+            # -----------------------------------------------------------------
+            need_model = (
+                not os.path.exists(model_path) or os.path.getsize(model_path) == 0
+            )
             if need_model:
                 self._append_output("  ⏳ Lade Modell (ca. 50-200 MB)...\n")
                 if not download_file(model_file, model_path, "Modell"):
@@ -26504,7 +26597,12 @@ class InstallDependencyDialog(BaseDialog):
             else:
                 self._append_output(f"  ✅ Modell {model_file} bereits vorhanden.\n")
 
-            need_json = (not os.path.exists(json_path) or os.path.getsize(json_path) == 0)
+            # -----------------------------------------------------------------
+            # 6. Konfigurations‑Datei (.onnx.json) herunterladen (falls nötig)
+            # -----------------------------------------------------------------
+            need_json = (
+                not os.path.exists(json_path) or os.path.getsize(json_path) == 0
+            )
             if need_json:
                 if not download_file(json_file, json_path, "Konfiguration"):
                     overall_success = False
@@ -26512,6 +26610,9 @@ class InstallDependencyDialog(BaseDialog):
             else:
                 self._append_output(f"  ✅ Konfiguration {json_file} bereits vorhanden.\n")
 
+            # -----------------------------------------------------------------
+            # 7. Stimme erfolgreich installiert
+            # -----------------------------------------------------------------
             self._append_output(f"  ✅ {voice} vollständig installiert.\n")
 
         return overall_success
