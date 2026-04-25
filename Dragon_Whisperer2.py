@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """🐉 THE DRAGON WHISPERER (v4.0) - Ultimate Stream Transcription & Translation"""
-
+from __future__ import annotations
 # =============================================================================
 # 1. STANDARDBIBLIOTHEK
 # =============================================================================
@@ -29239,7 +29239,13 @@ class DragonWhispererGUI:
     def __init__(self) -> None:
         """
         Initialisiert die DragonWhispererGUI – das Hauptfenster der Anwendung.
+
+        Die Methode ist vollständig fehlertolerant: Falls kritische Komponenten
+        (FFmpeg, yt‑dlp, numpy, tkinter) fehlen, wird die GUI trotzdem gestartet.
+        Der Benutzer kann dann über den integrierten Installationsdialog alle
+        benötigten Pakete nachrüsten.
         """
+
         # -----------------------------------------------------------------
         # 0. Vorbereitung: RateLimiter und Shutdown-Flags
         # -----------------------------------------------------------------
@@ -29249,6 +29255,7 @@ class DragonWhispererGUI:
         self._exit_dialog_active = False
         self._cleanup_done = False
         self._shutdown_completed = False
+        self._dependency_issue = False            # wird True, wenn kritische Pakete fehlen
 
         if DEBUG_LEVEL >= 3:
             log_debug("gui", "RateLimiter und Shutdown-Flags initialisiert")
@@ -29493,7 +29500,7 @@ class DragonWhispererGUI:
         self.event_bus.subscribe("gpu_status_changed", self._on_gpu_status_changed)
 
         # -----------------------------------------------------------------
-        # 18. Controller erstellen
+        # 18. Controller erstellen (kritisch – aber fangen wir Fehler)
         # -----------------------------------------------------------------
         try:
             self.controller = WhisperController(gui_ref=self, event_bus=self.event_bus)
@@ -29505,14 +29512,12 @@ class DragonWhispererGUI:
             return
 
         # -----------------------------------------------------------------
-        # 19. Manager und Engines initialisieren
+        # 19. Manager und Engines initialisieren (alle mit try/except)
         # -----------------------------------------------------------------
-        self._init_managers()
-        self._init_engines()
+        self._init_managers()      # fängt intern Fehler ab und setzt Fallbacks
+        self._init_engines()       # ebenso
 
-        # -----------------------------------------------------------------
-        # 20. Automatische Modellauswahl (VRAM oder RAM)
-        # -----------------------------------------------------------------
+        # Automatische Modellauswahl
         if self.settings.default_model is None:
             free_vram = self._get_free_vram_gb()
             if free_vram is not None:
@@ -29568,7 +29573,7 @@ class DragonWhispererGUI:
         self._apply_precision_optimizations()
 
         # -----------------------------------------------------------------
-        # 22. GUI aufbauen
+        # 22. GUI aufbauen (Layout & StatusBar)
         # -----------------------------------------------------------------
         self.layout = WhisperLayoutManager(gui_ref=self)
         self.queue_manager = QueueManager(self)
@@ -29582,14 +29587,12 @@ class DragonWhispererGUI:
                 value=self.advanced_settings.vad_fallback_enabled
             )
             self.status_bar = StatusBar(self.root, self, demo_mode=self.demo_mode)
+            self.status_bar.frame.grid(row=4, column=0, sticky="ew", pady=(2, 0))
             self._update_vad_fallback_button()
             self._update_live_mode_button()
             self._start_gui_updaters()
             self._set_initial_url()
 
-            # -----------------------------------------------------------------
-            # Fenstergröße stabilisieren – kein Flackern, aber benutzerdefinierbar
-            # -----------------------------------------------------------------
             self.root.update_idletasks()
             current_geometry = self.root.geometry()
             self.root.geometry(current_geometry)
@@ -29626,6 +29629,20 @@ class DragonWhispererGUI:
         # -----------------------------------------------------------------
         if DEBUG_LEVEL >= 2:
             log_debug("gui", "DragonWhispererGUI.__init__ erfolgreich abgeschlossen")
+
+        # -----------------------------------------------------------------
+        # 26. Wenn kritische Abhängigkeiten fehlen, öffne nach kurzer
+        #     Verzögerung den Installationsdialog.
+        # -----------------------------------------------------------------
+        missing_ffmpeg = not shutil.which("ffmpeg")
+        missing_ytdlp = not shutil.which("yt-dlp")
+        missing_numpy = not NUMPY_AVAILABLE
+        if missing_ffmpeg or missing_ytdlp or missing_numpy:
+            self._dependency_issue = True
+            def _open_installer():
+                if hasattr(self, "show_install_dialog") and not self.is_shutting_down():
+                    self.show_install_dialog()
+            self._safe_after(1500, _open_installer)
 
     # ------------------------------------------------------------------------
     # Initialisierungshilfen (private)
@@ -46925,11 +46942,37 @@ def _handle_headless_mode(args: argparse.Namespace) -> int:
 # Hauptfunktion
 # -----------------------------------------------------------------------------
 def main() -> int:
-    """Hauptfunktion des Dragon Whisperer."""
+    """
+    Hauptfunktion des Dragon Whisperer.
+
+    Diese Funktion ist der zentrale Einstiegspunkt der Anwendung. Sie
+    übernimmt die gesamte Ablaufsteuerung:
+        - Konsolenargumente auswerten
+        - Logging und Umgebung initialisieren
+        - Bei ``--headless`` oder ``--url`` in den Konsolenmodus wechseln
+        - Ansonsten die grafische Oberfläche (GUI) starten
+
+    **Fehlertoleranz gegenüber fehlenden Paketen**:
+        Wenn kritische Systemabhängigkeiten (FFmpeg, yt‑dlp, numpy) fehlen,
+        wird die GUI **trotzdem** gestartet, sofern Tkinter verfügbar ist.
+        Der Benutzer kann dann über den integrierten Installationsdialog
+        alle benötigten Komponenten nachrüsten, ohne dass das Programm
+        abstürzt oder ein manueller Eingriff nötig wäre.
+
+    **Rückgabewerte**:
+        0 – erfolgreicher Durchlauf (inklusive normaler Programmbeendigung)
+        1 – Fehler während der Ausführung (z. B. fehlende GUI oder kritische
+            Abhängigkeiten im Headless‑Modus)
+        2 – schwerwiegender, unbehandelter Laufzeitfehler
+    """
+
+    # -----------------------------------------------------------------
+    # 1. Argumente parsen
+    # -----------------------------------------------------------------
     args = parse_arguments()
 
     debug_level = 0
-    debug_components = []
+    debug_components: List[str] = []
     if args.debug != "0":
         if args.debug.isdigit():
             debug_level = int(args.debug)
@@ -46940,6 +46983,9 @@ def main() -> int:
     configure_logging(debug_level, debug_components, args.quiet)
     setup_platform_environment()
 
+    # -----------------------------------------------------------------
+    # 2. Spezielle Sofort‑Aktionen (keine GUI nötig)
+    # -----------------------------------------------------------------
     if args.version:
         print("🐉 Dragon Whisperer v4.1 (optimized)")
         print(f"Platform: {SYSTEM} {'ARM' if IS_ARM else 'x86'}")
@@ -46956,31 +47002,54 @@ def main() -> int:
     if args.test:
         return run_tests()
 
+    # -----------------------------------------------------------------
+    # 3. Headless‑ oder URL‑Modus (ohne GUI)
+    # -----------------------------------------------------------------
     if args.headless or args.url:
         if not args.url:
             print("Error: --headless requires --url to specify a stream.", file=sys.stderr)
             return 1
-        return _handle_headless_mode(args)
-
-    # GUI-Modus
-    logger = logging.getLogger("dragon")
-    app = None
-    try:
-        logger.info("🐉 Dragon Whisperer starting...")
-        logger.debug("🔍 Checking dependencies...")
         try:
+            # Im Headless‑Modus sind kritische Abhängigkeiten zwingend
             PlatformUtils.check_platform_dependencies()
         except RuntimeError as e:
             _show_user_error(str(e))
             return 1
-        logger.debug("✅ Dependencies OK")
+        return _handle_headless_mode(args)
 
+    # -----------------------------------------------------------------
+    # 4. GUI‑Modus – fehlertolerant gegenüber fehlenden Paketen
+    # -----------------------------------------------------------------
+    logger.info("🐉 Dragon Whisperer starting...")
+    logger.debug("🔍 Checking dependencies...")
+
+    dependency_issue = False
+    try:
+        PlatformUtils.check_platform_dependencies()
+    except RuntimeError as e:
         if not GUI_AVAILABLE:
-            raise RuntimeError("Tkinter/GUI not available. Install with: pip install tk")
+            # Ohne GUI können wir nichts machen – der Benutzer muss manuell
+            # installieren.  Wir geben eine verständliche Fehlermeldung aus.
+            _show_user_error(str(e))
+            return 1
+        # GUI ist verfügbar – wir starten trotzdem und zeigen später den
+        # Installationsdialog an.
+        logger.warning(
+            "Einige kritische Abhängigkeiten fehlen, aber die GUI kann "
+            "trotzdem gestartet werden.  Nach der Installation der "
+            "Komponenten steht der volle Funktionsumfang zur Verfügung.\n"
+            "%s", e
+        )
+        dependency_issue = True
 
+    logger.debug("✅ Dependencies OK (fehlende werden über GUI nachinstalliert)")
+
+    app = None
+    try:
         logger.debug("🖥️ Initializing GUI...")
         app = DragonWhispererGUI()
 
+        # Benutzerdefiniertes Profil laden, falls angegeben
         if args.profile:
             try:
                 profile_path = (
@@ -46994,21 +47063,37 @@ def main() -> int:
                     for key, value in profile_data.items():
                         if hasattr(app.advanced_settings, key):
                             setattr(app.advanced_settings, key, value)
-                    logger.info(f"✅ Profile '{args.profile}' loaded")
+                    logger.info("✅ Profile '%s' loaded", args.profile)
                 else:
-                    logger.warning(f"⚠️ Profile '{args.profile}' not found, using defaults")
+                    logger.warning(
+                        "⚠️ Profile '%s' not found, using defaults", args.profile
+                    )
             except Exception as e:
                 logger.warning(f"⚠️ Failed to load profile: {e}")
 
+        # Falls eine URL über die Kommandozeile übergeben wurde, direkt
+        # in das Eingabefeld setzen – aber erst nachdem die GUI vollständig
+        # aufgebaut ist (daher _safe_after).
         if args.url:
-            if hasattr(app, "url_entry") and app.url_entry.winfo_exists():
-                app.url_entry.delete(0, "end")
-                app.url_entry.insert(0, args.url)
-                logger.info(f"📌 URL from command line: {args.url}")
+            def _set_url(url: str) -> None:
+                if hasattr(app, "url_entry") and app.url_entry.winfo_exists():
+                    app.url_entry.delete(0, "end")
+                    app.url_entry.insert(0, url)
+                    logger.info(f"📌 URL from command line: {url}")
+            app._safe_after(500, _set_url, args.url)
 
+        # Wenn kritische Abhängigkeiten fehlen, öffne nach einer kurzen
+        # Verzögerung den Installationsdialog, damit der Benutzer direkt
+        # loslegen kann.
+        if dependency_issue:
+            def _open_installer() -> None:
+                if hasattr(app, "show_install_dialog") and not app.is_shutting_down():
+                    app.show_install_dialog()
+            app._safe_after(1500, _open_installer)
+
+        # Debug-Informationen ausgeben (nur wenn nicht im Quiet-Mode)
         if debug_level >= 1 and not args.quiet:
             _print_welcome(debug_level, args.quiet)
-
         if debug_level >= 3:
             print_system_info_debug3()
 
@@ -47016,23 +47101,25 @@ def main() -> int:
         app.run()
         logger.info("✅ Application closed normally")
 
-        # ========== Terminal wiederherstellen (Linux/macOS) ==========
+        # Terminal wiederherstellen (Linux/macOS)
         if not IS_WINDOWS:
             try:
                 subprocess.run(["stty", "sane"], check=False, timeout=1)
             except Exception:
                 pass
 
+        # Debug: aktive Threads nach GUI-Close auflisten
         if debug_level >= 1:
-            import threading
-            all_threads = threading.enumerate()
+            active = threading.enumerate()
             logger.info(
-                f"Active threads after GUI close: {[t.name for t in all_threads if t.is_alive()]}"
+                "Active threads after GUI close: %s",
+                [t.name for t in active if t.is_alive()]
             )
-            for t in all_threads:
+            for t in active:
                 if t.is_alive() and t != threading.main_thread():
-                    logger.debug(f"  Non-main thread: {t.name} (daemon={t.daemon})")
+                    logger.debug("  Non-main thread: %s (daemon=%s)", t.name, t.daemon)
 
+        # Sauberes Beenden – kein sys.exit() nötig, da die mainloop vorbei ist.
         logger.info("Forcing immediate exit with sys.exit(0)")
         sys.exit(0)
         return 0
@@ -47055,6 +47142,7 @@ def main() -> int:
         logger.debug("🧹 Final minimal cleanup...")
         if app is not None:
             try:
+                # Bereits vorhandene Aufräumlogik nutzen
                 if hasattr(app, "_safe_stop_all_processes"):
                     app._safe_stop_all_processes()
                 if app.app_context:
@@ -47070,7 +47158,6 @@ def main() -> int:
         if IS_WINDOWS:
             _restore_console_state()
         else:
-            # Auch hier nochmal sicherheitshalber stty sane
             try:
                 subprocess.run(["stty", "sane"], check=False, timeout=1)
             except Exception:
