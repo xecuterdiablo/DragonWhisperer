@@ -59,17 +59,11 @@ from typing import (
     get_args,
 )
 
-# =============================================================================
 # urllib3 MONKEY-PATCH (maximal robust für Kompatibilität mit urllib3 >= 2.0)
-# -----------------------------------------------------------------------------
 
 def _filter_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """
     Entfernt problematische Schlüsselwortargumente aus einem kwargs-Dictionary.
-
-    Betroffene Parameter:
-        - 'key_threadpool' (explizit)
-        - Alle Schlüssel, die mit '_' beginnen (interne Parameter von urllib3)
     """
     # Defensiv: Kopie erstellen, um Seiteneffekte zu vermeiden
     filtered = kwargs.copy()
@@ -89,8 +83,7 @@ def _should_patch() -> bool:
     benötigt wird.
     """
 
-    # Lokale Hilfsfunktion für Debug‑Ausgaben – prüft selbstständig
-    # die globalen Variablen DEBUG_LEVEL und DEBUG_COMPONENTS.
+    # Lokale Hilfsfunktion für Debug‑Ausgaben
     def _debug(msg: str) -> None:
         """Gibt eine Debug‑Meldung aus, falls Debugging aktiv ist."""
         try:
@@ -143,6 +136,7 @@ def _should_patch() -> bool:
         # Kein Fehler – der Parameter wird akzeptiert, Patch ist unnötig.
         _debug("urllib3 akzeptiert key_threadpool – Patch überflüssig.")
         return False
+
 
 def _debug_enabled() -> bool:
     """
@@ -265,58 +259,80 @@ def _apply_patches() -> None:
     if DEBUG_LEVEL >= 4:
         log_debug("monkey", "urllib3 monkey-patch applied successfully")
 
+
 def apply() -> None:
     """
     Wendet den urllib3‑Monkey‑Patch an, falls erforderlich.
     """
+
     global _patch_applied
 
-    # Bereits gepatcht? – dann nichts tun.
+    # -----------------------------------------------------------------
+    # Lokale Hilfsfunktionen für sicheres Logging – fallen auf ``print``
+    # zurück, falls ``logger`` nicht verfügbar ist.
+    # -----------------------------------------------------------------
+    def _debug(msg: str) -> None:
+        """Sichere Debug‑Ausgabe."""
+        try:
+            if DEBUG_LEVEL >= 3 or "monkey" in DEBUG_COMPONENTS:
+                if "log_debug" in globals():
+                    log_debug("monkey", msg)
+                else:
+                    logger.debug(f"[monkey] {msg}")
+        except (NameError, AttributeError):
+            # Weder Logger noch globale Variablen vorhanden → Ausgabe
+            # auf der Konsole, aber nur wenn nicht im Quiet‑Mode.
+            try:
+                if not QUIET_MODE:
+                    print(f"[monkey] {msg}")
+            except Exception:
+                pass
+
+    def _warn(msg: str) -> None:
+        """Sichere Warnungs‑Ausgabe."""
+        try:
+            logger.warning(msg)
+        except (NameError, AttributeError):
+            print(f"WARNING: {msg}")
+
+    # -----------------------------------------------------------------
+    # 1. Bereits gepatcht?
+    # -----------------------------------------------------------------
     if _patch_applied:
-        if _debug_enabled():
-            log_debug("monkey", "urllib3‑Patch wurde bereits angewendet.")
+        _debug("urllib3‑Patch wurde bereits angewendet.")
         return
 
-    # Prüfen, ob der Patch überhaupt benötigt wird.
+    # -----------------------------------------------------------------
+    # 2. Prüfen, ob der Patch benötigt wird.
+    # -----------------------------------------------------------------
     try:
         if not _should_patch():
-            if _debug_enabled():
-                log_debug("monkey", "Patch nicht erforderlich – überspringe.")
             return
     except Exception as e:
-        # Sollte niemals passieren, aber sicher ist sicher.
-        logger.warning(
-            f"Fehler in _should_patch(): {e} – Patch wird aus Sicherheits-"
-            "gründen nicht angewendet."
-        )
+        _warn(f"Fehler in _should_patch(): {e} – Patch wird nicht angewendet.")
         return
 
-    # Patch durchführen.
+    # -----------------------------------------------------------------
+    # 3. Patch ausführen.
+    # -----------------------------------------------------------------
     try:
         _apply_patches()
         _patch_applied = True
-        if _debug_enabled():
-            log_debug("monkey", "urllib3 monkey‑patch erfolgreich angewendet.")
+        _debug("urllib3 monkey‑patch erfolgreich angewendet.")
     except Exception as e:
-        # Jeder Fehler beim Patchen wird protokolliert, aber der Start
-        # des Programms nicht verhindert.
-        logger.warning(
-            f"urllib3 monkey‑patch konnte nicht angewendet werden: {e}. "
+        _warn(
+            f"urllib3 monkey‑patch konnte nicht angebracht werden: {e}. "
             "Das Programm funktioniert trotzdem, aber es könnte zu "
-            "Problemen mit urllib3 >= 2.0 kommen, falls diese Version "
-            "installiert ist."
+            "Problemen mit urllib3 >= 2.0 kommen."
         )
-        # Kein _patch_applied = True, falls später ein erneuter Versuch
-        # unternommen werden soll (z. B. nach Installation von Paketen).
+        # Kein _patch_applied = True setzen – so kann der Patch später
+        # immer noch nachgeholt werden, falls das Problem behoben wurde.
         _patch_applied = False
+
 
 def unpatch() -> None:
     """
     Entfernt den urllib3 Monkey‑Patch und stellt die Originalmethoden wieder her.
-
-    Diese Funktion ist vor allem für Unit‑Tests nützlich, die den unveränderten
-    Zustand benötigen. Sie ist nur wirksam, wenn der Patch zuvor mit `apply()`
-    aktiviert wurde.
     """
     global _patch_applied
     if not _patch_applied:
