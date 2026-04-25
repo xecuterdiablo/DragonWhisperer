@@ -5275,12 +5275,6 @@ class OptimizedThreadPoolExecutor:
             timeout: Maximale Wartezeit in Sekunden. `None` bedeutet unbegrenzt.
             *args: Positionsargumente für `fn`.
             **kwargs: Schlüsselwortargumente für `fn`.
-
-        Returns:
-            Das Ergebnis der Funktion.
-
-        Raises:
-            TimeoutError: Wenn das Ergebnis nicht innerhalb von `timeout` vorliegt.
         """
         future = self.submit(fn, *args, **kwargs)
         try:
@@ -27701,9 +27695,7 @@ class AdvancedSettingsDialog:
             self._loaded_tabs.add("gui")
             self._bind_validation_recursive(self.tab_gui)
 
-        # -----------------------------------------------------------------
         # 3. ttk‑Styles nach dem Laden aktualisieren
-        # -----------------------------------------------------------------
         try:
             self._setup_ttk_styles()
         except Exception as e:
@@ -27734,9 +27726,7 @@ class AdvancedSettingsDialog:
         if DEBUG_LEVEL >= 3:
             log_debug("settings", f"_on_tab_changed completed for tab {tab_id}")
 
-    # =========================================================================
     #  Hilfsmethode: Scrollbaren Container erstellen
-    # =========================================================================
     def _make_scrollable(self, parent: tk.Widget) -> tk.Frame:
         """
         Erstellt einen scrollbaren Container (Canvas + Scrollbar) innerhalb des
@@ -27745,9 +27735,7 @@ class AdvancedSettingsDialog:
         """
         theme = self.gui.current_theme
 
-        # -----------------------------------------------------------------
         # 1. Canvas und Scrollbar erstellen
-        # -----------------------------------------------------------------
         canvas = tk.Canvas(
             parent,
             bg=theme.BG_PRIMARY,
@@ -27767,9 +27755,7 @@ class AdvancedSettingsDialog:
         # Referenz auf den Canvas im Frame speichern (für spätere Theme‑Updates)
         scrollable._canvas = canvas
 
-        # -----------------------------------------------------------------
         # 2. Canvas konfigurieren
-        # -----------------------------------------------------------------
         canvas.create_window((0, 0), window=scrollable, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
@@ -27777,9 +27763,7 @@ class AdvancedSettingsDialog:
             canvas.configure(scrollregion=canvas.bbox("all"))
         scrollable.bind("<Configure>", _on_configure)
 
-        # -----------------------------------------------------------------
         # 3. Widgets platzieren
-        # -----------------------------------------------------------------
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
@@ -28423,7 +28407,7 @@ class AdvancedSettingsDialog:
         )
         theme_combo.grid(row=2, column=1, sticky="w", pady=5, padx=5)
         ToolTip(theme_combo, "Farbschema der Benutzeroberfläche")
-        theme_combo.bind("<<ComboboxSelected>>", self._on_theme_selected)   # Live-Vorschau
+        theme_combo.bind("<<ComboboxSelected>>", self._on_theme_selected)
 
         self.auto_save_cb = tk.Checkbutton(
             text_frame, text="Auto‑Save on Completion", variable=self.auto_save_var,
@@ -28433,9 +28417,7 @@ class AdvancedSettingsDialog:
         self.auto_save_cb.grid(row=3, column=0, columnspan=2, sticky="w", pady=5)
         ToolTip(self.auto_save_cb, "Transkription nach Stream‑Ende automatisch speichern")
 
-    # =========================================================================
     #  Hilfsmethoden für Widget‑Erstellung
-    # =========================================================================
     def _add_label_value(self, parent: tk.Widget, label: str, value: str, row: int) -> None:
         """Fügt ein Label mit einem statischen Wert hinzu."""
         tk.Label(parent, text=label, anchor="w",
@@ -28485,9 +28467,7 @@ class AdvancedSettingsDialog:
         var.trace_add("write", lambda *_: value_label.config(text=f"{var.get():.2f}"))
         return scale, value_label
 
-    # =========================================================================
     #  Validierung
-    # =========================================================================
     def _setup_validation_styles(self) -> None:
         """Erstellt ttk‑Styles für Validierungsfehler."""
         style = ttk.Style()
@@ -28527,9 +28507,7 @@ class AdvancedSettingsDialog:
         """
         Validiert eine numerische Eingabe in einem Widget (Spinbox, Entry, Combobox).
         """
-        # -----------------------------------------------------------------
         # 1. Wert aus der Variable auslesen und konvertieren
-        # -----------------------------------------------------------------
         try:
             raw_value = var.get()
             if is_int:
@@ -28545,9 +28523,7 @@ class AdvancedSettingsDialog:
                 raise ValueError(f"Wert muss zwischen {min_val} und {max_val} liegen")
 
         except (ValueError, tk.TclError) as e:
-            # -----------------------------------------------------------------
             # 2. Fehlerfall: Widget markieren und Meldung speichern
-            # -----------------------------------------------------------------
             self._show_validation_error(widget, str(e))
             return False
 
@@ -28604,9 +28580,7 @@ class AdvancedSettingsDialog:
         except tk.TclError:
             pass
 
-    # =========================================================================
     #  Suche
-    # =========================================================================
     def _on_search_changed(self) -> None:
         """Reagiert auf Änderungen im Suchfeld."""
         term = self._search_text.get().strip().lower()
@@ -28960,9 +28934,7 @@ class AdvancedSettingsDialog:
             )
             return
 
-        # ---------------------------------------------------------------------
         # Proxy‑URL validieren
-        # ---------------------------------------------------------------------
         proxy_enabled = self.proxy_enabled_var.get()
         proxy_url = self.proxy_var.get().strip()
         if proxy_enabled and proxy_url:
@@ -28989,9 +28961,7 @@ class AdvancedSettingsDialog:
         except Exception as e:
             logger.warning(f"Failed to restore mode overrides: {e}", exc_info=True)
 
-        # ---------------------------------------------------------------------
         # Werte aus den GUI‑Elementen in das AdvancedSettings‑Objekt übernehmen
-        # ---------------------------------------------------------------------
         adv.chunk_duration = self.chunk_var.get()
         adv.audio_profile = self.profile_var_audio.get()
         adv.vad_filter = self.vad_filter_var.get()
@@ -29296,9 +29266,7 @@ class AdvancedSettingsDialog:
         except Exception as e:
             DarkMessageBox.showerror("Fehler", f"Speichern fehlgeschlagen: {e}", self.parent)
 
-    # =========================================================================
     #  Hilfsmethoden (Paket‑Updates)
-    # =========================================================================
     def _open_install_dialog(self) -> None:
         """Öffnet den Installationsdialog für fehlende Pakete."""
         InstallDependencyDialog(self.dialog, self.gui)
@@ -29389,26 +29357,20 @@ class AdvancedSettingsDialog:
         Testet die Sprachausgabe mit den aktuell im Dialog eingestellten
         TTS‑Parametern (Engine, Stimme, Geschwindigkeit, Satzpause).
         """
-        # -----------------------------------------------------------------
         # 1. Referenz auf den TTS‑Manager prüfen
-        # -----------------------------------------------------------------
         if not hasattr(self.gui, "tts_manager") or self.gui.tts_manager is None:
             self.tts_test_status.config(text="❌ TTS‑Manager nicht verfügbar")
             return
 
         tts = self.gui.tts_manager
 
-        # -----------------------------------------------------------------
         # 2. Aktuelle GUI‑Auswahl sichern
-        # -----------------------------------------------------------------
         engine_name = self.tts_engine_var.get().strip()
         voice_name = self.tts_voice_var.get().strip()
         length_scale = self.tts_length_scale_var.get()
         sentence_silence = self.tts_sentence_silence_var.get()
 
-        # -----------------------------------------------------------------
         # 3. Prüfen, ob die gewählte Engine verfügbar ist
-        # -----------------------------------------------------------------
         if not tts.is_available(engine_name):
             self.tts_test_status.config(
                 text=f"❌ Engine '{engine_name}' nicht verfügbar"
@@ -29417,9 +29379,7 @@ class AdvancedSettingsDialog:
                 log_debug("tts_test", f"Engine {engine_name} nicht verfügbar")
             return
 
-        # -----------------------------------------------------------------
         # 4. Sprache aus der Stimme ableiten (für passenden Testtext)
-        # -----------------------------------------------------------------
         # Typische Piper‑Stimme: "de_DE-thorsten-medium" → lang_code = "de"
         lang_code = "en"  # Fallback Englisch
         if "_" in voice_name or "-" in voice_name:
@@ -29446,9 +29406,7 @@ class AdvancedSettingsDialog:
         }
         test_text = test_texts.get(lang_code, "Test. This is a short test sound.")
 
-        # -----------------------------------------------------------------
         # 5. Aktuelle Engine‑Einstellungen sichern
-        # -----------------------------------------------------------------
         old_voice = tts._voice
         old_length = tts.length_scale
         old_silence = tts.sentence_silence
@@ -29457,9 +29415,7 @@ class AdvancedSettingsDialog:
         self.tts_test_status.config(text="🔊 Wird abgespielt...")
         self.dialog.update_idletasks()
 
-        # -----------------------------------------------------------------
         # 6. TTS‑Test asynchron starten
-        # -----------------------------------------------------------------
         def callback(success: bool, message: str) -> None:
             """Wird nach Abschluss der Sprachausgabe aufgerufen."""
             # GUI‑Update muss im Hauptthread erfolgen
@@ -29480,9 +29436,7 @@ class AdvancedSettingsDialog:
 
             self.dialog.after(0, update)
 
-        # -----------------------------------------------------------------
         # 7. Temporär die gewählten Parameter setzen und Test starten
-        # -----------------------------------------------------------------
         try:
             tts._voice = voice_name
             tts.length_scale = length_scale
@@ -36838,19 +36792,6 @@ class AudioProcessor:
     Audio‑Enhancement durch und leitet die Daten über eine Queue an einen
     dedizierten Dispatcher‑Thread weiter. Dieser verteilt die Transkriptions‑
     und Übersetzungsaufträge an separate Thread‑Pools.
-
-    **Architektur:**
-        - Producer: `_process_audio_data` (wird vom StreamHandler aufgerufen)
-        - Queue: `_raw_audio_queue` (thread‑sicher)
-        - Dispatcher: `_dispatcher_loop` (entnimmt Chunks und übergibt sie dem Executor)
-        - Worker: `_process_audio_chunk_async` (führt Whisper‑Transkription durch)
-
-    **Wichtige Verbesserungen:**
-        - Segment‑Puffer für korrekte zeitliche Reihenfolge der Ausgabe
-        - Dynamische Anpassung der Chunk‑Dauer basierend auf Queue‑Auslastung
-        - Robuste Behandlung von vorzeitigen Stream‑Abbrüchen mit Download‑Modus
-        - Saubere Ressourcenfreigabe und Thread‑Management
-        - Detaillierte Debug‑ und Performance‑Metriken
     """
 
     # =========================================================================
@@ -38977,28 +38918,6 @@ class AudioProcessor:
         """
         Wartet darauf, dass die interne Rohdaten‑Queue vollständig abgearbeitet ist
         (queue.join()), jedoch mit einem echten Timeout.
-
-        Diese Methode behebt das Problem, dass `queue.Queue.join()` keinen
-        Timeout‑Parameter besitzt und bei fehlenden `task_done()`‑Aufrufen für
-        immer blockieren würde (Deadlock). Sie verwendet einen separaten Thread,
-        um `join()` auszuführen, und wartet mit `threading.Event.wait(timeout)`.
-
-        Features:
-            - Echter Timeout durch Auslagerung von `join()` in eigenen Thread.
-            - Sofortige Rückkehr `True`, wenn die Queue leer ist.
-            - Fallback auf `_wait_for_queue_idle()`, falls die Queue keine
-              `join()`‑Methode besitzt (z. B. DummyQueue).
-            - Robust gegen Exceptions im `join()`‑Thread (fängt alle ab und
-              signalisiert dennoch das Ende).
-            - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 3`.
-            - Thread‑sicher durch atomare Prüfung der Queue‑Größe vor Start.
-
-        Args:
-            timeout: Maximale Wartezeit in Sekunden.
-
-        Returns:
-            True, wenn die Queue innerhalb des Timeouts vollständig geleert wurde,
-            andernfalls False.
         """
         # ---------------------------------------------------------------------
         # 1. Fallback für Queues ohne join()‑Methode (z. B. DummyQueue)
@@ -39123,12 +39042,6 @@ class AudioProcessor:
             - Abbruchbedingungen (Benutzerabbruch, globaler Timeout) werden regelmäßig geprüft.
             - Detaillierte Debug‑Ausgaben bei hohem Log‑Level.
             - Robustere Berechnung der Wartezeiten mit zufälligem Jitter (optional).
-
-        Args:
-            timeout: Maximale Wartezeit in Sekunden.
-
-        Returns:
-            True, wenn die Queue innerhalb des Timeouts stabil leer war.
         """
         start_time = time.perf_counter()
         idle_start = None
