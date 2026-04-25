@@ -29216,7 +29216,6 @@ class DragonWhispererGUI:
                     f"active_types={len(self.last_calls)}>"
                 )
 
-
     # ------------------------------------------------------------------------
     # Dekorator für GUI‑Fehlerbehandlung
     # ------------------------------------------------------------------------
@@ -32631,18 +32630,63 @@ class DragonWhispererGUI:
         self._safe_after(1000, monitor)
 
     def _build_system_info_string(self) -> str:
-        import psutil
-        cpu = psutil.cpu_percent(interval=None)
-        mem = psutil.virtual_memory()
-        ram_used = mem.used / (1024**3)
-        ram_total = mem.total / (1024**3)
+        """
+        Erzeugt einen kompakten Status‑String für die Systemüberwachung.
+        """
+
+        # 1. CPU‑ und RAM‑Werte (mit Fallback für fehlendes psutil)
+        cpu_str = "--"
+        ram_str = "--/--G"
+        try:
+            import psutil
+            # cpu_percent mit interval=None blockiert nicht, sondern liefert
+            # den Wert seit dem letzten Aufruf (oder 0.0 beim ersten).
+            cpu = psutil.cpu_percent(interval=None)
+            mem = psutil.virtual_memory()
+            ram_used = mem.used / (1024 ** 3)
+            ram_total = mem.total / (1024 ** 3)
+            cpu_str = f"{cpu:.0f}"
+            ram_str = f"{ram_used:.1f}/{ram_total:.1f}G"
+        except ImportError:
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "gui",
+                    "psutil nicht verfügbar – CPU/RAM-Anzeige deaktiviert."
+                )
+        except Exception as e:
+            logger.warning(f"Fehler beim Abrufen der Systeminformationen: {e}")
+
+        # 2. GPU‑Informationen (VRAM) – über bereits robuste Hilfsmethode
         gpu_info = self._get_gpu_info_string()
-        model_name = self.transcription_engine.get_current_model() if hasattr(self, "transcription_engine") else "None"
-        if model_name == "None":
-            model_name = "not loaded"
+
+        # 3. Whisper‑Modell ermitteln (sicher)
+        model_name = "not loaded"
+        try:
+            if hasattr(self, "transcription_engine") and self.transcription_engine is not None:
+                engine = self.transcription_engine
+                model_name = engine.get_current_model()
+                if model_name == "None":
+                    model_name = "not loaded"
+        except Exception:
+            pass
+
+        # 4. Plattform‑Kürzel
+        if IS_WINDOWS:
+            platform_short = "🪟Windows"
+        elif IS_MACOS:
+            platform_short = "🍎Mac"
+        elif IS_LINUX:
+            platform_short = "🐧Linux"
+        else:
+            platform_short = "🌐OS"
+
+        # 5. Zusammenbau des Gesamtstrings
         demo_hint = " (demo)" if self.demo_mode else ""
-        platform_short = "🪟Windows" if IS_WINDOWS else "🍎Mac" if IS_MACOS else "🐧Linux"
-        return f"{platform_short} | CPU: {cpu:.0f}% | RAM: {ram_used:.1f}/{ram_total:.1f}G{gpu_info} | Model: {model_name}{demo_hint}"
+        info_string = (
+            f"{platform_short} | CPU: {cpu_str}% | RAM: {ram_str}"
+            f"{gpu_info} | Model: {model_name}{demo_hint}"
+        )
+        return info_string
 
     def _get_gpu_info_string(self) -> str:
         try:
