@@ -3112,15 +3112,6 @@ def get_config(config_type: str = "default") -> Config:
 class FastLazyLoader:
     """
     Thread‑sicherer Lazy‑Loader für Module mit Caching und Verfügbarkeitsprüfung.
-
-    Features:
-        - Lädt Module nur bei Bedarf (lazy).
-        - Cached geladene Module für schnellen Wiederzugriff.
-        - Verfügbarkeits‑Cache mit TTL (Standard 60 s).
-        - Optionale Metriken (Loads, Cache‑Treffer, Fehler).
-        - Automatische Bereinigung abgelaufener Verfügbarkeitseinträge.
-        - Bei Importfehlern wird ein Mock‑Modul zurückgegeben, das bei Zugriff eine Warnung ausgibt.
-        - Ausführliche Debug‑Logs bei `DEBUG_LEVEL >= 3`.
     """
 
     _loaded_modules: Dict[str, Any] = {}
@@ -3199,17 +3190,6 @@ class FastLazyLoader:
         Bei einem Importfehler wird ein Mock‑Modul zurückgegeben, das bei jedem
         Attributzugriff eine ImportError‑Exception wirft. Die Verfügbarkeit kann
         mit `is_available` vorab geprüft werden.
-
-        Args:
-            module_name: Name des Moduls (z.B. 'numpy').
-            import_paths: Alternativer Import‑Pfad oder Liste von Pfaden.
-                          Wird versucht, das Modul unter diesen Namen zu importieren.
-
-        Returns:
-            Das geladene Modul oder ein Mock‑Objekt, das bei Zugriff eine Exception wirft.
-
-        Raises:
-            Keine. Fehler werden intern behandelt und geloggt.
         """
         # Cache‑Treffer
         if module_name in cls._loaded_modules:
@@ -15979,13 +15959,6 @@ class FFmpegManager:
         Gibt den zuvor belegten Semaphor‑Slot **garantiert** frei (außer wenn
         `skip_release` gesetzt ist). Die Methode ist idempotent und fängt alle
         internen Exceptions ab, um den Aufräumvorgang nicht zu unterbrechen.
-
-        Args:
-            process_id: Die eindeutige ID des zu entfernenden Prozesses.
-            force: Wenn True, wird der Prozess ohne vorheriges SIGTERM sofort gekillt.
-
-        Returns:
-            True, wenn der Prozess erfolgreich entfernt wurde, sonst False.
         """
         logger.debug(f"  _remove_process called for {process_id} (force={force})")
         skip_release = False
@@ -16104,10 +16077,9 @@ class FFmpegManager:
             logger.exception(f"  _remove_process: outer exception caught: {e}")
             success = False
         finally:
-            # -----------------------------------------------------------------
+
             # GARANTIERTE SLOT‑FREIGABE (außer wenn skip_release gesetzt ist)
-            # HIER: Exception abfangen, um Bereinigung nicht zu unterbrechen
-            # -----------------------------------------------------------------
+
             if not skip_release:
                 try:
                     self._release_slot()
@@ -16170,9 +16142,7 @@ class FFmpegManager:
         SIGTERM (`terminate()`) nicht reagiert – typischerweise weil er in einem
         blockierenden I/O‑Aufruf (z. B. `read()`) hängt und keine Signale verarbeiten kann.
         """
-        # ---------------------------------------------------------------------
         # 1. Eingangsvalidierung
-        # ---------------------------------------------------------------------
         if proc is None:
             if DEBUG_LEVEL >= 3:
                 log_debug(
@@ -16192,9 +16162,7 @@ class FFmpegManager:
                 )
             return
 
-        # ---------------------------------------------------------------------
         # 2. Prüfen, ob der Prozess bereits beendet ist
-        # ---------------------------------------------------------------------
         exit_code = proc.poll()
         if exit_code is not None:
             if DEBUG_LEVEL >= 3:
@@ -21285,15 +21253,62 @@ class TTSManager:
         return self._available_engines.copy()
 
     def is_available(self, engine: Optional[str] = None) -> bool:
-        """Prüft, ob eine bestimmte (oder die aktuelle) Engine verfügbar ist."""
+        """
+        Prüft, ob eine bestimmte (oder die aktuell eingestellte) TTS‑Engine
+        auf diesem System funktionsfähig ist.
+        """
+        # 1. Standard‑Engine verwenden, wenn keine explizit angegeben
         if engine is None:
             engine = self._engine_name
+
+        # 2. Piper – hochwertige Offline‑Sprachsynthese
         if engine == "piper":
-            return shutil.which("piper") is not None and bool(self._available_players)
-        elif engine == "pyttsx3":
-            return importlib.util.find_spec("pyttsx3") is not None
-        elif engine == "espeak":
-            return shutil.which("espeak") is not None
+            # a) Ausführbare Datei im Systempfad?
+            if shutil.which("piper"):
+                if DEBUG_LEVEL >= 4:
+                    log_debug("tts", "is_available: piper.exe im PATH gefunden")
+                return True
+
+            # b) Mindestens eine vollständig installierte Stimme im Cache?
+            try:
+                voices = self.get_installed_piper_voices()
+                if voices:
+                    if DEBUG_LEVEL >= 3:
+                        log_debug(
+                            "tts",
+                            f"is_available: piper.exe nicht im PATH, aber "
+                            f"{len(voices)} Stimme(n) im Cache gefunden",
+                        )
+                    return True
+            except Exception as e:
+                logger.warning(f"Fehler bei Piper-Cache-Prüfung: {e}")
+
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts", "is_available: piper nicht verfügbar")
+            return False
+
+        # 3. pyttsx3 – plattformübergreifende TTS‑Bibliothek
+        if engine == "pyttsx3":
+            available = importlib.util.find_spec("pyttsx3") is not None
+            if DEBUG_LEVEL >= 4:
+                log_debug(
+                    "tts",
+                    f"is_available: pyttsx3 {'verfügbar' if available else 'nicht verfügbar'}",
+                )
+            return available
+
+        # 4. espeak – leichtgewichtiger Fallback
+        if engine == "espeak":
+            available = shutil.which("espeak") is not None
+            if DEBUG_LEVEL >= 4:
+                log_debug(
+                    "tts",
+                    f"is_available: espeak {'verfügbar' if available else 'nicht verfügbar'}",
+                )
+            return available
+
+        # 5. Unbekannte Engine
+        logger.warning(f"is_available: Unbekannte Engine '{engine}'")
         return False
 
     def test_audio(self, callback: Optional[Callable[[bool, str], None]] = None) -> None:
@@ -34446,19 +34461,6 @@ class DragonWhispererGUI:
         Executoren und Manager bereits heruntergefahren wurden. Sie dient als letzte
         Sicherheitsstufe, um hängende Threads zu identifizieren und – falls möglich –
         sauber zu beenden.
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - Bei `DEBUG_LEVEL >= 3` werden für jeden aktiven Nicht‑Daemon‑Thread
-              der vollständige Stacktrace ausgegeben. Dies erleichtert die
-              Identifikation von unbenannten Threads (z. B. `Thread-4`).
-            - Die verbleibende Zeit wird dynamisch auf die Threads verteilt,
-              sodass der gesamte Vorgang nicht länger als `timeout` Sekunden dauert.
-            - Detaillierte Log‑Ausgaben zu jedem Schritt (nur bei aktiviertem Debug).
-            - Threads, die nach dem Timeout noch leben, werden protokolliert,
-              aber der Shutdown wird nicht blockiert (sie werden ignoriert).
-
-        Args:
-            timeout: Maximale Gesamtzeit in Sekunden für alle join‑Operationen.
         """
         main_thread = threading.main_thread()
         deadline = time.time() + timeout
@@ -34696,20 +34698,6 @@ class WhisperController:
     def start_processing(self) -> None:
         """
         Startet die Verarbeitung asynchron mit umfassender Validierung und Fehlerbehandlung.
-
-        Diese Methode führt folgende Schritte aus:
-            1. GUI-Referenz und Eingabevalidierung (URL, Modell, Sprachen) VOR Zustandswechsel.
-            2. Automatische Korrektur von monolingualen .en-Modellen.
-            3. Zustandswechsel von IDLE zu STARTING (unter Lock).
-            4. Start eines dedizierten Threads für die eigentliche Verarbeitung.
-            5. Garantierte Zustandsrücksetzung bei Fehlern im Start-Thread.
-
-        Verbesserungen:
-            - Eingabevalidierung vor Zustandswechsel verhindert Hängen in STARTING.
-            - Sprachcodes werden frühzeitig validiert.
-            - Detaillierte Debug-Ausgaben für Nachvollziehbarkeit.
-            - Thread-Sicherheit durch konsequente Lock-Nutzung.
-            - Automatischer Fallback bei ungültigen Modellen.
         """
         # -----------------------------------------------------------------
         # 1. GUI-Referenz und schnelle Validierungen (VOR Zustandswechsel)
@@ -35128,28 +35116,6 @@ class WhisperController:
     def _handle_error(self, message: str, fatal: bool = False) -> None:
         """
         Zentrale Fehlerbehandlung für den Controller.
-
-        Diese Methode unterscheidet zwischen **temporären** und **fatalen** Fehlern.
-        Temporäre Fehler (z. B. ein fehlgeschlagener Reconnect) werden nur geloggt
-        und als Info an die GUI gesendet. Der Controller bleibt im Zustand PROCESSING,
-        sodass der `StreamHandler` selbstständig einen erneuten Versuch unternehmen kann.
-
-        Fatale Fehler (z. B. nicht initialisierbare Engines, kritische Ausnahmen)
-        versetzen den Controller in den Zustand ERROR, führen eine Notfallbereinigung
-        durch und planen nach 500 ms einen automatischen Reset zurück nach IDLE.
-
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - **Unterscheidung fatal / nicht‑fatal:** Verhindert das Einfrieren der GUI
-              und den Abbruch von Streams bei harmlosen, behebbaren Fehlern.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
-            - **Thread‑Sicherheit:** Alle Zustandsänderungen erfolgen unter Locks.
-            - **Timer‑Management:** Der Reset‑Timer wird bei einem Shutdown nicht gestartet
-              und im `dispose` sauber abgebrochen.
-
-        Args:
-            message: Die Fehlermeldung (wird geloggt und an die GUI gesendet).
-            fatal: Wenn `True`, wird der Controller in den ERROR‑Zustand versetzt.
-                   Bei `False` (Standard) bleibt der aktuelle Zustand erhalten.
         """
         logger.error(f"❌ Controller error (fatal={fatal}): {message}")
 
@@ -35257,17 +35223,11 @@ class WhisperController:
             src_lang_name: Name der Quellsprache (z.B. 'Deutsch' oder 'Automatisch').
             target_lang_name: Name der Zielsprache für Übersetzung.
         """
-        # -----------------------------------------------------------------
         # 0. Shutdown-Event zurücksetzen (vor allen Prüfungen)
-        # -----------------------------------------------------------------
         self._shutdown_event.clear()
 
-        # -----------------------------------------------------------------
         # 1. Vorab-Prüfung: Wurde während des Starts bereits Stop gedrückt?
-        #    (Das Shutdown-Event ist jetzt clean, aber wir prüfen trotzdem,
-        #     ob der Benutzer in der extrem kurzen Zeit zwischen clear()
-        #     und hier bereits wieder Stop gedrückt hat.)
-        # -----------------------------------------------------------------
+
         if self._shutdown_event.is_set():
             logger.debug("Start aborted: shutdown requested before processing")
             with self._state_lock:
@@ -35275,9 +35235,7 @@ class WhisperController:
                     self._set_state(WhisperController.State.IDLE)
             return
 
-        # -----------------------------------------------------------------
         # 2. Zustandswechsel von STARTING zu PROCESSING (unter Lock)
-        # -----------------------------------------------------------------
         with self._state_lock:
             if self._state != WhisperController.State.STARTING:
                 # Wurde zwischenzeitlich gestoppt?
@@ -35288,9 +35246,7 @@ class WhisperController:
         if DEBUG_LEVEL >= 1:
             logger.debug(f"_start_processing_internal called with URL: {url[:80]}...")
 
-        # -----------------------------------------------------------------
         # 3. Erneute Prüfung: Stop während Zustandswechsel?
-        # -----------------------------------------------------------------
         if self._shutdown_event.is_set():
             logger.debug("Start aborted: shutdown requested after state change")
             with self._state_lock:
@@ -35303,9 +35259,7 @@ class WhisperController:
             self._handle_error("GUI nicht verfügbar")
             return
 
-        # -----------------------------------------------------------------
         # 4. URL validieren
-        # -----------------------------------------------------------------
         url = self._validate_url(url)
         if url is None:
             with self._state_lock:
@@ -35317,31 +35271,23 @@ class WhisperController:
         if DEBUG_LEVEL >= 1:
             logger.debug(f"Validated URL: {url}")
 
-        # -----------------------------------------------------------------
         # 5. Stream-Informationen extrahieren
-        # -----------------------------------------------------------------
         self.event_bus.emit("info", "🔍 Analysiere Stream...")
         self._extract_stream_info(gui, url)
 
-        # -----------------------------------------------------------------
         # 6. Stream testen
-        # -----------------------------------------------------------------
         self.event_bus.emit("info", "🎵 Teste Audio-Stream...")
         if not self._test_stream(gui, url):
             self._handle_error("Stream nicht erreichbar")
             return
 
-        # -----------------------------------------------------------------
         # 7. KI-Modell laden
-        # -----------------------------------------------------------------
         self.event_bus.emit("info", "🤖 Lade KI-Modell...")
         if not self._load_model(gui, model_name):
             self._handle_error("KI-Modell konnte nicht geladen werden")
             return
 
-        # -----------------------------------------------------------------
         # 8. Quellsprache setzen
-        # -----------------------------------------------------------------
         self._set_source_language(gui, src_lang_name)
 
         # -----------------------------------------------------------------
@@ -35762,13 +35708,6 @@ class WhisperController:
     def _stop_audio_resources(self) -> None:
         """
         Stoppt alle Audio‑bezogenen Ressourcen (AudioProcessor, FFmpegManager).
-
-        Diese Methode wird vom Controller beim Stoppen der Verarbeitung aufgerufen.
-        Sie stellt sicher, dass der AudioProcessor und der FFmpegManager sauber
-        heruntergefahren werden, und gibt alle zugehörigen Prozesse und Threads frei.
-
-        Diese Methode ist thread‑sicher und kann mehrfach aufgerufen werden, ohne
-        dass Ressourcen mehrfach freigegeben werden.
         """
         log_debug("controller", "_stop_audio_resources: Entering")
 
@@ -40835,19 +40774,6 @@ class AudioProcessor:
             - Löscht temporäre Dateien aus dem Download-Modus.
             - Setzt das `_cleanup_done`-Flag, um doppelte Ausführung zu verhindern.
 
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - **Vollständige Thread-Bereinigung:** Alle Executoren werden mit
-              `shutdown(wait=True, cancel_futures=True)` beendet, und es wird
-              explizit auf das Ende der Worker-Threads gewartet. Verhindert
-              das Zurückbleiben von `Thread-1`/`Thread-2`.
-            - **Idempotenz:** Die Methode kann mehrfach gefahrlos aufgerufen werden.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` für jeden Schritt.
-            - **Robuste Fehlerbehandlung:** Jeder Schritt ist in `try/except` gekapselt,
-              sodass ein Fehler in einem Bereich nicht die gesamte Bereinigung blockiert.
-            - **Timeout für blockierende Operationen:** `join()`-Aufrufe haben ein
-              definiertes Timeout, um ein Hängenbleiben zu verhindern.
-            - **Abschließende Garbage Collection** und Logging der Dauer.
-
         Die Methode ist threadsicher und kann aus beliebigen Threads aufgerufen werden.
         """
         if self._cleanup_done:
@@ -41354,9 +41280,7 @@ class AudioProcessor:
         """
         Bereinigt nach dem Stream‑Ende alle Ressourcen in korrekter Reihenfolge.
         """
-        # ---------------------------------------------------------------------
         # Konstanten
-        # ---------------------------------------------------------------------
         QUEUE_JOIN_TIMEOUT = 30.0  # Sekunden
 
         log_debug(
@@ -41367,9 +41291,7 @@ class AudioProcessor:
         cleanup_start_time = time.perf_counter()
         step_times: Dict[str, float] = {}
 
-        # ---------------------------------------------------------------------
         # Hilfsfunktionen
-        # ---------------------------------------------------------------------
         def timed_step(step_name: str, func: Callable[[], None]) -> None:
             """Führt einen Schritt aus und misst die Dauer. Fehler werden geloggt."""
             step_start = time.perf_counter()
@@ -41429,9 +41351,7 @@ class AudioProcessor:
             ),
         )
 
-        # ---------------------------------------------------------------------
         # 4. Warten, bis die Raw-Audio-Queue vollständig geleert ist (mit Timeout).
-        # ---------------------------------------------------------------------
         timed_step("wait_for_queue_empty", lambda: self._join_queue_with_timeout(timeout=QUEUE_JOIN_TIMEOUT))
 
         # ---------------------------------------------------------------------
@@ -41465,17 +41385,13 @@ class AudioProcessor:
         self._in_final_flush.set()
         logger.info("🌐 Entering final flush phase – stop_event will be ignored")
 
-        # ---------------------------------------------------------------------
         # 10. Übersetzungs‑Satzpuffer leeren (erzeugt finale Übersetzungsaufgaben)
-        # ---------------------------------------------------------------------
         timed_step(
             "flush_sentence_buffer",
             lambda: self._flush_sentence_buffer(callbacks.get("translation")),
         )
 
-        # ---------------------------------------------------------------------
         # 11. Transkriptions‑Satzpuffer leeren
-        # ---------------------------------------------------------------------
         timed_step(
             "flush_transcript_buffer",
             lambda: self._flush_transcript_buffer(callbacks.get("transcription")),
@@ -41599,23 +41515,11 @@ class AudioProcessor:
         Sie sendet den kombinierten Satz sowohl an die GUI als auch an die
         Übersetzungs‑Engine (sofern aktiviert).
 
-        Verbesserungen:
-            - Explizite Prüfung der Callbacks und der Übersetzungs‑Engine.
-            - Detaillierte Debug‑Ausgaben auf WARNING‑Ebene für kritische Pfade
-              (immer sichtbar, unabhängig vom DEBUG‑LEVEL).
-            - Robuste Fehlerbehandlung – einzelne Callback‑Fehler unterbrechen nicht
-              die gesamte Bereinigung.
-            - Thread‑Sicherheit durch Verwendung von `_transcript_sentence_lock`.
-            - Garantiertes Leeren des Puffers im `finally`‑Block.
-            - Prüfung auf `None` und leere Puffer.
-
         Args:
             transcription_callback: Callback für die GUI‑Ausgabe. Falls None,
                                     wird keine Ausgabe erzeugt.
         """
-        # ---------------------------------------------------------------------
         # 1. Schneller Rückweg bei fehlendem Callback
-        # ---------------------------------------------------------------------
         if transcription_callback is None:
             logger.warning("🌐 _flush_transcript_buffer: transcription_callback is None – skipping flush")
             # Puffer trotzdem leeren, um Speicher freizugeben
@@ -41626,9 +41530,7 @@ class AudioProcessor:
                 self._transcript_segments.clear()
             return
 
-        # ---------------------------------------------------------------------
         # 2. Kritischer Abschnitt: Zugriff auf den Puffer
-        # ---------------------------------------------------------------------
         with self._transcript_sentence_lock:
             if not self._transcript_parts:
                 logger.warning("🌐 _flush_transcript_buffer: Transcript buffer empty, nothing to flush")
@@ -41641,9 +41543,7 @@ class AudioProcessor:
                 f"{total_chars} total chars"
             )
 
-            # -----------------------------------------------------------------
             # 3. Kombiniertes Segment erstellen
-            # -----------------------------------------------------------------
             try:
                 combined_seg = self._create_combined_transcript_segment()
             except Exception as e:
@@ -41656,9 +41556,7 @@ class AudioProcessor:
                 self._transcript_segments.clear()
                 return
 
-            # -----------------------------------------------------------------
             # 4. Callbacks auslösen (GUI und Übersetzung)
-            # -----------------------------------------------------------------
             try:
                 # 4a. GUI‑Ausgabe
                 transcription_callback(combined_seg)
@@ -47429,9 +47327,7 @@ def _show_critical_error(message: str) -> None:
         print(f"\n💥 {message}")
 
 
-# -----------------------------------------------------------------------------
 # Headless‑Modus
-# -----------------------------------------------------------------------------
 def _handle_headless_mode(args: argparse.Namespace) -> int:
     """
     Führt die Verarbeitung im Headless‑Modus aus (ohne GUI).
@@ -47567,9 +47463,7 @@ def _handle_headless_mode(args: argparse.Namespace) -> int:
 
     return 0
 
-# -----------------------------------------------------------------------------
 # Hauptfunktion
-# -----------------------------------------------------------------------------
 def main() -> int:
     """
     Hauptfunktion des Dragon Whisperer.
@@ -47580,24 +47474,9 @@ def main() -> int:
         - Logging und Umgebung initialisieren
         - Bei ``--headless`` oder ``--url`` in den Konsolenmodus wechseln
         - Ansonsten die grafische Oberfläche (GUI) starten
-
-    **Fehlertoleranz gegenüber fehlenden Paketen**:
-        Wenn kritische Systemabhängigkeiten (FFmpeg, yt‑dlp, numpy) fehlen,
-        wird die GUI **trotzdem** gestartet, sofern Tkinter verfügbar ist.
-        Der Benutzer kann dann über den integrierten Installationsdialog
-        alle benötigten Komponenten nachrüsten, ohne dass das Programm
-        abstürzt oder ein manueller Eingriff nötig wäre.
-
-    **Rückgabewerte**:
-        0 – erfolgreicher Durchlauf (inklusive normaler Programmbeendigung)
-        1 – Fehler während der Ausführung (z. B. fehlende GUI oder kritische
-            Abhängigkeiten im Headless‑Modus)
-        2 – schwerwiegender, unbehandelter Laufzeitfehler
     """
 
-    # -----------------------------------------------------------------
     # 1. Argumente parsen
-    # -----------------------------------------------------------------
     args = parse_arguments()
 
     debug_level = 0
@@ -47612,9 +47491,7 @@ def main() -> int:
     configure_logging(debug_level, debug_components, args.quiet)
     setup_platform_environment()
 
-    # -----------------------------------------------------------------
     # 2. Spezielle Sofort‑Aktionen (keine GUI nötig)
-    # -----------------------------------------------------------------
     if args.version:
         print("🐉 Dragon Whisperer v4.1 (optimized)")
         print(f"Platform: {SYSTEM} {'ARM' if IS_ARM else 'x86'}")
@@ -47631,9 +47508,7 @@ def main() -> int:
     if args.test:
         return run_tests()
 
-    # -----------------------------------------------------------------
     # 3. Headless‑ oder URL‑Modus (ohne GUI)
-    # -----------------------------------------------------------------
     if args.headless or args.url:
         if not args.url:
             print("Error: --headless requires --url to specify a stream.", file=sys.stderr)
@@ -47646,9 +47521,7 @@ def main() -> int:
             return 1
         return _handle_headless_mode(args)
 
-    # -----------------------------------------------------------------
     # 4. GUI‑Modus – fehlertolerant gegenüber fehlenden Paketen
-    # -----------------------------------------------------------------
     logger.info("🐉 Dragon Whisperer starting...")
     logger.debug("🔍 Checking dependencies...")
 
