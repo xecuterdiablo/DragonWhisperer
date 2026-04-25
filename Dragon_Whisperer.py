@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """🐉 THE DRAGON WHISPERER (v4.0) - Ultimate Stream Transcription & Translation"""
-
+from __future__ import annotations
 # =============================================================================
 # 1. STANDARDBIBLIOTHEK
 # =============================================================================
@@ -59,17 +59,11 @@ from typing import (
     get_args,
 )
 
-# =============================================================================
 # urllib3 MONKEY-PATCH (maximal robust für Kompatibilität mit urllib3 >= 2.0)
-# -----------------------------------------------------------------------------
 
 def _filter_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """
     Entfernt problematische Schlüsselwortargumente aus einem kwargs-Dictionary.
-
-    Betroffene Parameter:
-        - 'key_threadpool' (explizit)
-        - Alle Schlüssel, die mit '_' beginnen (interne Parameter von urllib3)
     """
     # Defensiv: Kopie erstellen, um Seiteneffekte zu vermeiden
     filtered = kwargs.copy()
@@ -85,34 +79,71 @@ def _filter_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
 
 def _should_patch() -> bool:
     """
-    Prüft dynamisch, ob der Patch überhaupt benötigt wird.
-
-    Versucht, PoolKey mit einem 'key_threadpool'-Argument zu instanziieren.
-    Schlägt dies mit einem TypeError fehl, der 'key_threadpool' erwähnt,
-    ist der Patch erforderlich.
-
-    Returns:
-        True, wenn der Patch benötigt wird, sonst False.
+    Prüft dynamisch und absolut robust, ob der urllib3‑Monkey‑Patch
+    benötigt wird.
     """
+
+    # Lokale Hilfsfunktion für Debug‑Ausgaben
+    def _debug(msg: str) -> None:
+        """Gibt eine Debug‑Meldung aus, falls Debugging aktiv ist."""
+        try:
+            if DEBUG_LEVEL >= 3 or "monkey" in DEBUG_COMPONENTS:
+                # log_debug könnte erst später definiert sein – Fallback
+                # auf logger.debug, falls vorhanden.
+                if "log_debug" in globals():
+                    log_debug("monkey", msg)
+                else:
+                    logger.debug(f"[monkey] {msg}")
+        except (NameError, AttributeError):
+            # Falls die globalen Variablen noch nicht existieren,
+            # wird die Ausgabe komplett unterdrückt.
+            pass
+
+    # 1. Versuchen, das benötigte Untermodul zu importieren
     try:
         import urllib3.connectionpool
-        if not hasattr(urllib3.connectionpool, 'PoolKey'):
-            return False
-        # Versuche, PoolKey mit dem kritischen Parameter zu erzeugen
+    except ImportError:
+        _debug("urllib3 nicht installiert – Patch überflüssig.")
+        return False
+
+    # 2. Existiert die Klasse PoolKey? (sehr alte urllib3?)
+    if not hasattr(urllib3.connectionpool, "PoolKey"):
+        _debug("PoolKey nicht vorhanden – Patch überflüssig.")
+        return False
+
+    # 3. Testaufruf mit dem problematischen Parameter durchführen.
+    try:
         urllib3.connectionpool.PoolKey(
-            host='localhost', port=80, request_context={},
-            key_threadpool='dummy'
+            host="localhost",
+            port=80,
+            request_context={},
+            key_threadpool="dummy",
         )
-        # Kein Fehler -> Patch nicht nötig
-        return False
     except TypeError as e:
-        if 'key_threadpool' in str(e):
+        # Ist dies der uns bekannte Fehler wegen key_threadpool?
+        if "key_threadpool" in str(e):
+            _debug("TypeError wegen key_threadpool erkannt – Patch wird angewendet.")
             return True
-        # Anderer TypeError -> Patch nicht nötig
+        # Andere TypeError-Ursache – kein Patch
+        _debug(f"TypeError, aber nicht key_threadpool: {e}")
         return False
-    except Exception:
-        # Bei anderen Fehlern konservativ patchen
-        return True
+    except Exception as e:
+        # Jede andere Exception (z.B. ein hypothetischer interner Fehler)
+        # wird als Grund gesehen, den Patch **nicht** anzuwenden.
+        _debug(f"Unerwarteter Fehler beim Testen: {e}")
+        return False
+    else:
+        # Kein Fehler – der Parameter wird akzeptiert, Patch ist unnötig.
+        _debug("urllib3 akzeptiert key_threadpool – Patch überflüssig.")
+        return False
+
+
+def _debug_enabled() -> bool:
+    """
+    Interne Hilfsfunktion, die prüft, ob Debug‑Ausgaben für die
+    Monkey‑Komponente ausgegeben werden sollen.
+    """
+    return (DEBUG_LEVEL >= 3) or ("monkey" in DEBUG_COMPONENTS)
 
 
 # -----------------------------------------------------------------------------
@@ -228,34 +259,80 @@ def _apply_patches() -> None:
     if DEBUG_LEVEL >= 4:
         log_debug("monkey", "urllib3 monkey-patch applied successfully")
 
+
 def apply() -> None:
     """
-    Wendet den urllib3 Monkey‑Patch an, falls erforderlich.
-
-    Der Patch wird nur dann aktiv, wenn die dynamische Prüfung (`_should_patch`)
-    ergibt, dass die aktuelle urllib3-Version das Problem aufweist. Bei Bedarf
-    wird der Patch an mehreren Stellen angebracht und ein entsprechender
-    Debug‑Eintrag geschrieben.
-
+    Wendet den urllib3‑Monkey‑Patch an, falls erforderlich.
     """
+
     global _patch_applied
+
+    # -----------------------------------------------------------------
+    # Lokale Hilfsfunktionen für sicheres Logging – fallen auf ``print``
+    # zurück, falls ``logger`` nicht verfügbar ist.
+    # -----------------------------------------------------------------
+    def _debug(msg: str) -> None:
+        """Sichere Debug‑Ausgabe."""
+        try:
+            if DEBUG_LEVEL >= 3 or "monkey" in DEBUG_COMPONENTS:
+                if "log_debug" in globals():
+                    log_debug("monkey", msg)
+                else:
+                    logger.debug(f"[monkey] {msg}")
+        except (NameError, AttributeError):
+            # Weder Logger noch globale Variablen vorhanden → Ausgabe
+            # auf der Konsole, aber nur wenn nicht im Quiet‑Mode.
+            try:
+                if not QUIET_MODE:
+                    print(f"[monkey] {msg}")
+            except Exception:
+                pass
+
+    def _warn(msg: str) -> None:
+        """Sichere Warnungs‑Ausgabe."""
+        try:
+            logger.warning(msg)
+        except (NameError, AttributeError):
+            print(f"WARNING: {msg}")
+
+    # -----------------------------------------------------------------
+    # 1. Bereits gepatcht?
+    # -----------------------------------------------------------------
     if _patch_applied:
+        _debug("urllib3‑Patch wurde bereits angewendet.")
         return
 
-    if not _should_patch():
+    # -----------------------------------------------------------------
+    # 2. Prüfen, ob der Patch benötigt wird.
+    # -----------------------------------------------------------------
+    try:
+        if not _should_patch():
+            return
+    except Exception as e:
+        _warn(f"Fehler in _should_patch(): {e} – Patch wird nicht angewendet.")
         return
 
-    _apply_patches()
-    _patch_applied = True
+    # -----------------------------------------------------------------
+    # 3. Patch ausführen.
+    # -----------------------------------------------------------------
+    try:
+        _apply_patches()
+        _patch_applied = True
+        _debug("urllib3 monkey‑patch erfolgreich angewendet.")
+    except Exception as e:
+        _warn(
+            f"urllib3 monkey‑patch konnte nicht angebracht werden: {e}. "
+            "Das Programm funktioniert trotzdem, aber es könnte zu "
+            "Problemen mit urllib3 >= 2.0 kommen."
+        )
+        # Kein _patch_applied = True setzen – so kann der Patch später
+        # immer noch nachgeholt werden, falls das Problem behoben wurde.
+        _patch_applied = False
 
 
 def unpatch() -> None:
     """
     Entfernt den urllib3 Monkey‑Patch und stellt die Originalmethoden wieder her.
-
-    Diese Funktion ist vor allem für Unit‑Tests nützlich, die den unveränderten
-    Zustand benötigen. Sie ist nur wirksam, wenn der Patch zuvor mit `apply()`
-    aktiviert wurde.
     """
     global _patch_applied
     if not _patch_applied:
@@ -4733,21 +4810,31 @@ class PlatformUtils:
 # Nachdem PlatformUtils definiert ist, rufe das Umgebungs‑Setup auf
 PlatformUtils.setup_platform_environment()
 
-# =============================================================================
 #  Global definierte Verfügbarkeitsvariablen (benötigen PlatformUtils)
-# =============================================================================
-TORCH_AVAILABLE = FastLazyLoader.is_available("torch")
-NUMPY_AVAILABLE = FastLazyLoader.is_available("numpy")
-TRANSLATOR_AVAILABLE = FastLazyLoader.is_available("deep_translator")
-SCIPY_AVAILABLE = FastLazyLoader.is_available("scipy.signal")
-FASTER_WHISPER_AVAILABLE = importlib.util.find_spec("faster_whisper") is not None
-OPENAI_WHISPER_AVAILABLE = importlib.util.find_spec("whisper") is not None
-WHISPER_AVAILABLE = FASTER_WHISPER_AVAILABLE or OPENAI_WHISPER_AVAILABLE
-OLLAMA_AVAILABLE = importlib.util.find_spec("requests") is not None   # <-- HIER EINGEFÜGT
-ARGOS_AVAILABLE = importlib.util.find_spec("argostranslate") is not None
-PSUTIL_AVAILABLE = importlib.util.find_spec("psutil") is not None
+def _safe_is_available(module_name: str) -> bool:
+    """Wrapper für FastLazyLoader.is_available – fängt ModuleNotFoundError ab."""
+    try:
+        return FastLazyLoader.is_available(module_name)
+    except ModuleNotFoundError:
+        return False
 
-#OLLAMA_AVAILABLE = importlib.util.find_spec("requests") is not None
+TORCH_AVAILABLE = _safe_is_available("torch")
+NUMPY_AVAILABLE = _safe_is_available("numpy")
+TRANSLATOR_AVAILABLE = _safe_is_available("deep_translator")
+SCIPY_AVAILABLE = _safe_is_available("scipy.signal")
+
+def _safe_find_spec(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except ModuleNotFoundError:
+        return False
+
+FASTER_WHISPER_AVAILABLE = _safe_find_spec("faster_whisper")
+OPENAI_WHISPER_AVAILABLE = _safe_find_spec("whisper")
+WHISPER_AVAILABLE = FASTER_WHISPER_AVAILABLE or OPENAI_WHISPER_AVAILABLE
+OLLAMA_AVAILABLE = _safe_find_spec("requests")
+ARGOS_AVAILABLE = _safe_find_spec("argostranslate")
+PSUTIL_AVAILABLE = _safe_find_spec("psutil")
 
 ARGOS_AVAILABLE = False
 try:
@@ -8627,10 +8714,6 @@ class AudioEnhancer:
     ) -> bool:
         """
         Prüft, ob der aktuelle Text ein Duplikat eines kürzlich transkribierten Textes ist.
-
-        Verwendet Normalisierung, Ähnlichkeitsvergleich (rapidfuzz/difflib) und
-        Wortvielfaltsanalyse. Die Duplikaterkennung kann über die Einstellungen
-        ein- und ausgeschaltet werden.
         """
         # Verwende die Einstellung aus AdvancedSettings
         if not self.settings.enable_duplicate_check:
@@ -8685,7 +8768,6 @@ class AudioEnhancer:
                         f"Geringe Wortvielfalt: {unique_ratio:.2%} < {self.config.MIN_UNIQUE_WORDS_RATIO:.2%}",
                     )
                 return True
-
         return False
 
     def _load_modules(self) -> None:
@@ -8813,6 +8895,12 @@ class TranscriptionEngine:
       - CPU: int8 (bei AVX2), sonst float32 (stabiler Fallback)
     """
 
+    # ------------------------------------------------------------------
+    # Klassenvariable für einmal fehlgeschlagenen torch-Import
+    # ------------------------------------------------------------------
+    _torch_import_failed: bool = False
+    """Verhindert wiederholte Importversuche, wenn torch nicht ladbar ist."""
+
     MODEL_SIZE_ORDER = [
         "tiny", "tiny.en", "base", "base.en", "small", "small.en",
         "medium", "medium.en", "large-v1", "large-v2", "large-v3",
@@ -8846,10 +8934,10 @@ class TranscriptionEngine:
         "_model_loaded_flag", "_disposing", "forced_language", "_last_detected_language",
         "_torch", "_np", "_scipy_signal", "_last_confidence_threshold",
         "_confidence_lock", "_audio_enhancer", "_cache_manager", "_model_locks",
-        "_model_locks_lock", "_reloading", "_model_load_stop_event", "_vad_fallback_enabled",
-        "_debug", "_state_lock", "_last_oom", "event_bus", "_requested_model",
-        "_model_size_cache", "_nvml_initialized", "_original_thresholds",
-        "_fallback_forced", "_device_lock",
+        "_model_locks_lock", "_reloading", "_model_load_stop_event",
+        "_vad_fallback_enabled", "_debug", "_state_lock", "_last_oom",
+        "event_bus", "_requested_model", "_model_size_cache", "_nvml_initialized",
+        "_original_thresholds", "_fallback_forced", "_device_lock",
     )
 
     _global_load_semaphore = threading.Semaphore(1)
@@ -9478,12 +9566,37 @@ class TranscriptionEngine:
     #  Private Hilfsmethoden (optimiert)
     # -------------------------------------------------------------------------
     def _load_modules(self) -> None:
+        """
+        Lädt numpy, scipy.signal und torch lazy. Ein einmal fehlgeschlagener
+        torch‑Import wird über die Klassenvariable ``_torch_import_failed``
+        markiert und nicht erneut versucht.
+        """
+        # numpy
         if self._np is None and NUMPY_AVAILABLE:
             self._np = FastLazyLoader.load("numpy")
+
+        # scipy.signal
         if self._scipy_signal is None and SCIPY_AVAILABLE:
             self._scipy_signal = FastLazyLoader.load("scipy.signal")
-        if self._torch is None and TORCH_AVAILABLE:
-            self._torch = FastLazyLoader.load("torch")
+
+        # torch (nur versuchen, wenn global verfügbar und nicht bereits dauerhaft fehlgeschlagen)
+        if self._torch is None and TORCH_AVAILABLE and not TranscriptionEngine._torch_import_failed:
+            try:
+                self._torch = FastLazyLoader.load("torch")
+                # Funktionstest – wirft ggf. eine Exception, wenn DLLs fehlen
+                _ = self._torch.cuda.is_available()
+                if DEBUG_LEVEL >= 3:
+                    log_debug("modules", "torch erfolgreich geladen")
+            except Exception as e:
+                logger.warning(
+                    "torch konnte nicht geladen werden: %s\n"
+                    "   GPU‑Beschleunigung ist nicht verfügbar. "
+                    "Stellen Sie sicher, dass PyTorch korrekt installiert ist und alle "
+                    "Abhängigkeiten (z. B. Visual C++ Redistributable) vorhanden sind.",
+                    e,
+                )
+                self._torch = None
+                TranscriptionEngine._torch_import_failed = True
 
     def _check_cpu_features(self) -> Dict[str, bool]:
         """
@@ -11036,196 +11149,508 @@ class TranscriptionEngine:
 class DummyTranscriptionEngine:
     """
     Platzhalter‑Engine, wenn kein Whisper‑Backend verfügbar ist.
-    Thread‑sicher und gibt konsistente Dummy‑Ergebnisse zurück.
+
     """
 
+    # -------------------------------------------------------------------------
+    #  Konstanten
+    # -------------------------------------------------------------------------
+    # Maximale Anzahl zwischengespeicherter Audio‑Hashes (Cache‑Größe)
+    DEFAULT_CACHE_MAXSIZE: int = 50
+
+    # Text, der bei fehlendem Whisper‑Backend ausgegeben wird
+    DEFAULT_DUMMY_TEXT: str = "[Whisper nicht verfügbar – Dummy‑Transkription]"
+
+    # Konfidenzwert für Dummy‑Ergebnisse
+    DEFAULT_CONFIDENCE: float = 0.5
+
+    # Standard‑Sprachcode für Dummy‑Ergebnisse
+    DEFAULT_LANGUAGE: str = "de"
+
+    # -------------------------------------------------------------------------
+    #  Konstruktor
+    # -------------------------------------------------------------------------
     def __init__(
         self,
         settings: Optional["AdvancedSettings"] = None,
         cache_manager: Optional[CacheManager] = None,
-        event_bus: Optional[EventBus] = None,      # optional, wird ignoriert
+        event_bus: Optional[EventBus] = None,
     ) -> None:
         """
         Initialisiert die Dummy‑Engine.
-
-        Args:
-            settings: Erweiterte Einstellungen (optional).
-            cache_manager: Cache‑Manager (optional).
-            event_bus: Event‑Bus (optional, wird ignoriert).
         """
+        # ---------------------------------------------------------------------
+        # 1. Basisattribute
+        # ---------------------------------------------------------------------
         self.settings = settings or AdvancedSettings()
         self.cache_manager = cache_manager or AppContext().cache_manager
-        self.model: Any = None
-        self.model_size = "dummy"
+        self.model: Any = None                      # Dummy‑Modell ist immer None
+        self.model_size: str = "dummy"
         self.whisper_backend: Optional[str] = None
-        self.demo_mode = True
-        self.device = "cpu"
-        self.compute_type = "int8"
+        self.demo_mode: bool = True
+        self.device: str = "cpu"
+        self.compute_type: str = "int8"
         self.forced_language: Optional[str] = None
 
+        # ---------------------------------------------------------------------
+        # 2. Thread‑Sicherheit
+        # ---------------------------------------------------------------------
         self._lock = threading.RLock()
+        self._state_lock = threading.RLock()
+
+        # ---------------------------------------------------------------------
+        # 3. Interner Cache (optional)
+        # ---------------------------------------------------------------------
         self._last_result: Optional[TranscriptionResult] = None
         self._last_audio_hash: Optional[str] = None
-        self._disposing = False
-        self._reloading = False
-        self._model_loaded_flag = True
-        self._vad_fallback_enabled = False
+        self._disposing: bool = False
+        self._reloading: bool = False
+        self._model_loaded_flag: bool = True
+        self._vad_fallback_enabled: bool = False
 
-        # Dummy‑Cache für Audiodaten (optional)
+        # Audio‑Cache (Audio‑Hash → TranscriptionResult)
         self._audio_cache: Dict[str, TranscriptionResult] = {}
-        self._cache_max_size = 50
+        self._cache_max_size: int = self.DEFAULT_CACHE_MAXSIZE
 
-        logger.info("📟 DummyTranscriptionEngine initialisiert (Demo‑Modus)")
+        # ---------------------------------------------------------------------
+        # 4. Weitere von der GUI erwartete Attribute
+        # ---------------------------------------------------------------------
+        self._last_oom: bool = False
+        self._model_cache: OrderedDict = OrderedDict()
+        self._model_locks: Dict[str, threading.Lock] = {}
+        self._model_locks_lock = threading.Lock()
+        self._model_load_stop_event = threading.Event()
+        self._requested_model: Optional[str] = None
+        self._debug: bool = logger.isEnabledFor(logging.DEBUG)
 
-    # -------------------------------------------------------------------------
-    # Öffentliche Methoden (kompatibel zu TranscriptionEngine)
-    # -------------------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # 5. Debug‑Ausgabe
+        # ---------------------------------------------------------------------
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "engine",
+                "DummyTranscriptionEngine initialisiert (Demo‑Modus)",
+            )
+
+    # =========================================================================
+    #  Öffentliche Methoden (kompatibel zu TranscriptionEngine)
+    # =========================================================================
+
     def load_model(
         self, model_size: str, set_active: bool = False
     ) -> Optional[Tuple[Any, str]]:
         """
         Simuliert das Laden eines Modells.
-        Gibt immer ein Dummy‑Modell zurück.
         """
         with self._lock:
-            logger.info(f"Dummy‑Modus: Laden von '{model_size}' nicht erforderlich.")
+            old_model = self.model_size
             self.model_size = model_size
-            return (None, "dummy")
+            self._model_loaded_flag = True
+            self._reloading = False
+
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "engine",
+                f"Dummy: Modell '{model_size}' simuliert geladen "
+                f"(vorher: '{old_model}', thread={threading.current_thread().name})",
+            )
+
+        return (None, "dummy")
+
+    def reload_model(self, model_size: str) -> bool:
+        """
+        Simuliert das Neuladen eines Modells (asynchron).
+
+        Args:
+            model_size: Name des neuen Modells.
+
+        Returns:
+            Immer True.
+        """
+        with self._lock:
+            self._reloading = True
+            self.model_size = model_size
+            self._reloading = False
+
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "engine",
+                f"Dummy: Modell asynchron auf '{model_size}' gewechselt",
+            )
+
+        return True
+
+    def get_current_model(self) -> str:
+        """
+        Gibt den Namen des aktuell simulierten Modells zurück.
+
+        Returns:
+            Der Name des Modells (z. B. 'dummy' oder der zuletzt gesetzte Name).
+        """
+        with self._lock:
+            return self.model_size
+
+    def is_functional(self) -> bool:
+        """
+        Gibt immer False zurück – eine Dummy‑Engine ist nie funktional.
+
+        Returns:
+            False
+        """
+        return False
+
+    def is_model_loading(self) -> bool:
+        """
+        Gibt zurück, ob gerade ein Modell geladen wird.
+
+        Returns:
+            Immer False (Dummy lädt synchron).
+        """
+        with self._lock:
+            return self._reloading
+
+    # -------------------------------------------------------------------------
+    #  Transkription (Kernfunktion)
+    # -------------------------------------------------------------------------
 
     def transcribe_audio(
         self, audio_data: bytes, include_timestamps: bool = False
     ) -> Any:
         """
         Gibt ein Dummy‑Transkriptionsergebnis zurück.
-        Bei wiederholten Aufrufen mit identischen Audiodaten wird das gleiche
-        Ergebnis geliefert (optionales Caching).
+
+        Args:
+            audio_data: Die zu transkribierenden PCM‑Daten (wird ignoriert).
+            include_timestamps: Wenn True, wird eine Liste von
+                                TranscriptionResult‑Objekten zurückgegeben.
+
+        Returns:
+            Ein ``TranscriptionResult`` oder eine Liste davon.
         """
+        # ---------------------------------------------------------------------
+        # 1. Eingangsvalidierung
+        # ---------------------------------------------------------------------
+        if audio_data is None or len(audio_data) == 0:
+            if DEBUG_LEVEL >= 4:
+                log_debug(
+                    "transcribe",
+                    "Dummy: empty audio_data → returning None",
+                )
+            return [] if include_timestamps else None
+
+        # ---------------------------------------------------------------------
+        # 2. Audio‑Hash für optionalen Cache
+        # ---------------------------------------------------------------------
+        audio_hash: Optional[str] = None
+        try:
+            audio_hash = hashlib.sha256(audio_data).hexdigest()
+        except Exception:
+            pass
+
+        # ---------------------------------------------------------------------
+        # 3. Cache‑Prüfung (identische Audiodaten → identisches Ergebnis)
+        # ---------------------------------------------------------------------
         with self._lock:
-            # Optional: Cache basierend auf Audio‑Hash
-            audio_hash = hashlib.sha256(audio_data).hexdigest() if audio_data else None
-            if self._last_audio_hash == audio_hash and self._last_result is not None:
-                result = self._last_result
-            else:
-                if include_timestamps:
-                    # Für Untertitel‑Modus: Liste von Segmenten
-                    result = [
-                        TranscriptionResult(
-                            text="[Whisper nicht verfügbar – Dummy‑Transkription]",
-                            confidence=0.5,
-                            language="de",
-                            start=0.0,
-                            end=5.0,
-                        )
-                    ]
-                else:
-                    result = TranscriptionResult(
-                        text="[Whisper nicht verfügbar – Dummy‑Transkription]",
-                        confidence=0.5,
-                        language="de",
+            if (
+                audio_hash is not None
+                and audio_hash == self._last_audio_hash
+                and self._last_result is not None
+            ):
+                if DEBUG_LEVEL >= 4:
+                    log_debug(
+                        "transcribe",
+                        f"Dummy: Cache‑Treffer für Hash {audio_hash[:16]}...",
                     )
-                # Cache speichern (für identische Audiodaten)
-                self._last_audio_hash = audio_hash
-                self._last_result = result
+                return self._last_result if not include_timestamps else [self._last_result]
 
-                # Cache‑Größe begrenzen
+        # ---------------------------------------------------------------------
+        # 4. Dummy‑Text generieren (ggf. sprachabhängig)
+        # ---------------------------------------------------------------------
+        lang = self.forced_language or self.DEFAULT_LANGUAGE
+        if lang in SUPPORTED_LANGUAGES:
+            lang_display = SUPPORTED_LANGUAGES[lang]
+            dummy_text = f"[Dummy‑Transkription – Sprache: {lang_display}]"
+        else:
+            dummy_text = self.DEFAULT_DUMMY_TEXT
+
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "transcribe",
+                f"Dummy: generiere Transkription "
+                f"(audio_len={len(audio_data)}, include_timestamps={include_timestamps}, "
+                f"lang={lang})",
+            )
+
+        # ---------------------------------------------------------------------
+        # 5. Ergebnis erstellen
+        # ---------------------------------------------------------------------
+        if include_timestamps:
+            result = [
+                TranscriptionResult(
+                    text=dummy_text,
+                    confidence=self.DEFAULT_CONFIDENCE,
+                    language=lang,
+                    start=0.0,
+                    end=5.0,
+                )
+            ]
+        else:
+            result = TranscriptionResult(
+                text=dummy_text,
+                confidence=self.DEFAULT_CONFIDENCE,
+                language=lang,
+            )
+
+        # ---------------------------------------------------------------------
+        # 6. Cache aktualisieren
+        # ---------------------------------------------------------------------
+        with self._lock:
+            self._last_audio_hash = audio_hash
+            self._last_result = result if not include_timestamps else result[0]
+
+            # Cache‑Größe begrenzen
+            if audio_hash is not None:
                 if len(self._audio_cache) >= self._cache_max_size:
-                    self._audio_cache.pop(next(iter(self._audio_cache)))
-                if audio_hash:
-                    self._audio_cache[audio_hash] = result
+                    oldest_key = next(iter(self._audio_cache))
+                    del self._audio_cache[oldest_key]
+                    if DEBUG_LEVEL >= 4:
+                        log_debug(
+                            "transcribe",
+                            f"Dummy: Cache‑Eintrag '{oldest_key[:16]}...' entfernt",
+                        )
+                self._audio_cache[audio_hash] = (
+                    result if not include_timestamps else result[0]
+                )
 
-            return result
+        return result
 
     def safe_transcribe(
         self, audio_data: bytes, max_retries: int = 2
     ) -> Optional[TranscriptionResult]:
         """
-        Sicherer Aufruf, der die gleiche Dummy‑Transkription wie transcribe_audio
-        liefert, aber im nicht‑Timestamp‑Modus.
+        Sicherer Aufruf für nicht‑Timestamp‑Modus.
+
+        Args:
+            audio_data: Die zu transkribierenden PCM‑Daten.
+            max_retries: Wird ignoriert (Dummy braucht keine Wiederholungen).
+
+        Returns:
+            Ein ``TranscriptionResult`` oder None.
         """
         result = self.transcribe_audio(audio_data, include_timestamps=False)
-        if isinstance(result, list) and result:
-            return result[0]
+        if isinstance(result, list):
+            return result[0] if result else None
         return result
+
+    def transcribe_with_language(
+        self,
+        audio_data: bytes,
+        language: Optional[str] = None,
+        include_timestamps: bool = False,
+    ) -> Any:
+        """
+        Transkribiert mit temporärer Sprachvorgabe.
+
+        Args:
+            audio_data: PCM‑Daten.
+            language: Optionaler Sprachcode.
+            include_timestamps: Wenn True, Liste von Segmenten.
+
+        Returns:
+            Transkriptionsergebnis(se).
+        """
+        with self._state_lock:
+            original_forced = self.forced_language
+            if language is not None:
+                self.forced_language = language
+
+        try:
+            result = self.transcribe_audio(audio_data, include_timestamps)
+            return result
+        finally:
+            with self._state_lock:
+                self.forced_language = original_forced
 
     def emergency_fallback_transcription(
         self, audio_data: Union[bytes, Any]
     ) -> Optional[TranscriptionResult]:
-        """Notfall‑Methode – identisch zu safe_transcribe."""
-        return self.safe_transcribe(audio_data)
+        """
+        Notfall‑Transkription – identisch zu ``safe_transcribe``.
 
-    def is_functional(self) -> bool:
-        """Gibt immer False zurück, da es sich um eine Dummy‑Engine handelt."""
-        return False
+        Args:
+            audio_data: PCM‑Daten (Bytes oder numpy‑Array).
 
-    def get_current_model(self) -> str:
-        """Gibt den Namen des aktuell geladenen Modells zurück."""
-        with self._lock:
-            return self.model_size
-
-    def is_model_loading(self) -> bool:
-        """Gibt immer False zurück (kein asynchrones Laden)."""
-        return False
-
-    def reload_model(self, model_size: str) -> bool:
-        """Simuliert das Neuladen eines Modells."""
-        with self._lock:
-            self.model_size = model_size
-            logger.info(f"Dummy: Modell auf '{model_size}' gewechselt")
-            return True
+        Returns:
+            Ein ``TranscriptionResult`` oder None.
+        """
+        if isinstance(audio_data, bytes):
+            return self.safe_transcribe(audio_data)
+        # Bei numpy‑Arrays: in Bytes konvertieren (Dummy)
+        try:
+            import numpy as np
+            if isinstance(audio_data, np.ndarray):
+                raw = audio_data.astype(np.int16).tobytes()
+                return self.safe_transcribe(raw)
+        except ImportError:
+            pass
+        return self.safe_transcribe(b"")
 
     def test_model_functionality(self) -> bool:
-        """Gibt immer True zurück (Dummy ist funktional)."""
+        """
+        Simuliert einen Funktionstest.
+
+        Returns:
+            Immer True – ein Dummy ist „funktional“.
+        """
         return True
 
-    def set_vad_fallback_enabled(self, enabled: bool) -> None:
+    # -------------------------------------------------------------------------
+    #  Methoden, die von der GUI erwartet werden (keine AttributeError mehr)
+    # -------------------------------------------------------------------------
+
+    def _force_model_cleanup(self) -> None:
         """
-        Aktiviert oder deaktiviert den VAD‑Fallback.
-        Dummy‑Implementierung – hat keine Wirkung, speichert nur den Zustand.
+        Simuliert das Entladen des Modells aus dem VRAM.
+        Wird von ``DragonWhispererGUI._check_vram_idle`` aufgerufen.
         """
         with self._lock:
-            self._vad_fallback_enabled = enabled
-            logger.debug(f"Dummy: VAD‑Fallback auf {enabled} gesetzt")
+            self._model_loaded_flag = False
+            self._last_result = None
+            self._last_audio_hash = None
+
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "engine",
+                "Dummy: _force_model_cleanup() aufgerufen – Cache geleert",
+            )
+
+    def get_hardware_diagnostics(self) -> Dict[str, Any]:
+        """
+        Liefert Diagnosedaten über die simulierte Hardware.
+
+        Returns:
+            Dictionary mit Dummy‑Werten.
+        """
+        return {
+            "device": self.device,
+            "compute_type": self.compute_type,
+            "cuda_available": False,
+            "model_loaded": self.model_size,
+            "model_backend": "dummy",
+            "last_oom": False,
+            "gpu_acceleration_enabled": False,
+            "gpu_name": "Dummy GPU",
+            "compute_capability": "0.0",
+            "vram_free_gb": None,
+            "vram_required_gb": None,
+            "cpu_features": {"avx2": False, "avx512": False},
+            "cpu_count": os.cpu_count(),
+            "pytorch_version": "not installed",
+            "cuda_version": None,
+            "forced_language": self.forced_language,
+            "last_detected_language": None,
+        }
 
     def set_gpu_acceleration(self, enabled: bool) -> None:
         """
-        Aktiviert oder deaktiviert die GPU‑Beschleunigung.
-        Dummy‑Implementierung – hat keine Wirkung.
+        Simuliert das Umschalten der GPU‑Beschleunigung.
+
+        Args:
+            enabled: True, wenn GPU verwendet werden soll.
         """
-        logger.debug(f"Dummy: GPU‑Acceleration auf {enabled} gesetzt (ignoriert)")
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "engine",
+                f"Dummy: set_gpu_acceleration({enabled}) – ignoriert",
+            )
+
+    def set_vad_fallback_enabled(self, enabled: bool) -> None:
+        """
+        Simuliert das Aktivieren/Deaktivieren des VAD‑Fallbacks.
+
+        Args:
+            enabled: True, wenn VAD‑Fallback aktiv sein soll.
+        """
+        with self._lock:
+            self._vad_fallback_enabled = enabled
+
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "engine",
+                f"Dummy: VAD‑Fallback auf {enabled} gesetzt",
+            )
+
+    def reset_fallback_state(self) -> None:
+        """
+        Setzt den Sprach‑Fallback‑Zustand zurück.
+        Wird nach jedem Stream vom AudioProcessor aufgerufen.
+        """
+        with self._state_lock:
+            self.forced_language = None
+
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "engine",
+                "Dummy: reset_fallback_state() – forced_language = None",
+            )
+
+    # -------------------------------------------------------------------------
+    #  Validierung und Hilfsmethoden
+    # -------------------------------------------------------------------------
 
     def validate_audio_data(self, audio_data: bytes) -> Tuple[bool, str]:
-        """Überprüft, ob Audiodaten gültig sind (minimale Prüfung)."""
+        """
+        Validiert Audiodaten (minimale Prüfung).
+
+        Args:
+            audio_data: Die zu prüfenden PCM‑Daten.
+
+        Returns:
+            (True, "OK") oder (False, Fehlermeldung).
+        """
         if not isinstance(audio_data, bytes):
             return False, "Audio data must be bytes"
         if len(audio_data) == 0:
             return False, "Audio data is empty"
+        # Dummy prüft nicht auf Stille – wir wollen auch leere Puffer zulassen
         return True, "Valid"
 
     def is_valid_segment(self, text: str, confidence: float) -> bool:
-        """Prüft, ob ein Segment gültig ist (minimale Prüfung)."""
+        """
+        Prüft, ob ein Transkriptionssegment gültig ist.
+
+        Args:
+            text: Der Text des Segments.
+            confidence: Der Konfidenzwert.
+
+        Returns:
+            True, wenn der Text nicht leer ist.
+        """
         return bool(text and text.strip())
 
     def clear_cache(self) -> None:
-        """Leert den internen Cache."""
+        """
+        Leert den internen Cache (Audiodaten und letztes Ergebnis).
+        """
         with self._lock:
             self._audio_cache.clear()
             self._last_result = None
             self._last_audio_hash = None
 
-    def dispose(self) -> None:
-        """Gibt alle Ressourcen frei."""
-        with self._lock:
-            self._disposing = True
-            self._audio_cache.clear()
-            self._last_result = None
-            self._last_audio_hash = None
-        logger.info("🧹 DummyTranscriptionEngine disposed")
+        if DEBUG_LEVEL >= 3:
+            log_debug("engine", "Dummy: Cache geleert")
 
     # -------------------------------------------------------------------------
-    # Zusätzliche Kompatibilitätsmethoden (von GUI erwartet)
+    #  Ressourcen‑Management
     # -------------------------------------------------------------------------
+
     def get_status(self) -> Dict[str, Any]:
-        """Gibt einen Status‑Dictionary zurück (für Statistiken)."""
+        """
+        Gibt einen Status‑Dictionary zurück (für die GUI‑Statistiken).
+
+        Returns:
+            Dictionary mit Statusinformationen.
+        """
         return {
             "model": self.model_size,
             "device": self.device,
@@ -11233,10 +11658,52 @@ class DummyTranscriptionEngine:
             "backend": "dummy",
             "functional": False,
             "demo_mode": True,
+            "forced_language": self.forced_language,
+            "cache_size": len(self._audio_cache),
+            "model_loaded": self._model_loaded_flag,
         }
 
+    def dispose(self) -> None:
+        """
+        Gibt alle Ressourcen der Dummy‑Engine frei.
+        Idempotent und thread‑sicher.
+        """
+        with self._lock:
+            if self._disposing:
+                return
+            self._disposing = True
+
+        if DEBUG_LEVEL >= 3:
+            log_debug("engine", "Dummy: dispose() aufgerufen")
+
+        # Cache leeren
+        self.clear_cache()
+
+        # Eventuell gehaltene Threads informieren
+        self._model_load_stop_event.set()
+
+        # Garbage Collection anregen
+        gc.collect()
+
+        if DEBUG_LEVEL >= 2:
+            log_debug("engine", "DummyTranscriptionEngine disposed")
+
+    # -------------------------------------------------------------------------
+    #  Spezielle Dunder‑Methoden
+    # -------------------------------------------------------------------------
+
     def __repr__(self) -> str:
-        return f"<DummyTranscriptionEngine model='{self.model_size}'>"
+        with self._lock:
+            cache_count = len(self._audio_cache)
+        return (
+            f"<DummyTranscriptionEngine "
+            f"model='{self.model_size}' "
+            f"lang={self.forced_language or 'auto'} "
+            f"cache={cache_count}/{self._cache_max_size}>"
+        )
+
+    def __str__(self) -> str:
+        return f"DummyTranscriptionEngine (model={self.model_size})"
 
 
 # =============================================================================
@@ -18158,6 +18625,11 @@ class ExportManager:
 class ResourceManager:
     """
     Zentrale Verwaltung von Systemressourcen (Prozesse, Threads, temporäre Dateien).
+
+    **Verwendung:**
+        - ``register_*()``-Methoden fügen Ressourcen hinzu.
+        - ``dispose()`` (öffentlich) oder ``cleanup()`` führen die Bereinigung durch.
+        - ``_atexit_cleanup()`` stellt sicher, dass auch bei Programmabbruch aufgeräumt wird.
     """
 
     __slots__ = (
@@ -18183,7 +18655,6 @@ class ResourceManager:
         self._psutil = None
         try:
             import psutil
-
             self._psutil = psutil
         except ImportError:
             pass
@@ -18361,31 +18832,27 @@ class ResourceManager:
             temp_files_to_delete = self.temp_files[:]
         for temp_file in temp_files_to_delete:
             if time.time() - start_time > timeout:
-                logger.warning(
-                    "⚠️ Cleanup timeout – breche Löschen temporärer Dateien ab"
-                )
+                logger.warning("⚠️ Cleanup timeout – breche Löschen temporärer Dateien ab")
                 break
             try:
                 if os.path.exists(temp_file):
                     os.unlink(temp_file)
                     logger.debug(f"🗑️ Temporäre Datei gelöscht: {temp_file}")
             except (OSError, PermissionError) as e:
-                logger.warning(
-                    f"⚠️ Konnte temporäre Datei {temp_file} nicht löschen: {e}"
-                )
+                logger.warning(f"⚠️ Konnte temporäre Datei {temp_file} nicht löschen: {e}")
             finally:
                 with self._lock:
                     if temp_file in self.temp_files:
                         self.temp_files.remove(temp_file)
 
-        # 4. GPU-Cache leeren (optional)
+        # 4. GPU-Cache leeren (nur wenn Torch bereits funktionsfähig geladen wurde)
         try:
-            import torch
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                logger.debug("🧹 GPU-Cache geleert")
-        except ImportError:
+            if "torch" in sys.modules:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    logger.debug("🧹 GPU-Cache geleert")
+        except Exception:
             pass
 
         # 5. Garbage Collection
@@ -18394,8 +18861,15 @@ class ResourceManager:
         logger.info("✅ ResourceManager: Alle Ressourcen bereinigt")
         return True
 
+    # -------------------------------------------------------------------------
+    # Einheitliche dispose()-Schnittstelle für andere Manager
+    # -------------------------------------------------------------------------
     def dispose(self) -> None:
-        """Öffentliche Methode zum Entsorgen der Ressourcen (Alias für cleanup)."""
+        """
+        Öffentliche Methode zum Entsorgen der Ressourcen.
+        Wird von ``DragonWhispererGUI._cleanup_resources`` aufgerufen
+        und leitet intern auf ``cleanup()`` weiter.
+        """
         self.cleanup()
 
     # -------------------------------------------------------------------------
@@ -18413,7 +18887,6 @@ class ResourceManager:
             fallback_kill_wait=1.0,
             stats_callback=None,
         )
-
 
 class LanguageDetector:
     """
@@ -25031,11 +25504,36 @@ class InstallDependencyDialog(BaseDialog):
     bietet Live-Feedback während langer Vorgänge und enthält eine spezielle
     Funktion zur Aktualisierung kritischer Pakete (z. B. numpy, faster-whisper).
 
+    **Optimierungen gegenüber der Basisversion:**
+        - Vorauswahl der Häkchen nur für **kritische** Pakete (ffmpeg, yt-dlp,
+          numpy, torch, faster-whisper, deep-translator). Optionale Tools (VLC,
+          Ollama, Piper, espeak) bleiben abgewählt.
+        - Verbesserte VLC‑Erkennung unter Windows (Standard‑Installationspfade).
+        - Detaillierte Debug‑Ausgaben bei `DEBUG_LEVEL >= 3`.
+        - Robuster Umgang mit nicht verfügbaren Paketmanagern und fehlenden
+          Berechtigungen.
+        - Optische Trennung zwischen kritischen und optionalen Paketen durch
+          Labels und Tooltips.
+        - Automatische Aktualisierung der Statusanzeige nach Installationen.
+        - Mausrad-Unterstützung im gesamten Dialog (Canvas‑basiertes Scrollen).
+
     Autor: Dragon Whisperer Team
-    Version: 6.0 – „Der unverwüstliche Paket-Drache“
+    Version: 7.0 – „Der benutzerfreundliche Paket-Drache“
     """
 
+    # -------------------------------------------------------------------------
     #  Konstanten
+    # -------------------------------------------------------------------------
+    CRITICAL_SYSTEM_PACKAGES: ClassVar[Set[str]] = {"ffmpeg", "yt-dlp", "numpy"}
+    CRITICAL_PYTHON_PACKAGES: ClassVar[Set[str]] = {
+        "numpy",
+        "torch",
+        "faster-whisper",
+        "deep-translator",
+        "scipy",
+        "psutil",
+    }
+
     SYSTEM_PACKAGES = {
         "ffmpeg": {"apt": "ffmpeg", "pacman": "ffmpeg", "brew": "ffmpeg", "winget": "FFmpeg"},
         "yt-dlp": {"apt": "yt-dlp", "pacman": "yt-dlp", "brew": "yt-dlp", "pip": "yt-dlp"},
@@ -25070,8 +25568,6 @@ class InstallDependencyDialog(BaseDialog):
         ("pynvml", "pynvml (detaillierte GPU-Statistiken)", lambda: importlib.util.find_spec("pynvml") is not None),
         ("requests", "requests (HTTP, für Ollama & Piper-Downloads)", lambda: OLLAMA_AVAILABLE),
     ]
-
-    CRITICAL_PACKAGES = ["numpy", "scipy", "faster-whisper", "yt-dlp", "torch"]
 
     PIPER_VOICES = {
         # --- Europäische Sprachen ---
@@ -25108,6 +25604,9 @@ class InstallDependencyDialog(BaseDialog):
         self._closed = False
         self._active_threads: List[threading.Thread] = []
 
+        # VLC-Erkennung (Windows-Pfade + PATH)
+        self._vlc_installed = self._is_vlc_installed()
+
         super().__init__(
             parent,
             "🐉 Abhängigkeiten installieren / aktualisieren",
@@ -25116,6 +25615,9 @@ class InstallDependencyDialog(BaseDialog):
             modal=True,
         )
 
+    # -------------------------------------------------------------------------
+    #  Paketmanager & externe Tool-Erkennung
+    # -------------------------------------------------------------------------
     def _detect_package_manager(self) -> str:
         """Ermittelt den verfügbaren Systempaketmanager."""
         if IS_WINDOWS:
@@ -25129,10 +25631,46 @@ class InstallDependencyDialog(BaseDialog):
                 return "pacman"
             return "manual"
 
+    @classmethod
+    def _is_vlc_installed(cls) -> bool:
+        """Prüft, ob VLC installiert ist (PATH + typische Windows-Pfade)."""
+        if shutil.which("vlc"):
+            return True
+        if IS_WINDOWS:
+            typical_paths = [
+                r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+                r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
+            ]
+            for p in typical_paths:
+                if os.path.exists(p):
+                    return True
+        return False
+
+    # -------------------------------------------------------------------------
     #  UI-Aufbau
+    # -------------------------------------------------------------------------
     def build_ui(self) -> None:
+        """
+        Erstellt die vollständige Benutzeroberfläche des Installations‑Dialogs.
+
+        Enthält:
+            - Systempakete mit Hervorhebung kritischer Tools
+            - Python‑Pakete mit optionaler Vorauswahl
+            - Piper‑Stimmen
+            - Update‑Bereich
+            - Ausgabebereich
+            - Steuerungs‑Buttons
+        Am Ende wird die Mausrad‑Steuerung für **alle** Widgets im Dialog
+        eingerichtet, sodass das Scrollen im gesamten Fenster funktioniert.
+        Zusätzlich wird unter Windows ohne FFmpeg ein Hinweis zur einfachen
+        Winget‑Installation eingeblendet.
+        """
+        # -----------------------------------------------------------------
         # Scrollbarer Hauptbereich
-        canvas = tk.Canvas(self.main, bg=CURRENT_THEME.BG_PRIMARY, highlightthickness=0)
+        # -----------------------------------------------------------------
+        canvas = tk.Canvas(
+            self.main, bg=CURRENT_THEME.BG_PRIMARY, highlightthickness=0
+        )
         scrollbar = tk.Scrollbar(self.main, orient="vertical", command=canvas.yview)
         self.scrollable_frame = tk.Frame(canvas, bg=CURRENT_THEME.BG_PRIMARY)
 
@@ -25145,7 +25683,7 @@ class InstallDependencyDialog(BaseDialog):
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        # Mausrad-Scrolling
+        # Mausrad-Funktionen (greifen auf das Canvas zu)
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
@@ -25155,11 +25693,9 @@ class InstallDependencyDialog(BaseDialog):
             elif event.num == 5:
                 canvas.yview_scroll(1, "units")
 
-        canvas.bind("<MouseWheel>", _on_mousewheel)
-        canvas.bind("<Button-4>", _on_mousewheel_linux)
-        canvas.bind("<Button-5>", _on_mousewheel_linux)
-
+        # -----------------------------------------------------------------
         # 1. Systempakete
+        # -----------------------------------------------------------------
         sys_frame = tk.LabelFrame(
             self.scrollable_frame,
             text="🖥️ Systempakete (externe Tools)",
@@ -25173,7 +25709,13 @@ class InstallDependencyDialog(BaseDialog):
 
         self.sys_vars: Dict[str, tk.BooleanVar] = {}
         for pkg_name, pkg_data in self.SYSTEM_PACKAGES.items():
-            if shutil.which(pkg_name) is not None:
+            # Prüfen, ob das Paket bereits verfügbar ist
+            if pkg_name == "vlc":
+                installed = self._vlc_installed
+            else:
+                installed = shutil.which(pkg_name) is not None
+
+            if installed:
                 tk.Label(
                     sys_frame,
                     text=f"✅ {pkg_name} (bereits installiert)",
@@ -25184,10 +25726,11 @@ class InstallDependencyDialog(BaseDialog):
                 continue
 
             if self.pkg_manager in pkg_data or "pip" in pkg_data or "fallback" in pkg_data:
-                var = tk.BooleanVar(value=True)
+                is_critical = pkg_name in self.CRITICAL_SYSTEM_PACKAGES
+                var = tk.BooleanVar(value=is_critical)
                 cb = tk.Checkbutton(
                     sys_frame,
-                    text=f"{pkg_name}",
+                    text=f"{pkg_name} {'⚠️ kritisch' if is_critical else '(optional)'}",
                     variable=var,
                     bg=CURRENT_THEME.BG_SECONDARY,
                     fg=CURRENT_THEME.TEXT_PRIMARY,
@@ -25197,7 +25740,74 @@ class InstallDependencyDialog(BaseDialog):
                 )
                 cb.pack(fill="x", pady=1)
                 self.sys_vars[pkg_name] = var
-                ToolTip(cb, f"Installiert {pkg_name} über {self.pkg_manager or 'Fallback'}")
+                tip = f"Installiert {pkg_name} über {self.pkg_manager or 'Fallback'}"
+                if is_critical:
+                    tip += "\n(⚠️ Für den Betrieb zwingend erforderlich)"
+                ToolTip(cb, tip)
+
+        # -----------------------------------------------------------------
+        # Spezieller Hinweis für Windows: FFmpeg einfach über Winget installieren
+        # -----------------------------------------------------------------
+        if (
+            IS_WINDOWS
+            and not shutil.which("ffmpeg")
+            and "ffmpeg" in self.SYSTEM_PACKAGES
+        ):
+            hint_frame = tk.Frame(
+                sys_frame,
+                bg=CURRENT_THEME.BG_SECONDARY,
+                padx=5,
+                pady=5,
+            )
+            hint_frame.pack(fill="x", pady=(8, 2))
+
+            tk.Label(
+                hint_frame,
+                text="📌 So installieren Sie FFmpeg ganz einfach unter Windows:",
+                bg=CURRENT_THEME.BG_SECONDARY,
+                fg=CURRENT_THEME.TEXT_ACCENT,
+                font=Fonts.SUBTITLE,
+                anchor="w",
+            ).pack(fill="x")
+
+            steps = (
+                "1. Startmenü öffnen, „cmd“ eingeben und Enter drücken\n"
+                "2. Im schwarzen Fenster folgenden Befehl ausführen:\n"
+                "   winget install --source winget Gyan.FFmpeg\n"
+                "3. Warten, bis die Installation abgeschlossen ist\n"
+                "4. Die Eingabeaufforderung schließen\n"
+                "5. Dragon Whisperer neu starten (am besten aus einer frisch\n"
+                "   geöffneten Eingabeaufforderung oder Verknüpfung)\n"
+            )
+            tk.Label(
+                hint_frame,
+                text=steps,
+                bg=CURRENT_THEME.BG_SECONDARY,
+                fg=CURRENT_THEME.TEXT_PRIMARY,
+                font=Fonts.PRIMARY,
+                justify="left",
+            ).pack(fill="x", pady=(4, 0))
+
+            # Button, um den Befehl direkt in die Zwischenablage zu kopieren
+            def _copy_ffmpeg_cmd():
+                try:
+                    self.dialog.clipboard_clear()
+                    self.dialog.clipboard_append("winget install --source winget Gyan.FFmpeg")
+                    self.status_var.set("📋 Befehl kopiert!")
+                except tk.TclError:
+                    pass
+
+            copy_btn = tk.Button(
+                hint_frame,
+                text="📋 Befehl kopieren",
+                command=_copy_ffmpeg_cmd,
+                bg=CURRENT_THEME.BG_TERTIARY,
+                fg=CURRENT_THEME.TEXT_PRIMARY,
+                font=("Segoe UI", 8),
+                padx=8,
+                pady=2,
+            )
+            copy_btn.pack(side="left", pady=(4, 0))
 
         if self.pkg_manager == "manual":
             tk.Label(
@@ -25219,7 +25829,9 @@ class InstallDependencyDialog(BaseDialog):
                 justify="left",
             ).pack(fill="x", pady=2)
 
+        # -----------------------------------------------------------------
         # 2. Python-Pakete
+        # -----------------------------------------------------------------
         py_frame = tk.LabelFrame(
             self.scrollable_frame,
             text="🐍 Python-Pakete (pip)",
@@ -25241,10 +25853,11 @@ class InstallDependencyDialog(BaseDialog):
         for i, (pkg_name, display_text, check_func) in enumerate(self.PYTHON_PACKAGES):
             target = left_col if i < half else right_col
             if not check_func():
-                var = tk.BooleanVar(value=True)
+                is_critical = pkg_name in self.CRITICAL_PYTHON_PACKAGES
+                var = tk.BooleanVar(value=is_critical)
                 cb = tk.Checkbutton(
                     target,
-                    text=display_text,
+                    text=f"{display_text} {'⚠️' if is_critical else ''}",
                     variable=var,
                     bg=CURRENT_THEME.BG_SECONDARY,
                     fg=CURRENT_THEME.TEXT_PRIMARY,
@@ -25254,7 +25867,10 @@ class InstallDependencyDialog(BaseDialog):
                 )
                 cb.pack(fill="x", pady=1)
                 self.py_vars[pkg_name] = var
-                ToolTip(cb, f"Installiert {pkg_name} mit pip")
+                tip = f"Installiert {pkg_name} mit pip"
+                if is_critical:
+                    tip += "\n(⚠️ Für den Betrieb zwingend erforderlich)"
+                ToolTip(cb, tip)
             else:
                 tk.Label(
                     target,
@@ -25264,7 +25880,9 @@ class InstallDependencyDialog(BaseDialog):
                     anchor="w",
                 ).pack(fill="x", pady=1)
 
+        # -----------------------------------------------------------------
         # 3. Piper-Stimmen
+        # -----------------------------------------------------------------
         voice_frame = tk.LabelFrame(
             self.scrollable_frame,
             text="🎤 Piper-Stimmen (hochwertige TTS)",
@@ -25305,10 +25923,13 @@ class InstallDependencyDialog(BaseDialog):
         for voice_name, display_name in self.PIPER_VOICES.items():
             model_path = os.path.join(cache_dir, f"{voice_name}.onnx")
             json_path = os.path.join(cache_dir, f"{voice_name}.onnx.json")
-            fully_installed = (os.path.exists(model_path) and os.path.getsize(model_path) > 0 and
-                               os.path.exists(json_path) and os.path.getsize(json_path) > 0)
+            fully_installed = (
+                os.path.exists(model_path) and os.path.getsize(model_path) > 0 and
+                os.path.exists(json_path) and os.path.getsize(json_path) > 0
+            )
 
             if not fully_installed:
+                # Piper-Stimmen sind nie kritisch → kein Haken
                 var = tk.BooleanVar(value=False)
                 cb = tk.Checkbutton(
                     voice_buttons_frame,
@@ -25339,7 +25960,9 @@ class InstallDependencyDialog(BaseDialog):
                 col = 0
                 row += 1
 
+        # -----------------------------------------------------------------
         # 4. Update-Bereich
+        # -----------------------------------------------------------------
         update_frame = tk.LabelFrame(
             self.scrollable_frame,
             text="🔄 Updates für pip-Pakete",
@@ -25365,7 +25988,7 @@ class InstallDependencyDialog(BaseDialog):
         )
         self.update_critical_btn.pack(side="left", padx=5)
         ToolTip(self.update_critical_btn,
-                f"Aktualisiert nur die wichtigsten Pakete:\n{', '.join(self.CRITICAL_PACKAGES)}")
+                f"Aktualisiert nur die wichtigsten Pakete:\n{', '.join(self.CRITICAL_PYTHON_PACKAGES)}")
 
         self.update_all_btn = tk.Button(
             btn_row,
@@ -25388,7 +26011,9 @@ class InstallDependencyDialog(BaseDialog):
         )
         self.update_status_label.pack(side="left", padx=10)
 
+        # -----------------------------------------------------------------
         # 5. Ausgabebereich
+        # -----------------------------------------------------------------
         output_frame = tk.LabelFrame(
             self.scrollable_frame,
             text="📋 Installationsausgabe",
@@ -25412,7 +26037,9 @@ class InstallDependencyDialog(BaseDialog):
         self.output_text.pack(fill="both", expand=True, pady=5)
         self._append_output("🐉 Bereit zum Fliegen. Wähle Pakete oder starte ein Update.\n")
 
+        # -----------------------------------------------------------------
         # 6. Steuerungs-Buttons
+        # -----------------------------------------------------------------
         btn_frame = tk.Frame(self.scrollable_frame, bg=CURRENT_THEME.BG_PRIMARY)
         btn_frame.pack(fill="x", pady=10)
 
@@ -25456,7 +26083,7 @@ class InstallDependencyDialog(BaseDialog):
             font=Fonts.SMALL,
         ).pack(fill="x", pady=(5, 0))
 
-        # Stilistische Effekte
+        # Stilistische Hover-Effekte
         for btn in (self.install_btn, self.update_critical_btn, self.update_all_btn):
             btn.bind("<Enter>", lambda e, b=btn: b.config(bg=CURRENT_THEME.DRAGON_BLUE))
             btn.bind("<Leave>", lambda e, b=btn: b.config(
@@ -25465,22 +26092,35 @@ class InstallDependencyDialog(BaseDialog):
                 CURRENT_THEME.DRAGON_GREEN
             ))
 
+        # -----------------------------------------------------------------
+        # 7. Mausrad-Unterstützung für den gesamten Dialog
+        # -----------------------------------------------------------------
+        def bind_mousewheel(widget):
+            """Bindet die Mausrad-Events rekursiv an alle Kinder."""
+            try:
+                widget.bind("<MouseWheel>", _on_mousewheel)
+                widget.bind("<Button-4>", _on_mousewheel_linux)
+                widget.bind("<Button-5>", _on_mousewheel_linux)
+            except tk.TclError:
+                pass
+            try:
+                for child in widget.winfo_children():
+                    bind_mousewheel(child)
+            except tk.TclError:
+                pass
+
+        bind_mousewheel(self.dialog)
+
+        # -----------------------------------------------------------------
+        # 8. Geometrie-Aktualisierung
+        # -----------------------------------------------------------------
         self.scrollable_frame.update_idletasks()
         canvas.configure(scrollregion=canvas.bbox("all"))
-        
-        def bind_children(widget):
-            widget.bind("<MouseWheel>", _on_mousewheel)
-            widget.bind("<Button-4>", _on_mousewheel_linux)
-            widget.bind("<Button-5>", _on_mousewheel_linux)
-            for child in widget.winfo_children():
-                 bind_children(child)
 
+    # -------------------------------------------------------------------------
     #  Sichere GUI-Updates aus Hintergrund-Threads
+    # -------------------------------------------------------------------------
     def _safe_after(self, delay_ms: int, callback: Callable, *args, **kwargs) -> None:
-        """
-        Plant einen Callback, der nur ausgeführt wird, wenn der Dialog noch existiert
-        und die Widgets gültig sind. Fängt `TclError` ab und verhindert Abstürze.
-        """
         def wrapper():
             if self._closed or not self.dialog.winfo_exists():
                 return
@@ -25491,7 +26131,6 @@ class InstallDependencyDialog(BaseDialog):
         self.dialog.after(delay_ms, wrapper)
 
     def _append_output(self, text: str) -> None:
-        """Sicherer Append, der auch nach Zerstörung des Widgets keine Fehler wirft."""
         self._safe_after(0, lambda: self._output_text_insert(text))
 
     def _output_text_insert(self, text: str) -> None:
@@ -25500,7 +26139,6 @@ class InstallDependencyDialog(BaseDialog):
             self.output_text.see("end")
 
     def _enable_ui(self, enabled: bool) -> None:
-        """Aktiviert/deaktiviert alle UI-Elemente. Thread-sicher."""
         self._safe_after(0, lambda: self._enable_ui_gui(enabled))
 
     def _enable_ui_gui(self, enabled: bool) -> None:
@@ -25512,7 +26150,6 @@ class InstallDependencyDialog(BaseDialog):
                 widget.config(state=state)
         for var_dict in (self.sys_vars, self.py_vars, self.voice_vars):
             for var in var_dict.values():
-                # Checkbutton-Variable – das Widget selbst konfigurieren
                 widget = self._find_checkbutton_by_var(var)
                 if widget and widget.winfo_exists():
                     widget.config(state=state)
@@ -25522,72 +26159,26 @@ class InstallDependencyDialog(BaseDialog):
             self.cancel_btn.config(state="normal")
 
     def _find_checkbutton_by_var(self, var: tk.BooleanVar) -> Optional[tk.Checkbutton]:
-        """
-        Durchsucht rekursiv alle Kinder des scrollbaren Hauptframes nach einem
-        Checkbutton, dessen `variable`-Attribut mit der übergebenen BooleanVar
-        übereinstimmt.
-
-        Diese Methode wird von `_enable_ui_gui` verwendet, um die Checkbuttons
-        für Systempakete, Python-Pakete und Piper-Stimmen zu (de-)aktivieren.
-        Da die Checkbuttons in verschiedenen Unterframes (`sys_frame`, `py_frame`,
-        `voice_frame`) liegen, ist eine rekursive Suche erforderlich.
-
-        **Robustheit:**
-            - Die Methode greift nur auf `self.scrollable_frame` zu, das in
-              `build_ui` als Attribut gespeichert wird.
-            - Falls `self.scrollable_frame` nicht existiert oder bereits zerstört
-              wurde, wird `None` zurückgegeben.
-            - Die Suche ist breit angelegt und findet das Widget auch dann,
-              wenn es in weiteren Untercontainern verschachtelt ist.
-            - Tkinter-Fehler während der Suche werden abgefangen und führen
-              zu `None`.
-
-        Args:
-            var: Die `tk.BooleanVar`, deren zugehöriger Checkbutton gesucht wird.
-
-        Returns:
-            Das `tk.Checkbutton`-Widget oder `None`, wenn keines gefunden wurde
-            oder der Dialog bereits geschlossen ist.
-        """
-        # Prüfen, ob das Hauptframe existiert und der Dialog noch offen ist
         if not hasattr(self, "scrollable_frame") or self.scrollable_frame is None:
-            if DEBUG_LEVEL >= 3:
-                log_debug("install", "_find_checkbutton_by_var: scrollable_frame not available")
             return None
-
         if self._closed or not self.dialog.winfo_exists():
-            if DEBUG_LEVEL >= 3:
-                log_debug("install", "_find_checkbutton_by_var: dialog closed or destroyed")
             return None
 
-        # Rekursive Hilfsfunktion, um alle Kinder zu durchsuchen
-        def search_widget(parent: tk.Widget) -> Optional[tk.Checkbutton]:
+        def search_widget(parent):
             try:
                 for child in parent.winfo_children():
-                    # Prüfen, ob das aktuelle Kind der gesuchte Checkbutton ist
                     if isinstance(child, tk.Checkbutton):
-                        # `cget("variable")` liefert den internen Tk-Namen der Variable
                         if child.cget("variable") == str(var):
                             return child
-                    # Rekursiv in Untercontainern suchen (z. B. Frames, LabelFrames)
                     if child.winfo_children():
                         result = search_widget(child)
                         if result is not None:
                             return result
-            except tk.TclError as e:
-                # Widget wurde während der Suche zerstört – Suche abbrechen
-                if DEBUG_LEVEL >= 3:
-                    log_debug("install", f"TclError during widget search: {e}")
+            except tk.TclError:
                 return None
             return None
 
-        # Suche starten
-        result = search_widget(self.scrollable_frame)
-
-        if DEBUG_LEVEL >= 4 and result is None:
-            log_debug("install", f"_find_checkbutton_by_var: no Checkbutton found for var {var}")
-
-        return result
+        return search_widget(self.scrollable_frame)
 
     def _start_progress(self) -> None:
         self._safe_after(0, self._start_progress_gui)
@@ -25666,7 +26257,6 @@ class InstallDependencyDialog(BaseDialog):
     def _install_system_package(self, pkg: str) -> bool:
         pkg_data = self.SYSTEM_PACKAGES.get(pkg, {})
 
-        # 1. Versuch mit systemeigenem Paketmanager
         if self.pkg_manager in pkg_data:
             cmd = self._get_package_manager_command(pkg_data[self.pkg_manager])
             if cmd:
@@ -25681,12 +26271,10 @@ class InstallDependencyDialog(BaseDialog):
                         return self._run_fallback_install(pkg_data["fallback"])
                     return False
 
-        # 2. Versuch mit pip (falls angegeben)
         if "pip" in pkg_data:
             self._append_output(f"🐍 Installiere {pkg} über pip...\n")
             return self._install_python_packages([pkg_data["pip"]], upgrade=True)
 
-        # 3. Direkter Fallback
         if "fallback" in pkg_data:
             self._append_output(f"🔄 Verwende Fallback-Installation für {pkg}...\n")
             return self._run_fallback_install(pkg_data["fallback"])
@@ -25706,60 +26294,37 @@ class InstallDependencyDialog(BaseDialog):
         return []
 
     def _run_fallback_install(self, command: str) -> bool:
-        """
-        Führt eine Fallback-Installation durch, indem der Benutzer den Befehl manuell
-        ausführen muss. Aus Sicherheitsgründen wird KEIN automatischer Shell-Befehl
-        ausgeführt (kein shell=True). Der Befehl wird in der GUI angezeigt und
-        optional in die Zwischenablage kopiert. Der Benutzer wird gefragt, ob die
-        manuelle Installation erfolgreich war.
-        """
         if DEBUG_LEVEL >= 3:
             log_debug("install", f"_run_fallback_install called with command: {command}")
 
-        # Ergebnis-Container und Event für Thread-Synchronisation
         result_container = [False]
         user_responded = threading.Event()
-
-        # Timeout für Benutzerantwort (in Sekunden) - großzügig, da manuelle Installation Zeit braucht
         RESPONSE_TIMEOUT = 120.0
 
         def gui_interaction() -> None:
-            """Wird im Hauptthread ausgeführt."""
             try:
-                # Prüfen, ob Dialog noch existiert
                 if not self.dialog or not self.dialog.winfo_exists():
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("install", "Dialog existiert nicht mehr – breche GUI-Interaktion ab")
                     result_container[0] = False
                     user_responded.set()
                     return
 
-                # 1. Befehl in der Ausgabe anzeigen (threadsicher über _append_output, das intern _safe_after nutzt)
                 self._append_output(
                     f"\n⚠️  Aus Sicherheitsgründen wird der folgende Befehl NICHT automatisch ausgeführt.\n"
                     f"Bitte kopieren Sie ihn und führen Sie ihn manuell in einem Terminal aus:\n\n"
                     f"    {command}\n\n"
                 )
 
-                # 2. Versuche, den Befehl in die Zwischenablage zu kopieren
                 clipboard_success = False
                 try:
                     self.dialog.clipboard_clear()
                     self.dialog.clipboard_append(command)
                     clipboard_success = True
                     self._append_output("📋 Der Befehl wurde in die Zwischenablage kopiert.\n")
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("install", "Befehl erfolgreich in Zwischenablage kopiert")
                 except tk.TclError as e:
                     self._append_output(f"⚠️  Konnte Befehl nicht in Zwischenablage kopieren: {e}\n")
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("install", f"Clipboard error: {e}")
                 except Exception as e:
                     self._append_output(f"⚠️  Unerwarteter Fehler beim Kopieren: {e}\n")
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("install", f"Unexpected clipboard error: {e}")
 
-                # 3. Bestätigungsdialog anzeigen (modaler Dialog, blockiert GUI-Event-Loop)
                 message = (
                     f"Der folgende Befehl muss manuell in einem Terminal ausgeführt werden:\n\n"
                     f"{command}\n\n"
@@ -25770,68 +26335,97 @@ class InstallDependencyDialog(BaseDialog):
                     title="Manuelle Installation erforderlich",
                     message=message,
                     parent=self.dialog,
-                    timeout=RESPONSE_TIMEOUT  # Dialog schließt sich nach Timeout und gibt None zurück
+                    timeout=RESPONSE_TIMEOUT
                 )
 
-                # Auswerten der Antwort
                 if response is True:
                     self._append_output("✅ Manuelle Installation wurde vom Benutzer bestätigt.\n")
                     result_container[0] = True
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("install", "Benutzer bestätigte manuelle Installation")
                 elif response is False:
                     self._append_output("❌ Manuelle Installation wurde vom Benutzer abgebrochen.\n")
                     result_container[0] = False
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("install", "Benutzer brach manuelle Installation ab")
-                else:  # None -> Timeout oder Dialog geschlossen
+                else:
                     self._append_output("⏰ Zeitüberschreitung oder Abbruch durch Benutzer – Installation nicht bestätigt.\n")
                     result_container[0] = False
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("install", "Keine Antwort vom Benutzer (Timeout)")
 
             except Exception as e:
-                # Unerwarteter Fehler in der GUI-Interaktion
                 logger.error(f"Fehler in _run_fallback_install GUI-Interaktion: {e}", exc_info=True)
                 self._append_output(f"❌ Interner Fehler bei der Benutzerabfrage: {e}\n")
                 result_container[0] = False
             finally:
                 user_responded.set()
 
-        # GUI-Interaktion im Hauptthread starten
         if self.dialog and self.dialog.winfo_exists():
-            # Verwende after_idle für bessere Reaktionsfähigkeit
             self.dialog.after_idle(gui_interaction)
         else:
-            # Fallback: Dialog existiert nicht (z.B. im Headless-Modus)
             logger.warning("Kein GUI-Dialog verfügbar – Fallback-Installation kann nicht interaktiv bestätigt werden.")
             self._append_output(
                 f"\n⚠️  Fallback-Installation erfordert manuelle Ausführung des folgenden Befehls:\n"
                 f"    {command}\n"
                 f"Bitte führen Sie den Befehl selbst aus.\n"
             )
-            # Da wir nicht interagieren können, geben wir False zurück.
             return False
 
-        # Auf Antwort warten (mit Timeout, etwas länger als der Dialog-Timeout)
         if not user_responded.wait(timeout=RESPONSE_TIMEOUT + 5.0):
-            logger.warning("Timeout beim Warten auf Benutzerantwort in _run_fallback_install")
+            logger.warning("Timeout beim Warten auf Benutzerantwort")
             self._append_output("⏰ Zeitüberschreitung bei der Warte auf Benutzerantwort.\n")
             return False
 
         return result_container[0]
 
     def _install_python_packages(self, packages: List[str], upgrade: bool = False) -> bool:
+        """
+        Installiert oder aktualisiert eine Liste von Python‑Paketen via pip.
+        """
+        # -----------------------------------------------------------------
+        # 1. Eingangsvalidierung
+        # -----------------------------------------------------------------
+        if not packages:
+            self._append_output("ℹ️ Keine Python‑Pakete angegeben – überspringe.\n")
+            return True
+
+        # -----------------------------------------------------------------
+        # 2. Basisbefehl zusammenbauen
+        # -----------------------------------------------------------------
         python_exe = sys.executable
-        cmd = [python_exe, "-m", "pip", "install", "--no-cache-dir"]
+        cmd = [
+            python_exe,
+            "-m", "pip", "install",
+            "--no-cache-dir",
+            "--disable-pip-version-check",
+        ]
         if upgrade:
             cmd.append("--upgrade")
+        # User‑Flag nur außerhalb eines venv setzen
         if not self.in_venv:
             cmd.append("--user")
         cmd.extend(packages)
+
+        # -----------------------------------------------------------------
+        # 3. Umgebungsvariablen – maximal kompatibel
+        # -----------------------------------------------------------------
         env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        return self._run_subprocess(cmd, "pip install", env=env)
+        env["PYTHONUNBUFFERED"] = "1"   # Echtzeit‑Ausgabe im Log
+        env["PYTHONUTF8"] = "1"         # Behebt Encoding‑Fehler unter Windows (z. B. bei dimits)
+
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "install",
+                f"pip install: {' '.join(cmd)}",
+            )
+
+        # -----------------------------------------------------------------
+        # 4. Subprozess ausführen und Ergebnis zurückgeben
+        # -----------------------------------------------------------------
+        success = self._run_subprocess(cmd, f"pip install {' '.join(packages)}", env=env)
+
+        if not success and DEBUG_LEVEL >= 2:
+            log_debug(
+                "install",
+                f"pip install fehlgeschlagen für: {', '.join(packages)}",
+            )
+
+        return success
 
     def _download_piper_voices(self, voices: List[str]) -> bool:
         cache_dir = os.path.expanduser("~/.cache/piper")
@@ -25922,7 +26516,9 @@ class InstallDependencyDialog(BaseDialog):
 
         return overall_success
 
+    # -------------------------------------------------------------------------
     #  Update-Methoden
+    # -------------------------------------------------------------------------
     def update_all_pip_packages(self):
         self._append_output("\n📦 ALLE PIP-PAKETE AKTUALISIEREN\n")
         self.update_status_label.config(text="🔍 Suche veraltete Pakete...")
@@ -25936,17 +26532,8 @@ class InstallDependencyDialog(BaseDialog):
         thread.start()
 
     def _update_all_worker(self) -> None:
-        """
-        Worker-Thread für die Aktualisierung aller pip-Pakete.
-
-        Diese Methode läuft in einem Hintergrundthread und darf **keine**
-        direkten GUI-Zugriffe durchführen. Alle Aktualisierungen der
-        Benutzeroberfläche erfolgen über `self._safe_after`, das die
-        Existenz der Widgets prüft und `TclError` abfängt.
-        """
         success = False
         try:
-            # 1. Veraltete Pakete ermitteln
             self._append_output("\n📦 ERMITTLE VERALTETE PAKETE...\n")
             result = subprocess.run(
                 [sys.executable, "-m", "pip", "list", "--outdated", "--format=json"],
@@ -25966,7 +26553,6 @@ class InstallDependencyDialog(BaseDialog):
                 self.status_var.set("✅ Alle Pakete aktuell")
                 return
 
-            # 2. Pakete aktualisieren
             packages = [pkg["name"] for pkg in outdated]
             self._append_output(f"📦 Aktualisiere {len(packages)} Pakete...\n")
             for pkg in packages:
@@ -25991,11 +26577,8 @@ class InstallDependencyDialog(BaseDialog):
             self._append_output(f"\n❌ Fehler: {e}\n")
             self.status_var.set("❌ Fehler bei Aktualisierung")
         finally:
-            # 3. GUI zurücksetzen (sicher über _safe_after)
             self._stop_progress()
-
             def restore_ui():
-                """Setzt alle UI-Elemente in den Ausgangszustand zurück."""
                 if self._closed or not self.dialog.winfo_exists():
                     return
                 try:
@@ -26011,16 +26594,10 @@ class InstallDependencyDialog(BaseDialog):
                     self.update_status_label.config(text="")
                 except Exception:
                     pass
-
             self._safe_after(0, restore_ui)
-
-            # 4. Thread aus der aktiven Liste entfernen
             current = threading.current_thread()
             if current in self._active_threads:
                 self._active_threads.remove(current)
-
-            if DEBUG_LEVEL >= 3:
-                log_debug("install", f"_update_all_worker finished (success={success})")
 
     def update_critical_packages(self):
         self.update_critical_btn.config(state="disabled", text="⏳ Aktualisiere...")
@@ -26031,7 +26608,7 @@ class InstallDependencyDialog(BaseDialog):
         self._start_progress()
 
         self._append_output("\n⚠️ KRITISCHE PAKETE AKTUALISIEREN\n")
-        for pkg in self.CRITICAL_PACKAGES:
+        for pkg in self.CRITICAL_PYTHON_PACKAGES:
             self._append_output(f"  • {pkg}\n")
         self._append_output("\n")
 
@@ -26040,17 +26617,14 @@ class InstallDependencyDialog(BaseDialog):
         thread.start()
 
     def _update_critical_worker(self) -> None:
-        """
-        Worker-Thread für die Aktualisierung kritischer pip-Pakete.
-        """
         success = False
         try:
             self._append_output("\n⚠️ KRITISCHE PAKETE AKTUALISIEREN\n")
-            for pkg in self.CRITICAL_PACKAGES:
+            for pkg in self.CRITICAL_PYTHON_PACKAGES:
                 self._append_output(f"  • {pkg}\n")
             self._append_output("\n")
 
-            success = self._install_python_packages(self.CRITICAL_PACKAGES, upgrade=True)
+            success = self._install_python_packages(list(self.CRITICAL_PYTHON_PACKAGES), upgrade=True)
 
             if success:
                 self._append_output("\n✅ Kritische Pakete erfolgreich aktualisiert.\n")
@@ -26064,15 +26638,11 @@ class InstallDependencyDialog(BaseDialog):
             self._append_output(f"\n❌ Fehler: {e}\n")
             self.status_var.set("❌ Fehler bei Aktualisierung")
         finally:
-            # GUI zurücksetzen (sicher über _safe_after)
             self._stop_progress()
-
             def restore_ui():
-                """Setzt alle UI-Elemente in den Ausgangszustand zurück."""
                 if self._closed or not self.dialog.winfo_exists():
                     return
                 try:
-                    # Kritische-Update-Button wieder aktivieren
                     if self.update_critical_btn.winfo_exists():
                         self.update_critical_btn.config(
                             state="normal",
@@ -26093,18 +26663,14 @@ class InstallDependencyDialog(BaseDialog):
                     self.update_status_label.config(text="")
                 except Exception:
                     pass
-
             self._safe_after(0, restore_ui)
-
-            # Thread aus der aktiven Liste entfernen
             current = threading.current_thread()
             if current in self._active_threads:
                 self._active_threads.remove(current)
 
-            if DEBUG_LEVEL >= 3:
-                log_debug("install", f"_update_critical_worker finished (success={success})")
-
+    # -------------------------------------------------------------------------
     #  Helfer (UI, Prozess, Fortschritt)
+    # -------------------------------------------------------------------------
     def _run_subprocess(self, cmd: List[str], description: str = "", env: Optional[Dict] = None) -> bool:
         try:
             with self._process_lock:
@@ -26160,33 +26726,23 @@ class InstallDependencyDialog(BaseDialog):
         self._enable_ui(True)
 
     def close(self) -> None:
-        """Bricht laufende Installationen ab und schließt den Dialog."""
         if self._closed:
             return
         self._closed = True
-
-        # Alle laufenden Prozesse abbrechen
         self.cancel_installation()
-
-        # Auf aktive Worker-Threads warten (max. 1 Sekunde)
         for t in self._active_threads:
             if t.is_alive():
                 t.join(timeout=1.0)
                 if t.is_alive():
                     logger.debug(f"Worker-Thread {t.name} läuft noch – wird als Daemon fortgeführt")
-
         self._active_threads.clear()
         super().close()
-
 
 class AdvancedSettingsDialog:
     """
     Optimierter Dialog für erweiterte Einstellungen mit Tab‑Navigation,
     Lazy Loading, Live‑Validierung, verbesserter Suche, voller Theme‑Unterstützung
     und allen ursprünglichen Funktionen inkl. Paket‑Updates.
-
-    Diese Version enthält umfangreiche Fallbacks und eine robuste Fehlerbehandlung,
-    sodass sie auch bei fehlenden Theme‑Attributen oder globalen Konstanten stabil läuft.
     """
 
     # =========================================================================
@@ -27761,27 +28317,6 @@ class AdvancedSettingsDialog:
     ) -> bool:
         """
         Validiert eine numerische Eingabe in einem Widget (Spinbox, Entry, Combobox).
-
-        Diese Methode wird bei FocusOut-Ereignissen aufgerufen und prüft, ob der
-        eingegebene Wert innerhalb des erlaubten Bereichs liegt. Sie unterstützt
-        sowohl tkinter- als auch ttk-Widgets.
-
-        Bei einem ungültigen Wert wird das Widget visuell als fehlerhaft markiert:
-            - tk.Spinbox: roter Hintergrund
-            - ttk.Entry / ttk.Combobox: roter Hintergrund über den Style "Danger.TEntry"
-        Gleichzeitig wird die Fehlermeldung im internen Dictionary
-        `self._validation_errors` gespeichert, um beim Speichern eine Warnung
-        anzeigen zu können.
-
-        Args:
-            widget: Das zu validierende Widget (z. B. tk.Spinbox, ttk.Combobox).
-            var:   Die zugehörige Tkinter-Variable, die den aktuellen Wert hält.
-            min_val: Minimal erlaubter Wert.
-            max_val: Maximal erlaubter Wert.
-            is_int:  Wenn True, wird der Wert als Ganzzahl interpretiert.
-
-        Returns:
-            True, wenn der Wert gültig ist, sonst False.
         """
         # -----------------------------------------------------------------
         # 1. Wert aus der Variable auslesen und konvertieren
@@ -27913,29 +28448,6 @@ class AdvancedSettingsDialog:
     def _on_theme_selected(self, event: Optional[tk.Event] = None) -> None:
         """
         Wendet das ausgewählte Theme sofort als Live‑Vorschau an.
-
-        Diese Methode wird aufgerufen, wenn der Benutzer im Theme‑Dropdown
-        eine neue Option auswählt. Sie aktualisiert das gesamte Erscheinungsbild
-        des Dialogs und aller bereits geladenen Tabs, ohne dass der Dialog
-        geschlossen werden muss.
-
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - **Vollständige Widget‑Farbaktualisierung:** Rekursive Anpassung aller
-              tkinter‑Standardwidgets (Label, Button, Entry, Checkbutton, etc.)
-              im Dialog, sodass keine weißen Flächen oder unlesbare Texte nach
-              einem Theme‑Wechsel zurückbleiben.
-            - **Canvas‑Hintergrund‑Aktualisierung:** Alle Canvas‑Widgets in den
-              geladenen Tabs erhalten den neuen Hintergrund.
-            - **Robuste Fehlerbehandlung:** Jeder Aktualisierungsschritt ist in
-              `try/except` gekapselt; Fehler werden geloggt, aber nicht
-              propagiert.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
-            - **Korrekte Behandlung von ttk‑Styles:** Die Styles werden neu
-              konfiguriert, nachdem `self.gui.current_theme` aktualisiert wurde.
-            - **Aktualisierung der Tab‑Hintergründe:** Die Hintergrundfarbe der
-              Tab‑Frames wird explizit auf die neue `BG_PRIMARY` gesetzt.
-            - **Iterative Farbaktualisierung:** Vermeidet Rekursionstiefe und
-              behandelt auch ttk‑Widgets.
         """
         new_theme = self.theme_var.get()
         if not new_theme:
@@ -28865,9 +29377,7 @@ class ExitConfirmDialog(BaseDialog):
         else:
             self.controller.safe_exit()
 
-
 PlatformUtils.set_allowed_dirs(Config.ALLOWED_FILE_BASE_DIRS)
-
 
 class DragonWhispererGUI:
     """
@@ -29129,10 +29639,7 @@ class DragonWhispererGUI:
                     f"active_types={len(self.last_calls)}>"
                 )
 
-
-    # ------------------------------------------------------------------------
     # Dekorator für GUI‑Fehlerbehandlung
-    # ------------------------------------------------------------------------
     @staticmethod
     def gui_error_handler(func: Callable) -> Callable:
         """Dekorator für GUI‑Methoden: fängt Exceptions ab und zeigt sie an."""
@@ -29146,13 +29653,12 @@ class DragonWhispererGUI:
 
         return wrapper
 
-    # ------------------------------------------------------------------------
     # Konstruktor und Initialisierung
-    # ------------------------------------------------------------------------
     def __init__(self) -> None:
         """
         Initialisiert die DragonWhispererGUI – das Hauptfenster der Anwendung.
         """
+
         # -----------------------------------------------------------------
         # 0. Vorbereitung: RateLimiter und Shutdown-Flags
         # -----------------------------------------------------------------
@@ -29162,13 +29668,13 @@ class DragonWhispererGUI:
         self._exit_dialog_active = False
         self._cleanup_done = False
         self._shutdown_completed = False
+        self._dependency_issue = False            # True, wenn kritische Pakete fehlen
+        self._install_dialog_open = False         # Sperre für den Installationsdialog
 
         if DEBUG_LEVEL >= 3:
             log_debug("gui", "RateLimiter und Shutdown-Flags initialisiert")
 
-        # -----------------------------------------------------------------
         # 1. GUI-Grundzustände
-        # -----------------------------------------------------------------
         self.is_processing = False
         self.subtitle_mode = False
         self.exit_confirmed = False
@@ -29179,9 +29685,7 @@ class DragonWhispererGUI:
         self._progress_bar_started = False
         self.translate_active = True
 
-        # -----------------------------------------------------------------
         # 2. Executors (vorab, damit sie bei Fehlern verfügbar sind)
-        # -----------------------------------------------------------------
         try:
             self.translation_executor = ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="Translation"
@@ -29192,9 +29696,7 @@ class DragonWhispererGUI:
             logger.error(f"Fehler beim Erstellen des Translation-Executors: {e}")
             self.translation_executor = None
 
-        # -----------------------------------------------------------------
         # 3. Historien und Duplikatprüfung
-        # -----------------------------------------------------------------
         self._history_lock = threading.RLock()
         self._duplicate_lock = threading.RLock()
         self._last_transcription_text = ""
@@ -29204,29 +29706,21 @@ class DragonWhispererGUI:
         self.transcript_history: Deque[TranscriptionResult] = deque(maxlen=1000)
         self.translation_history: Deque[TranslationResult] = deque(maxlen=500)
 
-        # -----------------------------------------------------------------
         # 3a. Puffer für intelligente Segment-Zusammenführung
-        # -----------------------------------------------------------------
         self._pending_transcript_segment = None
         self._last_segment_end = 0.0
 
-        # -----------------------------------------------------------------
         # 4. GUI-Dialogverwaltung
-        # -----------------------------------------------------------------
         self._open_dialogs: List[tk.Toplevel] = []
 
-        # -----------------------------------------------------------------
         # 5. TTS-Grundzustände
-        # -----------------------------------------------------------------
         self._tts_active = False
         self._tts_lock = threading.RLock()
         self._tts_timer: Optional[str] = None
         self._pending_tts_transcript = ""
         self._pending_tts_translation = ""
 
-        # -----------------------------------------------------------------
         # 6. Sonstige Zustände
-        # -----------------------------------------------------------------
         self._stopping_done = False
         self._current_layout: Optional[str] = None
         self._event_subscriptions: List[Tuple[str, Callable]] = []
@@ -29237,23 +29731,17 @@ class DragonWhispererGUI:
         self._vram_idle_timer: Optional[str] = None
         self._last_transcription_time = time.time()
 
-        # -----------------------------------------------------------------
         # 6a. Status-Lock für update_status (Thread-Sicherheit)
-        # -----------------------------------------------------------------
         self._status_lock = threading.RLock()
         self._last_status_message = ""
 
-        # -----------------------------------------------------------------
         # 7. Tkinter-Prüfung und Fallback
-        # -----------------------------------------------------------------
         if not GUI_AVAILABLE:
             logger.error("❌ Tkinter nicht verfügbar. Versuche Fallback...")
             self._try_fallback_gui()
             return
 
-        # -----------------------------------------------------------------
         # 8. DPI‑Awareness für Windows aktivieren (vor Erstellung von tk.Tk)
-        # -----------------------------------------------------------------
         if IS_WINDOWS:
             try:
                 import ctypes
@@ -29272,9 +29760,7 @@ class DragonWhispererGUI:
                 if DEBUG_LEVEL >= 3:
                     log_debug("gui", f"Failed to set Windows DPI awareness: {e}")
 
-        # -----------------------------------------------------------------
         # 9. Einstellungen laden (mit Fehlertoleranz)
-        # -----------------------------------------------------------------
         try:
             self.settings = AppSettings.load_from_file()
             if not self.settings.last_url:
@@ -29296,9 +29782,7 @@ class DragonWhispererGUI:
             not self.settings.cookies_notice_shown and self.settings.use_browser_cookies
         )
 
-        # -----------------------------------------------------------------
         # 10. AppContext und Event-Bus
-        # -----------------------------------------------------------------
         try:
             self.app_context = AppContext()
             self.event_bus = self.app_context.event_bus
@@ -29317,9 +29801,7 @@ class DragonWhispererGUI:
         target_lang_name = SUPPORTED_LANGUAGES.get(self.target_language, "Deutsch")
         self._last_valid_language = target_lang_name
 
-        # -----------------------------------------------------------------
         # 11. Tkinter Root erstellen
-        # -----------------------------------------------------------------
         try:
             self.root = tk.Tk()
             self.root.withdraw()
@@ -29333,9 +29815,7 @@ class DragonWhispererGUI:
             lambda delay, cb, *args: self.root.after(delay, cb, *args)
         )
 
-        # -----------------------------------------------------------------
         # 12. Auto‑TTS Variablen (nachdem root existiert)
-        # -----------------------------------------------------------------
         self.auto_tts_transcript_var = tk.BooleanVar(
             value=self.advanced_settings.auto_tts_transcript
         )
@@ -29348,9 +29828,7 @@ class DragonWhispererGUI:
             "🐉 Dragon Whisperer" if not self.demo_mode else "🐉 Dragon Whisperer (DEMO MODE)"
         )
 
-        # -----------------------------------------------------------------
         # 13. Queues für GUI-Updates
-        # -----------------------------------------------------------------
         try:
             self.gui_queue: queue.Queue = queue.Queue(maxsize=200)
         except Exception as e:
@@ -29363,9 +29841,7 @@ class DragonWhispererGUI:
             logger.warning(f"Text-Queue konnte nicht erstellt werden: {e}")
             self._text_update_queue = DummyQueue(maxsize=150)
 
-        # -----------------------------------------------------------------
         # 14. TTS-Warteschlange und Worker-Thread
-        # -----------------------------------------------------------------
         try:
             self._tts_queue = queue.Queue(maxsize=50)
         except Exception as e:
@@ -29387,27 +29863,20 @@ class DragonWhispererGUI:
             self._tts_worker_running = False
             self._tts_worker_thread = None
 
-        # -----------------------------------------------------------------
         # 15. Performance-Monitor
-        # -----------------------------------------------------------------
         self.performance_monitor = SimplePerformanceTracker()
         self._last_text_queue_size = 0
 
-        # -----------------------------------------------------------------
+
         # 16. StreamInfoExtractor
-        # -----------------------------------------------------------------
         self.stream_info_extractor = StreamInfoExtractor()
         self.stream_info_extractor.use_browser_cookies = self.settings.use_browser_cookies
 
-        # -----------------------------------------------------------------
         # 17. Event-Bus Abonnements registrieren
-        # -----------------------------------------------------------------
         self._register_event_bus_subscriptions()
         self.event_bus.subscribe("gpu_status_changed", self._on_gpu_status_changed)
 
-        # -----------------------------------------------------------------
-        # 18. Controller erstellen
-        # -----------------------------------------------------------------
+        # 18. Controller erstellen (kritisch – aber Fehler abfangen)
         try:
             self.controller = WhisperController(gui_ref=self, event_bus=self.event_bus)
             if DEBUG_LEVEL >= 3:
@@ -29418,14 +29887,12 @@ class DragonWhispererGUI:
             return
 
         # -----------------------------------------------------------------
-        # 19. Manager und Engines initialisieren
+        # 19. Manager und Engines initialisieren (alle mit try/except)
         # -----------------------------------------------------------------
-        self._init_managers()
-        self._init_engines()
+        self._init_managers()      # fängt intern Fehler ab und setzt Fallbacks
+        self._init_engines()       # ebenso
 
-        # -----------------------------------------------------------------
-        # 20. Automatische Modellauswahl (VRAM oder RAM)
-        # -----------------------------------------------------------------
+        # Automatische Modellauswahl
         if self.settings.default_model is None:
             free_vram = self._get_free_vram_gb()
             if free_vram is not None:
@@ -29475,18 +29942,15 @@ class DragonWhispererGUI:
             if hasattr(self, "model_var") and self.model_var is not None:
                 self.model_var.set(default)
 
-        # -----------------------------------------------------------------
         # 21. Präzisionsoptimierungen
-        # -----------------------------------------------------------------
         self._apply_precision_optimizations()
 
-        # -----------------------------------------------------------------
-        # 22. GUI aufbauen
-        # -----------------------------------------------------------------
+        # 22. GUI aufbauen (Layout & StatusBar)
         self.layout = WhisperLayoutManager(gui_ref=self)
         self.queue_manager = QueueManager(self)
 
         try:
+            self._adaptive_window_size()
             self.layout.setup_gui()
             if hasattr(self, "model_var") and self.model_var:
                 self.model_var.set(self.settings.default_model)
@@ -29495,19 +29959,14 @@ class DragonWhispererGUI:
                 value=self.advanced_settings.vad_fallback_enabled
             )
             self.status_bar = StatusBar(self.root, self, demo_mode=self.demo_mode)
+            self.status_bar.frame.grid(row=4, column=0, sticky="ew", pady=(2, 0))
             self._update_vad_fallback_button()
             self._update_live_mode_button()
             self._start_gui_updaters()
             self._set_initial_url()
 
-            # -----------------------------------------------------------------
-            # Fenstergröße stabilisieren – kein Flackern, aber benutzerdefinierbar
-            # -----------------------------------------------------------------
             self.root.update_idletasks()
-            current_geometry = self.root.geometry()
-            self.root.geometry(current_geometry)
             self.root.resizable(True, True)
-            self.root.minsize(950, 700)
 
             self.root.deiconify()
             if DEBUG_LEVEL >= 3:
@@ -29517,16 +29976,13 @@ class DragonWhispererGUI:
             self._show_error_and_exit(f"GUI konnte nicht erstellt werden: {e}")
             return
 
-        # -----------------------------------------------------------------
         # 23. Signal-Handler und Cookie-Hinweis
-        # -----------------------------------------------------------------
         self._register_signal_handlers()
-        if self._show_cookie_notice:
+        # Cookie‑Hinweis nur zeigen, wenn keine kritischen Pakete fehlen
+        if self._show_cookie_notice and not self._dependency_issue:
             self._safe_after(500, self._show_cookie_notice_dialog)
 
-        # -----------------------------------------------------------------
         # 24. Shortcuts und periodische Aufgaben
-        # -----------------------------------------------------------------
         self._bind_shortcuts()
         self._safe_after(1000, self._start_system_monitoring)
         self._safe_after(2000, self._final_initialization_check)
@@ -29534,15 +29990,24 @@ class DragonWhispererGUI:
         atexit.register(self._atexit_cleanup)
         self._schedule_vram_idle_check()
 
-        # -----------------------------------------------------------------
         # 25. Abschließende Debug-Ausgabe
-        # -----------------------------------------------------------------
         if DEBUG_LEVEL >= 2:
             log_debug("gui", "DragonWhispererGUI.__init__ erfolgreich abgeschlossen")
 
-    # ------------------------------------------------------------------------
+        # 26. Wenn kritische Abhängigkeiten fehlen, öffne nach kurzer
+        #     Verzögerung den Installationsdialog – dank der neuen
+        #     show_install_dialog-Methode erscheint er garantiert nur einmal.
+        missing_ffmpeg = not shutil.which("ffmpeg")
+        missing_ytdlp = not shutil.which("yt-dlp")
+        missing_numpy = not NUMPY_AVAILABLE
+        if missing_ffmpeg or missing_ytdlp or missing_numpy:
+            self._dependency_issue = True
+            def _open_installer():
+                if not self.is_shutting_down() and hasattr(self, "show_install_dialog"):
+                    self.show_install_dialog()
+            self._safe_after(1500, _open_installer)
+
     # Initialisierungshilfen (private)
-    # ------------------------------------------------------------------------
     def _set_initial_url(self) -> None:
         """Setzt die initiale URL im Eingabefeld, falls vorhanden."""
         if hasattr(self, "url_entry") and self.url_entry.winfo_exists():
@@ -29602,40 +30067,127 @@ class DragonWhispererGUI:
             self.performance_optimizer = LinuxPerformanceOptimizer(gui_ref=self)
 
     def _init_engines(self) -> None:
-        """Initialisiert die Transkriptions‑, Übersetzungs‑ und Audio‑Engines."""
+        """
+        Initialisiert die Transkriptions‑, Übersetzungs‑ und Audio‑Engines
+        mit maximaler Robustheit und detaillierten Debug‑Informationen.
+        """
+        # 1. Transkriptions‑Engine erstellen (mit Fallback)
+        if DEBUG_LEVEL >= 2:
+            log_debug("init", "Creating transcription engine...")
+
+        engine_created = False
         if WHISPER_AVAILABLE:
-            self.transcription_engine = TranscriptionEngine(
-                self.advanced_settings,
-                cache_manager=self.app_context.cache_manager,
-                event_bus=self.event_bus,
-            )
+            try:
+                self.transcription_engine = TranscriptionEngine(
+                    self.advanced_settings,
+                    cache_manager=self.app_context.cache_manager,
+                    event_bus=self.event_bus,
+                )
+                engine_created = True
+                if DEBUG_LEVEL >= 2:
+                    log_debug("init", "TranscriptionEngine successfully created.")
+            except Exception as e:
+                logger.exception(
+                    "❌ TranscriptionEngine creation failed: %s\n"
+                    "   This can happen if PyTorch or its dependencies "
+                    "(e.g. Microsoft Visual C++ Redistributable) are missing "
+                    "or corrupted. The application will continue in Demo mode.",
+                    e
+                )
         else:
+            logger.warning("No Whisper backend available – will use DummyTranscriptionEngine.")
+
+        if not engine_created:
             self.transcription_engine = DummyTranscriptionEngine(
                 self.advanced_settings, cache_manager=self.app_context.cache_manager
             )
-        self.language_detector = LanguageDetector(self.transcription_engine)
-        self.translation_engine = self._create_translation_engine()
-        self.audio_processor = AudioProcessor(
-            controller_ref=self.controller,
-            ffmpeg_manager=self.ffmpeg_manager,
-            settings=self.advanced_settings,
-            stream_manager=self.stream_manager,
-        )
-        fallback_engine = None
-        if self.advanced_settings.translation_engine == "google" and OLLAMA_AVAILABLE:
-            fallback_engine = OllamaTranslationEngine(
+            # Demo‑Modus aktualisieren, falls wir jetzt gezwungen sind, Dummy zu nutzen
+            if not self.demo_mode:
+                self.demo_mode = True
+                logger.info("🔄 Switched to Demo mode because transcription engine could not be loaded.")
+
+        # 2. LanguageDetector mit der vorhandenen Engine erstellen
+        try:
+            self.language_detector = LanguageDetector(self.transcription_engine)
+            if DEBUG_LEVEL >= 2:
+                log_debug("init", "LanguageDetector created.")
+        except Exception as e:
+            logger.exception("Failed to create LanguageDetector: %s", e)
+            self.language_detector = None  # nicht kritisch
+
+        # 3. Übersetzungs‑Engine erstellen (mit Fallback)
+        if DEBUG_LEVEL >= 2:
+            log_debug("init", "Creating translation engine...")
+
+        try:
+            self.translation_engine = self._create_translation_engine()
+        except Exception as e:
+            logger.exception(
+                "❌ Translation engine creation failed: %s\n"
+                "   Using DummyTranslationEngine instead.",
+                e
+            )
+            self.translation_engine = DummyTranslationEngine(
                 target_lang=self.current_language,
                 settings=self.advanced_settings,
-                model=self.advanced_settings.ollama_model,
-                host=self.advanced_settings.ollama_host,
                 cache_manager=self.app_context.cache_manager,
             )
-        self.audio_processor.set_engines(
-            transcription_engine=self.transcription_engine,
-            translation_engine=self.translation_engine,
-            fallback_translation_engine=fallback_engine,
-            plugin_manager=None,
-        )
+
+        # 4. AudioProcessor erstellen
+        if DEBUG_LEVEL >= 2:
+            log_debug("init", "Creating AudioProcessor...")
+
+        fallback_translation_engine = None
+        if (
+            self.advanced_settings.translation_engine == "google"
+            and OLLAMA_AVAILABLE
+        ):
+            try:
+                fallback_translation_engine = OllamaTranslationEngine(
+                    target_lang=self.current_language,
+                    settings=self.advanced_settings,
+                    model=self.advanced_settings.ollama_model,
+                    host=self.advanced_settings.ollama_host,
+                    cache_manager=self.app_context.cache_manager,
+                )
+            except Exception as e:
+                logger.warning("Could not create fallback OllamaTranslationEngine: %s", e)
+
+        try:
+            self.audio_processor = AudioProcessor(
+                controller_ref=self.controller,
+                ffmpeg_manager=self.ffmpeg_manager,
+                settings=self.advanced_settings,
+                stream_manager=self.stream_manager,
+            )
+            self.audio_processor.set_engines(
+                transcription_engine=self.transcription_engine,
+                translation_engine=self.translation_engine,
+                fallback_translation_engine=fallback_translation_engine,
+                plugin_manager=None,
+            )
+            if DEBUG_LEVEL >= 2:
+                log_debug("init", "AudioProcessor created and engines configured.")
+        except Exception as e:
+            logger.exception("Failed to create AudioProcessor: %s", e)
+            raise
+
+        # 5. GUI‑Elemente an Demo‑Modus anpassen (falls aktiviert)
+        if self.demo_mode:
+            if hasattr(self, "model_combo") and self.model_combo.winfo_exists():
+                self.model_combo.config(state="disabled")
+                self.model_var.set("dummy (Demo)")
+            self.update_status("⚠️ Demo-Modus: Whisper nicht verfügbar – verwende Dummy-Transkriptionen")
+            if DEBUG_LEVEL >= 2:
+                log_debug("init", "Demo mode GUI adjustments applied.")
+        else:
+            # Normaler Modus: sicherstellen, dass Model-Combo aktiviert ist
+            if hasattr(self, "model_combo") and self.model_combo.winfo_exists():
+                self.model_combo.config(state="readonly")
+                self.model_var.set(self.settings.default_model)
+
+        if DEBUG_LEVEL >= 2:
+            log_debug("init", "Engine initialization complete.")
 
     def _setup_callbacks(self) -> None:
         """Platzhalter für zusätzliche Callbacks (z.B. für Plugins)."""
@@ -29651,16 +30203,12 @@ class DragonWhispererGUI:
         self.advanced_settings.chunk_duration = 20.0
         logger.debug("Präzisionsoptimierungen angewendet (VAD deaktiviert, Chunk-Dauer 20s, Duplikat-Schwellwert 0.98)")
 
-    # ------------------------------------------------------------------------
     # Theme‑Methoden
-    # ------------------------------------------------------------------------
     def _apply_theme(self, theme_name: str) -> None:
         """
         Wendet das ausgewählte Theme auf die gesamte GUI an.
         """
-        # -----------------------------------------------------------------
         # 1. Theme‑Klasse auswählen
-        # -----------------------------------------------------------------
         theme_map = {
             "dark": DarkTheme,
             "light": LightTheme,
@@ -29786,24 +30334,55 @@ class DragonWhispererGUI:
 
     def _update_widget_tree(self, parent: tk.Widget) -> None:
         """
-        Rekursiv alle Kinder von `parent` mit den aktuellen Theme‑Farben aktualisieren.
-
-        Verbesserungen:
-            - Fängt `tk.TclError` ab, falls ein Widget während der Iteration zerstört wird.
-            - Verwendet eine iterative Tiefensuche (Stack) für bessere Performance und
-              geringere Rekursionstiefe.
-            - Unterstützt dynamische Updates für spezielle Widgets.
+        Aktualisiert rekursiv (iterativ via Stack) alle tkinter‑Widgets
+        innerhalb des übergebenen Containers mit den Farben des aktuellen
+        Themes.
         """
-        # Liste der speziellen Widgets für schnellen Lookup
-        special_widgets = {}
-        for name in self.SPECIAL_WIDGET_NAMES:
-            widget = getattr(self, name, None)
-            if widget is not None and widget.winfo_exists():
-                special_widgets[widget] = name
+        # 1. Hilfsfunktion: Sichere Konfiguration eines Widgets
+        def _safe_configure(widget: tk.Widget, **kwargs) -> None:
+            """
+            Wendet ``kwarg`` auf das Widget an, nachdem alle Schlüssel
+            validiert und auf gültige Tkinter‑Optionsnamen reduziert wurden.
+            """
+            if not kwargs:
+                return
+            # Nur String‑Keys erlauben (kein Integer o. Ä.)
+            clean = {}
+            for key, value in kwargs.items():
+                if isinstance(key, str) and key.strip():
+                    clean[key] = value
+                else:
+                    if DEBUG_LEVEL >= 3:
+                        log_debug(
+                            "theme",
+                            f"  ⚠️ Ungültiger Konfigurationsschlüssel "
+                            f"'{key}' (Typ {type(key).__name__}) in "
+                            f"{widget} – ignoriert",
+                        )
+            if not clean:
+                return
+            try:
+                widget.configure(**clean)
+            except tk.TclError as e:
+                # Widget wurde während der Ausführung zerstört – ignorieren
+                if DEBUG_LEVEL >= 4:
+                    log_debug("theme", f"  TclError bei {widget}: {e}")
+            except Exception as e:
+                logger.warning(f"⚠️ Fehler bei Theme‑Update von {widget}: {e}")
 
-        stack = [parent]
+        # 2. Vorbereitung: Stack und Hilfsstrukturen
+        stack: List[tk.Widget] = [parent]
+        processed_ttk = set()      # verhindert doppelte Style‑Aktualisierung
+        total_updated = 0
+        total_skipped = 0
+        total_errors = 0
+        theme = self.current_theme
+
+        # 3. Hauptschleife (iterative Tiefensuche)
         while stack:
             widget = stack.pop()
+
+            # 3.1 Existenz prüfen
             try:
                 if not widget.winfo_exists():
                     continue
@@ -29811,33 +30390,79 @@ class DragonWhispererGUI:
                 continue
 
             widget_class = widget.__class__
-            # Standard‑Theme‑Updates für bekannte Widget‑Klassen
+
+            # 3.2 ttk‑Widgets überspringen – sie werden über Styles gestaltet
+            if issubclass(widget_class, ttk.Widget):
+                # Nur einmal pro Typ loggen (vermeidet Terminal‑Spam)
+                if widget_class not in processed_ttk:
+                    processed_ttk.add(widget_class)
+                    if DEBUG_LEVEL >= 4:
+                        log_debug(
+                            "theme",
+                            f"  ttk.{widget_class.__name__} übersprungen "
+                            "(wird via Style aktualisiert)",
+                        )
+                total_skipped += 1
+                # Trotzdem die Kinder auf den Stack legen
+                try:
+                    stack.extend(widget.winfo_children())
+                except tk.TclError:
+                    pass
+                continue
+
+            # 3.3 Standard‑Theme‑Updates aus WIDGET_UPDATES anwenden
             if widget_class in self.WIDGET_UPDATES:
                 updates = {}
                 for opt, theme_attr in self.WIDGET_UPDATES[widget_class].items():
-                    if hasattr(self.current_theme, theme_attr):
-                        updates[opt] = getattr(self.current_theme, theme_attr)
+                    # Sicherstellen, dass theme_attr ein String ist
+                    if not isinstance(theme_attr, str):
+                        if DEBUG_LEVEL >= 3:
+                            log_debug(
+                                "theme",
+                                f"  ⚠️ WIDGET_UPDATES enthält nicht‑String "
+                                f"'{theme_attr}' für Klasse "
+                                f"{widget_class.__name__} – übersprungen",
+                            )
+                        continue
+                    if hasattr(theme, theme_attr):
+                        updates[opt] = getattr(theme, theme_attr)
                 if updates:
-                    try:
-                        widget.configure(**updates)
-                    except tk.TclError:
-                        pass
+                    _safe_configure(widget, **updates)
+                    total_updated += 1
+            else:
+                total_skipped += 1
 
-            # Spezielle Behandlung für bestimmte Widgets (z. B. Start‑Button)
-            if widget in special_widgets:
-                name = special_widgets[widget]
-                special_updates = self._get_special_updates(name)
-                if special_updates:
-                    try:
-                        widget.configure(**special_updates)
-                    except tk.TclError:
-                        pass
+            # 3.4 Spezielle Behandlung für benannte Widgets
+            for name in self.SPECIAL_WIDGET_NAMES:
+                w = getattr(self, name, None)
+                if w is not None and w is widget:
+                    special_updates = self._get_special_updates(name)
+                    if special_updates:
+                        valid_special = {
+                            k: v
+                            for k, v in special_updates.items()
+                            if isinstance(k, str)
+                        }
+                        _safe_configure(widget, **valid_special)
+                        total_updated += 1
+                    break   # Jedes Widget hat maximal einen Spezialnamen
 
-            # Kinder in den Stack legen
+            # 3.5 Kinder für nächste Iteration vormerken
             try:
-                stack.extend(widget.winfo_children())
+                children = widget.winfo_children()
+                stack.extend(children)
             except tk.TclError:
                 pass
+
+        # 4. Debug‑Zusammenfassung
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "theme",
+                f"_update_widget_tree abgeschlossen: "
+                f"{total_updated} aktualisiert, "
+                f"{total_skipped} übersprungen, "
+                f"{total_errors} Fehler",
+            )
 
     def _get_special_updates(self, widget_name: str) -> Dict[str, Any]:
         """Liefert dynamische Theme‑Updates für spezielle Widgets."""
@@ -29864,9 +30489,7 @@ class DragonWhispererGUI:
             updates = {"bg": self.current_theme.BG_TERTIARY, "fg": self.current_theme.TEXT_PRIMARY}
         return updates
 
-    # ------------------------------------------------------------------------
     # Thread‑sichere GUI‑Hilfsmethoden
-    # ------------------------------------------------------------------------
     def is_shutting_down(self) -> bool:
         """Gibt zurück, ob ein Shutdown im Gange ist."""
         with self._shutdown_lock:
@@ -29915,26 +30538,6 @@ class DragonWhispererGUI:
         Threads. Sie kürzt die Nachricht auf 100 Zeichen (passend für die Statusleiste),
         filtert leere oder bereits identische Nachrichten und leitet die Aktualisierung
         thread‑sicher über den QueueManager an den Hauptthread weiter.
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - **Thread‑sichere Duplikatprüfung:** Ein `threading.RLock` (`_status_lock`)
-              schützt den Zugriff auf `_last_status_message` und verhindert eine
-              Race Condition, bei der zwei Threads gleichzeitig dieselbe Nachricht
-              verarbeiten und eine davon fälschlich als Duplikat verworfen wird.
-            - **Robuste Shutdown‑Prüfung:** Bei aktivem Shutdown wird die Aktualisierung
-              sofort abgebrochen, um Zugriffe auf zerstörte Widgets zu vermeiden.
-            - **Fallback für fehlenden QueueManager:** Sollte der QueueManager nicht
-              verfügbar sein, wird die GUI‑Aktualisierung direkt über `after_idle`
-              im Hauptthread geplant.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` für jeden Schritt.
-            - **Fehlertoleranz im GUI‑Callback:** TclError und andere Exceptions werden
-              abgefangen und geloggt, ohne dass die Anwendung abstürzt.
-            - **Nachrichten‑Trunkierung:** Berücksichtigt Unicode‑Zeichen korrekt
-              (verwendet `[:100]` auf dem String, nicht auf Bytes).
-
-        Args:
-            message: Die anzuzeigende Nachricht. Darf `None` oder leer sein;
-                     in diesem Fall wird nichts unternommen.
         """
         # ---------------------------------------------------------------------
         # 1. Eingangsvalidierung und Shutdown‑Prüfung
@@ -30025,14 +30628,6 @@ class DragonWhispererGUI:
         - Satzkontext‑abhängige Zeitstempel (Systemuhrzeit im Normalmodus)
         - Unterschiedliche Darstellung für Normal‑ und Untertitelmodus
         - Thread‑sichere Pufferung und Historienführung
-
-        Konfigurierbare Schwellwerte für die Zusammenführung:
-        - MERGE_MAX_TIME_GAP: Maximale zeitliche Lücke zwischen Segmenten (Sekunden)
-        - MERGE_MAX_WORDS: Maximale Wortanzahl des aktuellen Segments für eine Zusammenführung
-        - MERGE_MIN_CONFIDENCE: Minimale Confidence für die Zusammenführung
-
-        Args:
-            result: Das von der Transkriptions‑Engine gelieferte Ergebnisobjekt.
         """
         # -----------------------------------------------------------------
         # 1. Eingangsvalidierung
@@ -30269,19 +30864,6 @@ class DragonWhispererGUI:
         vorliegt. Sie formatiert den Text (mit oder ohne Zeitstempel, je nach
         Untertitel‑Modus), prüft auf Duplikate, wendet Blacklist‑Filter an,
         stößt ggf. TTS an und stellt den Text in die GUI‑Queue ein.
-
-        Verbesserungen:
-            - Explizite WARNING‑Logs zur Diagnose (auch ohne DEBUG‑LEVEL).
-            - Fallback-Direktinsertion per root.after, falls QueueManager nicht
-              verfügbar oder GUI im Shutdown.
-            - Prüfung auf GUI‑Shutdown vor jeder GUI‑Operation.
-            - Robuste Behandlung von None‑Werten und leeren Texten.
-            - Korrekte Handhabung von asiatischen Sprachen (kein überflüssiges
-              Leerzeichen am Satzanfang).
-            - Thread‑Sicherheit durch Verwendung des QueueManagers und root.after.
-
-        Args:
-            result: Das Übersetzungsergebnis von der Engine.
         """
         # -----------------------------------------------------------------
         # 1. Eingangsdiagnose (immer sichtbar)
@@ -30460,6 +31042,22 @@ class DragonWhispererGUI:
 
         self.root.after(0, direct_insert)
 
+
+    def _adaptive_window_size(self) -> None:
+        """Passt die Fenstergröße an die Bildschirmauflösung an (mind. 800×600)."""
+        try:
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            # ca. 5 % Rand für Taskleiste lassen
+            usable_w = int(screen_w * 0.85)
+            usable_h = int(screen_h * 0.80)
+            width = min(950, usable_w)
+            height = min(700, usable_h)
+            self.root.geometry(f"{width}x{height}")
+            self.root.minsize(800, 600)
+        except Exception as e:
+            logger.warning(f"Could not adapt window size: {e}")
+
     @gui_error_handler
     def handle_info(self, info_msg: str) -> None:
         self._safe_gui_update(lambda: self.update_status(f"ℹ️ {info_msg}"), important=True)
@@ -30540,28 +31138,6 @@ class DragonWhispererGUI:
     def _on_file_finished(self, _=None) -> None:
         """
         Callback für das normale Ende einer Datei (z. B. YouTube-VOD) – GUI‑Version.
-
-        Diese Methode wird über den Event‑Bus aufgerufen, wenn der AudioProcessor
-        das Ende einer lokalen Datei oder eines Video-on-Demand-Streams erkennt
-        und erfolgreich abgeschlossen hat. Im Gegensatz zu einem Benutzerabbruch
-        oder Fehler signalisiert dieses Event einen vollständigen Durchlauf.
-
-        Aktionen:
-            - Fortschrittsbalken stoppen und zurücksetzen, da die Verarbeitung
-              vollständig abgeschlossen ist.
-            - Falls in den Einstellungen 'auto_save_on_completion' aktiviert ist,
-              wird die Speicherung der Transkription mit kurzer Verzögerung
-              angestoßen. Die Verzögerung gibt der GUI Zeit, letzte UI-Updates
-              abzuschließen.
-            - Andernfalls wird eine entsprechende Statusmeldung angezeigt, die
-              den Benutzer daran erinnert, manuell zu speichern.
-            - Ausführliche Debug-Informationen bei erhöhtem Debug-Level.
-
-        Die Methode ist idempotent und wird über den GUI-Error-Handler vor
-        unbehandelten Tkinter-Fehlern geschützt.
-
-        Args:
-            _: Platzhalter für Event-Daten (wird ignoriert, kann None sein).
         """
         logger.info("📁 File processing finished normally")
 
@@ -30632,48 +31208,12 @@ class DragonWhispererGUI:
     def _on_processing_finished(self, _=None) -> None:
         """
         Callback für das Ende der Audioverarbeitung (normal, Fehler oder Abbruch).
-
-        Diese Methode wird über den Event-Bus aufgerufen, sobald der Controller den
-        Verarbeitungszustand auf IDLE setzt oder der AudioProcessor sein
-        'processing_finished'-Event feuert. Sie ist dafür verantwortlich, alle
-        GUI-Elemente, die während der Verarbeitung aktiv waren, in den Ruhezustand
-        zurückzusetzen.
-
-        Konkret werden folgende Aktionen ausgeführt:
-            - Fortschrittsbalken stoppen und zurücksetzen (damit er nicht endlos
-              weiterläuft und fälschlich Aktivität signalisiert).
-            - LinuxPerformanceOptimizer deaktivieren (falls vorhanden und aktiv).
-            - Statusmeldung aktualisieren (optional, wird bereits an anderer
-              Stelle gesetzt).
-            - (Platzhalter für zukünftige Erweiterungen, z. B. Deaktivierung
-              von Overlay-Animationen).
-
-        Verbesserungen gegenüber der ursprünglichen Version:
-            - **Explizite Deaktivierung des LinuxPerformanceOptimizers:**
-              Da der Optimizer in der GUI erstellt und verwaltet wird, ist dies
-              der korrekte Ort für seine Deaktivierung. Der AudioProcessor hat
-              keine Referenz darauf.
-            - **Robuste Prüfung** auf Existenz des Optimizers und dessen aktiven
-              Zustand vor dem Aufruf von `restore_normal_mode()`.
-            - **Detaillierte Debug-Ausgaben** bei `DEBUG_LEVEL >= 3`.
-            - **Thread-Sicherheit:** Der Callback wird über den GUI-Error-Handler
-              geschützt und alle GUI-Operationen sind implizit im Hauptthread
-              (da der Event-Bus den Scheduler verwendet).
-
-        Die Methode ist idempotent und kann mehrfach gefahrlos aufgerufen werden.
-
-        Args:
-            _: Platzhalter für Event-Daten (wird ignoriert).
         """
         logger.info("Processing finished – GUI entering idle state")
 
         # -----------------------------------------------------------------
         # 1. Fortschrittsbalken stoppen und zurücksetzen
         # -----------------------------------------------------------------
-        # Der Balken könnte sich noch im indeterminierten Modus befinden
-        # (z. B. bei Livestreams) oder einen Wert > 0 anzeigen. Beides wird
-        # hier bereinigt, um dem Benutzer zu signalisieren, dass keine
-        # Hintergrundaktivität mehr stattfindet.
         self._reset_progress()
 
         # -----------------------------------------------------------------
@@ -30692,9 +31232,6 @@ class DragonWhispererGUI:
                     if DEBUG_LEVEL >= 4:
                         log_debug("gui", "Linux optimizer already inactive – skipping")
             except Exception as e:
-                # Fehler beim Deaktivieren des Optimizers sind unkritisch,
-                # da der Optimizer nur die Performance verbessert und keine
-                # funktionalen Auswirkungen hat.
                 logger.warning(f"Failed to deactivate Linux optimizer: {e}")
                 if DEBUG_LEVEL >= 3:
                     log_exception("gui", "Linux optimizer deactivation failed", e, level="debug")
@@ -30822,31 +31359,6 @@ class DragonWhispererGUI:
     def update_stream_info(self, info: Optional[StreamInfo]) -> None:
         """
         Aktualisiert die Stream‑Info‑Anzeige in der GUI.
-
-        Diese Methode wird vom Event‑Bus aufgerufen, wenn neue Stream‑Informationen
-        vorliegen (z. B. nach erfolgreicher Extraktion) oder wenn der Stream beendet
-        wurde (info=None). Sie speichert die letzte gültige Information persistent,
-        sodass sie auch nach Stream‑Ende noch für Zusammenfassungen, Exporte oder
-        andere Nachbearbeitungen zur Verfügung steht.
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - **Persistente Speicherung:** `last_completed_stream_info` wird bei
-              jedem gültigen Update gesetzt und **niemals** gelöscht. Dadurch ist
-              der Titel auch nach `info=None` verfügbar.
-            - **Robuste Widget‑Prüfung:** Vor jedem Zugriff wird `winfo_exists()`
-              geprüft, um Tkinter‑Fehler bei zerstörten Widgets zu vermeiden.
-            - **Thread‑Sicherheit:** Das GUI‑Update wird über `_safe_gui_update`
-              in den Hauptthread delegiert.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`.
-            - **Konsistente Textlänge:** Titel werden auf 80 Zeichen gekürzt,
-              Details sinnvoll formatiert.
-            - **Legacy‑Kompatibilität:** Setzt `last_stream_title` für ältere
-              Code‑Stellen, die darauf zugreifen.
-
-        Args:
-            info: Das StreamInfo‑Objekt mit Titel, Uploader, Dauer etc.
-                  Wenn None, wird die Anzeige auf "Kein aktiver Stream" zurückgesetzt,
-                  aber die persistente Information bleibt erhalten.
         """
         # -----------------------------------------------------------------
         # 1. Persistente Speicherung (unabhängig vom GUI-Thread)
@@ -31412,9 +31924,7 @@ class DragonWhispererGUI:
             lines.append("   Keine Hardware-Diagnosedaten verfügbar.")
         lines.append("")
 
-        # -----------------------------------------------------------------
         # MODEL INFORMATION
-        # -----------------------------------------------------------------
         lines.append("🤖 MODEL INFORMATION")
         lines.append(f"   Active model: {model_info.get('name', 'unknown')}")
         lines.append(f"   Backend: {model_info.get('backend', 'unknown')}")
@@ -31426,18 +31936,14 @@ class DragonWhispererGUI:
             lines.append(f"   Last detected: {hw.get('last_detected_language') or 'unknown'}")
         lines.append("")
 
-        # -----------------------------------------------------------------
         # TRANSCRIPTION & TRANSLATION STATS
-        # -----------------------------------------------------------------
         lines.append("🎙️ TRANSCRIPTION & TRANSLATION")
         lines.append(f"   Transcriptions: {perf_stats['transcriptions']}")
         lines.append(f"   Translations: {perf_stats['translations']}")
         lines.append(f"   Cache hit rate: {perf_stats['cache_hit_rate']}")
         lines.append("")
 
-        # -----------------------------------------------------------------
         # STREAM STABILITY (NEU: erweiterte Audio-Metriken)
-        # -----------------------------------------------------------------
         if audio_status:
             lines.append("🌊 STREAM STABILITY")
             lines.append(f"   Chunks processed: {audio_status.get('chunks_processed', 0)}")
@@ -31451,9 +31957,7 @@ class DragonWhispererGUI:
                 lines.append(f"   Realtime factor: {status}")
             lines.append("")
 
-        # -----------------------------------------------------------------
         # RECONNECT STATISTICS (vom StreamHandler, falls verfügbar)
-        # -----------------------------------------------------------------
         stream_diag = None
         if hasattr(self, "audio_processor") and self.audio_processor is not None:
             try:
@@ -31468,25 +31972,19 @@ class DragonWhispererGUI:
             lines.append(f"   Platform: {stream_diag.get('platform', 'unknown')}")
             lines.append("")
 
-        # -----------------------------------------------------------------
         # SYSTEM RESOURCES
-        # -----------------------------------------------------------------
         lines.append("💻 SYSTEM RESOURCES")
         lines.append(f"   CPU usage: {system_info['cpu']:.1f}%")
         lines.append(f"   RAM: {system_info['mem_used']}/{system_info['mem_total']} MB ({system_info['mem_percent']:.1f}%)")
         lines.append(f"   GPU: {gpu_text}")
         lines.append("")
 
-        # -----------------------------------------------------------------
         # CONFIGURATION
-        # -----------------------------------------------------------------
         lines.append("⚙️ CONFIGURATION")
         lines.extend(config_info)
         lines.append("")
 
-        # -----------------------------------------------------------------
         # CACHE STATISTICS
-        # -----------------------------------------------------------------
         lines.append("💾 CACHE STATISTICS")
         trans_cache = cache_stats.get('transcription_cache', {})
         transl_cache = cache_stats.get('translation_cache', {})
@@ -31504,24 +32002,6 @@ class DragonWhispererGUI:
     def _reset_progress(self) -> None:
         """
         Setzt den Fortschrittsbalken und das zugehörige Label in der GUI zurück.
-
-        Diese Methode wird nach Abschluss eines Streams oder bei einem Fehler
-        aufgerufen, um dem Benutzer zu signalisieren, dass keine Hintergrund-
-        aktivität mehr stattfindet. Sie ist threadsicher (wird über den
-        Event-Bus oder `root.after` im Hauptthread ausgeführt) und fängt
-        alle erwartbaren Tkinter-Fehler ab.
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - **Korrekte Referenz:** `self` ist die GUI-Instanz, kein `gui_ref()`-Aufruf.
-            - **Robuste Widget-Prüfung:** Vor jedem Zugriff wird `winfo_exists()`
-              geprüft.
-            - **Detaillierte Debug-Ausgaben** bei `DEBUG_LEVEL >= 3`.
-            - **Vollständige Fehlerbehandlung:** Unterscheidet zwischen TclError
-              (Widget zerstört) und anderen Exceptions.
-            - **Atomare Operationen:** Setzt den Fortschrittsbalken in den
-              deterministischen Modus und stoppt die Animation.
-
-        Die Methode ist idempotent und kann mehrfach gefahrlos aufgerufen werden.
         """
         # -----------------------------------------------------------------
         # 1. Prüfen, ob die benötigten Widgets existieren
@@ -31590,19 +32070,6 @@ class DragonWhispererGUI:
         """
         Liest den aktuell ausgewählten Text (oder den gesamten Inhalt des
         fokussierten Textfeldes) mit der konfigurierten TTS-Engine vor.
-
-        Verhalten:
-            - Falls bereits eine TTS-Ausgabe läuft, wird diese **gestoppt**.
-            - Ist Text im Transkriptions- oder Übersetzungsfeld markiert, wird
-              nur die Markierung vorgelesen.
-            - Andernfalls wird der gesamte Inhalt des fokussierten Feldes
-              vorgelesen.
-            - Zeitstempel und Sprachkürzel (z. B. `[00:00:00] [Deu]`) werden
-              vor der Ausgabe entfernt.
-
-        Die Methode ist robust gegen fehlende Widgets, Shutdown-Zustände und
-        leere Texte. Bei `DEBUG_LEVEL >= 3` werden detaillierte Informationen
-        über Quelle, Textlänge und Bereinigung protokolliert.
         """
         # -----------------------------------------------------------------
         # 1. Grundlegende Verfügbarkeitsprüfungen
@@ -31777,18 +32244,6 @@ class DragonWhispererGUI:
             - Zeilenanfänge der Form "[HH:MM:SS] [XYZ]" (z. B. "[00:01:23] [Deu]")
             - Zeilenanfänge der Form "[HH:MM:SS]" (z. B. "[00:01:23]")
         Mehrfache Leerzeichen und Zeilenumbrüche werden normalisiert.
-
-        Die Bereinigung erfolgt nur, wenn tatsächlich Änderungen vorgenommen
-        werden. Bei aktiviertem Debug‑Level werden die Änderungen protokolliert,
-        um eine fehlerhafte Textmanipulation schnell erkennen zu können.
-
-        Args:
-            text: Der zu bereinigende Rohtext (kann Zeitstempel enthalten).
-
-        Returns:
-            Der bereinigte Text ohne Zeitstempel und Sprachkürzel.
-            Falls der Eingabetext None oder leer ist, wird ein leerer String
-            zurückgegeben.
         """
         # -----------------------------------------------------------------
         # 1. Eingabevalidierung und früher Ausstieg
@@ -31967,45 +32422,6 @@ class DragonWhispererGUI:
     def toggle_live_mode(self) -> None:
         """
         Schaltet die Chunk-Dauer zwischen zwei vordefinierten Werten um
-        (standardmäßig 10 s und 20 s) und passt alle abhängigen Komponenten an.
-
-        Diese Methode wird über den „Live‑Modus“-Button in der Statusleiste
-        aufgerufen. Sie ermöglicht dem Benutzer, schnell zwischen einem Modus
-        mit niedriger Latenz (10 s) und einem Modus mit höherer Genauigkeit
-        (20 s) zu wechseln.
-
-        **Wichtig:**
-            - Während einer laufenden Transkription (`self.is_processing == True`)
-              ist der Wechsel nicht möglich, da die Chunk‑Dauer zur Laufzeit
-              nicht gefahrlos geändert werden kann.
-            - Die neue Chunk‑Dauer wird in `self.advanced_settings` gespeichert
-              und über den Event‑Bus sowie das automatische Speichern persistiert.
-            - Falls ein `AudioProcessor` existiert, wird dessen Konfiguration
-              (`settings.config.CHUNK_DURATION`) synchronisiert und die abhängigen
-              Attribute (`_update_chunk_size()`) neu berechnet.
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - Korrigiert den Zugriff auf die AudioProcessor‑Konfiguration
-              (verwendet `self.audio_processor.settings.config` statt des
-              nicht existierenden `self.audio_processor.config`).
-            - Robuste Prüfung, ob `self.audio_processor` und die erforderlichen
-              Attribute vorhanden sind, bevor darauf zugegriffen wird.
-            - Verhindert mehrfache, schnelle Aufrufe durch ein kurzes
-              Entprellen (Debounce) – verhindert versehentliche Doppelklicks.
-            - Ausführliche Debug‑Ausgaben bei `DEBUG_LEVEL >= 3`.
-            - Aktualisiert die Button‑Beschriftung und den Tooltip konsistent.
-            - Zeigt eine Warnung an, falls der Wechsel während der Verarbeitung
-              versucht wird.
-            - Speichert die geänderte Einstellung automatisch über den
-              vorhandenen `_schedule_settings_save`‑Mechanismus.
-            - Fehler werden abgefangen und geloggt, ohne die GUI zu blockieren.
-
-        **Nebenwirkungen:**
-            - `self.advanced_settings.chunk_duration` wird geändert.
-            - `self.audio_processor.settings.config.CHUNK_DURATION` wird
-              synchronisiert (falls vorhanden).
-            - `self._update_live_mode_button()` aktualisiert die Anzeige.
-            - Die Statusleiste zeigt eine Bestätigung an.
         """
         # ---------------------------------------------------------------------
         # 1. Entprellen: Verhindert Doppelausführung innerhalb von 500 ms
@@ -32208,25 +32624,6 @@ class DragonWhispererGUI:
         in die interne Warteschlange (`_tts_queue`) ein. Ein separater
         Worker‑Thread (`_tts_worker`) entnimmt die Texte sequenziell und
         übergibt sie an den TTS-Manager.
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - **Kein Timer-Debouncing mehr:** Jeder Satz wird garantiert
-              gesprochen; schnell aufeinanderfolgende Sätze überschreiben sich
-              nicht mehr.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3`, inklusive
-              Quelle, Textlänge und Warteschlangen-Größe.
-            - **Robuste Prüfung** auf `is_shutting_down()`, Existenz des
-              `tts_manager` und der Warteschlange.
-            - **Nicht-blockierendes Einfügen** mit `put_nowait` und Fallback
-              auf `put(block=False)`, um GUI-Blockaden zu vermeiden.
-            - **Maximale Textlänge** wird vor dem Einreihen auf
-              `MAX_TTS_LENGTH` (2000 Zeichen) begrenzt, um Piper nicht zu
-              überlasten.
-
-        Args:
-            text: Der vorzulesende Text (wird ggf. gekürzt).
-            source: Entweder "transcript" oder "translation". Bestimmt, welche
-                    Auto‑TTS‑Einstellung geprüft wird.
         """
         # -----------------------------------------------------------------
         # 1. Grundlegende Verfügbarkeitsprüfungen
@@ -32429,7 +32826,73 @@ class DragonWhispererGUI:
         SummarizeDialog(self.root, text, self)
 
     def show_install_dialog(self) -> None:
-        InstallDependencyDialog(self.root, self)
+        """
+        Öffnet den Installationsdialog für fehlende Pakete.
+        """
+        # -----------------------------------------------------------------
+        # 1. Shutdown-Prüfung
+        # -----------------------------------------------------------------
+        if self.is_shutting_down():
+            if DEBUG_LEVEL >= 3:
+                log_debug("install_dialog", "GUI im Shutdown – Dialog wird nicht geöffnet")
+            return
+
+        # -----------------------------------------------------------------
+        # 2. Prüfen, ob bereits ein Dialog existiert und noch anzeigbar ist
+        # -----------------------------------------------------------------
+        if hasattr(self, "_install_dialog") and self._install_dialog is not None:
+            dlg = self._install_dialog
+            try:
+                if dlg.dialog.winfo_exists():
+                    # Dialog existiert – nur in den Vordergrund holen
+                    dlg.dialog.lift()
+                    dlg.dialog.focus_force()
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("install_dialog", "Vorhandener Dialog in den Vordergrund geholt")
+                    return
+                else:
+                    # Widget wurde zerstört, aber Referenz existiert noch
+                    if DEBUG_LEVEL >= 3:
+                        log_debug("install_dialog", "Dialog-Referenz existiert, aber Widget zerstört – neu erstellen")
+                    self._install_dialog = None
+            except (tk.TclError, AttributeError) as e:
+                logger.warning(f"Fehler beim Prüfen des vorhandenen Dialogs: {e}")
+                self._install_dialog = None  # Sicherer Reset
+
+        # -----------------------------------------------------------------
+        # 3. Neuen Dialog erstellen (mit Fehlerbehandlung)
+        # -----------------------------------------------------------------
+        try:
+            dlg = InstallDependencyDialog(self.root, self)
+        except Exception as e:
+            logger.error(f"Konnte InstallDependencyDialog nicht erstellen: {e}", exc_info=True)
+            self.update_status("❌ Fehler beim Öffnen des Installationsdialogs")
+            return
+
+        self._install_dialog = dlg
+
+        # -----------------------------------------------------------------
+        # 4. Callback für das Schließen des Dialogs registrieren
+        # -----------------------------------------------------------------
+        def on_destroy():
+            """Setzt die Referenz zurück, sobald das Fenster geschlossen wird."""
+            if DEBUG_LEVEL >= 3:
+                log_debug("install_dialog", "Dialog geschlossen – Referenz zurückgesetzt")
+            self._install_dialog = None
+
+        # Protokolliere sowohl den Fenster-Close als auch den programmatischen close()
+        dlg.dialog.protocol("WM_DELETE_WINDOW", lambda: [on_destroy(), dlg.close()])
+
+        # Zusätzlich die originale close-Methode von BaseDialog überschreiben,
+        # um sicherzustellen, dass die Referenz auch bei Button-Klick gelöscht wird.
+        original_close = dlg.close
+        def _close_wrapper():
+            on_destroy()
+            original_close()
+        dlg.close = _close_wrapper
+
+        if DEBUG_LEVEL >= 2:
+            log_debug("install_dialog", "Neuer Installationsdialog geöffnet")
 
     @gui_operation_decorator
     def run_system_check(self) -> None:
@@ -32465,9 +32928,6 @@ class DragonWhispererGUI:
     def update_translation_engine(self) -> None:
         """
         Aktualisiert die Übersetzungs-Engine basierend auf den aktuellen Einstellungen.
-
-        Erstellt eine neue Engine, setzt die Zielsprache und übergibt sie an den
-        AudioProcessor. Die alte Engine wird vom AudioProcessor verzögert entsorgt.
         """
         try:
             new_engine = self._create_translation_engine()
@@ -32527,18 +32987,63 @@ class DragonWhispererGUI:
         self._safe_after(1000, monitor)
 
     def _build_system_info_string(self) -> str:
-        import psutil
-        cpu = psutil.cpu_percent(interval=None)
-        mem = psutil.virtual_memory()
-        ram_used = mem.used / (1024**3)
-        ram_total = mem.total / (1024**3)
+        """
+        Erzeugt einen kompakten Status‑String für die Systemüberwachung.
+        """
+
+        # 1. CPU‑ und RAM‑Werte (mit Fallback für fehlendes psutil)
+        cpu_str = "--"
+        ram_str = "--/--G"
+        try:
+            import psutil
+            # cpu_percent mit interval=None blockiert nicht, sondern liefert
+            # den Wert seit dem letzten Aufruf (oder 0.0 beim ersten).
+            cpu = psutil.cpu_percent(interval=None)
+            mem = psutil.virtual_memory()
+            ram_used = mem.used / (1024 ** 3)
+            ram_total = mem.total / (1024 ** 3)
+            cpu_str = f"{cpu:.0f}"
+            ram_str = f"{ram_used:.1f}/{ram_total:.1f}G"
+        except ImportError:
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "gui",
+                    "psutil nicht verfügbar – CPU/RAM-Anzeige deaktiviert."
+                )
+        except Exception as e:
+            logger.warning(f"Fehler beim Abrufen der Systeminformationen: {e}")
+
+        # 2. GPU‑Informationen (VRAM) – über bereits robuste Hilfsmethode
         gpu_info = self._get_gpu_info_string()
-        model_name = self.transcription_engine.get_current_model() if hasattr(self, "transcription_engine") else "None"
-        if model_name == "None":
-            model_name = "not loaded"
+
+        # 3. Whisper‑Modell ermitteln (sicher)
+        model_name = "not loaded"
+        try:
+            if hasattr(self, "transcription_engine") and self.transcription_engine is not None:
+                engine = self.transcription_engine
+                model_name = engine.get_current_model()
+                if model_name == "None":
+                    model_name = "not loaded"
+        except Exception:
+            pass
+
+        # 4. Plattform‑Kürzel
+        if IS_WINDOWS:
+            platform_short = "🪟Windows"
+        elif IS_MACOS:
+            platform_short = "🍎Mac"
+        elif IS_LINUX:
+            platform_short = "🐧Linux"
+        else:
+            platform_short = "🌐OS"
+
+        # 5. Zusammenbau des Gesamtstrings
         demo_hint = " (demo)" if self.demo_mode else ""
-        platform_short = "🪟Windows" if IS_WINDOWS else "🍎Mac" if IS_MACOS else "🐧Linux"
-        return f"{platform_short} | CPU: {cpu:.0f}% | RAM: {ram_used:.1f}/{ram_total:.1f}G{gpu_info} | Model: {model_name}{demo_hint}"
+        info_string = (
+            f"{platform_short} | CPU: {cpu_str}% | RAM: {ram_str}"
+            f"{gpu_info} | Model: {model_name}{demo_hint}"
+        )
+        return info_string
 
     def _get_gpu_info_string(self) -> str:
         try:
@@ -32625,9 +33130,7 @@ class DragonWhispererGUI:
         if self.queue_manager and not self.is_shutting_down():
             self.queue_manager._check_queue_sizes()
 
-    # ------------------------------------------------------------------------
     # VRAM-Idle-Timeout
-    # ------------------------------------------------------------------------
     def _schedule_vram_idle_check(self) -> None:
         if self._vram_idle_timer is not None:
             try:
@@ -32638,40 +33141,106 @@ class DragonWhispererGUI:
 
     def _check_vram_idle(self) -> None:
         """
-        Prüft, ob das Whisper-Modell aufgrund von Inaktivität aus dem VRAM entladen werden kann.
-        Verhindert mehrfaches Entladen durch Deaktivierung des Timers nach erfolgreichem Entladen.
+        Prüft, ob das Whisper‑Modell aufgrund von Inaktivität aus dem VRAM
+        entladen werden kann. Verhindert mehrfaches Entladen durch
+        Deaktivierung des Timers nach erfolgreichem Entladen.
         """
-        timeout = self.advanced_settings.vram_idle_timeout_seconds
+        # 1. Frühzeitiger Ausstieg bei Shutdown oder fehlender GUI
+        if getattr(self, "_shutting_down", False) or not self.root.winfo_exists():
+            if DEBUG_LEVEL >= 3:
+                log_debug("vram", "_check_vram_idle: Shutdown oder GUI nicht verfügbar – Abbruch")
+            return
+
+        # 2. Timeout aus den Einstellungen lesen (0 = deaktiviert)
+        try:
+            timeout = self.advanced_settings.vram_idle_timeout_seconds
+        except AttributeError:
+            logger.warning("_check_vram_idle: advanced_settings nicht verfügbar – Timer wird nicht neu gestartet")
+            return
+
         if timeout <= 0:
+            if DEBUG_LEVEL >= 3:
+                log_debug("vram", f"_check_vram_idle: Timeout {timeout}s – VRAM‑Idle‑Check deaktiviert")
             self._schedule_vram_idle_check()
             return
 
+        # 3. Wenn eine Transkription läuft, wird die letzte Aktivität aktualisiert und der Timer neu gestartet.
         if self.is_processing:
             self._last_transcription_time = time.time()
+            if DEBUG_LEVEL >= 4:
+                log_debug("vram", "_check_vram_idle: Verarbeitung aktiv – Idle‑Zeit zurückgesetzt")
             self._schedule_vram_idle_check()
             return
 
+        # 4. Idle‑Zeit berechnen
         idle_seconds = time.time() - self._last_transcription_time
-        if idle_seconds >= timeout:
-            if hasattr(self, "transcription_engine") and self.transcription_engine:
-                # Prüfen, ob überhaupt ein Modell geladen ist
-                current_model = self.transcription_engine.get_current_model()
-                if current_model and current_model != "None" and current_model != "not loaded":
-                    logger.info(f"💤 VRAM-Idle-Timeout ({timeout}s) erreicht – entlade Whisper-Modell")
-                    self.transcription_engine._force_model_cleanup()
-                    self.update_status("💤 Whisper-Modell aus VRAM entladen (Inaktivität)")
-                    if hasattr(self, "vram_unload_btn") and self.vram_unload_btn.winfo_exists():
-                        self.vram_unload_btn.config(state="disabled")
-                    # Timer nach erfolgreichem Entladen nicht erneut starten – das Modell ist weg
-                    return
-                else:
-                    # Kein Modell geladen – Timer ebenfalls nicht erneut starten
-                    if hasattr(self, "vram_unload_btn") and self.vram_unload_btn.winfo_exists():
-                        self.vram_unload_btn.config(state="disabled")
-                    return
+        if idle_seconds < timeout:
+            if DEBUG_LEVEL >= 4:
+                log_debug("vram", f"_check_vram_idle: {idle_seconds:.1f}s < {timeout}s – noch nicht reif")
+            self._schedule_vram_idle_check()
+            return
 
-        # Timer nur dann neu starten, wenn wir nicht bereits entladen haben
-        self._schedule_vram_idle_check()
+        # 5. Timeout erreicht – Modell entladen, falls vorhanden
+        logger.info(f"💤 VRAM‑Idle‑Timeout ({timeout}s) erreicht – versuche, Whisper‑Modell zu entladen")
+
+        engine = getattr(self, "transcription_engine", None)
+        if engine is None:
+            logger.warning("_check_vram_idle: Keine transcription_engine – Timer wird gestoppt")
+            self._set_vram_button_disabled()
+            return
+
+        # 5.1 Modellnamen ermitteln (sicher)
+        try:
+            current_model = engine.get_current_model()
+        except Exception as e:
+            logger.error(f"_check_vram_idle: Fehler beim Abrufen des Modellnamens: {e}")
+            self._schedule_vram_idle_check()
+            return
+
+        if not current_model or current_model in ("None", "not loaded", "dummy"):
+            if DEBUG_LEVEL >= 3:
+                log_debug("vram", f"_check_vram_idle: Kein Modell geladen ({current_model}) – Timer wird nicht neu gestartet")
+            self._set_vram_button_disabled()
+            return
+
+        # 5.2 Modell entladen (mit Fallback für Engines ohne die Methode)
+        try:
+            if hasattr(engine, "_force_model_cleanup"):
+                engine._force_model_cleanup()
+                logger.info("✅ Whisper‑Modell aus VRAM entladen")
+            else:
+                logger.warning(
+                    f"_check_vram_idle: Engine {type(engine).__name__} unterstützt "
+                    f"kein _force_model_cleanup – Modell wird auf None gesetzt"
+                )
+                with engine._model_usage_lock if hasattr(engine, "_model_usage_lock") else threading.RLock():
+                    engine.model = None
+                    engine.model_size = None
+        except Exception as e:
+            logger.error(f"_check_vram_idle: Fehler beim Entladen des Modells: {e}", exc_info=True)
+
+        # 5.3 GUI‑Status aktualisieren
+        self.update_status(f"💤 Whisper‑Modell aus VRAM entladen (Inaktivität > {timeout}s)")
+        self._last_transcription_time = 0.0
+
+        # 5.4 VRAM‑Button deaktivieren und Timer stoppen – Modell ist jetzt entladen
+        self._set_vram_button_disabled()
+
+    def _set_vram_button_disabled(self) -> None:
+        """
+        Setzt den VRAM‑Entlade‑Button auf 'disabled', falls er existiert.
+        """
+        if (
+            hasattr(self, "vram_unload_btn")
+            and self.vram_unload_btn is not None
+            and self.vram_unload_btn.winfo_exists()
+        ):
+            try:
+                self.vram_unload_btn.config(state="disabled")
+                if DEBUG_LEVEL >= 4:
+                    log_debug("vram", "VRAM‑Button deaktiviert")
+            except tk.TclError:
+                pass
 
     # ------------------------------------------------------------------------
     # Shortcuts
@@ -43436,12 +44005,48 @@ class WhisperLayoutManager:
         )
 
     def center_window(self) -> None:
-        self.root.update_idletasks()
-        width = self.root.winfo_width()
-        height = self.root.winfo_height()
-        x = (self.root.winfo_screenwidth() // 2) - (width // 2)
-        y = (self.root.winfo_screenheight() // 2) - (height // 2)
-        self.root.geometry(f"+{x}+{y}")
+        """
+        Zentriert das Hauptfenster auf dem Bildschirm.
+        """
+        try:
+            # Sicherstellen, dass Tkinter die Geometrie aktualisiert hat
+            self.root.update_idletasks()
+
+            win_w = self.root.winfo_width()
+            win_h = self.root.winfo_height()
+
+            # Bei sehr kleinen Werten (Fenster noch nicht vollständig
+            # aufgebaut) auf die angeforderte Größe zurückgreifen
+            if win_w <= 1 or win_h <= 1:
+                win_w = self.root.winfo_reqwidth()
+                win_h = self.root.winfo_reqheight()
+
+            # Bildschirmabmessungen (komplette Auflösung)
+            scr_w = self.root.winfo_screenwidth()
+            scr_h = self.root.winfo_screenheight()
+
+            # Zentrierte Position berechnen
+            x = max(0, (scr_w - win_w) // 2)
+            y = max(0, (scr_h - win_h) // 2)
+
+            # Clamping – Fenster darf nicht über den Bildschirmrand rutschen
+            if x + win_w > scr_w:
+                x = scr_w - win_w
+            if y + win_h > scr_h:
+                y = scr_h - win_h
+
+            self.root.geometry(f"+{x}+{y}")
+
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "gui",
+                    f"Window centered: {win_w}x{win_h} at ({x},{y})"
+                )
+
+        except Exception as e:
+            # Fehler beim Zentrieren sind nie kritisch – das Fenster
+            # erscheint dann an der Standardposition des Window-Managers.
+            logger.warning(f"Fenster konnte nicht zentriert werden: {e}")
 
     def create_layout(self) -> None:
         """Erstellt das Hauptlayout und die Steuerelemente."""
@@ -46838,11 +47443,37 @@ def _handle_headless_mode(args: argparse.Namespace) -> int:
 # Hauptfunktion
 # -----------------------------------------------------------------------------
 def main() -> int:
-    """Hauptfunktion des Dragon Whisperer."""
+    """
+    Hauptfunktion des Dragon Whisperer.
+
+    Diese Funktion ist der zentrale Einstiegspunkt der Anwendung. Sie
+    übernimmt die gesamte Ablaufsteuerung:
+        - Konsolenargumente auswerten
+        - Logging und Umgebung initialisieren
+        - Bei ``--headless`` oder ``--url`` in den Konsolenmodus wechseln
+        - Ansonsten die grafische Oberfläche (GUI) starten
+
+    **Fehlertoleranz gegenüber fehlenden Paketen**:
+        Wenn kritische Systemabhängigkeiten (FFmpeg, yt‑dlp, numpy) fehlen,
+        wird die GUI **trotzdem** gestartet, sofern Tkinter verfügbar ist.
+        Der Benutzer kann dann über den integrierten Installationsdialog
+        alle benötigten Komponenten nachrüsten, ohne dass das Programm
+        abstürzt oder ein manueller Eingriff nötig wäre.
+
+    **Rückgabewerte**:
+        0 – erfolgreicher Durchlauf (inklusive normaler Programmbeendigung)
+        1 – Fehler während der Ausführung (z. B. fehlende GUI oder kritische
+            Abhängigkeiten im Headless‑Modus)
+        2 – schwerwiegender, unbehandelter Laufzeitfehler
+    """
+
+    # -----------------------------------------------------------------
+    # 1. Argumente parsen
+    # -----------------------------------------------------------------
     args = parse_arguments()
 
     debug_level = 0
-    debug_components = []
+    debug_components: List[str] = []
     if args.debug != "0":
         if args.debug.isdigit():
             debug_level = int(args.debug)
@@ -46853,6 +47484,9 @@ def main() -> int:
     configure_logging(debug_level, debug_components, args.quiet)
     setup_platform_environment()
 
+    # -----------------------------------------------------------------
+    # 2. Spezielle Sofort‑Aktionen (keine GUI nötig)
+    # -----------------------------------------------------------------
     if args.version:
         print("🐉 Dragon Whisperer v4.1 (optimized)")
         print(f"Platform: {SYSTEM} {'ARM' if IS_ARM else 'x86'}")
@@ -46869,31 +47503,54 @@ def main() -> int:
     if args.test:
         return run_tests()
 
+    # -----------------------------------------------------------------
+    # 3. Headless‑ oder URL‑Modus (ohne GUI)
+    # -----------------------------------------------------------------
     if args.headless or args.url:
         if not args.url:
             print("Error: --headless requires --url to specify a stream.", file=sys.stderr)
             return 1
-        return _handle_headless_mode(args)
-
-    # GUI-Modus
-    logger = logging.getLogger("dragon")
-    app = None
-    try:
-        logger.info("🐉 Dragon Whisperer starting...")
-        logger.debug("🔍 Checking dependencies...")
         try:
+            # Im Headless‑Modus sind kritische Abhängigkeiten zwingend
             PlatformUtils.check_platform_dependencies()
         except RuntimeError as e:
             _show_user_error(str(e))
             return 1
-        logger.debug("✅ Dependencies OK")
+        return _handle_headless_mode(args)
 
+    # -----------------------------------------------------------------
+    # 4. GUI‑Modus – fehlertolerant gegenüber fehlenden Paketen
+    # -----------------------------------------------------------------
+    logger.info("🐉 Dragon Whisperer starting...")
+    logger.debug("🔍 Checking dependencies...")
+
+    dependency_issue = False
+    try:
+        PlatformUtils.check_platform_dependencies()
+    except RuntimeError as e:
         if not GUI_AVAILABLE:
-            raise RuntimeError("Tkinter/GUI not available. Install with: pip install tk")
+            # Ohne GUI können wir nichts machen – der Benutzer muss manuell
+            # installieren.  Wir geben eine verständliche Fehlermeldung aus.
+            _show_user_error(str(e))
+            return 1
+        # GUI ist verfügbar – wir starten trotzdem und zeigen später den
+        # Installationsdialog an.
+        logger.warning(
+            "Einige kritische Abhängigkeiten fehlen, aber die GUI kann "
+            "trotzdem gestartet werden.  Nach der Installation der "
+            "Komponenten steht der volle Funktionsumfang zur Verfügung.\n"
+            "%s", e
+        )
+        dependency_issue = True
 
+    logger.debug("✅ Dependencies OK (fehlende werden über GUI nachinstalliert)")
+
+    app = None
+    try:
         logger.debug("🖥️ Initializing GUI...")
         app = DragonWhispererGUI()
 
+        # Benutzerdefiniertes Profil laden, falls angegeben
         if args.profile:
             try:
                 profile_path = (
@@ -46907,21 +47564,37 @@ def main() -> int:
                     for key, value in profile_data.items():
                         if hasattr(app.advanced_settings, key):
                             setattr(app.advanced_settings, key, value)
-                    logger.info(f"✅ Profile '{args.profile}' loaded")
+                    logger.info("✅ Profile '%s' loaded", args.profile)
                 else:
-                    logger.warning(f"⚠️ Profile '{args.profile}' not found, using defaults")
+                    logger.warning(
+                        "⚠️ Profile '%s' not found, using defaults", args.profile
+                    )
             except Exception as e:
                 logger.warning(f"⚠️ Failed to load profile: {e}")
 
+        # Falls eine URL über die Kommandozeile übergeben wurde, direkt
+        # in das Eingabefeld setzen – aber erst nachdem die GUI vollständig
+        # aufgebaut ist (daher _safe_after).
         if args.url:
-            if hasattr(app, "url_entry") and app.url_entry.winfo_exists():
-                app.url_entry.delete(0, "end")
-                app.url_entry.insert(0, args.url)
-                logger.info(f"📌 URL from command line: {args.url}")
+            def _set_url(url: str) -> None:
+                if hasattr(app, "url_entry") and app.url_entry.winfo_exists():
+                    app.url_entry.delete(0, "end")
+                    app.url_entry.insert(0, url)
+                    logger.info(f"📌 URL from command line: {url}")
+            app._safe_after(500, _set_url, args.url)
 
+        # Wenn kritische Abhängigkeiten fehlen, öffne nach einer kurzen
+        # Verzögerung den Installationsdialog, damit der Benutzer direkt
+        # loslegen kann.
+        if dependency_issue:
+            def _open_installer() -> None:
+                if hasattr(app, "show_install_dialog") and not app.is_shutting_down():
+                    app.show_install_dialog()
+            app._safe_after(1500, _open_installer)
+
+        # Debug-Informationen ausgeben (nur wenn nicht im Quiet-Mode)
         if debug_level >= 1 and not args.quiet:
             _print_welcome(debug_level, args.quiet)
-
         if debug_level >= 3:
             print_system_info_debug3()
 
@@ -46929,23 +47602,25 @@ def main() -> int:
         app.run()
         logger.info("✅ Application closed normally")
 
-        # ========== Terminal wiederherstellen (Linux/macOS) ==========
+        # Terminal wiederherstellen (Linux/macOS)
         if not IS_WINDOWS:
             try:
                 subprocess.run(["stty", "sane"], check=False, timeout=1)
             except Exception:
                 pass
 
+        # Debug: aktive Threads nach GUI-Close auflisten
         if debug_level >= 1:
-            import threading
-            all_threads = threading.enumerate()
+            active = threading.enumerate()
             logger.info(
-                f"Active threads after GUI close: {[t.name for t in all_threads if t.is_alive()]}"
+                "Active threads after GUI close: %s",
+                [t.name for t in active if t.is_alive()]
             )
-            for t in all_threads:
+            for t in active:
                 if t.is_alive() and t != threading.main_thread():
-                    logger.debug(f"  Non-main thread: {t.name} (daemon={t.daemon})")
+                    logger.debug("  Non-main thread: %s (daemon=%s)", t.name, t.daemon)
 
+        # Sauberes Beenden – kein sys.exit() nötig, da die mainloop vorbei ist.
         logger.info("Forcing immediate exit with sys.exit(0)")
         sys.exit(0)
         return 0
@@ -46968,6 +47643,7 @@ def main() -> int:
         logger.debug("🧹 Final minimal cleanup...")
         if app is not None:
             try:
+                # Bereits vorhandene Aufräumlogik nutzen
                 if hasattr(app, "_safe_stop_all_processes"):
                     app._safe_stop_all_processes()
                 if app.app_context:
@@ -46983,7 +47659,6 @@ def main() -> int:
         if IS_WINDOWS:
             _restore_console_state()
         else:
-            # Auch hier nochmal sicherheitshalber stty sane
             try:
                 subprocess.run(["stty", "sane"], check=False, timeout=1)
             except Exception:
