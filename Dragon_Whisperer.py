@@ -3823,14 +3823,10 @@ class PlatformUtils:
     def check_platform_dependencies(cls) -> bool:
         """
         Prüft, ob alle kritischen und optionalen Abhängigkeiten vorhanden sind.
-        Gibt ausführliche Informationen im Log aus.
-        Wirft RuntimeError bei Fehlern mit ausführlicher Fehlermeldung.
 
-        Returns:
-            True, wenn alle kritischen Abhängigkeiten gefunden wurden.
-
-        Raises:
-            RuntimeError: Wenn eine kritische Abhängigkeit fehlt (ffmpeg, yt-dlp, tkinter, numpy).
+        Gibt ausführliche Informationen im Log aus und wirft eine RuntimeError,
+        wenn eine unverzichtbare Komponente (ffmpeg, yt-dlp, tkinter, numpy)
+        nicht gefunden wird.
         """
         with cls._dependencies_lock:
             if cls._dependencies_checked:
@@ -3989,7 +3985,8 @@ class PlatformUtils:
                 missing_optional.append("noisereduce")
                 issues.append("noisereduce not available (audio enhancement limited)")
                 cls._logger.debug(
-                    "  ✗ noisereduce missing", extra={"component": cls._DEBUG_COMPONENT}
+                    "  ✗ noisereduce missing",
+                    extra={"component": cls._DEBUG_COMPONENT},
                 )
             else:
                 cls._logger.debug(
@@ -4014,17 +4011,25 @@ class PlatformUtils:
                 missing_optional.append("python-docx")
                 issues.append("python-docx not available (Word export disabled)")
                 cls._logger.debug(
-                    "  ✗ python-docx missing", extra={"component": cls._DEBUG_COMPONENT}
+                    "  ✗ python-docx missing",
+                    extra={"component": cls._DEBUG_COMPONENT}
                 )
             else:
                 cls._logger.debug(
                     "  ✓ python-docx available",
-                    extra={"component": cls._DEBUG_COMPONENT},
+                    extra={"component": cls._DEBUG_COMPONENT}
                 )
 
             # ==================== EXTERNE TOOLS (optional) ====================
-            # VLC für DVB-Streams
+            # VLC für DVB-Streams – mit Windows-Pfad-Fallback
             vlc_found = shutil.which("vlc") is not None
+            if not vlc_found and IS_WINDOWS:
+                # Zusätzliche Standardpfade prüfen
+                for p in [r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+                          r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe"]:
+                    if os.path.exists(p):
+                        vlc_found = True
+                        break
             if not vlc_found:
                 missing_optional.append("vlc")
                 issues.append("vlc not found (DVB-S streams will not work)")
@@ -4036,8 +4041,34 @@ class PlatformUtils:
                     "  ✓ vlc available", extra={"component": cls._DEBUG_COMPONENT}
                 )
 
-            # Piper für TTS (hochwertige Sprachausgabe)
+            # Piper für TTS – zusätzlich Modell-Cache prüfen
             piper_found = shutil.which("piper") is not None
+            if not piper_found:
+                # Prüfe, ob im Cache-Verzeichnis mindestens eine .onnx-Datei liegt.
+                try:
+                    # Falls TTSManager bereits definiert ist, nutze dessen statische Methode
+                    if "TTSManager" in globals():
+                        cache_dir = TTSManager.get_piper_cache_dir()
+                    else:
+                        # Fallback für die Plattform
+                        if IS_WINDOWS:
+                            cache_dir = os.path.join(
+                                os.environ.get("APPDATA", os.path.expanduser("~\\AppData\\Roaming")),
+                                "piper"
+                            )
+                        else:
+                            cache_dir = os.path.join(
+                                os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
+                                "piper"
+                            )
+                    if os.path.isdir(cache_dir):
+                        for f in os.listdir(cache_dir):
+                            if f.endswith(".onnx") and os.path.getsize(os.path.join(cache_dir, f)) > 0:
+                                piper_found = True
+                                break
+                except Exception as e:
+                    cls._logger.debug(f"Piper-Cache-Prüfung fehlgeschlagen: {e}")
+
             if not piper_found:
                 missing_optional.append("piper")
                 issues.append("piper not found (high-quality TTS will be unavailable)")
@@ -4063,14 +4094,9 @@ class PlatformUtils:
                 )
 
             # Audio-Player für TTS (mindestens einer wird benötigt)
-            player_priority = [
-                ("ffplay", ["ffplay"]),
-                ("aplay", ["aplay"]),
-                ("paplay", ["paplay"]),
-                ("sox", ["play"]),
-            ]
             players = []
-            for name, cmd in player_priority:
+            for name, cmd in [("ffplay", ["ffplay"]), ("aplay", ["aplay"]),
+                             ("paplay", ["paplay"]), ("sox", ["play"])]:
                 if shutil.which(cmd[0]):
                     players.append(name)
             if not players:
@@ -4082,7 +4108,7 @@ class PlatformUtils:
             else:
                 cls._logger.debug(
                     f"  ✓ audio players: {', '.join(players)}",
-                    extra={"component": cls._DEBUG_COMPONENT},
+                    extra={"component": cls._DEBUG_COMPONENT}
                 )
 
             # ==================== FEHLERBEHANDLUNG KRITISCHE ABHÄNGIGKEITEN ====================
@@ -4093,9 +4119,7 @@ class PlatformUtils:
                 if "ffmpeg" in missing_critical:
                     error_msg += "\nFFmpeg Installation:\n"
                     if IS_WINDOWS:
-                        error_msg += (
-                            "  • Download from: https://ffmpeg.org/download.html\n"
-                        )
+                        error_msg += "  • Ausführen: winget install --source winget Gyan.FFmpeg\n"
                     elif IS_MACOS:
                         error_msg += "  • brew install ffmpeg\n"
                     else:
@@ -4110,9 +4134,7 @@ class PlatformUtils:
                     error_msg += "\nnumpy Installation:\n"
                     error_msg += "  • pip install numpy\n"
 
-                error_msg += (
-                    "\n💡 Nach der Installation starten Sie Dragon Whisperer neu."
-                )
+                error_msg += "\n💡 Nach der Installation starten Sie Dragon Whisperer neu."
                 cls._dependencies_checked = False
                 raise RuntimeError(error_msg)
 
@@ -4141,7 +4163,8 @@ class PlatformUtils:
             cls._logger.info("✅ Alle kritischen Abhängigkeiten gefunden")
             cls._dependencies_checked = True
             cls._logger.debug(
-                "Dependency check completed", extra={"component": cls._DEBUG_COMPONENT}
+                "Dependency check completed",
+                extra={"component": cls._DEBUG_COMPONENT}
             )
             return True
 
@@ -21122,14 +21145,98 @@ class TTSManager:
         return players
 
     def _detect_engines(self) -> List[str]:
-        """Ermittelt verfügbare TTS-Engines."""
-        engines = []
-        if shutil.which("piper") and self._available_players:
+        """
+        Ermittelt die verfügbaren TTS‑Engines mit maximaler Robustheit.
+        """
+        engines: List[str] = []
+
+        # -----------------------------------------------------------------
+        # 1. piper  (Qualitäts‑TTS)
+        # -----------------------------------------------------------------
+        piper_available = False
+        try:
+            # a) Ausführbare Datei im PATH?
+            if shutil.which("piper"):
+                piper_available = True
+                if DEBUG_LEVEL >= 3:
+                    log_debug("tts", "_detect_engines: piper.exe gefunden (PATH)")
+            else:
+                # b) Stimmen im Cache?
+                voices = self.get_installed_piper_voices()
+                if voices:
+                    piper_available = True
+                    if DEBUG_LEVEL >= 3:
+                        log_debug(
+                            "tts",
+                            f"_detect_engines: piper nicht im PATH, aber "
+                            f"{len(voices)} Stimme(n) im Cache gefunden",
+                        )
+        except Exception as e:
+            logger.warning(f"Fehler bei piper-Erkennung: {e}")
+
+        if piper_available:
             engines.append("piper")
-        if importlib.util.find_spec("pyttsx3") is not None:
+
+        # -----------------------------------------------------------------
+        # 2. pyttsx3  (plattformübergreifend, nutzt natives TTS)
+        # -----------------------------------------------------------------
+        pyttsx3_available = False
+        try:
+            if importlib.util.find_spec("pyttsx3") is not None:
+                # Kurzer Funktionstest – nur wenn wirklich nutzbar
+                import pyttsx3
+
+                try:
+                    test_engine = pyttsx3.init()
+                    voices = test_engine.getProperty("voices")
+                    test_engine.stop()
+                    if voices:
+                        pyttsx3_available = True
+                        if DEBUG_LEVEL >= 3:
+                            log_debug(
+                                "tts",
+                                f"_detect_engines: pyttsx3 initialisiert, "
+                                f"{len(voices)} Stimme(n) gefunden",
+                            )
+                    else:
+                        logger.warning(
+                            "pyttsx3 hat keine Stimmen – Engine nicht verfügbar"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"pyttsx3 initialisation fehlgeschlagen: {e}"
+                    )
+            else:
+                if DEBUG_LEVEL >= 3:
+                    log_debug("tts", "_detect_engines: pyttsx3-Modul nicht importierbar")
+        except ImportError:
+            logger.warning("pyttsx3-Modul nicht gefunden")
+            pyttsx3_available = False
+        except Exception as e:
+            logger.warning(f"Unerwarteter Fehler bei pyttsx3-Erkennung: {e}")
+
+        if pyttsx3_available:
             engines.append("pyttsx3")
-        if shutil.which("espeak"):
-            engines.append("espeak")
+
+        # -----------------------------------------------------------------
+        # 3. espeak  (leichter Fallback)
+        # -----------------------------------------------------------------
+        try:
+            if shutil.which("espeak"):
+                engines.append("espeak")
+                if DEBUG_LEVEL >= 3:
+                    log_debug("tts", "_detect_engines: espeak gefunden")
+        except Exception as e:
+            logger.warning(f"Fehler bei espeak-Erkennung: {e}")
+
+        # -----------------------------------------------------------------
+        # 4. Ergebnis protokollieren
+        # -----------------------------------------------------------------
+        if DEBUG_LEVEL >= 3:
+            log_debug("tts", f"_detect_engines: {len(engines)} Engine(s) verfügbar: {engines}")
+        else:
+            logger.debug(f"Verfügbare TTS-Engines: {', '.join(engines) if engines else 'keine'}")
+
         return engines
 
     # Öffentliche Konfigurationsmethoden
@@ -25547,6 +25654,7 @@ class InstallDependencyDialog(BaseDialog):
         ("deep-translator", "deep-translator (Google Übersetzung)", lambda: TRANSLATOR_AVAILABLE),
         ("argostranslate", "argos-translate (Offline-Übersetzung)", lambda: ARGOS_AVAILABLE),
         ("pyttsx3", "pyttsx3 (TTS-Fallback)", lambda: importlib.util.find_spec("pyttsx3") is not None),
+        ("pywin32", "pywin32 (Windows-API, benötigt für TTS)", lambda: importlib.util.find_spec("pywin32") is not None),
         ("noisereduce", "noisereduce (Rauschunterdrückung)", lambda: importlib.util.find_spec("noisereduce") is not None),
         ("rapidfuzz", "rapidfuzz (schnelle Textähnlichkeit)", lambda: importlib.util.find_spec("rapidfuzz") is not None),
         ("python-docx", "python-docx (Word-Export)", lambda: importlib.util.find_spec("docx") is not None),
@@ -29277,19 +29385,51 @@ class AdvancedSettingsDialog:
             pass
 
     def _test_tts(self) -> None:
-        if not hasattr(self.gui, "tts_manager"):
-            self.tts_test_status.config(text="❌ TTS-Manager nicht verfügbar")
+        """
+        Testet die Sprachausgabe mit den aktuell im Dialog eingestellten
+        TTS‑Parametern (Engine, Stimme, Geschwindigkeit, Satzpause).
+        """
+        # -----------------------------------------------------------------
+        # 1. Referenz auf den TTS‑Manager prüfen
+        # -----------------------------------------------------------------
+        if not hasattr(self.gui, "tts_manager") or self.gui.tts_manager is None:
+            self.tts_test_status.config(text="❌ TTS‑Manager nicht verfügbar")
             return
 
         tts = self.gui.tts_manager
-        old_voice = tts._voice
-        old_length = tts.length_scale
-        old_silence = tts.sentence_silence
 
-        voice = self.tts_voice_var.get()
-        lang_code = voice.split('_')[0] if '_' in voice else voice.split('-')[0]
-        lang_code = lang_code.lower()
+        # -----------------------------------------------------------------
+        # 2. Aktuelle GUI‑Auswahl sichern
+        # -----------------------------------------------------------------
+        engine_name = self.tts_engine_var.get().strip()
+        voice_name = self.tts_voice_var.get().strip()
+        length_scale = self.tts_length_scale_var.get()
+        sentence_silence = self.tts_sentence_silence_var.get()
 
+        # -----------------------------------------------------------------
+        # 3. Prüfen, ob die gewählte Engine verfügbar ist
+        # -----------------------------------------------------------------
+        if not tts.is_available(engine_name):
+            self.tts_test_status.config(
+                text=f"❌ Engine '{engine_name}' nicht verfügbar"
+            )
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts_test", f"Engine {engine_name} nicht verfügbar")
+            return
+
+        # -----------------------------------------------------------------
+        # 4. Sprache aus der Stimme ableiten (für passenden Testtext)
+        # -----------------------------------------------------------------
+        # Typische Piper‑Stimme: "de_DE-thorsten-medium" → lang_code = "de"
+        lang_code = "en"  # Fallback Englisch
+        if "_" in voice_name or "-" in voice_name:
+            first_part = voice_name.split("-")[0] if "-" in voice_name else voice_name.split("_")[0]
+            lang_code = first_part.split("_")[0].lower()
+        else:
+            # Falls der Name nicht dem erwarteten Schema folgt
+            lang_code = voice_name.split("-")[0].lower() if "-" in voice_name else voice_name.lower()
+
+        # Testtexte für verschiedene Sprachen
         test_texts = {
             "de": "Hallo, dies ist ein kurzer Testton.",
             "en": "Hello, this is a short test sound.",
@@ -29306,32 +29446,56 @@ class AdvancedSettingsDialog:
         }
         test_text = test_texts.get(lang_code, "Test. This is a short test sound.")
 
+        # -----------------------------------------------------------------
+        # 5. Aktuelle Engine‑Einstellungen sichern
+        # -----------------------------------------------------------------
+        old_voice = tts._voice
+        old_length = tts.length_scale
+        old_silence = tts.sentence_silence
+
+        # GUI‑Status auf "wird abgespielt" setzen
         self.tts_test_status.config(text="🔊 Wird abgespielt...")
         self.dialog.update_idletasks()
 
+        # -----------------------------------------------------------------
+        # 6. TTS‑Test asynchron starten
+        # -----------------------------------------------------------------
         def callback(success: bool, message: str) -> None:
+            """Wird nach Abschluss der Sprachausgabe aufgerufen."""
+            # GUI‑Update muss im Hauptthread erfolgen
             def update():
                 if not self.dialog.winfo_exists():
                     return
                 if success:
                     self.tts_test_status.config(text="✅ Test erfolgreich")
                 else:
-                    self.tts_test_status.config(text=f"❌ Fehler: {message[:50]}")
+                    # Zeige nur die ersten 50 Zeichen der Fehlermeldung
+                    short_msg = message[:50] + "…" if len(message) > 50 else message
+                    self.tts_test_status.config(text=f"❌ Fehler: {short_msg}")
+
+                # Einstellungen zurücksetzen
                 tts._voice = old_voice
                 tts.length_scale = old_length
                 tts.sentence_silence = old_silence
+
             self.dialog.after(0, update)
 
+        # -----------------------------------------------------------------
+        # 7. Temporär die gewählten Parameter setzen und Test starten
+        # -----------------------------------------------------------------
         try:
-            tts._voice = voice
-            tts.length_scale = self._gui_speed_to_piper(self.tts_length_scale_var.get())
-            tts.sentence_silence = self.tts_sentence_silence_var.get()
+            tts._voice = voice_name
+            tts.length_scale = length_scale
+            tts.sentence_silence = sentence_silence
             tts.speak(test_text, callback)
         except Exception as e:
+            # Falls schon das Setzen der Parameter fehlschlägt
             self.tts_test_status.config(text=f"❌ Fehler: {str(e)[:50]}")
             tts._voice = old_voice
             tts.length_scale = old_length
             tts.sentence_silence = old_silence
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts_test", f"Exception während Test: {e}")
 
     def _on_close(self) -> None:
         # Theme zurücksetzen, falls geändert und nicht gespeichert
