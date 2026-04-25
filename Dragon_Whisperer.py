@@ -4060,18 +4060,19 @@ class PlatformUtils:
                     "  ✓ piper available", extra={"component": cls._DEBUG_COMPONENT}
                 )
 
-            # espeak für TTS (leichtgewichtiger Fallback)
-            espeak_found = shutil.which("espeak") is not None
-            if not espeak_found:
-                missing_optional.append("espeak")
-                issues.append("espeak not found (lightweight TTS fallback unavailable)")
-                cls._logger.debug(
-                    "  ✗ espeak missing", extra={"component": cls._DEBUG_COMPONENT}
-                )
-            else:
-                cls._logger.debug(
-                    "  ✓ espeak available", extra={"component": cls._DEBUG_COMPONENT}
-                )
+            # espeak – unter Windows überspringen (pyttsx3/SAPI ist immer verfügbar)
+            if not IS_WINDOWS:
+                espeak_found = shutil.which("espeak") is not None
+                if not espeak_found:
+                    missing_optional.append("espeak")
+                    issues.append("espeak not found (lightweight TTS fallback unavailable)")
+                    cls._logger.debug(
+                        "  ✗ espeak missing", extra={"component": cls._DEBUG_COMPONENT}
+                    )
+                else:
+                    cls._logger.debug(
+                        "  ✓ espeak available", extra={"component": cls._DEBUG_COMPONENT}
+                    )
 
             # Audio-Player für TTS (mindestens einer wird benötigt)
             players = []
@@ -25577,7 +25578,7 @@ class InstallDependencyDialog(BaseDialog):
         "yt-dlp": {"apt": "yt-dlp", "pacman": "yt-dlp", "brew": "yt-dlp", "pip": "yt-dlp"},
         "vlc": {"apt": "vlc", "pacman": "vlc", "brew": "vlc", "winget": "VideoLAN.VLC"},
         "espeak": {"apt": "espeak", "pacman": "espeak", "brew": "espeak"},
-        "piper": {"apt": "piper", "pacman": "piper", "brew": "piper"},
+        "piper": {"apt": "piper", "pacman": "piper", "brew": "piper", "winget": "piper"},
         "ollama": {
             "apt": "ollama",
             "pacman": "ollama",
