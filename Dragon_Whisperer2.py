@@ -29239,10 +29239,23 @@ class DragonWhispererGUI:
         """
         Initialisiert die DragonWhispererGUI – das Hauptfenster der Anwendung.
 
-        Die Methode ist vollständig fehlertolerant: Falls kritische Komponenten
-        (FFmpeg, yt‑dlp, numpy, tkinter) fehlen, wird die GUI trotzdem gestartet.
-        Der Benutzer kann dann über den integrierten Installationsdialog alle
-        benötigten Pakete nachrüsten.
+        Die Methode ist so ausgelegt, dass sie auch auf einem minimalen
+        Python‑System (nur Python + Tkinter) fehlerfrei startet.  Fehlende
+        Pakete (FFmpeg, numpy, psutil …) führen **nicht** zum Abbruch,
+        sondern werden protokolliert.  Der Benutzer wird nach dem Start
+        automatisch zum integrierten Installationsdialog geführt, sodass
+        alle Komponenten ohne manuelle Eingriffe nachinstalliert werden können.
+
+        **Verbesserungen für kleine Bildschirme (1024×768)**:
+            - Die Fenstergröße wird dynamisch an die Bildschirmauflösung
+              angepasst (Aufruf von ``_adaptive_window_size``).
+            - Der Cookie‑Hinweis wird **unterdrückt**, wenn ohnehin der
+              Installationsdialog erscheint, damit der Benutzer nicht von
+              mehreren Popups überrannt wird.
+
+        **Thread‑Sicherheit**:
+            - Alle GUI‑Operationen werden über den RateLimiter oder den
+              QueueManager in den Hauptthread delegiert.
         """
 
         # -----------------------------------------------------------------
@@ -29254,7 +29267,8 @@ class DragonWhispererGUI:
         self._exit_dialog_active = False
         self._cleanup_done = False
         self._shutdown_completed = False
-        self._dependency_issue = False            # wird True, wenn kritische Pakete fehlen
+        self._dependency_issue = False            # True, wenn kritische Pakete fehlen
+        self._install_dialog_open = False         # Sperre für den Installationsdialog
 
         if DEBUG_LEVEL >= 3:
             log_debug("gui", "RateLimiter und Shutdown-Flags initialisiert")
@@ -29499,7 +29513,7 @@ class DragonWhispererGUI:
         self.event_bus.subscribe("gpu_status_changed", self._on_gpu_status_changed)
 
         # -----------------------------------------------------------------
-        # 18. Controller erstellen (kritisch – aber fangen wir Fehler)
+        # 18. Controller erstellen (kritisch – aber Fehler abfangen)
         # -----------------------------------------------------------------
         try:
             self.controller = WhisperController(gui_ref=self, event_bus=self.event_bus)
@@ -29578,6 +29592,7 @@ class DragonWhispererGUI:
         self.queue_manager = QueueManager(self)
 
         try:
+            self._adaptive_window_size()   # Fenster an Bildschirm anpassen
             self.layout.setup_gui()
             if hasattr(self, "model_var") and self.model_var:
                 self.model_var.set(self.settings.default_model)
@@ -29593,10 +29608,7 @@ class DragonWhispererGUI:
             self._set_initial_url()
 
             self.root.update_idletasks()
-            current_geometry = self.root.geometry()
-            self.root.geometry(current_geometry)
             self.root.resizable(True, True)
-            self.root.minsize(950, 700)
 
             self.root.deiconify()
             if DEBUG_LEVEL >= 3:
@@ -29610,7 +29622,8 @@ class DragonWhispererGUI:
         # 23. Signal-Handler und Cookie-Hinweis
         # -----------------------------------------------------------------
         self._register_signal_handlers()
-        if self._show_cookie_notice:
+        # Cookie‑Hinweis nur zeigen, wenn keine kritischen Pakete fehlen
+        if self._show_cookie_notice and not self._dependency_issue:
             self._safe_after(500, self._show_cookie_notice_dialog)
 
         # -----------------------------------------------------------------
@@ -29631,7 +29644,7 @@ class DragonWhispererGUI:
 
         # -----------------------------------------------------------------
         # 26. Wenn kritische Abhängigkeiten fehlen, öffne nach kurzer
-        #     Verzögerung den Installationsdialog.
+        #     Verzögerung den Installationsdialog – aber nur einmal.
         # -----------------------------------------------------------------
         missing_ffmpeg = not shutil.which("ffmpeg")
         missing_ytdlp = not shutil.which("yt-dlp")
@@ -29639,8 +29652,15 @@ class DragonWhispererGUI:
         if missing_ffmpeg or missing_ytdlp or missing_numpy:
             self._dependency_issue = True
             def _open_installer():
+                if self._install_dialog_open:
+                    return
                 if hasattr(self, "show_install_dialog") and not self.is_shutting_down():
+                    self._install_dialog_open = True
                     self.show_install_dialog()
+                    # Nach Schließen zurücksetzen, damit der Benutzer den Dialog
+                    # später manuell erneut öffnen kann.
+                    if hasattr(self, 'root'):
+                        self.root.after(500, lambda: setattr(self, '_install_dialog_open', False))
             self._safe_after(1500, _open_installer)
 
     # ------------------------------------------------------------------------
@@ -30018,26 +30038,6 @@ class DragonWhispererGUI:
         Threads. Sie kürzt die Nachricht auf 100 Zeichen (passend für die Statusleiste),
         filtert leere oder bereits identische Nachrichten und leitet die Aktualisierung
         thread‑sicher über den QueueManager an den Hauptthread weiter.
-
-        **Verbesserungen gegenüber der ursprünglichen Version:**
-            - **Thread‑sichere Duplikatprüfung:** Ein `threading.RLock` (`_status_lock`)
-              schützt den Zugriff auf `_last_status_message` und verhindert eine
-              Race Condition, bei der zwei Threads gleichzeitig dieselbe Nachricht
-              verarbeiten und eine davon fälschlich als Duplikat verworfen wird.
-            - **Robuste Shutdown‑Prüfung:** Bei aktivem Shutdown wird die Aktualisierung
-              sofort abgebrochen, um Zugriffe auf zerstörte Widgets zu vermeiden.
-            - **Fallback für fehlenden QueueManager:** Sollte der QueueManager nicht
-              verfügbar sein, wird die GUI‑Aktualisierung direkt über `after_idle`
-              im Hauptthread geplant.
-            - **Detaillierte Debug‑Ausgaben** bei `DEBUG_LEVEL >= 3` für jeden Schritt.
-            - **Fehlertoleranz im GUI‑Callback:** TclError und andere Exceptions werden
-              abgefangen und geloggt, ohne dass die Anwendung abstürzt.
-            - **Nachrichten‑Trunkierung:** Berücksichtigt Unicode‑Zeichen korrekt
-              (verwendet `[:100]` auf dem String, nicht auf Bytes).
-
-        Args:
-            message: Die anzuzeigende Nachricht. Darf `None` oder leer sein;
-                     in diesem Fall wird nichts unternommen.
         """
         # ---------------------------------------------------------------------
         # 1. Eingangsvalidierung und Shutdown‑Prüfung
@@ -30128,14 +30128,6 @@ class DragonWhispererGUI:
         - Satzkontext‑abhängige Zeitstempel (Systemuhrzeit im Normalmodus)
         - Unterschiedliche Darstellung für Normal‑ und Untertitelmodus
         - Thread‑sichere Pufferung und Historienführung
-
-        Konfigurierbare Schwellwerte für die Zusammenführung:
-        - MERGE_MAX_TIME_GAP: Maximale zeitliche Lücke zwischen Segmenten (Sekunden)
-        - MERGE_MAX_WORDS: Maximale Wortanzahl des aktuellen Segments für eine Zusammenführung
-        - MERGE_MIN_CONFIDENCE: Minimale Confidence für die Zusammenführung
-
-        Args:
-            result: Das von der Transkriptions‑Engine gelieferte Ergebnisobjekt.
         """
         # -----------------------------------------------------------------
         # 1. Eingangsvalidierung
@@ -30372,19 +30364,6 @@ class DragonWhispererGUI:
         vorliegt. Sie formatiert den Text (mit oder ohne Zeitstempel, je nach
         Untertitel‑Modus), prüft auf Duplikate, wendet Blacklist‑Filter an,
         stößt ggf. TTS an und stellt den Text in die GUI‑Queue ein.
-
-        Verbesserungen:
-            - Explizite WARNING‑Logs zur Diagnose (auch ohne DEBUG‑LEVEL).
-            - Fallback-Direktinsertion per root.after, falls QueueManager nicht
-              verfügbar oder GUI im Shutdown.
-            - Prüfung auf GUI‑Shutdown vor jeder GUI‑Operation.
-            - Robuste Behandlung von None‑Werten und leeren Texten.
-            - Korrekte Handhabung von asiatischen Sprachen (kein überflüssiges
-              Leerzeichen am Satzanfang).
-            - Thread‑Sicherheit durch Verwendung des QueueManagers und root.after.
-
-        Args:
-            result: Das Übersetzungsergebnis von der Engine.
         """
         # -----------------------------------------------------------------
         # 1. Eingangsdiagnose (immer sichtbar)
@@ -30562,6 +30541,22 @@ class DragonWhispererGUI:
                 logger.error(f"🌐 Direct insert unexpected error: {e}")
 
         self.root.after(0, direct_insert)
+
+
+    def _adaptive_window_size(self) -> None:
+        """Passt die Fenstergröße an die Bildschirmauflösung an (mind. 800×600)."""
+        try:
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            # ca. 5 % Rand für Taskleiste lassen
+            usable_w = int(screen_w * 0.85)
+            usable_h = int(screen_h * 0.80)
+            width = min(950, usable_w)
+            height = min(700, usable_h)
+            self.root.geometry(f"{width}x{height}")
+            self.root.minsize(800, 600)
+        except Exception as e:
+            logger.warning(f"Could not adapt window size: {e}")
 
     @gui_error_handler
     def handle_info(self, info_msg: str) -> None:
@@ -43584,12 +43579,48 @@ class WhisperLayoutManager:
         )
 
     def center_window(self) -> None:
-        self.root.update_idletasks()
-        width = self.root.winfo_width()
-        height = self.root.winfo_height()
-        x = (self.root.winfo_screenwidth() // 2) - (width // 2)
-        y = (self.root.winfo_screenheight() // 2) - (height // 2)
-        self.root.geometry(f"+{x}+{y}")
+        """
+        Zentriert das Hauptfenster auf dem Bildschirm.
+        """
+        try:
+            # Sicherstellen, dass Tkinter die Geometrie aktualisiert hat
+            self.root.update_idletasks()
+
+            win_w = self.root.winfo_width()
+            win_h = self.root.winfo_height()
+
+            # Bei sehr kleinen Werten (Fenster noch nicht vollständig
+            # aufgebaut) auf die angeforderte Größe zurückgreifen
+            if win_w <= 1 or win_h <= 1:
+                win_w = self.root.winfo_reqwidth()
+                win_h = self.root.winfo_reqheight()
+
+            # Bildschirmabmessungen (komplette Auflösung)
+            scr_w = self.root.winfo_screenwidth()
+            scr_h = self.root.winfo_screenheight()
+
+            # Zentrierte Position berechnen
+            x = max(0, (scr_w - win_w) // 2)
+            y = max(0, (scr_h - win_h) // 2)
+
+            # Clamping – Fenster darf nicht über den Bildschirmrand rutschen
+            if x + win_w > scr_w:
+                x = scr_w - win_w
+            if y + win_h > scr_h:
+                y = scr_h - win_h
+
+            self.root.geometry(f"+{x}+{y}")
+
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "gui",
+                    f"Window centered: {win_w}x{win_h} at ({x},{y})"
+                )
+
+        except Exception as e:
+            # Fehler beim Zentrieren sind nie kritisch – das Fenster
+            # erscheint dann an der Standardposition des Window-Managers.
+            logger.warning(f"Fenster konnte nicht zentriert werden: {e}")
 
     def create_layout(self) -> None:
         """Erstellt das Hauptlayout und die Steuerelemente."""
