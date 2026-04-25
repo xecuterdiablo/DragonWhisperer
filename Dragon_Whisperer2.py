@@ -85,70 +85,64 @@ def _filter_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
 
 def _should_patch() -> bool:
     """
-    Prüft dynamisch und robust, ob der urllib3‑Monkey‑Patch benötigt wird.
+    Prüft dynamisch und absolut robust, ob der urllib3‑Monkey‑Patch
+    benötigt wird.
     """
-    # 1. Versuche, das benötigte Submodul zu importieren.
-    #    Falls urllib3 insgesamt fehlt, ist nichts zu tun.
+
+    # Lokale Hilfsfunktion für Debug‑Ausgaben – prüft selbstständig
+    # die globalen Variablen DEBUG_LEVEL und DEBUG_COMPONENTS.
+    def _debug(msg: str) -> None:
+        """Gibt eine Debug‑Meldung aus, falls Debugging aktiv ist."""
+        try:
+            if DEBUG_LEVEL >= 3 or "monkey" in DEBUG_COMPONENTS:
+                # log_debug könnte erst später definiert sein – Fallback
+                # auf logger.debug, falls vorhanden.
+                if "log_debug" in globals():
+                    log_debug("monkey", msg)
+                else:
+                    logger.debug(f"[monkey] {msg}")
+        except (NameError, AttributeError):
+            # Falls die globalen Variablen noch nicht existieren,
+            # wird die Ausgabe komplett unterdrückt.
+            pass
+
+    # 1. Versuchen, das benötigte Untermodul zu importieren
     try:
         import urllib3.connectionpool
     except ImportError:
-        # urllib3 nicht verfügbar – dann gibt es auch keinen Fehler zu patchen
-        if _debug_enabled():
-            log_debug(
-                "monkey",
-                "urllib3 nicht installiert – Monkey‑Patch wird nicht benötigt.",
-            )
+        _debug("urllib3 nicht installiert – Patch überflüssig.")
         return False
 
-    # 2. Prüfe, ob die relevante Klasse überhaupt existiert.
+    # 2. Existiert die Klasse PoolKey? (sehr alte urllib3?)
     if not hasattr(urllib3.connectionpool, "PoolKey"):
-        if _debug_enabled():
-            log_debug(
-                "monkey",
-                "urllib3.connectionpool.PoolKey nicht gefunden – "
-                "Monkey‑Patch überflüssig.",
-            )
+        _debug("PoolKey nicht vorhanden – Patch überflüssig.")
         return False
 
-    # 3. Versuche, ein PoolKey-Objekt mit dem problematischen Argument
+    # 3. Testaufruf mit dem problematischen Parameter durchführen.
+    try:
         urllib3.connectionpool.PoolKey(
             host="localhost",
             port=80,
             request_context={},
             key_threadpool="dummy",
         )
-        # Kein Fehler aufgetreten – Patch nicht nötig
-        if _debug_enabled():
-            log_debug(
-                "monkey",
-                "urllib3 akzeptiert key_threadpool – Monkey‑Patch überflüssig.",
-            )
-        return False
     except TypeError as e:
-        # Genau dieser Fehler ist der Grund für den Patch
+        # Ist dies der uns bekannte Fehler wegen key_threadpool?
         if "key_threadpool" in str(e):
-            if _debug_enabled():
-                log_debug(
-                    "monkey",
-                    "urllib3 wirft TypeError wegen key_threadpool – "
-                    "Monkey‑Patch wird angewendet.",
-                )
+            _debug("TypeError wegen key_threadpool erkannt – Patch wird angewendet.")
             return True
-        # Anderer TypeError – aus Sicherheitsgründen keinen Patch
-        logger.warning(
-            f"urllib3 TypeError, aber nicht wegen key_threadpool: {e}"
-        )
+        # Andere TypeError-Ursache – kein Patch
+        _debug(f"TypeError, aber nicht key_threadpool: {e}")
         return False
     except Exception as e:
-        # Jede andere Exception (z.B. ConnectionError bei einem
-        # hypothetischen connect) – Patch sicherheitshalber nicht anwenden.
-        logger.warning(
-            f"Unerwarteter Fehler beim Testen des Monkey‑Patches: {e}"
-        )
+        # Jede andere Exception (z.B. ein hypothetischer interner Fehler)
+        # wird als Grund gesehen, den Patch **nicht** anzuwenden.
+        _debug(f"Unerwarteter Fehler beim Testen: {e}")
         return False
-    # 4. Niemals hier ankommen, aber zur Sicherheit:
-    return False
-
+    else:
+        # Kein Fehler – der Parameter wird akzeptiert, Patch ist unnötig.
+        _debug("urllib3 akzeptiert key_threadpool – Patch überflüssig.")
+        return False
 
 def _debug_enabled() -> bool:
     """
