@@ -12447,15 +12447,6 @@ class StreamManager:
         3. m4a-Format bevorzugt
         4. worstaudio als letzter Ausweg
 
-        **Verbesserungen:**
-            - **Dynamische Mindestdauer:** Verwendet die erwartete Videodauer, falls bekannt,
-              um kurze Videos nicht fälschlich abzulehnen. Standard‑Mindestdauer wurde auf
-              5 Sekunden reduziert (vorher 30), um auch YouTube‑Shorts korrekt zu verarbeiten.
-            - **Detaillierte Debug‑Ausgaben:** Bei `DEBUG_LEVEL >= 3` wird jeder Schritt
-              mit Format, Cookies und Dauer protokolliert.
-            - **Optimierte Reihenfolge:** Die vielversprechendsten Formate werden zuerst
-              getestet, um Zeit zu sparen.
-
         Args:
             url: Die YouTube‑URL.
             platform_id: Der erkannte Plattform‑Identifier (wird nicht verwendet).
@@ -12965,15 +12956,6 @@ class YtDlpHelper:
 
     Bietet Methoden zum Abrufen von JSON-Metadaten und direkten Audio-URLs.
     Die Ausführung erfolgt immer ohne Shell (sicher gegen Injection).
-
-    Verbesserungen:
-        - Strategie: erst ohne Cookies (schnell), dann mit dem angegebenen Browser (nur dieser).
-        - Keine automatische Fallback-Liste über alle Browser – reduziert unnötige Timeouts.
-        - Detaillierte Debug-Ausgaben bei DEBUG_LEVEL >= 2.
-        - Robuste Prozess-Terminierung mit cancel_event.
-        - IPv4-Präferenz und Proxy-Unterstützung.
-        - Validierung von Eingaben (Browser, Proxy, Format).
-        - Wiederholungslogik bei temporären Fehlern (optional, derzeit nicht verwendet).
     """
 
     # -------------------------------------------------------------------------
@@ -14629,11 +14611,6 @@ class FFmpegManager:
             return None
 
         finally:
-            # ---------------------------------------------------------------------
-            # GARANTIERTE BEREINIGUNG: Alle jemals gestarteten Prozesse beenden.
-            # Dies verhindert Zombie‑Prozesse selbst dann, wenn während der Methode
-            # eine Exception auftritt (z. B. in _register_process).
-            # ---------------------------------------------------------------------
             for proc in all_procs:
                 if proc is None:
                     continue
@@ -14870,16 +14847,6 @@ class FFmpegManager:
         Startet FFmpeg mit optimiertem Befehl und fällt bei sofortigem Tod
         auf einen minimalen Befehl und schließlich auf einen ultraminimalen
         Befehl zurück.
-
-        Args:
-            audio_url: Die aufgelöste Audio‑URL.
-            seek_seconds: Startposition in Sekunden (nur für Nicht‑YouTube‑VODs).
-            detected_language: Vom Whisper‑Modell erkannte Sprache (für Audiofilter).
-            is_live: True, wenn es sich um einen Livestream handelt.
-            is_youtube: True, wenn die Quelle YouTube ist.
-
-        Returns:
-            Den gestarteten FFmpeg‑Prozess oder None bei vollständigem Fehlschlag.
         """
         # -----------------------------------------------------------------
         # 1. Optimierten Befehl erstellen
@@ -15191,19 +15158,6 @@ class FFmpegManager:
     ) -> List[str]:
         """
         Erstellt eine optimierte, robuste und maximal kompatible FFmpeg‑Befehlszeile.
-
-        Die Methode analysiert den Stream‑Typ (Live / VOD) und die Plattform (YouTube etc.)
-        und wählt gezielt Optionen, die auf einer breiten Palette von FFmpeg‑Versionen
-        (4.x bis 7.x) stabil funktionieren. Nicht allgemein unterstützte Flags werden
-        vermieden, und Reconnect‑Optionen werden **nur für Livestreams** aktiviert,
-        da sie bei VODs und lokalen Dateien zu Fehlern oder endlosen Hängern führen.
-
-        **Hinweis zu ``-ss`` (Seek):** Bei Nicht‑YouTube‑VODs kann ein Seek vor der
-        Eingabe (`-ss` vor `-i`) verwendet werden. Dieser Parameter ist seit FFmpeg 2.1
-        stabil, dennoch wird für den unwahrscheinlichen Fall, dass eine ältere Version
-        ihn nicht unterstützt, der aufrufende ``_start_stream_normal_mode`` einen
-        mehrstufigen Fallback auslösen (minimale Befehle ohne Seek), um dennoch eine
-        Verbindung herzustellen.
         """
         log_debug("ffmpeg", f"_build_ffmpeg_command_optimized: url={url[:100]}...")
 
@@ -15299,11 +15253,6 @@ class FFmpegManager:
                 # Bei YouTube führt Seek oft zu PCM‑Korruption, daher nur für andere
                 if not is_youtube:
                     logger.info(f"  ⏩ Seeking to {seek_seconds}s")
-                    # Das Platzieren von -ss vor dem -i ermöglicht schnelles und
-                    # genaues Seek. Sollte eine hypothetische uralte FFmpeg-
-                    # Version diesen Parameter ablehnen, wird der Fehler durch
-                    # _start_ffmpeg_with_fallback unter Verwendung eines minimalen
-                    # Befehls aufgefangen.
                     cmd.extend(["-ss", str(seek_seconds)])
                 else:
                     logger.warning(
@@ -15930,9 +15879,6 @@ class FFmpegManager:
             # 7. 🔥 GARANTIERTE SLOT‑FREIGABE IM FEHLERFALL
             #    Nur wenn slot_acquired noch True ist (d.h. die Registrierung
             #    hat nicht erfolgreich abgeschlossen), wird der Slot freigegeben.
-            #    Bei Erfolg wurde slot_acquired auf False gesetzt, sodass der
-            #    Slot dauerhaft belegt bleibt.
-            # -----------------------------------------------------------------
             if slot_acquired:
                 try:
                     self._release_slot(purpose=f"register_failed:{process_id}")
@@ -21869,10 +21815,9 @@ class TTSManager:
 
     def _speak_piper_sync(self, text: str, _depth: int = 0, _retry: int = 0) -> Tuple[bool, str]:
         """
-        Synchrone Piper-Ausgabe (wird im Worker-Thread aufgerufen).
-        Gibt (erfolg, nachricht) zurück.
+        Synchrone Piper‑Ausgabe (wird im Worker‑Thread aufgerufen).
         """
-        # 0. Vorab-Prüfung: Wurde der TTSManager bereits disposed oder gestoppt?
+
         if getattr(self, "_disposed", False):
             log_debug("tts", "_speak_piper_sync: TTSManager disposed – abort")
             return False, "TTSManager disposed"
@@ -21885,266 +21830,229 @@ class TTSManager:
         if _retry >= self.MAX_SYNTHESIS_RETRIES:
             return False, f"Maximale Wiederholungen ({self.MAX_SYNTHESIS_RETRIES}) erreicht"
 
+
+        try:
+            piper_exe = self._find_piper_executable()
+        except FileNotFoundError:
+            logger.warning("piper executable not found – falling back to another engine")
+            return False, "piper executable not found"
+
         process = None
         audio_player = None
         forwarded_bytes = 0
         total_piper_bytes = 0
         _np_available = NUMPY_AVAILABLE
-        original_voice = self._voice
-
-        # Erweiterte Debug-Ausgabe: Text vor der Synthese
-        if DEBUG_LEVEL >= 4:
-            log_debug(
-                "tts",
-                f"_speak_piper_sync: Vollständiger Text für Piper:\n{text}"
-            )
-        elif DEBUG_LEVEL >= 3:
-            preview = text[:200] + "…" if len(text) > 200 else text
-            log_debug(
-                "tts",
-                f"_speak_piper_sync: Starte Synthese\n"
-                f"  Textlänge: {len(text)} Zeichen\n"
-                f"  Textvorschau: {preview}\n"
-                f"  Voice: {self._voice}, length_scale={self._length_scale:.2f}"
-            )
 
         try:
-            # --- Modell vorbereiten (mit Fallback high -> medium) ---
-            try:
-                model_path, json_path = self._prepare_piper_model()
-            except FileNotFoundError as e:
-                if getattr(self, "_disposed", False) or self._stop_requested.is_set():
-                    return False, "Aborted during model preparation"
-                if self._voice.endswith("-high"):
-                    fallback_voice = self._voice.replace("-high", "-medium")
-                    logger.warning(f"Piper high-Modell fehlerhaft, versuche Fallback auf {fallback_voice}")
-                    self._voice = fallback_voice
-                    return self._speak_piper_sync(text, _depth + 1, _retry)
-                else:
-                    return False, str(e)
-
-            # --- Erneute Prüfung nach Modell-Vorbereitung ---
+            model_path, json_path = self._prepare_piper_model()
+        except FileNotFoundError as e:
             if getattr(self, "_disposed", False) or self._stop_requested.is_set():
-                return False, "Aborted before starting Piper"
+                return False, "Aborted during model preparation"
+            if self._voice.endswith("-high"):
+                fallback_voice = self._voice.replace("-high", "-medium")
+                logger.warning(f"Piper high-Modell fehlerhaft, versuche Fallback auf {fallback_voice}")
+                self._voice = fallback_voice
+                return self._speak_piper_sync(text, _depth + 1, _retry)
+            else:
+                return False, str(e)
 
-            # --- Piper starten ---
-            piper_exe = self._find_piper_executable()
-            cmd = [
-                piper_exe, "--model", model_path,
-                "--length_scale", str(self._length_scale),
-                "--sentence_silence", str(self._sentence_silence),
-                "--output-raw",
-            ]
-            if _retry > 0:
-                cmd.append("--debug")
 
-            if DEBUG_LEVEL >= 3 or 'tts' in DEBUG_COMPONENTS:
-                log_debug("tts", f"Starte Piper (retry={_retry}): {' '.join(cmd)}")
+        if getattr(self, "_disposed", False) or self._stop_requested.is_set():
+            return False, "Aborted before starting Piper"
+
+
+        cmd = [
+            piper_exe, "--model", model_path,
+            "--length_scale", str(self._length_scale),
+            "--sentence_silence", str(self._sentence_silence),
+            "--output-raw",
+        ]
+        if _retry > 0:
+            cmd.append("--debug")
+
+        if DEBUG_LEVEL >= 3 or 'tts' in DEBUG_COMPONENTS:
+            log_debug("tts", f"Starte Piper (retry={_retry}): {' '.join(cmd)}")
+        try:
             process = subprocess.Popen(
-                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                cmd,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                **self._get_process_kwargs(),
             )
-            with self._lock:
-                # Prüfen, ob während Popen disposed wurde
-                if getattr(self, "_disposed", False):
-                    process.kill()
-                    return False, "Disposed during process start"
-                self._process = process
+        except Exception as e:
+            logger.error(f"Fehler beim Starten von Piper: {e}")
+            return False, f"Piper start failed: {e}"
 
-            # --- Audio-Player starten ---
+        with self._lock:
+            if getattr(self, "_disposed", False):
+                process.kill()
+                return False, "Disposed during process start"
+            self._process = process
+
+
+        try:
             audio_player = self._start_audio_player()
-            player_start_time = time.perf_counter()
+        except RuntimeError as e:
+            logger.error(str(e))
+            process.kill()
+            return False, str(e)
 
-            # --- Text an Piper senden (mit Flush) ---
+        player_start_time = time.perf_counter()
+
+
+        try:
+            text_bytes = text.encode("utf-8")
+            process.stdin.write(text_bytes)
+            process.stdin.flush()
+        except BrokenPipeError:
+            stderr = process.stderr.read().decode(errors="ignore")
+            process.wait(timeout=2.0)
+            if getattr(self, "_disposed", False) or self._stop_requested.is_set():
+                return False, "Aborted"
+            if _retry < self.MAX_SYNTHESIS_RETRIES:
+                logger.warning(f"Piper stdin BrokenPipe, retry {_retry+1}/{self.MAX_SYNTHESIS_RETRIES}")
+                return self._speak_piper_sync(text, _depth, _retry + 1)
+            return False, f"Piper stdin broken (exit {process.returncode}): {stderr}"
+        finally:
             try:
-                text_bytes = text.encode("utf-8")
-                process.stdin.write(text_bytes)
-                process.stdin.flush()
-                if DEBUG_LEVEL >= 4:
-                    log_debug("tts", f"An Piper gesendet: {len(text_bytes)} Bytes")
+                process.stdin.close()
             except BrokenPipeError:
-                stderr = process.stderr.read().decode(errors="ignore")
-                process.wait(timeout=2.0)
-                if getattr(self, "_disposed", False) or self._stop_requested.is_set():
-                    return False, "Aborted"
-                if _retry < self.MAX_SYNTHESIS_RETRIES:
-                    logger.warning(f"Piper stdin BrokenPipe, versuche erneut ({_retry+1}/{self.MAX_SYNTHESIS_RETRIES})")
-                    return self._speak_piper_sync(text, _depth, _retry + 1)
-                return False, f"Piper schloss stdin frühzeitig (exit {process.returncode}):\n{stderr}"
+                pass
+
+        self._forward_stop.clear()
+        forward_error = None
+        forward_done = threading.Event()
+
+        def forward():
+            nonlocal forwarded_bytes, forward_error, total_piper_bytes
+            try:
+                start_time = time.time()
+                while not self._forward_stop.is_set():
+                    chunk = process.stdout.read(8192)
+                    if not chunk:
+                        break
+                    total_piper_bytes += len(chunk)
+                    if forwarded_bytes == 0 and time.time() - start_time > 3.0:
+                        forward_error = TimeoutError("Piper liefert keine Audiodaten")
+                        break
+                    chunk = self._apply_volume_scaling(chunk, _np_available)
+                    try:
+                        audio_player.stdin.write(chunk)
+                        audio_player.stdin.flush()
+                        forwarded_bytes += len(chunk)
+                    except BrokenPipeError:
+                        forward_error = BrokenPipeError("Audio player pipe closed early")
+                        break
+            except Exception as e:
+                forward_error = e
+                logger.error(f"Fehler in forward-Thread: {e}", exc_info=True)
             finally:
                 try:
-                    process.stdin.close()
-                except BrokenPipeError:
+                    audio_player.stdin.close()
+                except Exception:
                     pass
+                forward_done.set()
 
-            # --- Forward-Thread für Datenweitergabe ---
-            self._forward_stop.clear()
-            forward_error = None
-            forward_done = threading.Event()
+        self._forward_thread = threading.Thread(target=forward, daemon=True, name="TTS-Forward")
+        self._forward_thread.start()
 
-            def forward():
-                nonlocal forwarded_bytes, forward_error, total_piper_bytes
-                try:
-                    start_time = time.time()
-                    while not self._forward_stop.is_set():
-                        chunk = process.stdout.read(8192)
-                        if not chunk:
-                            break
-                        total_piper_bytes += len(chunk)
-                        if forwarded_bytes == 0 and time.time() - start_time > 3.0:
-                            forward_error = TimeoutError("Piper liefert keine Audiodaten")
-                            break
 
-                        chunk = self._apply_volume_scaling(chunk, _np_available)
-                        try:
-                            audio_player.stdin.write(chunk)
-                            audio_player.stdin.flush()
-                            forwarded_bytes += len(chunk)
-                        except BrokenPipeError:
-                            logger.warning("Audio-Player-Pipe unterbrochen")
-                            forward_error = BrokenPipeError("Audio player pipe closed early")
-                            break
-                except Exception as e:
-                    forward_error = e
-                    logger.error(f"Fehler in forward-Thread: {e}", exc_info=True)
-                finally:
-                    try:
-                        audio_player.stdin.close()
-                    except Exception:
-                        pass
-                    forward_done.set()
-
-            self._forward_thread = threading.Thread(target=forward, daemon=True, name="TTS-Forward")
-            self._forward_thread.start()
-
-            # --- Auf Piper warten ---
-            try:
-                process.wait(timeout=120)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-                if getattr(self, "_disposed", False):
-                    return False, "Disposed"
-                return False, "Piper timeout nach 120 Sekunden"
-
-            # --- Forward beenden ---
-            self._forward_stop.set()
-            forward_done.wait(timeout=2.0)
-            if self._forward_thread and self._forward_thread.is_alive():
-                self._forward_thread.join(timeout=2.0)
-            self._forward_thread = None
-
-            # --- Auf Audio-Player warten (mit gestaffelter Terminierung) ---
-            time.sleep(0.2)
-            try:
-                audio_player.stdin.close()
-            except Exception:
-                pass
-            try:
-                # Erhöhter Timeout: 15 Sekunden statt 5
-                audio_player.wait(timeout=15.0)
-            except subprocess.TimeoutExpired:
-                logger.warning("Audio-Player beendet sich nicht, sende SIGTERM")
-                audio_player.terminate()
-                try:
-                    audio_player.wait(timeout=2.0)
-                except subprocess.TimeoutExpired:
-                    logger.warning("Audio-Player reagiert nicht auf SIGTERM, sende SIGKILL")
-                    audio_player.kill()
-                    audio_player.wait(timeout=1.0)
-
-            player_duration = time.perf_counter() - player_start_time
-            expected_duration = forwarded_bytes / self.PIPER_BYTES_PER_SECOND if forwarded_bytes > 0 else 0.0
-
-            # --- Erweiterte Debug-Ausgaben (Byte- und Zeitanalyse) ---
-            if DEBUG_LEVEL >= 3:
-                log_debug(
-                    "tts",
-                    f"_speak_piper_sync: Synthese abgeschlossen\n"
-                    f"  Piper Bytes gelesen: {total_piper_bytes}\n"
-                    f"  An Player gesendet: {forwarded_bytes}\n"
-                    f"  Erwartete Dauer: {expected_duration:.2f}s\n"
-                    f"  Player-Dauer: {player_duration:.2f}s\n"
-                    f"  Textlänge: {len(text)} Zeichen"
-                )
-                if total_piper_bytes != forwarded_bytes:
-                    log_debug(
-                        "tts",
-                        f"  WARNUNG: Nicht alle Bytes weitergeleitet! "
-                        f"Diff: {total_piper_bytes - forwarded_bytes} Bytes"
-                    )
-                if forwarded_bytes == 0:
-                    log_debug("tts", "  WARNUNG: Keine Audiodaten an Player gesendet!")
-                if player_duration < expected_duration * 0.9:
-                    log_debug(
-                        "tts",
-                        f"  WARNUNG: Audio-Player endete {expected_duration - player_duration:.2f}s zu früh!"
-                    )
-                stderr = process.stderr.read().decode(errors="ignore")
-                if stderr:
-                    log_debug("tts", f"Piper stderr: {stderr[:500]}")
-                if audio_player.stderr:
-                    aplay_stderr = audio_player.stderr.read().decode(errors="ignore")
-                    if aplay_stderr:
-                        log_debug("tts", f"aplay stderr: {aplay_stderr.strip()}")
-
-            # --- Fehlerauswertung ---
+        try:
+            process.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
             if getattr(self, "_disposed", False):
                 return False, "Disposed"
+            return False, "Piper timeout nach 120 Sekunden"
 
-            if forward_error:
-                stderr = process.stderr.read().decode(errors="ignore")
-                if _retry < self.MAX_SYNTHESIS_RETRIES and not self._stop_requested.is_set():
-                    logger.warning(f"Forward-Fehler, versuche erneut ({_retry+1}/{self.MAX_SYNTHESIS_RETRIES})")
-                    return self._speak_piper_sync(text, _depth, _retry + 1)
-                return False, f"Forward-Fehler: {forward_error}\nPiper stderr:\n{stderr}"
 
-            if process.returncode != 0 or forwarded_bytes == 0:
-                stderr = process.stderr.read().decode(errors="ignore")
-                logger.error(f"❌ Piper Fehler (exit {process.returncode}, bytes={forwarded_bytes}):\n{stderr}")
+        self._forward_stop.set()
+        forward_done.wait(timeout=2.0)
+        if self._forward_thread and self._forward_thread.is_alive():
+            self._forward_thread.join(timeout=2.0)
+        self._forward_thread = None
 
-                # Automatische Reparatur bei Protobuf-Fehler
-                if "InvalidProtobuf" in stderr or "Protobuf parsing failed" in stderr:
-                    model_path = os.path.join(TTSManager.get_piper_cache_dir(), f"{self._voice}.onnx")
-                    logger.warning(f"Beschädigtes Piper-Modell erkannt, lösche: {model_path}")
-                    try:
-                        os.unlink(model_path)
-                    except Exception as e:
-                        logger.error(f"Löschen fehlgeschlagen: {e}")
-                    logger.info("Das Modell wurde gelöscht und wird beim nächsten Start neu heruntergeladen.")
 
-                # Fallback auf medium, wenn high fehlschlägt
-                if self._voice.endswith("-high") and not self._stop_requested.is_set():
-                    fallback_voice = self._voice.replace("-high", "-medium")
-                    logger.warning(f"Wechsle zu Fallback-Stimme: {fallback_voice}")
-                    self._voice = fallback_voice
-                    return self._speak_piper_sync(text, _depth + 1, _retry)
-                else:
-                    if _retry < self.MAX_SYNTHESIS_RETRIES and not self._stop_requested.is_set():
-                        logger.warning(f"Piper Fehler, versuche erneut ({_retry+1}/{self.MAX_SYNTHESIS_RETRIES})")
-                        return self._speak_piper_sync(text, _depth, _retry + 1)
-                    return False, f"Piper exit {process.returncode}, bytes={forwarded_bytes}\n{stderr}"
+        time.sleep(0.2)
+        try:
+            audio_player.stdin.close()
+        except Exception:
+            pass
+        try:
+            audio_player.wait(timeout=15.0)
+        except subprocess.TimeoutExpired:
+            logger.warning("Audio-Player beendet sich nicht, sende SIGTERM")
+            audio_player.terminate()
+            try:
+                audio_player.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                logger.warning("Audio-Player reagiert nicht auf SIGTERM, sende SIGKILL")
+                audio_player.kill()
+                audio_player.wait(timeout=1.0)
 
-            logger.info(f"✅ Piper erfolgreich: {forwarded_bytes} Bytes an {self._available_players[0][0]} gesendet")
-            return True, ""
 
-        except Exception as e:
-            logger.error(f"Unerwarteter Fehler in _speak_piper_sync: {e}", exc_info=True)
-            if getattr(self, "_disposed", False) or self._stop_requested.is_set():
-                return False, "Aborted due to dispose/stop"
-            if _retry < self.MAX_SYNTHESIS_RETRIES:
-                logger.warning(f"Unerwarteter Fehler, versuche erneut ({_retry+1}/{self.MAX_SYNTHESIS_RETRIES})")
+        player_duration = time.perf_counter() - player_start_time
+        expected_duration = forwarded_bytes / self.PIPER_BYTES_PER_SECOND if forwarded_bytes > 0 else 0.0
+
+        if DEBUG_LEVEL >= 3:
+            log_debug("tts",
+                      f"_speak_piper_sync: Synthese abgeschlossen\n"
+                      f"  Piper Bytes gelesen: {total_piper_bytes}\n"
+                      f"  An Player gesendet: {forwarded_bytes}\n"
+                      f"  Erwartete Dauer: {expected_duration:.2f}s\n"
+                      f"  Player-Dauer: {player_duration:.2f}s\n"
+                      f"  Textlänge: {len(text)} Zeichen")
+
+
+        if getattr(self, "_disposed", False):
+            return False, "Disposed"
+
+        if forward_error:
+            stderr = process.stderr.read().decode(errors="ignore")
+            if _retry < self.MAX_SYNTHESIS_RETRIES and not self._stop_requested.is_set():
+                logger.warning(f"Forward-Fehler, retry {_retry+1}/{self.MAX_SYNTHESIS_RETRIES}")
                 return self._speak_piper_sync(text, _depth, _retry + 1)
-            return False, str(e)
-        finally:
-            # Aufräumen
-            if process and process.poll() is None:
-                process.kill()
-            if audio_player and audio_player.poll() is None:
-                audio_player.terminate()
-            with self._lock:
-                if self._process == process:
-                    self._process = None
-            self._voice = original_voice
+            return False, f"Forward-Fehler: {forward_error}\nPiper stderr:\n{stderr}"
+
+        if process.returncode != 0 or forwarded_bytes == 0:
+            stderr = process.stderr.read().decode(errors="ignore")
+            logger.error(f"❌ Piper Fehler (exit {process.returncode}, bytes={forwarded_bytes}):\n{stderr}")
+
+            # Automatische Reparatur bei Protobuf-Fehler
+            if "InvalidProtobuf" in stderr or "Protobuf parsing failed" in stderr:
+                model_path = os.path.join(TTSManager.get_piper_cache_dir(), f"{self._voice}.onnx")
+                logger.warning(f"Beschädigtes Piper-Modell, lösche: {model_path}")
+                try:
+                    os.unlink(model_path)
+                except Exception as e:
+                    logger.error(f"Löschen fehlgeschlagen: {e}")
+                logger.info("Modell gelöscht – wird beim nächsten Start neu geladen.")
+
+            # Fallback high → medium
+            if self._voice.endswith("-high") and not self._stop_requested.is_set():
+                fallback_voice = self._voice.replace("-high", "-medium")
+                logger.warning(f"Wechsle zu Fallback-Stimme: {fallback_voice}")
+                self._voice = fallback_voice
+                return self._speak_piper_sync(text, _depth + 1, _retry)
+
+            if _retry < self.MAX_SYNTHESIS_RETRIES and not self._stop_requested.is_set():
+                logger.warning(f"Piper Fehler, retry {_retry+1}/{self.MAX_SYNTHESIS_RETRIES}")
+                return self._speak_piper_sync(text, _depth, _retry + 1)
+
+            return False, f"Piper exit {process.returncode}, bytes={forwarded_bytes}\n{stderr}"
+
+        logger.info(f"✅ Piper erfolgreich: {forwarded_bytes} Bytes an {self._available_players[0][0]} gesendet")
+        return True, ""
+
+
+    def _get_process_kwargs(self) -> Dict[str, Any]:
+        """Plattformspezifische Argumente für subprocess.Popen."""
+        kwargs: Dict[str, Any] = {}
+        if IS_WINDOWS:
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        else:
+            kwargs["start_new_session"] = True
+        return kwargs
 
     def _speak_to_file_piper(self, text: str, output_path: str) -> Tuple[bool, str]:
         """Erzeugt eine Audiodatei mit Piper."""
@@ -28734,9 +28642,7 @@ class AdvancedSettingsDialog:
                 w_class = widget.__class__
 
                 try:
-                    # ---------------------------------------------------------
-                    # Standard tk-Widgets
-                    # ---------------------------------------------------------
+
                     if w_class in (tk.Label, tk.Button):
                         widget.configure(
                             bg=theme.BG_TERTIARY if w_class == tk.Button else theme.BG_PRIMARY,
@@ -30976,10 +30882,6 @@ class DragonWhispererGUI:
             )
             return
 
-        # =================================================================
-        # NORMALMODUS mit intelligenter Nachbearbeitung
-        # =================================================================
-        # Konfigurierbare Schwellwerte
         MERGE_MAX_TIME_GAP = 0.5       # Sekunden
         MERGE_MAX_WORDS = 6            # max. Wörter im aktuellen Segment
         MERGE_MIN_CONFIDENCE = 0.4     # Confidence‑Schwelle für Zusammenführung
@@ -31096,9 +30998,6 @@ class DragonWhispererGUI:
                 return True
             return last[-1] in ".!?。！？"
 
-    # ---------------------------------------------------------------------
-    # Hilfsmethode: Blacklist anwenden (falls nicht bereits vorhanden)
-    # ---------------------------------------------------------------------
     def _apply_blacklist_filter(self, text: str, lang: str) -> bool:
         """
         Wendet die Blacklist auf einen Text an.
@@ -31418,9 +31317,7 @@ class DragonWhispererGUI:
         # -----------------------------------------------------------------
         # 1. Fortschrittsbalken stoppen und zurücksetzen
         # -----------------------------------------------------------------
-        # Nach einem normalen Ende ist die Verarbeitung vollständig beendet.
-        # Ein weiterlaufender indeterminierter Balken würde fälschlich
-        # Aktivität signalisieren.
+
         self._reset_progress()
         if DEBUG_LEVEL >= 3:
             log_debug("gui", "_on_file_finished: progress bar reset")
@@ -32534,10 +32431,10 @@ class DragonWhispererGUI:
         original = text
         original_len = len(original)
 
-        # -----------------------------------------------------------------
+
         # 2. Zeitstempel mit Sprachkürzel entfernen
         #    Format: [HH:MM:SS] [XYZ] am Zeilenanfang
-        # -----------------------------------------------------------------
+
         text = re.sub(
             r"^\[\d{2}:\d{2}:\d{2}(?:\.\d{3})?\]\s*\[[A-Za-z]{2,3}\]\s*",
             "",
@@ -32545,10 +32442,9 @@ class DragonWhispererGUI:
             flags=re.MULTILINE
         )
 
-        # -----------------------------------------------------------------
+
         # 3. Zeitstempel ohne Sprachkürzel entfernen
-        #    Format: [HH:MM:SS] am Zeilenanfang
-        # -----------------------------------------------------------------
+
         text = re.sub(
             r"^\[\d{2}:\d{2}:\d{2}(?:\.\d{3})?\]\s*",
             "",
@@ -32556,17 +32452,16 @@ class DragonWhispererGUI:
             flags=re.MULTILINE
         )
 
-        # -----------------------------------------------------------------
+
         # 4. Mehrfache Leerzeichen und Zeilenumbrüche normalisieren
-        # -----------------------------------------------------------------
+
         text = re.sub(r"\s+", " ", text)
 
         cleaned = text.strip()
         cleaned_len = len(cleaned)
 
-        # -----------------------------------------------------------------
         # 5. Debug-Ausgabe bei Änderungen
-        # -----------------------------------------------------------------
+
         if DEBUG_LEVEL >= 3 and original != cleaned:
             # Bei sehr hohem Debug-Level mehr Text anzeigen
             if DEBUG_LEVEL >= 4:
@@ -32746,14 +32641,14 @@ class DragonWhispererGUI:
                 f"toggle_live_mode: Wechsle Chunk-Dauer von {current_duration:.1f}s → {new_duration:.1f}s"
             )
 
-        # ---------------------------------------------------------------------
+
         # 4. Einstellungen aktualisieren
-        # ---------------------------------------------------------------------
+
         self.advanced_settings.chunk_duration = new_duration
 
-        # ---------------------------------------------------------------------
+
         # 5. AudioProcessor synchronisieren (falls vorhanden)
-        # ---------------------------------------------------------------------
+
         if hasattr(self, "audio_processor") and self.audio_processor is not None:
             try:
                 # Korrigierter Zugriff: über settings.config
@@ -32771,22 +32666,21 @@ class DragonWhispererGUI:
                 if DEBUG_LEVEL >= 3:
                     log_debug("gui", f"AudioProcessor Synchronisation fehlgeschlagen: {e}")
 
-        # ---------------------------------------------------------------------
+
         # 6. GUI-Elemente aktualisieren
-        # ---------------------------------------------------------------------
+
         self._update_live_mode_button()
 
         # Statusmeldung
         self.update_status(f"⏱️ Chunk-Dauer auf {new_duration:.0f}s umgestellt")
 
-        # ---------------------------------------------------------------------
-        # 7. Einstellungen speichern (verzögert)
-        # ---------------------------------------------------------------------
+
+
         self._schedule_settings_save()
 
-        # ---------------------------------------------------------------------
+
         # 8. Event-Bus benachrichtigen (optional, für andere Komponenten)
-        # ---------------------------------------------------------------------
+
         if hasattr(self, "event_bus") and self.event_bus is not None:
             try:
                 self.event_bus.emit("chunk_duration_changed", {
@@ -32805,12 +32699,6 @@ class DragonWhispererGUI:
         """
         Aktualisiert die Beschriftung des Live‑Mode‑Buttons mit der aktuellen
         Chunk‑Dauer. Thread‑sicher durch Bindung des Werts an das Lambda.
-
-        Verbesserungen:
-            - Wert wird im Hauptthread gelesen (keine Race Condition).
-            - Lambda mit Default‑Argument fixiert den Wert für die spätere Ausführung.
-            - Debug‑Ausgabe bei Änderungen (DEBUG_LEVEL >= 3).
-            - Fallback für fehlende Einstellungen oder Widgets.
 
         Die Methode ist idempotent und kann aus beliebigen Threads aufgerufen werden.
         """
@@ -33760,14 +33648,6 @@ class DragonWhispererGUI:
         TTS-Manager (`tts_manager`). Er läuft als Daemon-Thread und beendet sich
         automatisch, wenn das Flag `_tts_worker_running` auf `False` gesetzt wird
         oder ein Sentinel (`None`) empfangen wird.
-
-        Verbesserungen gegenüber der Basisversion:
-            - Robuste GUI‑Existenzprüfung mit dedizierter Hilfsfunktion.
-            - TTS‑Manager‑Verfügbarkeitscheck vor jeder Übergabe.
-            - Granulare Ausnahmebehandlung für Queue‑Operationen.
-            - Erweiterte Diagnose bei fehlgeschlagenen TTS‑Übergaben.
-            - Task‑Done‑Garantie durch zentrales `finally`.
-            - Detaillierte, levelabhängige Debug‑Ausgaben.
 
         Diese Methode ist vollständig thread‑sicher und kann ohne weitere
         Synchronisation nebenläufig betrieben werden.
@@ -36232,19 +36112,6 @@ class StreamHandler:
         Diese Methode ist das Herzstück des StreamHandlers. Sie liest kontinuierlich
         PCM‑Daten vom FFmpeg‑Prozess, behandelt Timeouts und Fehler, führt bei
         Bedarf mehrstufige Reconnects durch und leitet die Daten an den AudioProcessor weiter.
-
-        **Umfassende Verbesserungen in dieser Version:**
-            - Vollständig integrierte und sichere `_is_stream_still_alive`‑Prüfung.
-            - Exponential Backoff mit Jitter für Reconnect‑Versuche.
-            - Dynamische Anpassung der Timeouts basierend auf Stream‑Typ.
-            - Granulare Diagnose und Metriken für jeden Verarbeitungsschritt.
-            - Optionale `requests`‑Fallbacks (HEAD/GET) zur Erkennung der Server‑Erreichbarkeit.
-            - Wiederholungslogik für flüchtige Lesefehler.
-            - Verbesserte Inaktivitätserkennung mit progressiver Eskalation.
-            - Detaillierte Debug‑Ausgaben in verschiedenen Leveln.
-            - Robuste Behandlung von `BrokenPipeError` und `ConnectionResetError`.
-            - Optimierte Speichernutzung durch Streaming‑Ansatz.
-            - Maximale Kompatibilität mit unterschiedlichen FFmpeg‑ und yt‑dlp‑Versionen.
         """
         normal_ending = False
         self._reset_diagnosis()
@@ -38964,13 +38831,6 @@ class AudioProcessor:
     def _wait_for_queue_idle(self, timeout: float) -> bool:
         """
         Zeitbasierte Heuristik für Queues, die `join()` nicht unterstützen.
-
-        Verbesserungen:
-            - Exponentielles Backoff (0.05 s → 1.0 s) statt festem sleep(0.2),
-              um CPU‑Zeit zu sparen und gleichzeitig reaktionsfähig zu bleiben.
-            - Abbruchbedingungen (Benutzerabbruch, globaler Timeout) werden regelmäßig geprüft.
-            - Detaillierte Debug‑Ausgaben bei hohem Log‑Level.
-            - Robustere Berechnung der Wartezeiten mit zufälligem Jitter (optional).
         """
         start_time = time.perf_counter()
         idle_start = None
