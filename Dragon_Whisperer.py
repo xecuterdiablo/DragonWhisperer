@@ -26379,81 +26379,88 @@ class InstallDependencyDialog(BaseDialog):
         return []
 
     def _run_fallback_install(self, command: str) -> bool:
+        """
+        Führt eine Fallback-Installation durch, indem der Benutzer den Befehl
+        manuell ausführen muss. Aus Sicherheitsgründen wird KEIN automatischer
+        Shell-Befehl gestartet (kein shell=True).
+        """
         if DEBUG_LEVEL >= 3:
-            log_debug("install", f"_run_fallback_install called with command: {command}")
+            log_debug("install", f"_run_fallback_install: command='{command}'")
 
         result_container = [False]
         user_responded = threading.Event()
-        RESPONSE_TIMEOUT = 120.0
+        RESPONSE_TIMEOUT = 120  # Sekunden
 
-        def gui_interaction() -> None:
-            try:
-                if not self.dialog or not self.dialog.winfo_exists():
-                    result_container[0] = False
-                    user_responded.set()
-                    return
-
-                self._append_output(
-                    f"\n⚠️  Aus Sicherheitsgründen wird der folgende Befehl NICHT automatisch ausgeführt.\n"
-                    f"Bitte kopieren Sie ihn und führen Sie ihn manuell in einem Terminal aus:\n\n"
-                    f"    {command}\n\n"
-                )
-
-                clipboard_success = False
-                try:
-                    self.dialog.clipboard_clear()
-                    self.dialog.clipboard_append(command)
-                    clipboard_success = True
-                    self._append_output("📋 Der Befehl wurde in die Zwischenablage kopiert.\n")
-                except tk.TclError as e:
-                    self._append_output(f"⚠️  Konnte Befehl nicht in Zwischenablage kopieren: {e}\n")
-                except Exception as e:
-                    self._append_output(f"⚠️  Unerwarteter Fehler beim Kopieren: {e}\n")
-
-                message = (
-                    f"Der folgende Befehl muss manuell in einem Terminal ausgeführt werden:\n\n"
-                    f"{command}\n\n"
-                    f"{'📋 Der Befehl wurde in die Zwischenablage kopiert.' if clipboard_success else ''}\n"
-                    f"Wurde der Befehl erfolgreich ausgeführt?"
-                )
-                response = DarkMessageBox.askyesno(
-                    title="Manuelle Installation erforderlich",
-                    message=message,
-                    parent=self.dialog,
-                    timeout=RESPONSE_TIMEOUT
-                )
-
-                if response is True:
-                    self._append_output("✅ Manuelle Installation wurde vom Benutzer bestätigt.\n")
-                    result_container[0] = True
-                elif response is False:
-                    self._append_output("❌ Manuelle Installation wurde vom Benutzer abgebrochen.\n")
-                    result_container[0] = False
-                else:
-                    self._append_output("⏰ Zeitüberschreitung oder Abbruch durch Benutzer – Installation nicht bestätigt.\n")
-                    result_container[0] = False
-
-            except Exception as e:
-                logger.error(f"Fehler in _run_fallback_install GUI-Interaktion: {e}", exc_info=True)
-                self._append_output(f"❌ Interner Fehler bei der Benutzerabfrage: {e}\n")
+        def gui_interaction():
+            if not self.dialog or not self.dialog.winfo_exists():
                 result_container[0] = False
-            finally:
                 user_responded.set()
+                return
 
+            # 1. Befehl in die Zwischenablage kopieren
+            try:
+                self.dialog.clipboard_clear()
+                self.dialog.clipboard_append(command)
+                copied = True
+            except tk.TclError:
+                copied = False
+
+            # 2. Ausgabe im Logfenster des Installationsdialogs
+            self._append_output(
+                f"\n⚠️  Aus Sicherheitsgründen wird der folgende Befehl NICHT automatisch ausgeführt.\n"
+                f"Bitte führen Sie ihn manuell in einem Terminal (Eingabeaufforderung) aus.\n\n"
+                f"    {command}\n\n"
+                f"{'📋 Der Befehl wurde in die Zwischenablage kopiert.' if copied else ''}"
+            )
+
+            # 3. Dialog vor modalen Fenstern aktualisieren
+            self.dialog.update_idletasks()
+
+            # 4. Informationsfenster mit genauer Anleitung anzeigen
+            DarkMessageBox.showinfo(
+                title="Manuelle Installation erforderlich",
+                message=(
+                    f"Bitte öffnen Sie eine Eingabeaufforderung (cmd) und führen Sie "
+                    f"den folgenden Befehl aus:\n\n"
+                    f"    {command}\n\n"
+                    f"Der Befehl wurde in die Zwischenablage kopiert.\n"
+                    f"Klicken Sie anschließend auf OK und beantworten Sie die Frage."
+                ),
+                parent=self.dialog,
+                timeout=RESPONSE_TIMEOUT,
+            )
+
+            self.dialog.update_idletasks()
+
+            # 5. Rückfrage, ob die Aktion erfolgreich war
+            response = DarkMessageBox.askyesno(
+                title="Installation bestätigen",
+                message="Wurde der Befehl erfolgreich ausgeführt?",
+                parent=self.dialog,
+                timeout=RESPONSE_TIMEOUT,
+            )
+
+            if response is True:
+                self._append_output("✅ Manuelle Installation wurde vom Benutzer bestätigt.\n")
+                result_container[0] = True
+            else:
+                self._append_output("❌ Manuelle Installation wurde vom Benutzer abgebrochen.\n")
+                result_container[0] = False
+
+        # GUI-Interaktion im Hauptthread starten
         if self.dialog and self.dialog.winfo_exists():
             self.dialog.after_idle(gui_interaction)
         else:
-            logger.warning("Kein GUI-Dialog verfügbar – Fallback-Installation kann nicht interaktiv bestätigt werden.")
+            logger.warning("Kein GUI-Dialog – Fallback-Installation nicht möglich.")
             self._append_output(
-                f"\n⚠️  Fallback-Installation erfordert manuelle Ausführung des folgenden Befehls:\n"
+                f"\n⚠️  Fallback-Installation erfordert manuelle Ausführung:\n"
                 f"    {command}\n"
-                f"Bitte führen Sie den Befehl selbst aus.\n"
             )
             return False
 
-        if not user_responded.wait(timeout=RESPONSE_TIMEOUT + 5.0):
-            logger.warning("Timeout beim Warten auf Benutzerantwort")
-            self._append_output("⏰ Zeitüberschreitung bei der Warte auf Benutzerantwort.\n")
+        # Auf Benutzerantwort warten (mit Timeout)
+        if not user_responded.wait(timeout=RESPONSE_TIMEOUT + 5):
+            self._append_output("⏰ Zeitüberschreitung – Installation nicht bestätigt.\n")
             return False
 
         return result_container[0]
@@ -26462,16 +26469,12 @@ class InstallDependencyDialog(BaseDialog):
         """
         Installiert oder aktualisiert eine Liste von Python‑Paketen via pip.
         """
-        # -----------------------------------------------------------------
-        # 1. Eingangsvalidierung
-        # -----------------------------------------------------------------
+
         if not packages:
             self._append_output("ℹ️ Keine Python‑Pakete angegeben – überspringe.\n")
             return True
 
-        # -----------------------------------------------------------------
-        # 2. Basisbefehl zusammenbauen
-        # -----------------------------------------------------------------
+
         python_exe = sys.executable
         cmd = [
             python_exe,
@@ -26486,9 +26489,7 @@ class InstallDependencyDialog(BaseDialog):
             cmd.append("--user")
         cmd.extend(packages)
 
-        # -----------------------------------------------------------------
-        # 3. Umgebungsvariablen – maximal kompatibel
-        # -----------------------------------------------------------------
+
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"   # Echtzeit‑Ausgabe im Log
         env["PYTHONUTF8"] = "1"         # Behebt Encoding‑Fehler unter Windows (z. B. bei dimits)
@@ -26499,9 +26500,7 @@ class InstallDependencyDialog(BaseDialog):
                 f"pip install: {' '.join(cmd)}",
             )
 
-        # -----------------------------------------------------------------
-        # 4. Subprozess ausführen und Ergebnis zurückgeben
-        # -----------------------------------------------------------------
+
         success = self._run_subprocess(cmd, f"pip install {' '.join(packages)}", env=env)
 
         if not success and DEBUG_LEVEL >= 2:
