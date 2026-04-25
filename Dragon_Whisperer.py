@@ -21256,12 +21256,29 @@ class TTSManager:
         """
         Prüft, ob eine bestimmte (oder die aktuell eingestellte) TTS‑Engine
         auf diesem System funktionsfähig ist.
+
+        Die Prüfung ist maximal robust und berücksichtigt für ``"piper"``
+        sowohl die ausführbare Datei als auch bereits installierte Stimmen
+        im plattformspezifischen Cache‑Verzeichnis. So gilt Piper auch dann
+        als verfügbar, wenn ``piper.exe`` nicht im ``PATH`` liegt, aber die
+        Modelle bereits heruntergeladen wurden.
+
+        Args:
+            engine: Name der Engine (``"piper"``, ``"pyttsx3"``, ``"espeak"``).
+                    Falls ``None``, wird die aktuell konfigurierte Engine geprüft.
+
+        Returns:
+            ``True``, wenn die Engine verwendet werden kann, sonst ``False``.
         """
+        # -----------------------------------------------------------------
         # 1. Standard‑Engine verwenden, wenn keine explizit angegeben
+        # -----------------------------------------------------------------
         if engine is None:
             engine = self._engine_name
 
+        # -----------------------------------------------------------------
         # 2. Piper – hochwertige Offline‑Sprachsynthese
+        # -----------------------------------------------------------------
         if engine == "piper":
             # a) Ausführbare Datei im Systempfad?
             if shutil.which("piper"):
@@ -21287,8 +21304,12 @@ class TTSManager:
                 log_debug("tts", "is_available: piper nicht verfügbar")
             return False
 
+        # -----------------------------------------------------------------
         # 3. pyttsx3 – plattformübergreifende TTS‑Bibliothek
+        # -----------------------------------------------------------------
         if engine == "pyttsx3":
+            # Nur als vorhanden melden, wenn das Modul importierbar ist.
+            # Einen tieferen Funktionstest macht _detect_engines beim Start.
             available = importlib.util.find_spec("pyttsx3") is not None
             if DEBUG_LEVEL >= 4:
                 log_debug(
@@ -21297,7 +21318,9 @@ class TTSManager:
                 )
             return available
 
+        # -----------------------------------------------------------------
         # 4. espeak – leichtgewichtiger Fallback
+        # -----------------------------------------------------------------
         if engine == "espeak":
             available = shutil.which("espeak") is not None
             if DEBUG_LEVEL >= 4:
@@ -21307,7 +21330,9 @@ class TTSManager:
                 )
             return available
 
+        # -----------------------------------------------------------------
         # 5. Unbekannte Engine
+        # -----------------------------------------------------------------
         logger.warning(f"is_available: Unbekannte Engine '{engine}'")
         return False
 
@@ -25663,7 +25688,7 @@ class InstallDependencyDialog(BaseDialog):
         ("deep-translator", "deep-translator (Google Übersetzung)", lambda: TRANSLATOR_AVAILABLE),
         ("argostranslate", "argos-translate (Offline-Übersetzung)", lambda: ARGOS_AVAILABLE),
         ("pyttsx3", "pyttsx3 (TTS-Fallback)", lambda: importlib.util.find_spec("pyttsx3") is not None),
-        ("pywin32", "pywin32 (Windows-API, benötigt für TTS)", lambda: importlib.util.find_spec("pywin32") is not None),
+        ("pywin32", "pywin32 (Windows-API, benötigt für TTS)", lambda: importlib.util.find_spec("win32api") is not None),
         ("noisereduce", "noisereduce (Rauschunterdrückung)", lambda: importlib.util.find_spec("noisereduce") is not None),
         ("rapidfuzz", "rapidfuzz (schnelle Textähnlichkeit)", lambda: importlib.util.find_spec("rapidfuzz") is not None),
         ("python-docx", "python-docx (Word-Export)", lambda: importlib.util.find_spec("docx") is not None),
@@ -29375,6 +29400,8 @@ class AdvancedSettingsDialog:
         # 1. Referenz auf den TTS‑Manager prüfen
         if not hasattr(self.gui, "tts_manager") or self.gui.tts_manager is None:
             self.tts_test_status.config(text="❌ TTS‑Manager nicht verfügbar")
+            if DEBUG_LEVEL >= 3:
+                log_debug("tts_test", "TTS‑Manager fehlt oder ist None")
             return
 
         tts = self.gui.tts_manager
@@ -29385,17 +29412,30 @@ class AdvancedSettingsDialog:
         length_scale = self.tts_length_scale_var.get()
         sentence_silence = self.tts_sentence_silence_var.get()
 
-        # 3. Prüfen, ob die gewählte Engine verfügbar ist
+        # 3. Ausführliche Diagnose, warum die Engine ggf. nicht verfügbar ist
+        if DEBUG_LEVEL >= 3:
+            log_debug("tts_test",
+                      f"Teste TTS: engine={engine_name}, voice={voice_name}, "
+                      f"length_scale={length_scale}, silence={sentence_silence}")
+            # Zeige den Zustand der Piper‑Erkennung an
+            piper_in_path = shutil.which("piper") is not None
+            installed_voices = tts.get_installed_piper_voices()
+            log_debug("tts_test",
+                      f"Piper im PATH: {piper_in_path}, "
+                      f"Stimmen im Cache: {installed_voices}")
+
+        # 4. Prüfen, ob die gewählte Engine verfügbar ist
         if not tts.is_available(engine_name):
             self.tts_test_status.config(
                 text=f"❌ Engine '{engine_name}' nicht verfügbar"
             )
             if DEBUG_LEVEL >= 3:
-                log_debug("tts_test", f"Engine {engine_name} nicht verfügbar")
+                log_debug("tts_test",
+                          f"Engine {engine_name} nicht verfügbar laut is_available()")
             return
 
-        # 4. Sprache aus der Stimme ableiten (für passenden Testtext)
-        # Typische Piper‑Stimme: "de_DE-thorsten-medium" → lang_code = "de"
+        # 5. Sprache aus der Stimme ableiten (für passenden Testtext)
+        # Typische Piper‑Stimme: "de_DE-thorsten-high" → lang_code = "de"
         lang_code = "en"  # Fallback Englisch
         if "_" in voice_name or "-" in voice_name:
             first_part = voice_name.split("-")[0] if "-" in voice_name else voice_name.split("_")[0]
@@ -29421,7 +29461,7 @@ class AdvancedSettingsDialog:
         }
         test_text = test_texts.get(lang_code, "Test. This is a short test sound.")
 
-        # 5. Aktuelle Engine‑Einstellungen sichern
+        # 6. Aktuelle Engine‑Einstellungen sichern
         old_voice = tts._voice
         old_length = tts.length_scale
         old_silence = tts.sentence_silence
@@ -29430,7 +29470,7 @@ class AdvancedSettingsDialog:
         self.tts_test_status.config(text="🔊 Wird abgespielt...")
         self.dialog.update_idletasks()
 
-        # 6. TTS‑Test asynchron starten
+        # 7. TTS‑Test asynchron starten
         def callback(success: bool, message: str) -> None:
             """Wird nach Abschluss der Sprachausgabe aufgerufen."""
             # GUI‑Update muss im Hauptthread erfolgen
@@ -29444,14 +29484,14 @@ class AdvancedSettingsDialog:
                     short_msg = message[:50] + "…" if len(message) > 50 else message
                     self.tts_test_status.config(text=f"❌ Fehler: {short_msg}")
 
-                # Einstellungen zurücksetzen
+                # Einstellungen zurücksetzen – garantiert
                 tts._voice = old_voice
                 tts.length_scale = old_length
                 tts.sentence_silence = old_silence
 
             self.dialog.after(0, update)
 
-        # 7. Temporär die gewählten Parameter setzen und Test starten
+        # 8. Temporär die gewählten Parameter setzen und Test starten
         try:
             tts._voice = voice_name
             tts.length_scale = length_scale
