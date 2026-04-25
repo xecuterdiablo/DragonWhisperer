@@ -4810,21 +4810,31 @@ class PlatformUtils:
 # Nachdem PlatformUtils definiert ist, rufe das Umgebungs‑Setup auf
 PlatformUtils.setup_platform_environment()
 
-# =============================================================================
 #  Global definierte Verfügbarkeitsvariablen (benötigen PlatformUtils)
-# =============================================================================
-TORCH_AVAILABLE = FastLazyLoader.is_available("torch")
-NUMPY_AVAILABLE = FastLazyLoader.is_available("numpy")
-TRANSLATOR_AVAILABLE = FastLazyLoader.is_available("deep_translator")
-SCIPY_AVAILABLE = FastLazyLoader.is_available("scipy.signal")
-FASTER_WHISPER_AVAILABLE = importlib.util.find_spec("faster_whisper") is not None
-OPENAI_WHISPER_AVAILABLE = importlib.util.find_spec("whisper") is not None
-WHISPER_AVAILABLE = FASTER_WHISPER_AVAILABLE or OPENAI_WHISPER_AVAILABLE
-OLLAMA_AVAILABLE = importlib.util.find_spec("requests") is not None   # <-- HIER EINGEFÜGT
-ARGOS_AVAILABLE = importlib.util.find_spec("argostranslate") is not None
-PSUTIL_AVAILABLE = importlib.util.find_spec("psutil") is not None
+def _safe_is_available(module_name: str) -> bool:
+    """Wrapper für FastLazyLoader.is_available – fängt ModuleNotFoundError ab."""
+    try:
+        return FastLazyLoader.is_available(module_name)
+    except ModuleNotFoundError:
+        return False
 
-#OLLAMA_AVAILABLE = importlib.util.find_spec("requests") is not None
+TORCH_AVAILABLE = _safe_is_available("torch")
+NUMPY_AVAILABLE = _safe_is_available("numpy")
+TRANSLATOR_AVAILABLE = _safe_is_available("deep_translator")
+SCIPY_AVAILABLE = _safe_is_available("scipy.signal")
+
+def _safe_find_spec(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except ModuleNotFoundError:
+        return False
+
+FASTER_WHISPER_AVAILABLE = _safe_find_spec("faster_whisper")
+OPENAI_WHISPER_AVAILABLE = _safe_find_spec("whisper")
+WHISPER_AVAILABLE = FASTER_WHISPER_AVAILABLE or OPENAI_WHISPER_AVAILABLE
+OLLAMA_AVAILABLE = _safe_find_spec("requests")
+ARGOS_AVAILABLE = _safe_find_spec("argostranslate")
+PSUTIL_AVAILABLE = _safe_find_spec("psutil")
 
 ARGOS_AVAILABLE = False
 try:
