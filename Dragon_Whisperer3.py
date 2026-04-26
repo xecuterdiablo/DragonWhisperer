@@ -2559,7 +2559,6 @@ class ConfigDefaults:
         logger.debug("=" * 60)
         for name, value in cls.__dict__.items():
             if not name.startswith("_") and not callable(value):
-                # Werte kürzen, wenn zu lang
                 if isinstance(value, (list, dict)) and len(str(value)) > 100:
                     value_str = str(value)[:100] + "..."
                 else:
@@ -2637,25 +2636,21 @@ class Config(ConfigDefaults):
         default_factory=lambda: ConfigDefaults.PLATFORM_CONFIG.copy()
     )
 
-    #  Audio-Enhancement
     AUDIO_ENHANCEMENT_ENABLED: bool = False
     MIN_RMS_THRESHOLD: float = ConfigDefaults.MIN_RMS_THRESHOLD
     TARGET_RMS: float = ConfigDefaults.TARGET_RMS
     MAX_GAIN: float = ConfigDefaults.MAX_GAIN
     CLIPPING_THRESHOLD: float = ConfigDefaults.CLIPPING_THRESHOLD
 
-    #  Duplikaterkennung
     DUPLICATE_CHECK_ENABLED: bool = False
     RECENT_TRANSCRIPTIONS_SIZE: int = ConfigDefaults.RECENT_TRANSCRIPTIONS_SIZE
     MIN_TEXT_LENGTH: int = ConfigDefaults.MIN_TEXT_LENGTH
     MIN_UNIQUE_WORDS_RATIO: float = ConfigDefaults.MIN_UNIQUE_WORDS_RATIO
 
-    #  Untertitel
     SUBTITLE_BUFFER_SIZE: int = ConfigDefaults.SUBTITLE_BUFFER_SIZE
     ENABLE_TIMED_TRANSCRIPTIONS: bool = ConfigDefaults.ENABLE_TIMED_TRANSCRIPTIONS
     ENABLE_TIMED_TRANSLATIONS: bool = ConfigDefaults.ENABLE_TIMED_TRANSLATIONS
 
-    #  Logging
     ENABLE_DEBUG_LOGGING: bool = ConfigDefaults.ENABLE_DEBUG_LOGGING
     LOG_CHUNK_PROCESSING: bool = ConfigDefaults.LOG_CHUNK_PROCESSING
     LOG_AUDIO_STATS: bool = ConfigDefaults.LOG_AUDIO_STATS
@@ -2663,21 +2658,17 @@ class Config(ConfigDefaults):
     LOG_STREAM_EVENTS: bool = ConfigDefaults.LOG_STREAM_EVENTS
     PERFORMANCE_LOG_INTERVAL: int = ConfigDefaults.PERFORMANCE_LOG_INTERVAL
 
-    #  Caching
     MAX_CACHE_SIZE_MB: int = ConfigDefaults.MAX_CACHE_SIZE_MB
     CACHE_ENABLED: bool = ConfigDefaults.CACHE_ENABLED
 
-    #  Whisper-Modelle (direkt als Klassenattribut für bessere Performance)
     WHISPER_MODELS: List[str] = field(
         default_factory=lambda: ConfigDefaults.WHISPER_MODELS.copy()
     )
 
-    #  Interner Cache für BYTES_PER_SECOND (Performance-Optimierung)
     _cached_bytes_per_second: Optional[int] = field(
         default=None, init=False, repr=False
     )
 
-    #  Properties für dynamische Werte
     @property
     def CHUNK_DURATION(self) -> float:
         """Aktuelle Chunk-Dauer in Sekunden (dynamisch änderbar)."""
@@ -2754,12 +2745,6 @@ class Config(ConfigDefaults):
     def get_timeout_microseconds(self, is_youtube: bool = False) -> int:
         """
         Gibt das passende Timeout in Mikrosekunden zurück.
-
-        Args:
-            is_youtube: True für YouTube-Streams (kürzeres Timeout).
-
-        Returns:
-            Timeout in Mikrosekunden.
         """
         return self.YOUTUBE_TIMEOUT if is_youtube else self.NORMAL_TIMEOUT
 
@@ -3013,9 +2998,6 @@ class Config(ConfigDefaults):
     def validate_config(self) -> bool:
         """
         Validiert die aktuelle Konfiguration auf Konsistenz.
-
-        Returns:
-            True, wenn alle Werte gültig sind, sonst False.
         """
         try:
             valid = (
@@ -3392,8 +3374,6 @@ class FastLazyLoader:
                 "Bitte installieren Sie es mit: pip install faster-whisper"
             )
             cls._logger.warning(error_msg, extra={"component": "loader"})
-            # Die Exception wird an den aufrufenden Lazy-Loader weitergegeben,
-            # der dann ein Mock-Modul erstellt.
             raise ImportError(error_msg) from e
 
     @classmethod
@@ -3418,13 +3398,6 @@ class FastLazyLoader:
     def is_available(cls, module_name: str, use_cache: bool = True) -> bool:
         """
         Prüft, ob ein Modul verfügbar ist (durch Suchpfad).
-
-        Args:
-            module_name: Name des Moduls.
-            use_cache: Wenn True, wird ein Cache mit TTL verwendet.
-
-        Returns:
-            True, wenn das Modul importiert werden kann, sonst False.
         """
         if cls._metrics_enabled:
             with cls._metrics_lock:
@@ -3460,10 +3433,6 @@ class FastLazyLoader:
     def clear_cache(cls, module_name: Optional[str] = None) -> None:
         """
         Leert den Modul‑Cache und den Verfügbarkeits‑Cache.
-
-        Args:
-            module_name: Wenn angegeben, wird nur dieses Modul aus dem Cache entfernt.
-                         Sonst wird der gesamte Cache geleert.
         """
         with cls._global_lock:
             if module_name is None:
@@ -3639,8 +3608,8 @@ class PlatformUtils:
     _test_home: Optional[Path] = None
     _test_cwd: Optional[Path] = None
     _DEBUG_COMPONENT = "platform"
-    _logger = logging.getLogger("dragon")  # wird zur Laufzeit gesetzt
-    _config_dir_logged = False  # NEU: für einmaliges Logging
+    _logger = logging.getLogger("dragon")
+    _config_dir_logged = False
 
     @classmethod
     def set_allowed_dirs(cls, dirs: List[str]) -> None:
@@ -3724,12 +3693,6 @@ class PlatformUtils:
         """
         Beendet einen Prozess und alle seine Kindprozesse.
         Verwendet psutil, falls vorhanden, ansonsten plattformspezifische Befehle.
-
-        Args:
-            pid: Prozess‑ID des Elternprozesses.
-
-        Returns:
-            True, wenn der Prozessbaum erfolgreich beendet wurde, sonst False.
         """
         cls._logger.debug(
             f"Killing process tree for PID {pid}",
@@ -3834,10 +3797,6 @@ class PlatformUtils:
     def check_platform_dependencies(cls) -> bool:
         """
         Prüft, ob alle kritischen und optionalen Abhängigkeiten vorhanden sind.
-
-        Gibt ausführliche Informationen im Log aus und wirft eine RuntimeError,
-        wenn eine unverzichtbare Komponente (ffmpeg, yt-dlp, tkinter, numpy)
-        nicht gefunden wird.
         """
         with cls._dependencies_lock:
             if cls._dependencies_checked:
@@ -4030,8 +3989,6 @@ class PlatformUtils:
                     extra={"component": cls._DEBUG_COMPONENT},
                 )
 
-            # ==================== EXTERNE TOOLS (optional) ====================
-            # VLC für DVB-Streams – mit Windows-Pfad-Fallback
             vlc_found = shutil.which("vlc") is not None
             if not vlc_found and IS_WINDOWS:
                 # Zusätzliche Standardpfade prüfen
@@ -8073,9 +8030,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
             )
         return None
 
-    # -------------------------------------------------------------------------
-    # Pre‑ und Postprocessing
-    # -------------------------------------------------------------------------
     def _preprocess_text(self, text: str) -> str:
         if not text:
             return ""
@@ -8133,20 +8087,9 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         if DEBUG_LEVEL >= 2:
             log_debug("ollama", "OllamaTranslationEngine disposed")
 
-
-# =============================================================================
-# REFLECTION TRANSLATION ENGINE (Wrapper)
-# =============================================================================
 class ReflectionTranslationEngine(BaseTranslationEngine):
     """
     Verbesserte Wrapper‑Klasse für zweistufige Übersetzung (Self‑Reflection).
-
-    Änderungen gegenüber der ursprünglichen Version:
-        - Prüft auf die korrekte API‑Methode ``_call_ollama_with_timeout_retry``.
-        - Fängt alle API‑Fehler ab und liefert im Notfall die initiale Übersetzung zurück.
-        - Unterstützt optionale Cancel‑Events und konfigurierbare Timeouts.
-        - Saubere Trennung von Reflexion und Verbesserung mit Fallback‑Logik.
-        - Thread‑sicher durch separates Lock für den gesamten Übersetzungsvorgang.
     """
 
     def __init__(
@@ -8194,9 +8137,6 @@ class ReflectionTranslationEngine(BaseTranslationEngine):
             "Output ONLY the final translation, no additional text."
         )
 
-    # ---------------------------------------------------------------------
-    # Öffentliche API
-    # ---------------------------------------------------------------------
     def set_target_language(self, target_lang: str) -> None:
         """Leitet die Zielsprache an die Basis‑Engine weiter."""
         with self._lock:
@@ -8238,9 +8178,6 @@ class ReflectionTranslationEngine(BaseTranslationEngine):
         )
         target_lang_name = self.base_engine.default_target_lang
 
-        # -----------------------------------------------------------------
-        # Phase 2: Reflexion (Analyse)
-        # -----------------------------------------------------------------
         reflection_prompt = self.reflection_prompt_template.format(
             source_lang=src_lang_name,
             target_lang=target_lang_name,
@@ -8255,9 +8192,6 @@ class ReflectionTranslationEngine(BaseTranslationEngine):
             )
             return initial_result
 
-        # -----------------------------------------------------------------
-        # Phase 3: Verbesserte Übersetzung
-        # -----------------------------------------------------------------
         improvement_prompt = self.improvement_prompt_template.format(
             source_text=text,
             draft_translation=draft_translation,
@@ -8279,9 +8213,6 @@ class ReflectionTranslationEngine(BaseTranslationEngine):
             target_lang=target_lang_name,
         )
 
-    # ---------------------------------------------------------------------
-    # Hilfsmethoden
-    # ---------------------------------------------------------------------
     def _safe_api_call(self, prompt: str, stage: str) -> Optional[str]:
         """
         Führt einen Ollama‑API‑Aufruf mit Timeout und Fehlerbehandlung durch.
@@ -8649,9 +8580,6 @@ class DummyTranslationEngine(BaseTranslationEngine):
         pass
 
 
-# =============================================================================
-# 13. AUDIO ENHANCER
-# =============================================================================
 class AudioEnhancer:
     MAX_COMPARE_LEN: int = 150
     MAX_LEN_RATIO_DEVIATION: float = 0.5
@@ -8909,9 +8837,6 @@ class TranscriptionEngine:
       - CPU: int8 (bei AVX2), sonst float32 (stabiler Fallback)
     """
 
-    # ------------------------------------------------------------------
-    # Klassenvariable für einmal fehlgeschlagenen torch-Import
-    # ------------------------------------------------------------------
     _torch_import_failed: bool = False
     """Verhindert wiederholte Importversuche, wenn torch nicht ladbar ist."""
 
@@ -9099,9 +9024,6 @@ class TranscriptionEngine:
                 f"TranscriptionEngine initialisiert (event_bus={event_bus is not None})",
             )
 
-    # -------------------------------------------------------------------------
-    #  Öffentliche Methoden
-    # -------------------------------------------------------------------------
     def set_vad_fallback_enabled(self, enabled: bool) -> None:
         self._vad_fallback_enabled = enabled
         if self._debug:
@@ -13788,9 +13710,6 @@ class FFmpegManager:
     Verwaltung von FFmpeg‑Prozessen für Audio‑Streaming.
     """
 
-    # -------------------------------------------------------------------------
-    #  Interne Hilfsklassen
-    # -------------------------------------------------------------------------
     class _LRUCache:
         """Einfacher LRU-Cache mit maximaler Größe."""
 
@@ -13829,10 +13748,6 @@ class FFmpegManager:
         def __init__(self, max_messages: int = 10, period: float = 60.0):
             """
             Initialisiert den RateLimiter.
-
-            Args:
-                max_messages: Maximale Anzahl erlaubter Meldungen innerhalb von `period` Sekunden.
-                period: Zeitfenster in Sekunden.
             """
             if max_messages < 1:
                 raise ValueError("max_messages must be >= 1")
@@ -13846,12 +13761,6 @@ class FFmpegManager:
         def allow(self) -> bool:
             """
             Prüft, ob eine weitere Meldung erlaubt ist.
-
-            Entfernt zuerst alle Zeitstempel, die älter als `self.period` Sekunden sind,
-            und fügt bei Erfolg den aktuellen Zeitstempel hinzu.
-
-            Returns:
-                True, wenn die Meldung erlaubt ist, sonst False.
             """
             now = (
                 time.monotonic()
@@ -13988,9 +13897,6 @@ class FFmpegManager:
             self.read_stop: Optional[threading.Event] = None
             self.read_buffer: bytes = b""
 
-    # -------------------------------------------------------------------------
-    #  Konstanten
-    # -------------------------------------------------------------------------
     PSUTIL_CHILD_TERMINATE_TIMEOUT = 2.5
     PSUTIL_CHILD_KILL_WAIT = 1.0
     PSUTIL_PARENT_TERMINATE_TIMEOUT = 6.0
@@ -14027,9 +13933,6 @@ class FFmpegManager:
     _YOUTUBE_HEADERS_STRING: Optional[str] = None
     READ_BLOCK_SIZE: int = 8192
 
-    # -------------------------------------------------------------------------
-    #  Konstruktor & Destruktor
-    # -------------------------------------------------------------------------
     def __init__(
         self,
         config: Optional[Any] = None,
@@ -14144,9 +14047,6 @@ class FFmpegManager:
         log_debug("ffmpeg", "Garbage collection triggered")
         logger.info("✅ FFmpeg Manager disposed")
 
-    # -------------------------------------------------------------------------
-    #  Öffentliche API
-    # -------------------------------------------------------------------------
     def start_stream(
         self,
         video_url: str,
@@ -14321,9 +14221,6 @@ class FFmpegManager:
             )
             # Auch bei Fehlern in der Bereinigung wird _remove_process aufgerufen
 
-        # ---------------------------------------------------------------------
-        # 3. _remove_process wird IMMER aufgerufen
-        # ---------------------------------------------------------------------
         logger.debug(f"stop_stream: About to call _remove_process for {process_id}")
         result = self._remove_process(process_id)
         logger.debug(f"stop_stream: _remove_process returned {result} for {process_id}")
@@ -14353,9 +14250,6 @@ class FFmpegManager:
         self._global_shutdown = True
         logger.info("🔥 kill_all_streams: Start")
 
-        # ---------------------------------------------------------------------
-        # 1. Snapshot aller aktiven Prozesse erstellen und Registry leeren
-        # ---------------------------------------------------------------------
         with self._lock:
             processes_snapshot = list(self._processes.items())
             # Registry sofort leeren, damit keine neuen Zugriffe mehr erfolgen.
@@ -14427,9 +14321,6 @@ class FFmpegManager:
                     logger.error(f"    → ❌ kill() für {pid} fehlgeschlagen: {e}")
                     failed_count += 1
 
-        # ---------------------------------------------------------------------
-        # 3. Abschluss und Statistik
-        # ---------------------------------------------------------------------
         if killed_count > 0 or failed_count > 0:
             logger.info(
                 f"🔥 kill_all_streams: {killed_count} Prozesse beendet, "
@@ -14460,15 +14351,6 @@ class FFmpegManager:
     ) -> Optional[bytes]:
         """
         Liest PCM-Audiodaten vom FFmpeg-Prozess.
-
-        Args:
-            process_id: ID des Prozesses.
-            size: Anzahl der zu lesenden Bytes.
-            timeout_override: Optionaler Timeout in Sekunden. Überschreibt die automatische
-                              Timeout-Berechnung. Nützlich für schnelle Stop-Reaktion.
-
-        Returns:
-            Bytes oder None bei Fehler/Timeout.
         """
         with self._lock:
             if process_id not in self._processes:
@@ -14865,9 +14747,6 @@ class FFmpegManager:
                 f"Pipe mode start: video_url={video_url[:100]}..., process_id={process_id}",
             )
 
-        # Formate, die nacheinander ausprobiert werden.
-        # None bedeutet: yt‑dlp entscheidet automatisch (empfohlen).
-        # Die Reihenfolge ist nach Kompatibilität und Wahrscheinlichkeit sortiert.
         formats_to_try = [None, "webm", "matroska", "mp4"]
 
         yt_process: Optional[subprocess.Popen] = None
@@ -14904,7 +14783,7 @@ class FFmpegManager:
                         bufsize=10 * 1024 * 1024,
                         start_new_session=True,
                     )
-                    all_procs.append(yt_process)  # ← Sofort für Bereinigung merken
+                    all_procs.append(yt_process)
                     logger.info(
                         f"  ✅ yt‑dlp started (PID: {yt_process.pid}) "
                         f"(Format: {fmt if fmt else 'auto'})"
@@ -14939,7 +14818,7 @@ class FFmpegManager:
                         bufsize=10 * 1024 * 1024,
                         start_new_session=True,
                     )
-                    all_procs.append(ff_process)  # ← Sofort für Bereinigung merken
+                    all_procs.append(ff_process)
                     logger.info(f"  ✅ FFmpeg started (PID: {ff_process.pid})")
                     if DEBUG_LEVEL >= 3:
                         log_debug("ffmpeg", f"FFmpeg started, PID={ff_process.pid}")
@@ -14983,8 +14862,6 @@ class FFmpegManager:
                         self._stats["total_processes_started"] += 1
                         self._stats["total_pipe_processes"] += 1
 
-                    # Die erfolgreichen Prozesse aus all_procs entfernen, damit sie
-                    # nicht im finally‑Block beendet werden.
                     if yt_process in all_procs:
                         all_procs.remove(yt_process)
                     if ff_process in all_procs:
@@ -15051,9 +14928,6 @@ class FFmpegManager:
         """
         Bereinigt alle Ressourcen eines fehlgeschlagenen Pipe‑Versuchs.
         """
-        # -------------------------------------------------------------------------
-        # 1. yt‑dlp stderr‑Thread stoppen
-        # -------------------------------------------------------------------------
         if yt_stderr_thread and yt_stderr_thread.is_alive():
             if DEBUG_LEVEL >= 3:
                 log_debug("ffmpeg", "  → Stopping yt‑dlp stderr thread")
@@ -15083,9 +14957,6 @@ class FFmpegManager:
                 if DEBUG_LEVEL >= 3:
                     log_debug("ffmpeg", "  → yt_stderr_thread joined")
 
-        # -------------------------------------------------------------------------
-        # 2. Prozesse bereinigen – erst Pipes schließen, dann terminieren
-        # -------------------------------------------------------------------------
         for proc, name in ((ff_process, "FFmpeg"), (yt_process, "yt‑dlp")):
             if proc is None:
                 continue
@@ -15111,9 +14982,6 @@ class FFmpegManager:
             if DEBUG_LEVEL >= 3:
                 log_debug("ffmpeg", f"  → Cleaning up {name} (PID {proc.pid})")
 
-            # ---------------------------------------------------------------------
-            # 2a. Alle Pipes explizit schließen (Windows‑Ressourcenleck verhindern)
-            # ---------------------------------------------------------------------
             pipes_closed = 0
             for pipe_name in ("stdout", "stderr", "stdin"):
                 pipe = getattr(proc, pipe_name, None)
@@ -15130,9 +14998,6 @@ class FFmpegManager:
             if DEBUG_LEVEL >= 3 and pipes_closed > 0:
                 log_debug("ffmpeg", f"    Closed {pipes_closed} pipe(s) for {name}")
 
-            # ---------------------------------------------------------------------
-            # 2b. Prozess beenden (erst SIGTERM, dann SIGKILL)
-            # ---------------------------------------------------------------------
             try:
                 proc.terminate()
                 if DEBUG_LEVEL >= 3:
@@ -15163,9 +15028,6 @@ class FFmpegManager:
         if DEBUG_LEVEL >= 3:
             log_debug("ffmpeg", "  → Pipe resources cleanup completed")
 
-    # -------------------------------------------------------------------------
-    # Normaler Modus (direkte Audio‑URL)
-    # -------------------------------------------------------------------------
     def _start_stream_normal_mode(
         self,
         video_url: str,
@@ -15180,17 +15042,10 @@ class FFmpegManager:
     ) -> Optional[subprocess.Popen]:
         """
         Startet einen Stream im normalen Modus (direkte Audio‑URL).
-
-        Verwendet eine mehrstufige Fallback‑Strategie:
-            1. Optimierter FFmpeg‑Befehl
-            2. Minimaler FFmpeg‑Befehl (falls erster sofort stirbt)
         """
         if DEBUG_LEVEL >= 3:
             log_debug("ffmpeg", "Using normal mode (direct audio URL)")
 
-        # ---------------------------------------------------------------------
-        # Audio‑URL auflösen
-        # ---------------------------------------------------------------------
         if audio_url is None or force_refresh_audio_url:
             logger.info("🎵 Resolving audio URL...")
             if DEBUG_LEVEL >= 3:
@@ -15231,9 +15086,6 @@ class FFmpegManager:
                     f"Using pre-resolved URL (truncated): {audio_url[:100]}...",
                 )
 
-        # ---------------------------------------------------------------------
-        # FFmpeg‑Prozess starten (mit Fallback)
-        # ---------------------------------------------------------------------
         process = self._start_ffmpeg_with_fallback(
             audio_url=audio_url,
             seek_seconds=seek_seconds,
@@ -15245,9 +15097,6 @@ class FFmpegManager:
         if process is None:
             return None
 
-        # ---------------------------------------------------------------------
-        # Registrierung und Abschluss
-        # ---------------------------------------------------------------------
         if self.resource_manager is not None:
             self.resource_manager.register_process(process)
 
@@ -15279,9 +15128,6 @@ class FFmpegManager:
         auf einen minimalen Befehl und schließlich auf einen ultraminimalen
         Befehl zurück.
         """
-        # -----------------------------------------------------------------
-        # 1. Optimierten Befehl erstellen
-        # -----------------------------------------------------------------
         cmd = self._build_ffmpeg_command_optimized(
             audio_url,
             seek_seconds=seek_seconds,
@@ -15319,9 +15165,6 @@ class FFmpegManager:
                     f"Optimized FFmpeg died (exit {process.poll()}), stderr preview: {stderr_display}",
                 )
 
-            # -----------------------------------------------------------------
-            # 2. Fallback: minimaler Befehl (mit Timeout‑Optionen)
-            # -----------------------------------------------------------------
             logger.info("🔄 Trying fallback with minimal FFmpeg options...")
             minimal_cmd = self._build_ffmpeg_minimal_command(
                 audio_url, detected_language
@@ -15346,9 +15189,6 @@ class FFmpegManager:
                     f"❌ Minimal FFmpeg also died. Exit code: {minimal_process.poll()}, stderr: {stderr_minimal_display}"
                 )
 
-                # -----------------------------------------------------------------
-                # 3. Ultimativer Fallback: Befehl ohne Timeout‑Optionen
-                # -----------------------------------------------------------------
                 logger.warning(
                     "Minimal FFmpeg failed. Trying ultra-minimal without timeout options."
                 )
@@ -15384,9 +15224,6 @@ class FFmpegManager:
             if DEBUG_LEVEL >= 3:
                 log_debug("ffmpeg", "Optimized FFmpeg running, poll() is None")
 
-        # ---------------------------------------------------------------------
-        # Zusätzliche Wartezeit für HLS‑Streams
-        # ---------------------------------------------------------------------
         if any(
             keyword in audio_url.lower()
             for keyword in ["hls", ".m3u8", "manifest.googlevideo.com"]
@@ -15654,9 +15491,6 @@ class FFmpegManager:
         """
         log_debug("ffmpeg", f"_build_ffmpeg_command_optimized: url={url[:100]}...")
 
-        # ---------------------------------------------------------------------
-        # Stream‑Typ und Plattform ermitteln
-        # ---------------------------------------------------------------------
         is_live, platform = self._detect_stream_type(url)
 
         # Explizite Absicherung für lokale Dateien – Reconnect ist hier nie erlaubt
@@ -15686,8 +15520,6 @@ class FFmpegManager:
             "warning",
         ]
 
-        # Reconnect **NUR** für Livestreams – verhindert Hänger bei VODs und
-        # den Fehler "Option reconnect not found" bei lokalen Dateien.
         if is_live:
             logger.info("  📡 LIVE: Using reconnect options")
             cmd.extend(
@@ -15713,9 +15545,6 @@ class FFmpegManager:
             ]
         )
 
-        # ---------------------------------------------------------------------
-        # YouTube‑spezifische Header (User‑Agent, Referer, Origin)
-        # ---------------------------------------------------------------------
         if is_youtube:
             logger.info("  🎯 YouTube erkannt – verwende optimierte Header")
             cmd.extend(
@@ -15786,38 +15615,33 @@ class FFmpegManager:
             language=detected_language, profile=profile
         )
         logger.info(f"  🎚️ Using audio filter (profile={profile}): {audio_filter}")
-
-        # Ausgabeformat – PCM 16‑bit, Mono, konfigurierte Samplerate
         cmd.extend(
             [
-                "-vn",  # Video deaktivieren
+                "-vn",  
                 "-f",
-                "s16le",  # Roh‑Audio signed 16‑bit little‑endian
+                "s16le",  
                 "-acodec",
-                "pcm_s16le",  # PCM‑Codec
+                "pcm_s16le",  
                 "-ar",
-                str(self.config.SAMPLE_RATE),  # Abtastrate (16000 Hz)
+                str(self.config.SAMPLE_RATE), 
                 "-ac",
-                str(self.config.CHANNELS),  # Mono (1 Kanal)
+                str(self.config.CHANNELS), 
                 "-af",
-                audio_filter,  # Audiofilter
+                audio_filter,
                 "-fflags",
-                "+genpts+discardcorrupt",  # Korrupte Frames verwerfen
+                "+genpts+discardcorrupt",
                 "-avoid_negative_ts",
-                "make_zero",  # Negative Timestamps vermeiden
+                "make_zero",  
                 "-max_interleave_delta",
-                "0",  # Keine Interleaving‑Verzögerung
+                "0", 
                 "-threads",
-                "2",  # 2 Threads für Dekodierung
+                "2",  
                 "-bufsize",
-                self.config.FFMPEG_BUFSIZE,  # Puffergröße (z. B. 2048k)
-                "pipe:1",  # Ausgabe auf stdout
+                self.config.FFMPEG_BUFSIZE, 
+                "pipe:1",
             ]
         )
 
-        # ---------------------------------------------------------------------
-        # Debug‑Ausgaben
-        # ---------------------------------------------------------------------
         if DEBUG_LEVEL >= 2:
             log_debug(
                 "ffmpeg",
@@ -15866,16 +15690,10 @@ class FFmpegManager:
                 )
                 return cached["is_live"], cached["platform"]
 
-        # -----------------------------------------------------------------
-        # 2. URL normalisieren und analysieren
-        # -----------------------------------------------------------------
         url_lower = url.lower()
         is_live = False
         platform = "unknown"
 
-        # -----------------------------------------------------------------
-        # 3. YouTube: Kombinierte Erkennung (Heuristik + Metadaten + Retry + Dauer)
-        # -----------------------------------------------------------------
         if "youtube.com" in url_lower or "youtu.be" in url_lower:
             platform = "YouTube"
 
@@ -15896,9 +15714,6 @@ class FFmpegManager:
             meta_is_live = False
             if not url_suggests_live:
                 meta_is_live = self._check_youtube_live_by_metadata(url)
-                # -----------------------------------------------------------------
-                # Zusätzlicher Retry: YouTube liefert manchmal verzögert korrekte Daten
-                # -----------------------------------------------------------------
                 if not meta_is_live:
                     if DEBUG_LEVEL >= 3:
                         log_debug(
@@ -15954,17 +15769,11 @@ class FFmpegManager:
                     is_live = False
                     logger.info("  🎬 YouTube‑VOD erkannt (via Metadaten)")
 
-        # -----------------------------------------------------------------
-        # 4. Twitch – Livestreams sind der Normalfall
-        # -----------------------------------------------------------------
         elif "twitch.tv" in url_lower:
             platform = "Twitch"
             is_live = True
             logger.info("  🎥 Twitch‑Livestream erkannt")
 
-        # -----------------------------------------------------------------
-        # 5. TikTok – Prüfung auf "live" in der URL
-        # -----------------------------------------------------------------
         elif "tiktok.com" in url_lower:
             platform = "TikTok"
             is_live = "live" in url_lower
@@ -15972,9 +15781,6 @@ class FFmpegManager:
                 f"  {'🎥' if is_live else '🎬'} TikTok-{'Livestream' if is_live else 'VOD'} erkannt"
             )
 
-        # -----------------------------------------------------------------
-        # 6. Facebook / fb.watch
-        # -----------------------------------------------------------------
         elif "facebook.com" in url_lower or "fb.watch" in url_lower:
             platform = "Facebook"
             is_live = "live" in url_lower or "watch/live" in url_lower
@@ -15982,17 +15788,11 @@ class FFmpegManager:
                 f"  {'🎥' if is_live else '🎬'} Facebook-{'Livestream' if is_live else 'VOD'} erkannt"
             )
 
-        # -----------------------------------------------------------------
-        # 7. Kick – Livestreaming-Plattform
-        # -----------------------------------------------------------------
         elif "kick.com" in url_lower:
             platform = "Kick"
             is_live = True
             logger.info("  🎥 Kick‑Livestream erkannt")
 
-        # -----------------------------------------------------------------
-        # 8. Rumble – Prüfung auf "live"
-        # -----------------------------------------------------------------
         elif "rumble.com" in url_lower:
             platform = "Rumble"
             is_live = "live" in url_lower
@@ -16000,9 +15800,6 @@ class FFmpegManager:
                 f"  {'🎥' if is_live else '🎬'} Rumble-{'Livestream' if is_live else 'VOD'} erkannt"
             )
 
-        # -----------------------------------------------------------------
-        # 9. Dailymotion – Prüfung auf "live"
-        # -----------------------------------------------------------------
         elif "dailymotion.com" in url_lower:
             platform = "Dailymotion"
             is_live = "live" in url_lower
@@ -16010,9 +15807,6 @@ class FFmpegManager:
                 f"  {'🎥' if is_live else '🎬'} Dailymotion-{'Livestream' if is_live else 'VOD'} erkannt"
             )
 
-        # -----------------------------------------------------------------
-        # 10. Vimeo – Prüfung auf "live"
-        # -----------------------------------------------------------------
         elif "vimeo.com" in url_lower:
             platform = "Vimeo"
             is_live = "live" in url_lower
@@ -16020,9 +15814,6 @@ class FFmpegManager:
                 f"  {'🎥' if is_live else '🎬'} Vimeo-{'Livestream' if is_live else 'VOD'} erkannt"
             )
 
-        # -----------------------------------------------------------------
-        # 11. Twitter / X – Prüfung auf "live"
-        # -----------------------------------------------------------------
         elif "twitter.com" in url_lower or "x.com" in url_lower:
             platform = "Twitter/X"
             is_live = "live" in url_lower
@@ -16030,49 +15821,31 @@ class FFmpegManager:
                 f"  {'🎥' if is_live else '🎬'} Twitter/X-{'Livestream' if is_live else 'VOD'} erkannt"
             )
 
-        # -----------------------------------------------------------------
-        # 12. Lokale Dateien – niemals live
-        # -----------------------------------------------------------------
         elif url_lower.startswith("file://"):
             platform = "Local File"
             is_live = False
             logger.info("  📁 Lokale Datei erkannt")
 
-        # -----------------------------------------------------------------
-        # 13. HLS-Streams (.m3u8) – immer live
-        # -----------------------------------------------------------------
         elif ".m3u8" in url_lower:
             platform = "HLS Stream"
             is_live = True
             logger.info("  📡 HLS‑Livestream erkannt")
 
-        # -----------------------------------------------------------------
-        # 14. DASH-Streams (.mpd) – immer live
-        # -----------------------------------------------------------------
         elif ".mpd" in url_lower:
             platform = "DASH Stream"
             is_live = True
             logger.info("  📡 DASH‑Livestream erkannt")
 
-        # -----------------------------------------------------------------
-        # 15. Generische HTTP-Streams – Fallback
-        # -----------------------------------------------------------------
         elif url_lower.startswith(("http://", "https://")):
             platform = "HTTP Stream"
             is_live = False
             logger.info("  🌐 HTTP‑Stream (generisch) – als VOD behandelt")
 
-        # -----------------------------------------------------------------
-        # 16. Unbekannte Quelle
-        # -----------------------------------------------------------------
         else:
             platform = "unknown"
             is_live = False
             logger.warning(f"  ❓ Unbekannte Plattform für URL: {url[:50]}")
 
-        # -----------------------------------------------------------------
-        # 17. Ergebnis im Cache speichern
-        # -----------------------------------------------------------------
         self._live_detection_cache.put(
             cache_key,
             {
@@ -16089,9 +15862,6 @@ class FFmpegManager:
         )
         return is_live, platform
 
-    # -------------------------------------------------------------------------
-    #  Prozess‑Management
-    # -------------------------------------------------------------------------
     def _register_process(
         self,
         process_id: str,
@@ -16107,9 +15877,6 @@ class FFmpegManager:
         Verwaltung, startet die zugehörigen Lese‑ und stderr‑Threads und aktualisiert
         die PID‑Tracking‑Datenstrukturen.
         """
-        # -----------------------------------------------------------------
-        # 0. Erweiterte Eingangsvalidierung
-        # -----------------------------------------------------------------
         if process is None:
             raise RuntimeError("FFmpeg process is None – cannot register")
 
@@ -16130,9 +15897,6 @@ class FFmpegManager:
                 f"pipe_mode={pipe_mode}, url={url[:100]}...",
             )
 
-        # -----------------------------------------------------------------
-        # 1. Bereinige eventuell vorhandene alte Registrierung (idempotent)
-        # -----------------------------------------------------------------
         old_pinfo = None
         with self._lock:
             if process_id in self._processes:
@@ -16141,14 +15905,9 @@ class FFmpegManager:
                     f"⚠️ Überschreibe bestehende Prozess-ID {process_id} "
                     f"(PID {old_pinfo.process.pid}) – führe Bereinigung durch."
                 )
-                # Verhindere doppelte Slot‑Freigabe im alten _remove_process
                 old_pinfo._skip_semaphore_release = True
-                # Entferne alten Prozess (außerhalb des Locks, um Deadlocks zu vermeiden)
                 self._remove_process(process_id, force=False)
 
-        # -----------------------------------------------------------------
-        # 2. Plattform‑ und Header‑Informationen ermitteln (für Statistiken)
-        # -----------------------------------------------------------------
         url_lower = url.lower()
         platform = "Unknown"
         headers_used = False
@@ -16189,16 +15948,10 @@ class FFmpegManager:
         if DEBUG_LEVEL >= 3:
             log_debug("ffmpeg", f"  Platform: {platform}, headers_used={headers_used}")
 
-        # -----------------------------------------------------------------
-        # 3. PID‑Tracking vorbereiten
-        # -----------------------------------------------------------------
         pid_entries = [(process.pid, process_id)]
         if yt_process and yt_process.pid is not None:
             pid_entries.append((yt_process.pid, f"{process_id}_yt"))
 
-        # -----------------------------------------------------------------
-        # 4. Slot‑Akquisition (NEU: erst hier, NACH der Validierung)
-        # -----------------------------------------------------------------
         if not self._acquire_slot(purpose=f"register:{process_id}"):
             raise RuntimeError(
                 f"Konnte keinen Slot für Prozess {process_id} akquirieren – "
@@ -16212,9 +15965,6 @@ class FFmpegManager:
                 f"  Slot acquired for {process_id} (active slots: {self._active_slots}/{self._process_semaphore_max})",
             )
 
-        # -----------------------------------------------------------------
-        # 5. Registrierung durchführen (mit vollständigem Rollback bei Fehler)
-        # -----------------------------------------------------------------
         pinfo = None
         stderr_thread_started = False
         read_thread_started = False
@@ -16303,11 +16053,6 @@ class FFmpegManager:
                 if DEBUG_LEVEL >= 3:
                     log_debug("ffmpeg", "  yt-dlp stderr thread started")
 
-            # -----------------------------------------------------------------
-            # 5.6 🔥 ERFOLGREICHE REGISTRIERUNG – Slot bleibt dauerhaft belegt.
-            #     Das Flag slot_acquired wird auf False gesetzt, damit der
-            #     finally‑Block den Slot NICHT freigibt.
-            # -----------------------------------------------------------------
             slot_acquired = False
 
             # 5.7 Erfolgsmeldung
@@ -16327,9 +16072,6 @@ class FFmpegManager:
                 )
 
         except Exception as e:
-            # -----------------------------------------------------------------
-            # ROLLBACK: Fehler während der Registrierung – alle Ressourcen freigeben
-            # -----------------------------------------------------------------
             logger.error(
                 f"❌ Fehler bei Registrierung von {process_id}: {e}", exc_info=True
             )
@@ -17298,9 +17040,6 @@ class FFmpegManager:
 
         try:
             for attempt in range(1, max_attempts + 1):
-                # -------------------------------------------------------------
-                # Abbruch prüfen
-                # -------------------------------------------------------------
                 if is_cancelled():
                     logger.info(
                         f"Refresh abgebrochen durch Benutzer (Versuch {attempt})"
@@ -17323,9 +17062,6 @@ class FFmpegManager:
                         f"  🔁 Refresh attempt {attempt}/{max_attempts} for {process_id}"
                     )
 
-                # -------------------------------------------------------------
-                # Stream-Typ und Plattform ermitteln
-                # -------------------------------------------------------------
                 is_live, platform = self._detect_stream_type(video_url)
                 is_youtube = (
                     "youtube.com" in video_url.lower()
@@ -17411,9 +17147,6 @@ class FFmpegManager:
                     current_state = RefreshState.FAILED
                     break
 
-                # -------------------------------------------------------------
-                # Neuen Prozess starten (mit derselben ID wie zuvor)
-                # -------------------------------------------------------------
                 current_state = RefreshState.STARTING
                 diagnosis["state_history"].append(f"attempt_{attempt}_starting")
                 try:
@@ -17675,8 +17408,6 @@ class FFmpegManager:
             "warning" if DEBUG_LEVEL < 3 else "info",
         ]
 
-        # Minimale Reconnect‑Optionen – nur die, die in den meisten FFmpeg‑Builds
-        # vorhanden sind (kein -reconnect_attempts, -reconnect_delay_max etc.)
         cmd.extend(["-reconnect", "1", "-reconnect_streamed", "1"])
 
         # Bei Netzwerk‑Streams Timeout setzen (in Mikrosekunden)
@@ -17905,7 +17636,6 @@ class FFmpegManager:
             self.READ_BLOCK_SIZE = 8192
 
 
-# APPSETTINGS & ADVANCEDSETTINGS
 @dataclass
 class AppSettings:
     """
@@ -17913,7 +17643,7 @@ class AppSettings:
     """
 
     last_url: str = ""
-    default_model: Optional[str] = None  # None = noch nicht gesetzt (erster Start)
+    default_model: Optional[str] = None
     default_language: str = "auto"
     layout_mode: str = "horizontal"
     recent_urls: List[str] = field(default_factory=list)
@@ -18222,12 +17952,6 @@ class StreamInfoExtractor:
     def extract_stream_info(self, url: str) -> StreamInfo:
         """
         Extrahiert Stream-Informationen für eine gegebene URL.
-
-        Args:
-            url: Video-/Stream-URL.
-
-        Returns:
-            StreamInfo-Objekt mit Titel, Uploader, Dauer, Plattform.
         """
         if self._debug:
             logger.debug(
@@ -18461,8 +18185,6 @@ class StreamInfoExtractor:
             platform="unknown",
         )
 
-    # -------------------------------------------------------------------------
-    # YouTube-optimierte Extraktion
     def _extract_youtube_info_optimized(self, url: str) -> Optional[StreamInfo]:
         """
         Optimierte YouTube‑Extraktion mit paralleler Ausführung, minimaler Latenz
@@ -18599,9 +18321,6 @@ class StreamInfoExtractor:
             if result is not None:
                 return result
 
-        # ------------------------------------------------------------------
-        # Ultimativer Fallback: einfache URL‑Analyse
-        # ------------------------------------------------------------------
         if self._debug:
             logger.debug("  🔄 Fallback: Extrahiere Basis‑Info aus URL")
         return self._fallback_from_url(url)
@@ -38799,8 +38518,6 @@ class DragonWhispererGUI:
         Hintergrund-Thread für die sequenzielle Verarbeitung der TTS-Warteschlange.
         """
 
-        # Hilfsfunktion: Sichere Prüfung der GUI‑Existenz
-
         def is_root_alive() -> bool:
             """
             Gibt True zurück, wenn das Tkinter-Hauptfenster existiert und
@@ -38822,9 +38539,6 @@ class DragonWhispererGUI:
         log_debug("tts", "TTS-Worker-Thread gestartet")
 
         while getattr(self, "_tts_worker_running", True):
-            # -----------------------------------------------------------------
-            # 1. Element aus der Queue holen (mit kurzem Timeout)
-            # -----------------------------------------------------------------
             try:
                 text = self._tts_queue.get(timeout=0.5)
             except queue.Empty:
@@ -38854,9 +38568,6 @@ class DragonWhispererGUI:
                 self._tts_queue.task_done()
                 continue
 
-            # -----------------------------------------------------------------
-            # 3. Erweiterte Debug-Ausgabe (nur bei aktiviertem Debug-Level)
-            # -----------------------------------------------------------------
             if DEBUG_LEVEL >= 3:
                 preview = text[:200] + "…" if len(text) > 200 else text
                 try:
@@ -38879,9 +38590,6 @@ class DragonWhispererGUI:
                 self._tts_queue.task_done()
                 break
 
-            # -----------------------------------------------------------------
-            # 5. TTS-Manager-Verfügbarkeit prüfen
-            # -----------------------------------------------------------------
             if not hasattr(self, "tts_manager") or self.tts_manager is None:
                 log_debug(
                     "tts",
