@@ -46615,21 +46615,11 @@ class AudioProcessor:
                 if DEBUG_LEVEL >= 3:
                     log_debug("processor", f"Callback error: {e}", exc_info=True)
 
-        # ---------------------------------------------------------------------
-        # 1. FFmpeg‑Prozess stoppen
-        # ---------------------------------------------------------------------
         timed_step("stop_ffmpeg", lambda: self._safe_stop_ffmpeg())
-
-        # ---------------------------------------------------------------------
-        # 2. Dispatcher‑Shutdown signalisieren (keine neuen Aufgaben)
-        # ---------------------------------------------------------------------
         timed_step(
             "signal_dispatcher_shutdown", lambda: self._dispatcher_shutdown.set()
         )
 
-        # ---------------------------------------------------------------------
-        # 3. Audio‑Puffer flushen (verbliebene Daten verarbeiten)
-        # ---------------------------------------------------------------------
         timed_step(
             "flush_audio_buffer",
             lambda: self._flush_audio_buffer(
@@ -46639,60 +46629,37 @@ class AudioProcessor:
             ),
         )
 
-        # 4. Warten, bis die Raw-Audio-Queue vollständig geleert ist (mit Timeout).
         timed_step(
             "wait_for_queue_empty",
             lambda: self._join_queue_with_timeout(timeout=QUEUE_JOIN_TIMEOUT),
         )
 
-        # ---------------------------------------------------------------------
-        # 5. Dispatcher endgültig stoppen
-        # ---------------------------------------------------------------------
         timed_step("stop_dispatcher", lambda: self._stop_dispatcher(clear_queue=False))
 
-        # ---------------------------------------------------------------------
-        # 6. Auf ausstehende Executor‑Tasks warten (Transkription)
-        # ---------------------------------------------------------------------
         timed_step("wait_for_pending_tasks", lambda: self._wait_for_pending_tasks())
 
-        # ---------------------------------------------------------------------
-        # 7. Zweite Warte-Runde für verzögerte Transkriptions-Tasks
-        # ---------------------------------------------------------------------
         def wait_for_delayed_tasks():
             time.sleep(0.5)
             self._wait_for_pending_tasks()
 
         timed_step("wait_for_delayed_tasks", wait_for_delayed_tasks)
 
-        # ---------------------------------------------------------------------
-        # 8. GUI‑Queue leeren (sicherstellen, dass alle Texte angezeigt werden)
-        # ---------------------------------------------------------------------
         timed_step("drain_gui_queue", lambda: self._drain_gui_queue())
 
-        # ---------------------------------------------------------------------
-        # 9. 🔥 FINAL‑FLUSH‑PHASE EINLEITEN
-        #    Verhindert, dass das _stop_event während der finalen Übersetzung
-        #    die Aufgaben verwirft.
-        # ---------------------------------------------------------------------
         self._in_final_flush.set()
         logger.info("🌐 Entering final flush phase – stop_event will be ignored")
 
-        # 10. Übersetzungs‑Satzpuffer leeren (erzeugt finale Übersetzungsaufgaben)
         timed_step(
             "flush_sentence_buffer",
             lambda: self._flush_sentence_buffer(callbacks.get("translation")),
         )
 
-        # 11. Transkriptions‑Satzpuffer leeren
+
         timed_step(
             "flush_transcript_buffer",
             lambda: self._flush_transcript_buffer(callbacks.get("transcription")),
         )
 
-        # ---------------------------------------------------------------------
-        # 12. Übersetzungs‑Executor herunterfahren und warten
-        #     🔥 MUSS NACH DEM FLUSH ERFOLGEN, damit alle Aufgaben angenommen werden!
-        # ---------------------------------------------------------------------
         def shutdown_translation_executor():
             executor = getattr(self, "_translation_executor", None)
             if executor is None:
@@ -46717,22 +46684,13 @@ class AudioProcessor:
 
         timed_step("shutdown_translation_executor", shutdown_translation_executor)
 
-        # ---------------------------------------------------------------------
-        # 13. 🔥 FINAL‑FLUSH‑PHASE BEENDEN
-        # ---------------------------------------------------------------------
         self._in_final_flush.clear()
         logger.info("🌐 Final flush phase ended")
 
-        # ---------------------------------------------------------------------
-        # 14. Fallback‑Zustand der TranscriptionEngine zurücksetzen
-        # ---------------------------------------------------------------------
         timed_step(
             "reset_transcription_engine_fallback", lambda: self._reset_engine_fallback()
         )
 
-        # ---------------------------------------------------------------------
-        # 15. LinuxPerformanceOptimizer deaktivieren (falls aktiv)
-        # ---------------------------------------------------------------------
         if (
             IS_LINUX
             and hasattr(self, "performance_optimizer")
@@ -46746,20 +46704,11 @@ class AudioProcessor:
             if DEBUG_LEVEL >= 3:
                 log_debug("processor", "  Linux optimizer not active – skipping")
 
-        # ---------------------------------------------------------------------
-        # 16. Temporäre Dateien löschen
-        # ---------------------------------------------------------------------
         timed_step("cleanup_temp_files", lambda: self._cleanup_temp_files())
 
-        # ---------------------------------------------------------------------
-        # 17. Statistik ausgeben
-        # ---------------------------------------------------------------------
         if self._chunk_counter > 0:
             timed_step("log_final_stats", self._log_final_stats)
 
-        # ---------------------------------------------------------------------
-        # 18. Callbacks auslösen
-        # ---------------------------------------------------------------------
         timed_step(
             "invoke_callbacks",
             lambda: self._invoke_final_callbacks(
@@ -46767,23 +46716,14 @@ class AudioProcessor:
             ),
         )
 
-        # ---------------------------------------------------------------------
-        # 19. Download‑Modus‑Flag zurücksetzen
-        # ---------------------------------------------------------------------
         if getattr(self, "_download_mode_active", False):
             self._download_mode_active = False
 
-        # ---------------------------------------------------------------------
-        # 20. Event‑Bus benachrichtigen
-        # ---------------------------------------------------------------------
         timed_step(
             "emit_cleanup_event",
             lambda: self._emit_cleanup_completed(normal_ending, error_occurred),
         )
 
-        # ---------------------------------------------------------------------
-        # 21. Executor‑Referenzen freigeben (Transkription und Timeout)
-        # ---------------------------------------------------------------------
         def release_executors():
             if hasattr(self, "_transcription_executor"):
                 self._transcription_executor = None
@@ -46795,9 +46735,6 @@ class AudioProcessor:
 
         timed_step("release_executors", release_executors)
 
-        # ---------------------------------------------------------------------
-        # 22. Abschließende Debug‑Ausgabe
-        # ---------------------------------------------------------------------
         total_duration = time.perf_counter() - cleanup_start_time
         with self._pending_tasks_lock:
             final_pending = self._pending_tasks
@@ -46817,22 +46754,11 @@ class AudioProcessor:
     ) -> None:
         """
         Leert den Transkriptions‑Satzpuffer und gibt den finalen kombinierten Satz aus.
-
-        Diese Methode wird während des Cleanups (`_cleanup_after_stream`) aufgerufen,
-        um sicherzustellen, dass keine unvollständigen Sätze im Puffer verbleiben.
-        Sie sendet den kombinierten Satz sowohl an die GUI als auch an die
-        Übersetzungs‑Engine (sofern aktiviert).
-
-        Args:
-            transcription_callback: Callback für die GUI‑Ausgabe. Falls None,
-                                    wird keine Ausgabe erzeugt.
         """
-        # 1. Schneller Rückweg bei fehlendem Callback
         if transcription_callback is None:
             logger.warning(
                 "🌐 _flush_transcript_buffer: transcription_callback is None – skipping flush"
             )
-            # Puffer trotzdem leeren, um Speicher freizugeben
             with self._transcript_sentence_lock:
                 if self._transcript_parts:
                     logger.warning(
@@ -46842,7 +46768,6 @@ class AudioProcessor:
                 self._transcript_segments.clear()
             return
 
-        # 2. Kritischer Abschnitt: Zugriff auf den Puffer
         with self._transcript_sentence_lock:
             if not self._transcript_parts:
                 logger.warning(
@@ -46857,7 +46782,6 @@ class AudioProcessor:
                 f"{total_chars} total chars"
             )
 
-            # 3. Kombiniertes Segment erstellen
             try:
                 combined_seg = self._create_combined_transcript_segment()
             except Exception as e:
@@ -46865,21 +46789,17 @@ class AudioProcessor:
                     f"🌐 Failed to create combined transcript segment: {e}",
                     exc_info=True,
                 )
-                # Puffer dennoch leeren, um Blockaden zu vermeiden
                 self._transcript_parts.clear()
                 self._transcript_segments.clear()
                 return
 
-            # 4. Callbacks auslösen (GUI und Übersetzung)
             try:
-                # 4a. GUI‑Ausgabe
                 transcription_callback(combined_seg)
                 logger.warning(
                     f"🌐 Final transcript sentence delivered to GUI "
                     f"({len(combined_seg.text)} chars)"
                 )
 
-                # 4b. Übersetzung anstoßen, falls Engine verfügbar und aktiviert
                 translation_cb = getattr(self, "_translation_callback", None)
                 engine = (
                     self.translation_engine
@@ -46927,29 +46847,15 @@ class AudioProcessor:
                 )
 
             finally:
-                # -----------------------------------------------------------------
-                # 5. Puffer in JEDEM Fall leeren (garantiert)
-                # -----------------------------------------------------------------
                 self._transcript_parts.clear()
                 self._transcript_segments.clear()
                 logger.warning("🌐 Transcript buffer cleared")
 
-    # -------------------------------------------------------------------------
-    # Hilfsmethoden für _cleanup_after_stream
-    # -------------------------------------------------------------------------
 
     def _safe_stop_ffmpeg(self) -> None:
         """
         Stoppt alle aktiven FFmpeg-Streams und setzt die zugehörige Stream-ID zurück.
-
-        Diese Methode ist ein zentraler Bestandteil des ressourcenschonenden
-        Stream-Cleanups. Sie stellt sicher, dass keine FFmpeg-Prozesse oder
-        Pipe‑Verbindungen zurückbleiben, und bereinigt den internen Zustand
-        des AudioProcessors.
         """
-        # -----------------------------------------------------------------
-        # 1. Vorbereitung: Referenz auf den FFmpegManager prüfen
-        # -----------------------------------------------------------------
         ffmpeg_manager = getattr(self, "ffmpeg_manager", None)
 
         if ffmpeg_manager is None:
@@ -46965,9 +46871,6 @@ class AudioProcessor:
             log_debug("processor", "  Stopping all FFmpeg streams...")
             start_time = time.perf_counter()
 
-        # -----------------------------------------------------------------
-        # 2. Primärer Stopp: kill_all_streams (hart, aber zuverlässig)
-        # -----------------------------------------------------------------
         kill_success = False
         try:
             ffmpeg_manager.kill_all_streams()
@@ -46979,7 +46882,6 @@ class AudioProcessor:
                     f"  ✅ FFmpeg streams killed via kill_all_streams() in {elapsed:.2f} ms",
                 )
         except AttributeError:
-            # Manager hat keine kill_all_streams-Methode – Fallback
             if DEBUG_LEVEL >= 3:
                 log_debug(
                     "processor",
@@ -46992,9 +46894,6 @@ class AudioProcessor:
                     "processor", "kill_all_streams() failed", e, level="debug"
                 )
 
-        # -----------------------------------------------------------------
-        # 3. Fallback: stop_all_streams (sanfter, blockiert ggf.)
-        # -----------------------------------------------------------------
         if not kill_success:
             try:
                 if hasattr(ffmpeg_manager, "stop_all_streams"):
@@ -47016,9 +46915,6 @@ class AudioProcessor:
                         "processor", "stop_all_streams() failed", e, level="debug"
                     )
 
-        # -----------------------------------------------------------------
-        # 4. Zusätzliche Absicherung: cancel_all_reads (falls vorhanden)
-        # -----------------------------------------------------------------
         try:
             if hasattr(ffmpeg_manager, "cancel_all_reads"):
                 ffmpeg_manager.cancel_all_reads()
@@ -47028,20 +46924,11 @@ class AudioProcessor:
             if DEBUG_LEVEL >= 3:
                 log_debug("processor", f"  cancel_all_reads() failed: {e}")
 
-        # -----------------------------------------------------------------
-        # 5. Stream-ID in jedem Fall zurücksetzen (garantiert)
-        # -----------------------------------------------------------------
         finally:
             self._current_stream_id = None
             if DEBUG_LEVEL >= 3:
                 log_debug("processor", "  _current_stream_id set to None")
 
-        # -----------------------------------------------------------------
-        # 6. Optional: Kurze Pause für Prozess‑Beendigung (nur bei Bedarf)
-        # -----------------------------------------------------------------
-        # Unter Windows kann es vorkommen, dass das Betriebssystem etwas Zeit
-        # benötigt, um die Prozesshandles freizugeben. Ein kurzes Sleep
-        # verhindert Race Conditions beim sofortigen Neustart.
         if IS_WINDOWS:
             time.sleep(0.05)
 
@@ -47049,9 +46936,7 @@ class AudioProcessor:
         """
         Thread‑sichere Änderung des Zählers für ausstehende Transkriptions‑Tasks.
         """
-        # -----------------------------------------------------------------
-        # 1. Eingangsvalidierung
-        # -----------------------------------------------------------------
+
         if delta not in (1, -1):
             logger.warning(
                 f"_modify_pending_tasks called with invalid delta={delta}. "
@@ -47059,17 +46944,11 @@ class AudioProcessor:
             )
             return
 
-        # -----------------------------------------------------------------
-        # 2. Kritischer Abschnitt unter der Condition
-        # -----------------------------------------------------------------
         with self._pending_tasks_cond:
             old_value = self._pending_tasks
             self._pending_tasks += delta
             new_value = self._pending_tasks
 
-            # -----------------------------------------------------------------
-            # 3. Automatische Korrektur bei negativem Zähler (sollte nie passieren)
-            # -----------------------------------------------------------------
             if new_value < 0:
                 logger.error(
                     f"CRITICAL: _pending_tasks became negative ({new_value}) after delta={delta:+d}! "
@@ -47078,28 +46957,20 @@ class AudioProcessor:
                 )
                 self._pending_tasks = 0
                 new_value = 0
-                # Wir benachrichtigen trotzdem, um eventuell wartende Threads zu befreien
                 self._pending_tasks_cond.notify_all()
                 if DEBUG_LEVEL >= 3:
                     log_debug(
                         "processor",
                         f"_pending_tasks corrected from {old_value} to 0 (was {old_value + delta})",
                     )
-                # Frühzeitiger return, da der Zähler jetzt 0 ist und die Benachrichtigung erfolgte
                 return
 
-            # -----------------------------------------------------------------
-            # 4. Debug‑Ausgabe bei ausreichendem Log‑Level
-            # -----------------------------------------------------------------
             if DEBUG_LEVEL >= 4:
                 log_debug(
                     "processor",
                     f"_pending_tasks: {old_value} -> {new_value} (delta={delta:+d})",
                 )
 
-            # -----------------------------------------------------------------
-            # 5. Benachrichtigung bei Erreichen von 0
-            # -----------------------------------------------------------------
             if new_value == 0:
                 self._pending_tasks_cond.notify_all()
                 if DEBUG_LEVEL >= 3:
@@ -47108,9 +46979,6 @@ class AudioProcessor:
                         f"All pending tasks completed (was {old_value}), condition notified",
                     )
 
-            # -----------------------------------------------------------------
-            # 6. Optionale Warnung bei hohem Zählerstand (Hinweis auf Stau)
-            # -----------------------------------------------------------------
             if new_value > 100 and new_value % 50 == 0:
                 logger.warning(
                     f"High number of pending transcription tasks: {new_value}. "
@@ -47125,16 +46993,7 @@ class AudioProcessor:
     def _wait_for_pending_tasks(self) -> None:
         """
         Wartet dynamisch auf den Abschluss aller ausstehenden Transkriptions‑Tasks.
-
-        Verwendet eine `threading.Condition`, um **verlustfrei** auf den Zählerstand
-        `_pending_tasks == 0` zu warten. Ein Lost‑Wakeup (wie bei `threading.Event`)
-        ist ausgeschlossen. Die Methode kombiniert eine globale Timeout‑Grenze mit
-        regelmäßigen Statusmeldungen und reagiert auf Benutzerabbrüche sowie einen
-        unerwarteten Abbruch des Dispatcher‑Threads.
         """
-        # -----------------------------------------------------------------
-        # 1. Aktuelle Anzahl ausstehender Tasks ermitteln (unter Condition)
-        # -----------------------------------------------------------------
         with self._pending_tasks_cond:
             pending = self._pending_tasks
 
@@ -47146,24 +47005,14 @@ class AudioProcessor:
                 )
             return
 
-        # -----------------------------------------------------------------
-        # 2. Dynamische Timeout‑Berechnung
-        # -----------------------------------------------------------------
-        # Basis: geschätzte Verarbeitungszeit pro Task
         chunk_duration = self.settings.config.CHUNK_DURATION
         with self._stats_lock:
             rt_factor = max(1.0, self._last_realtime_factor)
 
-        # Sicherheitsfaktor: 2,5 × die erwartete Zeit für alle Tasks
         estimated_seconds = pending * chunk_duration * rt_factor * 2.5
-
-        # Absolute Grenzen: mindestens 60 s, maximal 1200 s (20 Minuten)
         MAX_WAIT_SECONDS = max(60.0, min(1200.0, estimated_seconds))
-
-        # Intervalle für Logging und Condition-Timeout
-        CONDITION_WAIT_TIMEOUT = 30.0  # Maximale Blockade pro wait()-Aufruf
-        LOG_INTERVAL = 5.0  # Fortschrittsmeldungen nur alle 5 Sekunden
-
+        CONDITION_WAIT_TIMEOUT = 30.0  
+        LOG_INTERVAL = 5.0  
         wait_start = time.perf_counter()
         last_log_time = wait_start
         last_pending = pending
@@ -47175,14 +47024,8 @@ class AudioProcessor:
                 f"(max {MAX_WAIT_SECONDS:.1f}s, est={estimated_seconds:.1f}s, rt_factor={rt_factor:.2f})",
             )
 
-        # -----------------------------------------------------------------
-        # 3. Warteschleife mit Condition
-        # -----------------------------------------------------------------
         with self._pending_tasks_cond:
             while self._pending_tasks > 0:
-                # ---------------------------------------------------------
-                # 3.1 Abbruch durch Benutzer?
-                # ---------------------------------------------------------
                 if self._stop_event.is_set():
                     if DEBUG_LEVEL >= 3:
                         log_debug(
@@ -47191,9 +47034,6 @@ class AudioProcessor:
                         )
                     break
 
-                # ---------------------------------------------------------
-                # 3.2 Dispatcher‑Status prüfen (nur warnen, wenn er wirklich tot ist)
-                # ---------------------------------------------------------
                 if (
                     self._dispatcher_thread is not None
                     and not self._dispatcher_thread.is_alive()
@@ -47205,14 +47045,8 @@ class AudioProcessor:
                     )
                     break
 
-                # ---------------------------------------------------------
-                # 3.3 Aktuelle Anzahl ausstehender Tasks (unter Condition)
-                # ---------------------------------------------------------
                 current_pending = self._pending_tasks
 
-                # ---------------------------------------------------------
-                # 3.4 Globalen Timeout prüfen
-                # ---------------------------------------------------------
                 elapsed = time.perf_counter() - wait_start
                 if elapsed >= MAX_WAIT_SECONDS:
                     logger.warning(
@@ -47221,9 +47055,6 @@ class AudioProcessor:
                     )
                     break
 
-                # ---------------------------------------------------------
-                # 3.5 Fortschritt loggen (gedrosselt)
-                # ---------------------------------------------------------
                 now = time.perf_counter()
                 if (
                     current_pending != last_pending
@@ -47237,23 +47068,13 @@ class AudioProcessor:
                     last_pending = current_pending
                     last_log_time = now
 
-                # ---------------------------------------------------------
-                # 3.6 Warten auf Benachrichtigung (mit Timeout, um Periodik zu ermöglichen)
-                #     Berechne verbleibende Zeit bis zum globalen Timeout
-                # ---------------------------------------------------------
                 remaining_global = MAX_WAIT_SECONDS - elapsed
                 wait_timeout = min(CONDITION_WAIT_TIMEOUT, remaining_global)
                 if wait_timeout <= 0:
                     break
 
-                # 🔥 Entscheidender Aufruf: Condition.wait() gibt den Lock atomar frei
-                #    und erwirbt ihn erneut, sobald notify_all() aufgerufen wird oder
-                #    der Timeout abläuft. Ein Lost‑Wakeup ist unmöglich.
                 self._pending_tasks_cond.wait(timeout=wait_timeout)
 
-        # -----------------------------------------------------------------
-        # 4. Ergebnis auswerten und ggf. Bereinigung durchführen
-        # -----------------------------------------------------------------
         with self._pending_tasks_cond:
             final_pending = self._pending_tasks
 
@@ -47265,9 +47086,6 @@ class AudioProcessor:
                     f"  ✅ All transcription tasks finished after {elapsed:.2f}s",
                 )
         else:
-            # -----------------------------------------------------------------
-            # 5. Fehlerfall: Zähler manuell zurücksetzen, um Deadlock zu lösen
-            # -----------------------------------------------------------------
             logger.warning(
                 f"⚠️ Wait for pending tasks aborted with {final_pending} task(s) remaining. "
                 "Forcing counter reset to prevent deadlock."
@@ -47281,16 +47099,7 @@ class AudioProcessor:
     def _drain_gui_queue(self) -> None:
         """
         Leert die GUI-Queue vollständig und verarbeitet alle ausstehenden Tkinter-Ereignisse.
-
-        Diese Methode wird während des Stream-Cleanups aufgerufen, nachdem der Dispatcher
-        gestoppt wurde und keine neuen GUI-Ereignisse mehr produziert werden. Sie stellt
-        sicher, dass alle bereits in der GUI-Queue befindlichen Aktualisierungen
-        (Transkriptionen, Übersetzungen, Statusmeldungen) tatsächlich in der GUI
-        angezeigt werden, bevor der AudioProcessor in den IDLE-Zustand zurückkehrt.
         """
-        # ---------------------------------------------------------------------
-        # 1. GUI-Referenz beschaffen und validieren
-        # ---------------------------------------------------------------------
         try:
             gui = self.controller_ref.gui_ref() if self.controller_ref else None
         except Exception as e:
@@ -47314,9 +47123,6 @@ class AudioProcessor:
             log_debug("processor", f"  GUI root window check failed: {e}")
             return
 
-        # ---------------------------------------------------------------------
-        # 2. Konstanten für den Drain-Vorgang
-        # ---------------------------------------------------------------------
         MAX_WAIT_SECONDS = 3.0  # Maximale Gesamtwartezeit
         IDLE_ITERATIONS_BEFORE_BREAK = 3  # Anzahl leerer Durchläufe vor Abbruch
         SLEEP_INTERVAL = 0.05  # Sekunden zwischen Verarbeitungszyklen
@@ -47336,16 +47142,12 @@ class AudioProcessor:
                 f"queue_manager_available={queue_manager is not None})",
             )
 
-        # ---------------------------------------------------------------------
-        # 3. Primärer Drain-Mechanismus: über queue_manager (falls verfügbar)
-        # ---------------------------------------------------------------------
         if queue_manager is not None and gui_queue is not None:
             idle_counter = 0
             processed_items = 0
             last_qsize_log = -1
 
             while True:
-                # 3.1 Timeout prüfen
                 elapsed = time.perf_counter() - start_time
                 if elapsed >= MAX_WAIT_SECONDS:
                     if DEBUG_LEVEL >= 3:
@@ -47355,17 +47157,14 @@ class AudioProcessor:
                         )
                     break
 
-                # 3.2 Aktuelle Queue-Größe ermitteln
                 try:
                     qsize = gui_queue.qsize()
                 except (NotImplementedError, AttributeError):
-                    # Fallback: Wir können die Größe nicht bestimmen, verarbeiten trotzdem einen Batch
-                    qsize = 1  # Trick: immer einen Durchlauf machen
+                    qsize = 1
                 except Exception as e:
                     log_debug("processor", f"  qsize() failed: {e}, aborting drain")
                     break
 
-                # 3.3 Queue ist leer → Idle-Zähler erhöhen
                 if qsize == 0:
                     idle_counter += 1
                     if idle_counter >= IDLE_ITERATIONS_BEFORE_BREAK:
@@ -47377,23 +47176,19 @@ class AudioProcessor:
                         break
                 else:
                     idle_counter = 0
-                    # Fortschritt nur loggen, wenn sich die Größe signifikant ändert
                     if qsize != last_qsize_log:
                         if DEBUG_LEVEL >= 3:
                             log_debug("processor", f"  GUI queue size: {qsize}")
                         last_qsize_log = qsize
 
-                # 3.4 Einen Batch verarbeiten
                 try:
                     queue_manager._process_gui_queue_dynamic()
                     processed_items += 1
                 except Exception as e:
                     log_debug("processor", f"  _process_gui_queue_dynamic error: {e}")
-                    # Bei Fehler nicht sofort abbrechen, sondern nach kurzer Pause weitermachen
                     time.sleep(SLEEP_INTERVAL)
                     continue
 
-                # 3.5 Kurze Pause, um die CPU nicht zu überlasten
                 time.sleep(SLEEP_INTERVAL)
 
             if DEBUG_LEVEL >= 3:
@@ -47404,16 +47199,8 @@ class AudioProcessor:
                     f"{elapsed:.2f}s elapsed",
                 )
 
-        # ---------------------------------------------------------------------
-        # 4. Sekundärer Drain-Mechanismus: direktes root.update()
-        # ---------------------------------------------------------------------
-        # Selbst wenn der queue_manager nicht verfügbar war oder die Queue
-        # bereits leer ist, können noch native Tkinter-Ereignisse anstehen.
-        # Ein abschließendes root.update() stellt sicher, dass diese verarbeitet werden.
         try:
             if gui.root.winfo_exists():
-                # Mehrere update()-Aufrufe mit kurzen Pausen dazwischen,
-                # um verschachtelte Ereignisse vollständig abzuarbeiten.
                 for _ in range(3):
                     gui.root.update()
                     time.sleep(0.01)
@@ -47424,9 +47211,6 @@ class AudioProcessor:
         except Exception as e:
             log_debug("processor", f"  root.update() failed: {e}")
 
-        # ---------------------------------------------------------------------
-        # 5. Fallback für den Fall, dass queue_manager nicht verfügbar war
-        # ---------------------------------------------------------------------
         if queue_manager is None and gui_queue is not None:
             if DEBUG_LEVEL >= 3:
                 log_debug("processor", "  Using fallback: manual queue drain")
@@ -47442,7 +47226,6 @@ class AudioProcessor:
 
                 try:
                     item = gui_queue.get_nowait()
-                    # Versuche, das Element zu verarbeiten, falls es ein Callback ist
                     if isinstance(item, tuple) and len(item) >= 2:
                         callback = item[1] if len(item) > 1 else item[0]
                         if callable(callback):
@@ -47456,9 +47239,6 @@ class AudioProcessor:
             if DEBUG_LEVEL >= 3 and items_processed > 0:
                 log_debug("processor", f"  Fallback processed {items_processed} items")
 
-        # ---------------------------------------------------------------------
-        # 6. Abschließende kurze Pause für das Rendering
-        # ---------------------------------------------------------------------
         time.sleep(0.05)
 
         total_elapsed = time.perf_counter() - start_time
@@ -47470,16 +47250,7 @@ class AudioProcessor:
     def _flush_sentence_buffer(self, translation_callback: Optional[Callable]) -> None:
         """
         Leert den internen Satzpuffer und stößt eine finale Übersetzung an.
-
-        Während der Stream-Verarbeitung werden einzelne Transkriptionssegmente
-        im Satzpuffer gesammelt (`_sentence_parts`), um vollständige Sätze
-        übersetzen zu können. Diese Methode wird am Ende des Streams (während
-        `_cleanup_after_stream`) aufgerufen, um den verbleibenden Text zu
-        übersetzen und den Puffer zu leeren.
         """
-        # -----------------------------------------------------------------
-        # 1. Schneller Rückweg bei leerem Puffer
-        # -----------------------------------------------------------------
         with self._sentence_lock:
             if not self._sentence_parts:
                 if DEBUG_LEVEL >= 4:
@@ -47498,15 +47269,10 @@ class AudioProcessor:
                 f"  Flushing sentence buffer: {num_parts} parts, {total_chars} total chars",
             )
 
-        # -----------------------------------------------------------------
-        # 2. Satz zusammenbauen und Sprache ermitteln (unter Lock)
-        # -----------------------------------------------------------------
         try:
             with self._sentence_lock:
-                # Text zusammenfügen
                 sentence = " ".join(self._sentence_parts).strip()
                 if not sentence:
-                    # Puffer enthält nur Leerzeichen – trotzdem leeren
                     if DEBUG_LEVEL >= 3:
                         log_debug(
                             "translate",
@@ -47516,14 +47282,12 @@ class AudioProcessor:
                     self._sentence_segments.clear()
                     return
 
-                # Sprache aus dem letzten Segment ermitteln
                 detected_lang = "auto"
                 if self._sentence_segments:
                     last_seg = self._sentence_segments[-1]
                     if hasattr(last_seg, "language") and last_seg.language != "unknown":
                         detected_lang = last_seg.language
 
-                # Zeitstempel für das gesamte Satz-Konstrukt (erster und letzter)
                 first = self._sentence_segments[0] if self._sentence_segments else None
                 last = self._sentence_segments[-1] if self._sentence_segments else None
 
@@ -47537,9 +47301,6 @@ class AudioProcessor:
                         f"({len(sentence)} chars, lang={lang_display})",
                     )
 
-                # -----------------------------------------------------------------
-                # 3. Übersetzung anstoßen (falls Engine verfügbar und aktiviert)
-                # -----------------------------------------------------------------
                 if (
                     self.translation_engine is not None
                     and self._translation_enabled.is_set()
@@ -47547,7 +47308,6 @@ class AudioProcessor:
                 ):
                     target_lang = self.translation_engine.default_target_lang
 
-                    # Keine Übersetzung, wenn Quell- und Zielsprache identisch sind
                     if detected_lang != "auto" and detected_lang == target_lang:
                         if DEBUG_LEVEL >= 3:
                             log_debug(
@@ -47555,7 +47315,6 @@ class AudioProcessor:
                                 f"    Source language equals target ({target_lang}) – skipping translation",
                             )
                     else:
-                        # Asynchrone Übersetzung starten
                         self._translate_and_send_async(
                             sentence,
                             detected_lang,
@@ -47580,8 +47339,6 @@ class AudioProcessor:
                         log_debug("translate", f"    Skipping translation: {reason}")
 
         except Exception as e:
-            # Fehler beim Zusammenbauen oder Übersetzen – protokollieren,
-            # aber Cleanup nicht unterbrechen.
             logger.warning(f"Fehler beim Verarbeiten des finalen Satzpuffers: {e}")
             if DEBUG_LEVEL >= 3:
                 log_exception(
@@ -47589,9 +47346,6 @@ class AudioProcessor:
                 )
 
         finally:
-            # -----------------------------------------------------------------
-            # 4. Puffer in **jedem** Fall leeren (garantiert)
-            # -----------------------------------------------------------------
             try:
                 with self._sentence_lock:
                     self._sentence_parts.clear()
@@ -47604,7 +47358,6 @@ class AudioProcessor:
                     log_exception(
                         "processor", "sentence buffer clear failed", e, level="error"
                     )
-                # Letzter Versuch ohne Lock (Notfall)
                 try:
                     self._sentence_parts.clear()
                     self._sentence_segments.clear()
@@ -47614,16 +47367,8 @@ class AudioProcessor:
     def _reset_engine_fallback(self) -> None:
         """
         Setzt den sprachbezogenen Fallback-Zustand der TranscriptionEngine zurück.
-
-        Während der Verarbeitung eines Streams kann die TranscriptionEngine in einen
-        Fallback‑Modus wechseln, wenn die automatische Spracherkennung unsicher ist
-        (z. B. niedrige Konfidenz oder unbekannte Sprache). In diesem Modus wird
-        eine feste Fallback‑Sprache erzwungen und strengere Halluzinations‑Schwellwerte
-        gesetzt, um die Transkriptionsqualität zu sichern.
         """
-        # -----------------------------------------------------------------
-        # 1. Engine-Referenz unter Lock holen
-        # -----------------------------------------------------------------
+ 
         try:
             with self._engine_lock:
                 engine = self._transcription_engine
@@ -47637,9 +47382,6 @@ class AudioProcessor:
                 )
             return
 
-        # -----------------------------------------------------------------
-        # 2. Prüfung, ob Engine vorhanden und Methode verfügbar
-        # -----------------------------------------------------------------
         if engine is None:
             if DEBUG_LEVEL >= 3:
                 log_debug(
@@ -47662,9 +47404,6 @@ class AudioProcessor:
             )
             return
 
-        # -----------------------------------------------------------------
-        # 3. Methode aufrufen und Ergebnis protokollieren
-        # -----------------------------------------------------------------
         try:
             if DEBUG_LEVEL >= 3:
                 log_debug(
@@ -47683,7 +47422,6 @@ class AudioProcessor:
                 log_debug("language", "  TranscriptionEngine fallback state reset")
 
         except Exception as e:
-            # Fehler beim Reset – Cleanup nicht unterbrechen
             logger.warning(
                 f"Fehler beim Zurücksetzen des Fallback‑Zustands der "
                 f"{type(engine).__name__}: {e}"
@@ -47696,19 +47434,9 @@ class AudioProcessor:
     def _cleanup_temp_files(self) -> None:
         """
         Löscht alle registrierten temporären Dateien sicher und zuverlässig.
-
-        Während des Download-Modus (insbesondere beim Nachladen von Stream-Teilen
-        über yt-dlp) werden temporäre Dateien angelegt, die nach Abschluss der
-        Verarbeitung gelöscht werden müssen, um Speicherplatz freizugeben und
-        keine sensiblen Daten zurückzulassen. Diese Methode iteriert über die
-        interne Liste `self._temp_files`, löscht jede Datei und entfernt den
-        Eintrag aus der Liste.
         """
-        # -----------------------------------------------------------------
-        # 1. Lock für die Liste der temporären Dateien
-        # -----------------------------------------------------------------
+
         if not hasattr(self, "_temp_files_lock"):
-            # Fallback, falls Lock nicht initialisiert wurde (sollte nicht passieren)
             self._temp_files_lock = threading.RLock()
             logger.warning(
                 "_temp_files_lock was not initialized – creating ad-hoc lock"
@@ -47720,17 +47448,12 @@ class AudioProcessor:
                     log_debug("processor", "  No temporary files to clean up")
                 return
 
-            # Kopie der Liste erstellen, um während der Iteration nicht durch
-            # Entfernen von Elementen die Original-Liste zu verändern.
             files_to_delete = list(self._temp_files)
             total_files = len(files_to_delete)
 
         if DEBUG_LEVEL >= 3:
             log_debug("processor", f"  Cleaning up {total_files} temporary file(s)...")
 
-        # -----------------------------------------------------------------
-        # 2. Iteration über die zu löschenden Dateien
-        # -----------------------------------------------------------------
         deleted_count = 0
         failed_count = 0
         missing_count = 0
@@ -47739,7 +47462,6 @@ class AudioProcessor:
             if not file_path or not isinstance(file_path, str):
                 logger.warning(f"Ungültiger temporärer Dateipfad: {file_path}")
                 failed_count += 1
-                # Trotzdem aus der Liste entfernen (später)
                 continue
 
             try:
@@ -47769,23 +47491,16 @@ class AudioProcessor:
                         level="debug",
                     )
 
-        # -----------------------------------------------------------------
-        # 3. Liste vollständig leeren (garantiert)
-        # -----------------------------------------------------------------
         try:
             with self._temp_files_lock:
                 self._temp_files.clear()
         except Exception as e:
             logger.error(f"Fehler beim Leeren der _temp_files-Liste: {e}")
-            # Notfall: trotzdem versuchen, per Zuweisung zu leeren
             try:
                 self._temp_files = []
             except Exception:
                 pass
 
-        # -----------------------------------------------------------------
-        # 4. Zusammenfassung loggen (bei DEBUG oder wenn Fehler auftraten)
-        # -----------------------------------------------------------------
         if DEBUG_LEVEL >= 3 or failed_count > 0:
             summary = (
                 f"  Temporary file cleanup summary: "
@@ -47805,14 +47520,7 @@ class AudioProcessor:
     ) -> None:
         """
         Ruft die finalen Benutzer-Callbacks basierend auf dem Beendigungsgrund auf.
-
-        Diese Methode wird ganz am Ende des Stream-Cleanups aufgerufen, nachdem alle
-        Ressourcen freigegeben und Puffer geleert wurden. Sie informiert die GUI
-        oder andere Komponenten darüber, wie der Stream beendet wurde:
         """
-        # -----------------------------------------------------------------
-        # 1. Entscheidung, welcher Callback aufgerufen werden soll
-        # -----------------------------------------------------------------
         if error_occurred:
             logger.error("❌ Fehler während der Stream-Verarbeitung")
             cb = callbacks.get("error")
@@ -47838,29 +47546,18 @@ class AudioProcessor:
                     log_debug("processor", "  No finished callback registered")
 
         else:
-            # Benutzerabbruch – kein Callback notwendig
             logger.info("Stream processing stopped by user.")
             if DEBUG_LEVEL >= 3:
                 log_debug("processor", "  User stop – no callback triggered")
 
-    # -------------------------------------------------------------------------
-    # Hilfsmethode: Sicherer Callback-Aufruf (im Hauptthread)
-    # -------------------------------------------------------------------------
     def _invoke_callback_safe(self, cb: Callable, *args: Any) -> None:
         """
         Ruft einen Callback thread‑sicher auf – vorzugsweise im GUI‑Hauptthread.
-
-        Diese Methode stellt sicher, dass GUI‑Aktualisierungen nicht aus einem
-        Hintergrundthread heraus erfolgen, was bei Tkinter zu undefiniertem
-        Verhalten oder Abstürzen führen kann. Falls die GUI verfügbar ist, wird
-        der Callback mit `root.after(0, ...)` in die Ereignisschleife des
-        Hauptthreads eingereiht. Andernfalls wird der Callback direkt aufgerufen.
         """
         if cb is None:
             return
 
         try:
-            # GUI‑Referenz besorgen
             gui = None
             if hasattr(self, "controller_ref") and self.controller_ref is not None:
                 gui = (
@@ -47873,7 +47570,6 @@ class AudioProcessor:
                 try:
                     # Prüfen, ob das root-Fenster noch existiert
                     if gui.root.winfo_exists():
-                        # Callback in den Hauptthread delegieren
                         gui.root.after(0, lambda: self._call_callback_safely(cb, *args))
                         if DEBUG_LEVEL >= 4:
                             log_debug(
@@ -47886,7 +47582,6 @@ class AudioProcessor:
                 except Exception as e:
                     logger.warning(f"Fehler beim Planen des GUI-Callbacks: {e}")
 
-            # Fallback: GUI nicht verfügbar oder Fenster zerstört – direkt aufrufen
             if DEBUG_LEVEL >= 4:
                 log_debug(
                     "processor", f"  GUI not available, calling {cb.__name__} directly"
@@ -47903,10 +47598,6 @@ class AudioProcessor:
     def _call_callback_safely(self, cb: Callable, *args: Any) -> None:
         """
         Führt einen Callback aus und fängt eventuelle Exceptions ab.
-
-        Diese Methode ist die letzte Sicherheitsstufe vor dem tatsächlichen
-        Aufruf des Callbacks. Sie stellt sicher, dass eine Exception im Callback
-        nicht den übergeordneten Cleanup-Prozess zum Absturz bringt.
         """
         try:
             cb(*args)
@@ -47948,16 +47639,7 @@ class AudioProcessor:
     ) -> None:
         """
         Sendet das `cleanup_completed`-Event über den zentralen Event-Bus.
-
-        Dieses Event signalisiert allen interessierten Komponenten (insbesondere
-        der GUI und dem Controller), dass der AudioProcessor den Cleanup nach
-        einem Stream vollständig abgeschlossen hat und sich nun im IDLE-Zustand
-        befindet. Es enthält eine Zusammenfassung der wichtigsten Metriken des
-        gerade beendeten Streams.
         """
-        # -----------------------------------------------------------------
-        # 1. Event‑Bus‑Referenz prüfen
-        # -----------------------------------------------------------------
         event_bus = getattr(self, "_event_bus", None)
         if event_bus is None:
             if DEBUG_LEVEL >= 3:
@@ -47967,9 +47649,6 @@ class AudioProcessor:
                 )
             return
 
-        # -----------------------------------------------------------------
-        # 2. Statistiken thread‑sicher sammeln
-        # -----------------------------------------------------------------
         with self._stats_lock:
             chunks = self._chunk_counter
             bytes_processed = self._total_bytes_processed
@@ -47978,10 +47657,6 @@ class AudioProcessor:
         with self._pending_tasks_lock:
             pending = self._pending_tasks
 
-        # -----------------------------------------------------------------
-        # 3. Payload zusammenstellen
-        # -----------------------------------------------------------------
-        # Bestimme den Beendigungsgrund als lesbaren String
         if error_occurred:
             termination_reason = "error"
         elif normal_ending:
@@ -48001,9 +47676,6 @@ class AudioProcessor:
             "timestamp": time.time(),
         }
 
-        # -----------------------------------------------------------------
-        # 4. Event senden (mit Fehlerbehandlung)
-        # -----------------------------------------------------------------
         try:
             if DEBUG_LEVEL >= 3:
                 log_debug(
@@ -48058,22 +47730,14 @@ class AudioProcessor:
         Passt die Chunk-Dauer dynamisch an, um ein optimales Gleichgewicht zwischen
         Latenz und Genauigkeit zu erreichen.
         """
-        # Untertitelmodus erfordert feste Chunk-Größen für konsistente Zeitstempel
         if self.subtitle_mode:
             return
 
-        # -----------------------------------------------------------------
-        # 1. Aktuellen Echtzeitfaktor unter Stats-Lock holen
-        # -----------------------------------------------------------------
         with self._stats_lock:
             last_realtime = self._last_realtime_factor
 
-        # -----------------------------------------------------------------
-        # 2. Geglättete Wortanzahl unter Word-Count-Lock berechnen
-        # -----------------------------------------------------------------
         with self._word_count_lock:
             if len(self._word_count_history) < Config.ADAPTIVE_CHUNK_MIN_SAMPLES:
-                # Noch nicht genügend Daten für eine zuverlässige Schätzung
                 return
 
             avg_words = sum(self._word_count_history) / len(self._word_count_history)
@@ -48087,9 +47751,6 @@ class AudioProcessor:
                 )
             smoothed = self._smoothed_word_count
 
-        # -----------------------------------------------------------------
-        # 3. Schwellwerte und Grenzen aus der Konfiguration
-        # -----------------------------------------------------------------
         low_thresh = self.settings.adaptive_chunk_low_words
         high_thresh = self.settings.adaptive_chunk_high_words
         min_dur = self.settings.config.MIN_CHUNK_DURATION
@@ -48098,9 +47759,6 @@ class AudioProcessor:
 
         new_duration = current_duration
 
-        # -----------------------------------------------------------------
-        # 4. Entscheidungslogik: Echtzeitfaktor hat Vorrang
-        # -----------------------------------------------------------------
         if last_realtime > 1.5 and current_duration > min_dur + 0.5:
             # System kann nicht in Echtzeit mithalten → reduziere Chunk
             new_duration = max(min_dur, current_duration - 1.0)
@@ -48126,9 +47784,6 @@ class AudioProcessor:
                     f"erhöhe Chunk von {current_duration:.1f}s auf {new_duration:.1f}s"
                 )
 
-        # -----------------------------------------------------------------
-        # 5. Stabilisierung: Nur bei wiederholtem gleichem Vorschlag ändern
-        # -----------------------------------------------------------------
         if new_duration != current_duration:
             if new_duration != self._last_chunk_duration:
                 self._chunk_stable_counter = 1
@@ -48150,10 +47805,6 @@ class AudioProcessor:
             # Keine Änderung vorgeschlagen → Zähler zurücksetzen
             self._chunk_stable_counter = 0
             self._last_chunk_duration = current_duration
-
-    # -------------------------------------------------------------------------
-    # Queue-Drop-Zähler und zugehörige Hilfsmethoden
-    # -------------------------------------------------------------------------
 
     def _increment_queue_drop(self) -> None:
         """
@@ -50456,7 +50107,6 @@ class WhisperLayoutManager:
             )
             gui.translation_header.pack(side="left")
 
-            # Auto-Scroll Checkbox
             gui.translation_scroll_var = tk.BooleanVar(value=True)
             scroll_cb2 = tk.Checkbutton(
                 transla_header,
@@ -50747,8 +50397,6 @@ class WhisperLayoutManager:
         ContextMenuMixin(text_widget)
         return text_widget
 
-
-# LinuxPerformanceOptimizer
 if IS_LINUX and PSUTIL_AVAILABLE:
 
     class LinuxPerformanceOptimizer:
@@ -50772,7 +50420,6 @@ if IS_LINUX and PSUTIL_AVAILABLE:
             self._original_settings: Dict[str, Any] = {}
             self._optimization_active = False
 
-            # Thread-Steuerung
             self._monitoring_stop_event = threading.Event()
             self._monitoring_thread: Optional[threading.Thread] = None
             self._monitoring_lock = threading.RLock()
@@ -50787,7 +50434,6 @@ if IS_LINUX and PSUTIL_AVAILABLE:
                     f"LinuxPerformanceOptimizer initialisiert (gui_ref={'vorhanden' if gui_ref else 'fehlt'})",
                 )
 
-        # Hilfsmethoden für GUI-Zugriff
         def _is_gui_available_safe(self) -> bool:
             try:
                 if self.gui is None:
@@ -51779,7 +51425,6 @@ class AdvancedSettings:
                     )
                 return cls._cache[cache_key]
 
-        # 2. Datei nicht vorhanden → Standardeinstellungen erstellen
         if not file_path.exists():
             logger.info(
                 "📝 Keine gespeicherten erweiterten Einstellungen, verwende Standard"
@@ -51796,7 +51441,6 @@ class AdvancedSettings:
                 )
             return instance
 
-        # 3. JSON‑Daten sicher laden (mit Backup bei Korruption)
         data = cls._read_json_safe(file_path)
         if data is None:
             logger.warning("Verwende Standardeinstellungen aufgrund von Lesefehlern")
@@ -51806,7 +51450,6 @@ class AdvancedSettings:
                 cls._cache[cache_key] = instance
             return instance
 
-        # 4. Versionserkennung und optionale Migration
         file_version = data.get("_version", 1)
         if file_version > 2:
             logger.warning(
@@ -51817,7 +51460,6 @@ class AdvancedSettings:
             data = cls._migrate_data(data, file_version)
             logger.info(f"Einstellungen von Version {file_version} auf 2 migriert")
 
-        # 5. Nur gültige Felder übernehmen (ignoriere Fremdfelder)
         valid_fields = {f.name for f in fields(cls) if f.init}
         filtered = {}
         outdated_fields = []
@@ -51835,7 +51477,6 @@ class AdvancedSettings:
                         f"Ignoriere veraltetes Feld '{key}' in AdvancedSettings"
                     )
 
-        # 6. Typableitung aus der Dataclass
         default_instance = cls()
         type_map = {}
         for f in fields(cls):
@@ -51850,7 +51491,6 @@ class AdvancedSettings:
             if typ in (int, float, bool, str, list):
                 type_map[f.name] = typ
 
-        # 7. Werte typensicher konvertieren
         for key in list(filtered.keys()):
             if key not in type_map:
                 continue
@@ -51858,10 +51498,8 @@ class AdvancedSettings:
             default_value = getattr(default_instance, key)
             filtered[key] = cls._convert_value(filtered[key], target, default_value)
 
-        # 8. Spezialfall chunk_duration (Property)
         chunk_duration_val = filtered.pop("chunk_duration", None)
 
-        # 9. Instanz erstellen
         try:
             instance = cls(**filtered)
         except Exception as e:
@@ -51876,10 +51514,8 @@ class AdvancedSettings:
                     f"⚠️ Ungültiger Wert für chunk_duration: {chunk_duration_val}"
                 )
 
-        # 10. Reparatur durchführen (fügt fehlende Felder hinzu)
         instance._repair_if_needed()
 
-        # 11. Falls veraltete Felder vorhanden waren, die Datei sofort bereinigen
         if outdated_fields:
             logger.info(
                 f"🔧 Veraltete Felder erkannt: {outdated_fields}. Speichere bereinigte Konfiguration..."
@@ -51891,7 +51527,6 @@ class AdvancedSettings:
                     f"Fehler beim automatischen Bereinigen der Konfigurationsdatei: {e}"
                 )
 
-        # 12. Cache speichern
         with cls._cache_lock:
             cls._cache[cache_key] = instance
 
@@ -51906,7 +51541,6 @@ class AdvancedSettings:
             )
         return instance
 
-    # Hilfsmethoden (statisch / Klassenmethoden)
     @classmethod
     def invalidate_cache(cls, filename: str = "dragon_advanced_settings.json") -> None:
         """
@@ -51996,9 +51630,7 @@ class AdvancedSettings:
         Derzeit nur Platzhalter für zukünftige Strukturänderungen.
         """
         if from_version < 2:
-            # Entferne eventuell veraltete Schlüssel, die in Version 2 nicht mehr existieren
             data.pop("some_old_key", None)
-            # Beispiel: Umbenennung eines Feldes
             if "old_name" in data:
                 data["new_name"] = data.pop("old_name")
         return data
@@ -52063,15 +51695,13 @@ class AdvancedSettings:
                 if IS_WINDOWS:
                     os.replace(
                         temp_path, file_path
-                    )  # os.replace existiert auch in älteren Windows
+                    )
                 else:
                     shutil.move(str(temp_path), str(file_path))
             except FileNotFoundError:
-                # Verzeichnis könnte zwischen mkdir und replace gelöscht worden sein
                 config_dir.mkdir(parents=True, exist_ok=True)
                 os.replace(temp_path, file_path)
 
-            # Cache invalidieren, damit nächste Ladevorgänge aktuelle Daten sehen
             self.invalidate_cache(filename)
 
             success = True
@@ -53011,8 +52641,6 @@ def run_tests() -> int:
             self.processor.emergency_reset(force=True)
             self.assertEqual(self.processor._state, AudioProcessor.State.IDLE)
             self.assertTrue(self.processor._stop_event.is_set())
-
-    # Erweiterte Tests für kritische Pfade
 
     class TestAdvancedScenarios(unittest.TestCase):
         def setUp(self):
