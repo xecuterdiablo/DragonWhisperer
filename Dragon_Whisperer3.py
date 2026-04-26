@@ -62,30 +62,23 @@ from typing import (
 
 # urllib3 MONKEY-PATCH (maximal robust für Kompatibilität mit urllib3 >= 2.0)
 
-
 def _filter_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """
     Entfernt problematische Schlüsselwortargumente aus einem kwargs-Dictionary.
     """
-    # Defensiv: Kopie erstellen, um Seiteneffekte zu vermeiden
     filtered = kwargs.copy()
-    # Explizit bekannte Störenfriede entfernen
     filtered.pop("key_threadpool", None)
     filtered.pop("_pool", None)
-    # Alle privaten Parameter entfernen (beginnen mit '_')
     keys_to_remove = [k for k in filtered if k.startswith("_")]
     for key in keys_to_remove:
         filtered.pop(key, None)
     return filtered
-
 
 def _should_patch() -> bool:
     """
     Prüft dynamisch und absolut robust, ob der urllib3‑Monkey‑Patch
     benötigt wird.
     """
-
-    # Lokale Hilfsfunktion für Debug‑Ausgaben
     def _debug(msg: str) -> None:
         """Gibt eine Debug‑Meldung aus, falls Debugging aktiv ist."""
         try:
@@ -96,20 +89,14 @@ def _should_patch() -> bool:
                     logger.debug(f"[monkey] {msg}")
         except (NameError, AttributeError):
             pass
-
-    # 1. Versuchen, das benötigte Untermodul zu importieren
     try:
         import urllib3.connectionpool
     except ImportError:
         _debug("urllib3 nicht installiert – Patch überflüssig.")
         return False
-
-    # 2. Existiert die Klasse PoolKey? (sehr alte urllib3?)
     if not hasattr(urllib3.connectionpool, "PoolKey"):
         _debug("PoolKey nicht vorhanden – Patch überflüssig.")
         return False
-
-    # 3. Testaufruf mit dem problematischen Parameter durchführen.
     try:
         urllib3.connectionpool.PoolKey(
             host="localhost",
@@ -118,18 +105,15 @@ def _should_patch() -> bool:
             key_threadpool="dummy",
         )
     except TypeError as e:
-        # Ist dies der uns bekannte Fehler wegen key_threadpool?
         if "key_threadpool" in str(e):
             _debug("TypeError wegen key_threadpool erkannt – Patch wird angewendet.")
             return True
-        # Andere TypeError-Ursache – kein Patch
         _debug(f"TypeError, aber nicht key_threadpool: {e}")
         return False
     except Exception as e:
         _debug(f"Unerwarteter Fehler beim Testen: {e}")
         return False
     else:
-        # Kein Fehler – der Parameter wird akzeptiert, Patch ist unnötig.
         _debug("urllib3 akzeptiert key_threadpool – Patch überflüssig.")
         return False
 
@@ -141,9 +125,6 @@ def _debug_enabled() -> bool:
     """
     return (DEBUG_LEVEL >= 3) or ("monkey" in DEBUG_COMPONENTS)
 
-
-#  Zustand für Originalmethoden (für Unpatch)
-
 _original_pool_init: Optional[Callable] = None
 _original_proxy_init: Optional[Callable] = None
 _original_poolkey_new: Optional[Callable] = None
@@ -154,10 +135,6 @@ _original_urlopen: Optional[Callable] = None
 
 _patch_applied = False
 
-
-#  Patch-Funktionen
-
-
 def _apply_patches() -> None:
     """Führt alle Monkey‑Patches durch (intern)."""
     global _original_pool_init, _original_proxy_init, _original_poolkey_new
@@ -167,13 +144,11 @@ def _apply_patches() -> None:
     if _patch_applied:
         return
 
-    # Module importieren
     import urllib3.poolmanager
     import urllib3.connectionpool
     import urllib3._collections
     import urllib3.connection
 
-    # 1. PoolManager.__init__
     _original_pool_init = urllib3.poolmanager.PoolManager.__init__
 
     def _patched_pool_init(self, *args, **kwargs):
@@ -182,7 +157,6 @@ def _apply_patches() -> None:
 
     urllib3.poolmanager.PoolManager.__init__ = _patched_pool_init
 
-    # 2. ProxyManager.__init__
     if hasattr(urllib3.poolmanager, "ProxyManager"):
         _original_proxy_init = urllib3.poolmanager.ProxyManager.__init__
 
@@ -192,7 +166,6 @@ def _apply_patches() -> None:
 
         urllib3.poolmanager.ProxyManager.__init__ = _patched_proxy_init
 
-    # 3. PoolKey.__new__
     if hasattr(urllib3.connectionpool, "PoolKey"):
         _original_poolkey_new = urllib3.connectionpool.PoolKey.__new__
 
@@ -203,7 +176,6 @@ def _apply_patches() -> None:
 
         urllib3.connectionpool.PoolKey.__new__ = _patched_poolkey_new
 
-    # 4. PoolKey.__init__ (Sicherheitspatch)
     if hasattr(urllib3.connectionpool, "PoolKey") and hasattr(
         urllib3.connectionpool.PoolKey, "__init__"
     ):
@@ -215,7 +187,6 @@ def _apply_patches() -> None:
 
         urllib3.connectionpool.PoolKey.__init__ = _patched_poolkey_init
 
-    # 5. connection_from_pool_key
     if hasattr(urllib3.poolmanager.PoolManager, "connection_from_pool_key"):
         _original_connection_from_pool_key = (
             urllib3.poolmanager.PoolManager.connection_from_pool_key
@@ -228,7 +199,6 @@ def _apply_patches() -> None:
             _patched_connection_from_pool_key
         )
 
-    # 6. RecentlyUsedContainer (für ältere urllib3-Versionen)
     if hasattr(urllib3._collections, "RecentlyUsedContainer"):
         _original_container_init = urllib3._collections.RecentlyUsedContainer.__init__
 
@@ -238,7 +208,6 @@ def _apply_patches() -> None:
 
         urllib3._collections.RecentlyUsedContainer.__init__ = _patched_container_init
 
-    # 7. ConnectionPool.urlopen (kann ebenfalls key_threadpool erhalten)
     if hasattr(urllib3.connectionpool, "ConnectionPool"):
         _original_urlopen = urllib3.connectionpool.ConnectionPool.urlopen
 
@@ -389,7 +358,6 @@ try:
 except ImportError:
     requests = None
 
-# 3. TKINTER (GUI)
 try:
     import tkinter as tk
     from tkinter import filedialog, scrolledtext, ttk, simpledialog
@@ -725,26 +693,18 @@ BASE_LANGUAGES: Dict[str, str] = {
     "tt": "Tatarisch",
 }
 
-# -----------------------------------------------------------------------------
-# 8.2 Mapping für abweichende Sprachcodes (Whisper → Übersetzungs-APIs)
-# -----------------------------------------------------------------------------
+
 LANGUAGE_CODE_MAPPING: Dict[str, str] = {
-    "yue": "zh-TW",  # Kantonesisch → Traditionelles Chinesisch (Google)
-    "tl": "fil",  # Tagalog → Filipino (Google)
-    "he": "iw",  # Hebräisch → iw (Google)
-    "zh": "zh-CN",  # Chinesisch (vereinfacht) → zh-CN (Google)
+    "yue": "zh-TW",
+    "tl": "fil",
+    "he": "iw",
+    "zh": "zh-CN",
 }
 
-# -----------------------------------------------------------------------------
-# 8.3 Von Whisper direkt unterstützte Sprachcodes (ohne "auto")
-# -----------------------------------------------------------------------------
 WHISPER_SUPPORTED_LANGUAGES: Set[str] = {
     code for code in BASE_LANGUAGES if code != "auto"
 }
 
-# -----------------------------------------------------------------------------
-# 8.4 Abgeleitete Strukturen (nicht manuell ändern)
-# -----------------------------------------------------------------------------
 SUPPORTED_LANGUAGES: Dict[str, str] = BASE_LANGUAGES.copy()
 # Liste von Tupeln (Anzeigename, Code), sortiert nach Anzeigename
 SORTED_LANGUAGES: List[Tuple[str, str]] = sorted(
@@ -760,9 +720,6 @@ DISPLAY_NAME_TO_CODE: Dict[str, str] = {
 }
 
 
-# -----------------------------------------------------------------------------
-# 8.5 Hilfsfunktionen für konsistenten Sprachcode‑Zugriff
-# -----------------------------------------------------------------------------
 def get_whisper_language_code(display_name: str) -> Optional[str]:
     """
     Gibt den Whisper‑Code für einen Anzeigenamen zurück.
@@ -875,7 +832,6 @@ def get_other_language_names() -> List[str]:
     return _OTHER_NAMES.copy()
 
 
-# 9. BASISKLASSEN UND HILFSKLASSEN (EventBus, PeriodicTaskMixin, BaseDialog, ContextMenuMixin, Themes, Fonts)
 class EventBus:
     """
     Thread-sicherer Event-Bus mit exakten und Muster-Abonnements.
@@ -1083,10 +1039,6 @@ class EventBus:
     def get_metrics(self) -> Dict[str, Any]:
         """
         Gibt Metriken zurück (nur wenn debug=True aktiviert).
-
-        Returns:
-            Dictionary mit total_events, events_per_type, errors, uptime.
-            Bei deaktivierten Metriken leeres Dictionary.
         """
         if not self._metrics_enabled:
             return {}
@@ -1099,9 +1051,6 @@ class EventBus:
     def get_debug_info(self) -> Dict[str, Any]:
         """
         Gibt detaillierte Debug-Informationen zurück (nur bei debug=True).
-
-        Returns:
-            Dictionary mit Anzahl exakter und Muster-Abonnements, Scheduler-Status, Metriken.
         """
         if not self._debug:
             return {"debug_enabled": False}
@@ -1279,9 +1228,6 @@ class BaseDialog:
     def apply_theme(self) -> None:
         """
         Wendet das aktuelle globale Theme rekursiv auf diesen Dialog an.
-
-        Kann von außen (z. B. aus ``AdvancedSettingsDialog._on_theme_selected``)
-        aufgerufen werden, um alle offenen Dialoge konsistent umzufärben.
         """
         try:
             if not self.dialog.winfo_exists():
@@ -1531,7 +1477,6 @@ class ContextMenuMixin:
     """
     Einheitliches Kontextmenü für Text- und Entry-Widgets mit:
     """
-
     def __init__(
         self,
         widget: Union[tk.Text, tk.Entry, ttk.Entry],
@@ -2027,7 +1972,6 @@ class HighContrastTheme:
     ERROR = "#ff0000"
     INFO = "#00ffff"
     BORDER = "#ffffff"
-    # Scrollbar – leuchtendes Gelb für maximale Sichtbarkeit
     SCROLLBAR = "#ffff00"
     SCROLLBAR_HOVER = "#ffaa00"
     INPUT_BG = "#000000"
@@ -2060,22 +2004,22 @@ class Fonts:
 
 
 class DraculaTheme:
-    BG_PRIMARY = "#282a36"  # Hintergrund
-    BG_SECONDARY = "#44475a"  # Sekundärer Hintergrund (Frames)
-    BG_TERTIARY = "#6272a4"  # Eingabefelder, Widgets
-    BG_HOVER = "#44475a"  # Hover-Effekt
-    BG_CARD = "#21222c"  # Karten/Kacheln
-    TEXT_PRIMARY = "#f8f8f2"  # Haupttext
-    TEXT_SECONDARY = "#bfbfbf"  # Sekundärtext
-    TEXT_ACCENT = "#ff79c6"  # Akzent (pink)
-    TEXT_MUTED = "#6272a4"  # Gedimmter Text
-    DRAGON_GREEN = "#50fa7b"  # Erfolg/Grün (Dragon-Akzent)
+    BG_PRIMARY = "#282a36"
+    BG_SECONDARY = "#44475a"
+    BG_TERTIARY = "#6272a4"
+    BG_HOVER = "#44475a"
+    BG_CARD = "#21222c"
+    TEXT_PRIMARY = "#f8f8f2"
+    TEXT_SECONDARY = "#bfbfbf"
+    TEXT_ACCENT = "#ff79c6"
+    TEXT_MUTED = "#6272a4"
+    DRAGON_GREEN = "#50fa7b"
     DRAGON_GREEN_LIGHT = "#69ff94"
-    DRAGON_BLUE = "#8be9fd"  # Cyan
-    DRAGON_PURPLE = "#bd93f9"  # Lila
+    DRAGON_BLUE = "#8be9fd"
+    DRAGON_PURPLE = "#bd93f9"
     SUCCESS = "#50fa7b"
-    WARNING = "#ffb86c"  # Orange
-    ERROR = "#ff5555"  # Rot
+    WARNING = "#ffb86c"
+    ERROR = "#ff5555"
     INFO = "#8be9fd"
     BORDER = "#6272a4"
     SCROLLBAR = "#44475a"
@@ -2305,15 +2249,12 @@ class MonokaiTheme:
 
 CURRENT_THEME = DarkTheme()
 
-# 10. KONFIGURATION (ConfigDefaults, Config, RealtimeConfig, HighAccuracyConfig, YouTubeOptimizedConfig, get_config)
-
 
 class ConfigDefaults:
     """
     Zentrale Konfigurationskonstanten für Dragon Whisperer.
     """
 
-    # Audio-Grundlagen
     SAMPLE_RATE: int = 16000
     """Audio-Samplerate in Hz (16 kHz ist optimal für Whisper)."""
 
@@ -2326,7 +2267,6 @@ class ConfigDefaults:
     BYTES_PER_SAMPLE: int = 2
     """Bytes pro Sample (bei 16-bit = 2)."""
 
-    # Allgemeine Konfiguration
     DEFAULT_BEAM_SIZE: int = 10
     """Standard-Beam-Size für Whisper-Decodierung (höher = genauer, aber langsamer)."""
 
@@ -2351,7 +2291,6 @@ class ConfigDefaults:
     MAX_CONSECUTIVE_ERRORS: int = 5
     """Maximale aufeinanderfolgende Fehler, bevor der Stream neu gestartet wird."""
 
-    # Chunk-Parameter (Audiodaten-Blöcke)
     BASE_CHUNK_DURATION: int = 20
     """Standard-Chunk-Dauer in Sekunden (20s ist ein guter Kompromiss)."""
 
@@ -2364,7 +2303,6 @@ class ConfigDefaults:
     CHUNK_OVERLAP: float = 2.0
     """Überlappung zwischen aufeinanderfolgenden Chunks in Sekunden (verhindert Informationsverlust an den Grenzen)."""
 
-    # Streaming & Netzwerk
     STREAM_TIMEOUT: int = 25
     """Timeout für Stream-Verbindungen in Sekunden."""
 
@@ -2452,7 +2390,6 @@ class ConfigDefaults:
     SUCCESSES_BEFORE_CHUNK_INCREASE: int = 5
     """Anzahl der Erfolge, bevor die Chunk-Dauer erhöht wird."""
 
-    # FFmpeg
     FFMPEG_BUFSIZE: str = "2048k"
     """FFmpeg Puffergröße (2 MB)."""
 
@@ -2465,7 +2402,6 @@ class ConfigDefaults:
     FFMPEG_ANALYZE_DURATION: str = "0"
     """FFmpeg Analyze-Duration (0 = automatisch)."""
 
-    # Audio-Enhancement (Rauschunterdrückung, Verstärkung)
     AUDIO_ENHANCEMENT_ENABLED: bool = True
     """Audio-Enhancement standardmäßig aktivieren."""
 
@@ -2499,9 +2435,6 @@ class ConfigDefaults:
     LOW_QUALITY_CHUNK_LOG_INTERVAL: int = 10
     """Intervall für Low-Quality-Logs (Anzahl der Chunks)."""
 
-    # =========================================================================
-    # Duplikaterkennung
-    # =========================================================================
     DUPLICATE_CHECK_ENABLED: bool = False
     """Duplikaterkennung standardmäßig deaktiviert (spart CPU)."""
 
@@ -2514,7 +2447,6 @@ class ConfigDefaults:
     MIN_UNIQUE_WORDS_RATIO: float = 0.3
     """Minimaler Anteil einzigartiger Wörter (verhindert Wiederholungen wie 'ja ja ja')."""
 
-    # Untertitel (Timed Transcripts)
     SUBTITLE_BUFFER_SIZE: int = 1000
     """Maximale Anzahl von Untertitel-Segmenten im Puffer."""
 
@@ -2524,7 +2456,6 @@ class ConfigDefaults:
     ENABLE_TIMED_TRANSLATIONS: bool = True
     """Zeitstempel für Übersetzungen aktivieren (für Untertitel-Modus)."""
 
-    # Logging
     ENABLE_DEBUG_LOGGING: bool = True
     """Debug-Logging global aktivieren."""
 
@@ -2543,7 +2474,6 @@ class ConfigDefaults:
     PERFORMANCE_LOG_INTERVAL: int = 50
     """Intervall für Performance-Logs (Anzahl der Chunks)."""
 
-    # Caching
     MAX_CACHE_SIZE_MB: int = 100
     """Maximale Cache-Größe in MB (Überschreibung durch Config möglich)."""
 
@@ -2568,9 +2498,6 @@ class ConfigDefaults:
     AUDIO_CACHE_TTL: int = 1800
     """Lebensdauer von Audio-Cache-Einträgen in Sekunden (30 Minuten)."""
 
-    # =========================================================================
-    # VAD (Voice Activity Detection)
-    # =========================================================================
     VAD_THRESHOLD: float = 0.25
     """VAD-Schwellwert (0.0-1.0, höher = weniger empfindlich)."""
 
@@ -2580,7 +2507,6 @@ class ConfigDefaults:
     VAD_MIN_SILENCE_DURATION_MS: int = 80
     """Minimale Stilledauer in Millisekunden, um einen Satz zu beenden."""
 
-    # Sprachspezifische VAD-Überschreibungen (werden in Config kopiert)
     LANGUAGE_VAD: Dict[str, Dict[str, Any]] = {
         "ja": {"threshold": 0.3, "min_speech_ms": 300, "min_silence_ms": 100},
         "ko": {"threshold": 0.3, "min_speech_ms": 300, "min_silence_ms": 100},
@@ -2595,9 +2521,6 @@ class ConfigDefaults:
     }
     """Sprachspezifische VAD-Parameter (überschreiben die globalen Werte für bestimmte Sprachen)."""
 
-    # =========================================================================
-    # Datei- und URL-Konfiguration
-    # =========================================================================
     ALLOWED_FILE_SCHEME_PREFIX: str = "file://"
     """Präfix für lokale Dateien."""
 
@@ -2610,9 +2533,6 @@ class ConfigDefaults:
     URL_ALLOWED_CHARS: str = r"a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%"
     """Erlaubte Zeichen in URLs (RFC 3986-konform)."""
 
-    # =========================================================================
-    # YouTube & Plattform-spezifisch
-    # =========================================================================
     YOUTUBE_HEADERS: Dict[str, str] = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
         "Referer": "https://www.youtube.com/",
@@ -2625,7 +2545,7 @@ class ConfigDefaults:
     PLATFORM_CONFIG: Dict[str, Dict[str, Any]] = {
         "windows": {
             "ffmpeg_flags": ["-reconnect", "1", "-reconnect_streamed", "1"],
-            "process_creation_flags": 0x08000000,  # CREATE_NO_WINDOW
+            "process_creation_flags": 0x08000000,
         },
         "macos": {
             "ffmpeg_flags": ["-reconnect", "1", "-reconnect_on_network_error", "1"],
@@ -2674,9 +2594,6 @@ class ConfigDefaults:
     ]
     """Liste aller von Whisper unterstützten Modelle (für ComboBox und Validierung)."""
 
-    # =========================================================================
-    # URL-Refresh (für Twitch, YouTube, etc.)
-    # =========================================================================
     MAX_REFRESH_ATTEMPTS: int = 3
     """Maximale Anzahl von Refresh-Versuchen für Stream-URLs."""
 
@@ -2689,7 +2606,6 @@ class ConfigDefaults:
     STALLED_RECONNECT_LOG_INTERVAL: float = 10.0
     """Intervall für Logs bei hängenden Reconnects in Sekunden."""
 
-    # Zusätzliche Debug-Informationen (nur für Entwicklung)
     @classmethod
     def print_debug_info(cls) -> None:
         """Gibt eine Übersicht aller Konfigurationswerte für Debugging-Zwecke aus."""
@@ -2742,7 +2658,6 @@ class Config(ConfigDefaults):
     Dynamische Konfiguration für Dragon Whisperer.
     """
 
-    #  Basisattribute (überschreiben oder ergänzen)
     _base_chunk_duration: int = ConfigDefaults.BASE_CHUNK_DURATION
     CHUNK_OVERLAP: float = ConfigDefaults.CHUNK_OVERLAP
     MIN_CHUNK_DURATION: int = ConfigDefaults.MIN_CHUNK_DURATION
@@ -2754,7 +2669,6 @@ class Config(ConfigDefaults):
         init=False, default=float(ConfigDefaults.BASE_CHUNK_DURATION)
     )
 
-    #  Audio-Filter
     AUDIO_FILTER: str = "aresample=16000"
     LANGUAGE_FILTERS: Dict[str, str] = field(
         default_factory=lambda: {
@@ -2772,7 +2686,6 @@ class Config(ConfigDefaults):
         }
     )
 
-    #  Plattform- und YouTube-Konfiguration
     YOUTUBE_HEADERS: Dict[str, str] = field(
         default_factory=lambda: ConfigDefaults.YOUTUBE_HEADERS.copy()
     )
@@ -2934,12 +2847,6 @@ class Config(ConfigDefaults):
     def get_youtube_headers(self, is_manifest: bool = False) -> Dict[str, str]:
         """
         Gibt die HTTP-Header für YouTube-Anfragen zurück.
-
-        Args:
-            is_manifest: True für Manifest-Anfragen (HLS/DASH).
-
-        Returns:
-            Dictionary mit Headern.
         """
         headers = self.YOUTUBE_HEADERS.copy()
         if is_manifest:
@@ -2951,12 +2858,6 @@ class Config(ConfigDefaults):
     def get_platform_config(self, platform: Optional[str] = None) -> Dict[str, Any]:
         """
         Gibt plattformspezifische Konfiguration für FFmpeg und Prozesse zurück.
-
-        Args:
-            platform: Name der Plattform ('windows', 'macos', 'linux') – falls None, wird SYSTEM verwendet.
-
-        Returns:
-            Dictionary mit Konfigurationsparametern.
         """
         if not platform:
             platform = SYSTEM.lower()
@@ -3084,7 +2985,6 @@ class Config(ConfigDefaults):
         """
         Berechnet die optimale Chunk-Dauer basierend auf Modell, Hardware und Echtzeit-Anforderung.
         """
-        # 1. Echtzeit-Modus: immer kurze Chunks
         if is_realtime:
             min_dur = float(self.MIN_CHUNK_DURATION)
             if device == "cuda" and use_dynamic:
@@ -3098,7 +2998,6 @@ class Config(ConfigDefaults):
                 )
             return duration
 
-        # 2. Basis-Dauer aus Modellgröße ableiten
         model_lower = model_size.lower()
         base_model = model_lower.replace(".en", "")
         model_base = {
@@ -3114,7 +3013,6 @@ class Config(ConfigDefaults):
         }
         duration = model_base.get(base_model, 5.0)
 
-        # 3. Dynamische Anpassung (Hardware & Compute)
         if use_dynamic:
             compute_factor = 1.0
             if compute_type == "int8":
@@ -3134,10 +3032,7 @@ class Config(ConfigDefaults):
                 device_factor = 0.8
             duration *= device_factor
 
-        # 4. Begrenzung auf Min/Max
         duration = max(self.MIN_CHUNK_DURATION, min(duration, self.MAX_CHUNK_DURATION))
-
-        # 5. Runden auf 0,5 Sekunden
         duration = round(duration * 2) / 2.0
 
         if DEBUG_LEVEL >= 2:
@@ -3258,32 +3153,26 @@ class RealtimeConfig(Config):
         self.AUDIO_FILTER = self.FILTER_PROFILES["realtime"]
 
         # Weitere Optimierungen für Echtzeitbetrieb
-        self.AUDIO_ENHANCEMENT_ENABLED = False  # spart Rechenzeit
-        self.DUPLICATE_CHECK_ENABLED = False  # vermeidet zusätzliche Berechnungen
-        self.MAX_CONSECUTIVE_ERRORS = 3  # schneller auf Fehler reagieren
+        self.AUDIO_ENHANCEMENT_ENABLED = False 
+        self.DUPLICATE_CHECK_ENABLED = False  
+        self.MAX_CONSECUTIVE_ERRORS = 3 
 
 
 class HighAccuracyConfig(Config):
     """
     Konfiguration für höchste Transkriptionsgenauigkeit bei geringerem Zeitdruck.
-
-    Verwendet lange Chunks, eine große Überlappung, einen aufwändigen Audio-Filter
-    und aktiviert optionale Qualitätsverbesserungen (Rauschunterdrückung,
-    Duplikaterkennung). Ideal für vorab aufgenommene Dateien oder Aufnahmen,
-    bei denen die Verarbeitungszeit keine Rolle spielt.
     """
 
     def __init__(self) -> None:
         super().__init__()
-        self.CHUNK_DURATION = 25.0  # lange Chunks für besseren Kontext
-        self.CHUNK_OVERLAP = 0.8  # hohe Überlappung für glatte Übergänge
+        self.CHUNK_DURATION = 25.0  
+        self.CHUNK_OVERLAP = 0.8  
         self.AUDIO_FILTER = (
             "aresample=16000,volume=1.8,highpass=f=80,"
             "lowpass=f=3800,dynaudnorm=p=0.3:s=3:g=20"
         )
         self.AUDIO_ENHANCEMENT_ENABLED = True
         self.DUPLICATE_CHECK_ENABLED = True
-        # Hinweis: Beam Size, Temperature, VAD werden über AdvancedSettings gesteuert
 
 
 class YouTubeOptimizedConfig(Config):
@@ -3358,10 +3247,6 @@ class FastLazyLoader:
     ) -> None:
         """
         Konfiguriert globale Parameter.
-
-        Args:
-            availability_cache_ttl: Lebensdauer der Verfügbarkeits‑Cache‑Einträge (Sekunden).
-            enable_metrics: Aktiviert das Sammeln von Metriken.
         """
         if availability_cache_ttl is not None:
             cls._availability_cache_ttl = availability_cache_ttl
