@@ -45077,7 +45077,6 @@ class AudioProcessor:
                         "IdleWaiter: state forced to IDLE, stop flags cleared",
                     )
 
-                # Event-Bus benachrichtigen (falls vorhanden)
                 if self._event_bus is not None:
                     try:
                         self._event_bus.emit("audio_processor_idle", None)
@@ -45085,13 +45084,10 @@ class AudioProcessor:
                         log_debug("processor", f"Failed to emit idle event: {e}")
 
         if wait:
-            # Synchroner Modus: direkt ausführen
             wait_for_idle()
             log_debug("processor", "stop_processing: synchronous wait completed")
         else:
-            # Asynchroner Modus: Thread starten
             with self._idle_waiter_lock:
-                # Verhindert mehrfaches Starten
                 if self._idle_waiter_thread and self._idle_waiter_thread.is_alive():
                     log_debug("processor", "Idle waiter thread already running")
                 else:
@@ -45148,20 +45144,15 @@ class AudioProcessor:
                     )
 
         with self._resource_lock:
-            # Zustand auf IDLE setzen (unter state_lock)
             with self._state_lock:
                 old_state = self._state
                 self._set_state(AudioProcessor.State.IDLE)
                 if DEBUG_LEVEL >= 3:
                     log_debug("processor", f"State changed: {old_state.name} -> IDLE")
 
-            # Stop-Event setzen (bricht laufende Verarbeitung ab)
             self._stop_event.set()
-
-            # Aktuelle Stream‑ID löschen
             self._current_stream_id = None
 
-            # Statistik‑Zähler zurücksetzen
             with self._stats_lock:
                 self._consecutive_errors = 0
                 self._consecutive_timeouts = 0
@@ -45171,7 +45162,6 @@ class AudioProcessor:
                 if DEBUG_LEVEL >= 4:
                     log_debug("processor", "Stats counters reset")
 
-            # Bei force=True: Untertitel‑ und Duplikatpuffer leeren
             if force:
                 safe_reset_step(
                     "clear subtitle buffers",
@@ -45188,7 +45178,6 @@ class AudioProcessor:
                     ),
                 )
 
-            # Audio‑Puffer leeren
             safe_reset_step(
                 "clear audio buffer",
                 lambda: (
@@ -45813,9 +45802,6 @@ class AudioProcessor:
         )
 
         try:
-            # -----------------------------------------------------------------
-            # 1. Audio‑URL extrahieren
-            # -----------------------------------------------------------------
             if self._stop_event.is_set():
                 log_debug("processor", "Stop event set before audio URL extraction")
                 return
@@ -45827,9 +45813,6 @@ class AudioProcessor:
 
             detected_language = None
 
-            # -----------------------------------------------------------------
-            # 2. FFmpeg‑Prozess starten
-            # -----------------------------------------------------------------
             if self._stop_event.is_set():
                 log_debug("processor", "Stop event set before FFmpeg start")
                 return
@@ -45837,17 +45820,12 @@ class AudioProcessor:
                 url, audio_url, detected_language, callbacks["error"]
             )
             if not process:
-                # Kein fataler Fehler – StreamHandler wird automatisch Reconnect versuchen
                 logger.warning(
                     "FFmpeg process start failed – relying on StreamHandler reconnect"
                 )
                 log_debug("processor", "FFmpeg process start failed, but not fatal")
-                # Kein error_occurred = True, damit der Cleanup nicht als Fehler behandelt wird
                 return
 
-            # -----------------------------------------------------------------
-            # 3. Stream‑Loop ausführen
-            # -----------------------------------------------------------------
             log_debug("processor", "Starting stream loop...")
             self._run_stream_loop(
                 process,
@@ -45870,9 +45848,6 @@ class AudioProcessor:
             )
 
         finally:
-            # -----------------------------------------------------------------
-            # 4. Cleanup nach Stream (garantiert)
-            # -----------------------------------------------------------------
             log_debug("processor", "Entering cleanup after stream...")
             try:
                 self._cleanup_after_stream(
@@ -45881,21 +45856,14 @@ class AudioProcessor:
             except Exception as e:
                 logger.exception(f"Error in _cleanup_after_stream: {e}")
             finally:
-                # -----------------------------------------------------------------
-                # 5. Garantierte finale Bereinigung
-                # -----------------------------------------------------------------
                 try:
                     self._guaranteed_cleanup()
                 except Exception as e:
                     logger.exception(f"Error in _guaranteed_cleanup: {e}")
 
-            # -----------------------------------------------------------------
-            # 6. Thread‑Referenz freigeben und Beendigung signalisieren
-            # -----------------------------------------------------------------
             self._processing_thread = None
             log_debug("processor", "Processing loop finished")
 
-            # Explizit den Thread‑Namen loggen, um Hänger zu identifizieren
             if DEBUG_LEVEL >= 3:
                 current_thread = threading.current_thread()
                 log_debug(
@@ -46010,7 +45978,6 @@ class AudioProcessor:
         cleanup_start_time = time.perf_counter()
         step_times: Dict[str, float] = {}
 
-        # Hilfsfunktionen
         def timed_step(step_name: str, func: Callable[[], None]) -> None:
             """Führt einen Schritt aus und misst die Dauer. Fehler werden geloggt."""
             step_start = time.perf_counter()
@@ -46169,7 +46136,6 @@ class AudioProcessor:
             if hasattr(self, "_transcription_executor"):
                 self._transcription_executor = None
             if hasattr(self, "_transcribe_timeout_executor"):
-                # Timeout-Executor wird nicht mehr benötigt
                 self._transcribe_timeout_executor = None
             if DEBUG_LEVEL >= 3:
                 log_debug("processor", "  Executor references set to None")
@@ -48699,10 +48665,8 @@ class WhisperLayoutManager:
             if tab is None or not tab.winfo_exists():
                 continue
 
-            # Widgets im Tab
             update_widget_colors(tab)
 
-            # Hintergrund des Tabs selbst
             try:
                 tab.configure(bg=theme.BG_PRIMARY)
             except tk.TclError as e:
@@ -49005,8 +48969,6 @@ class WhisperLayoutManager:
                 log_debug("gui", f"Window centered: {win_w}x{win_h} at ({x},{y})")
 
         except Exception as e:
-            # Fehler beim Zentrieren sind nie kritisch – das Fenster
-            # erscheint dann an der Standardposition des Window-Managers.
             logger.warning(f"Fenster konnte nicht zentriert werden: {e}")
 
     def create_layout(self) -> None:
@@ -49342,7 +49304,6 @@ class WhisperLayoutManager:
             "Untertitel‑Modus aktivieren (Zeitstempel und Sprachkürzel)",
         )
 
-        # Modellwechsel binden
         gui.model_combo.bind("<<ComboboxSelected>>", gui.on_model_change)
 
         # Falls Widgets nicht erstellt werden konnten, Log‑Eintrag
@@ -49417,7 +49378,6 @@ class WhisperLayoutManager:
         if DEBUG_LEVEL >= 3:
             log_debug("layout", "Creating vertical layout...")
 
-        # 1. Hauptcontainer erstellen
         try:
             main_frame = tk.LabelFrame(
                 gui.text_container,
@@ -49440,7 +49400,6 @@ class WhisperLayoutManager:
                 log_exception("layout", "main_frame creation failed", e)
             return
 
-        # 2. Oberer Frame (Transkription)
         try:
             trans_frame = tk.Frame(main_frame, bg=theme.BG_SECONDARY)
             trans_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 2))
@@ -49452,7 +49411,6 @@ class WhisperLayoutManager:
                 log_exception("layout", "trans_frame creation failed", e)
             return
 
-        # 3. Header für Transkription
         try:
             trans_header = tk.Frame(trans_frame, bg=theme.BG_SECONDARY)
             trans_header.grid(row=0, column=0, sticky="ew", padx=3, pady=2)
@@ -49467,7 +49425,6 @@ class WhisperLayoutManager:
                 else ("Segoe UI", 9, "bold"),
             ).pack(side="left")
 
-            # Auto-Scroll Checkbox
             gui.transcript_scroll_var = tk.BooleanVar(value=True)
             scroll_cb = tk.Checkbutton(
                 trans_header,
@@ -49487,7 +49444,6 @@ class WhisperLayoutManager:
             ).pack(side="right", padx=1)
             ToolTip(scroll_cb, "Automatisch zum Ende scrollen")
 
-            # Auto-TTS Checkbox
             tts_cb = tk.Checkbutton(
                 trans_header,
                 variable=gui.auto_tts_transcript_var,
@@ -49511,7 +49467,6 @@ class WhisperLayoutManager:
             if DEBUG_LEVEL >= 3:
                 log_exception("layout", "trans_header creation failed", e)
 
-        # 4. Transkriptions-Textfeld
         try:
             gui.transcript_text = self.create_text_widget(trans_frame, height=6)
             gui.transcript_text.grid(row=1, column=0, sticky="nsew", padx=2, pady=2)
@@ -49752,7 +49707,6 @@ class WhisperLayoutManager:
             )
             gui.translation_header.pack(side="left")
 
-            # Auto-Scroll Checkbox
             gui.translation_scroll_var = tk.BooleanVar(value=True)
             scroll_cb2 = tk.Checkbutton(
                 transla_header,
@@ -49772,7 +49726,6 @@ class WhisperLayoutManager:
             ).pack(side="right", padx=1)
             ToolTip(scroll_cb2, "Automatisch zum Ende scrollen")
 
-            # Auto-TTS Checkbox
             tts_cb2 = tk.Checkbutton(
                 transla_header,
                 variable=gui.auto_tts_translation_var,
@@ -49852,9 +49805,6 @@ if IS_LINUX and PSUTIL_AVAILABLE:
         def __init__(self, gui_ref: "DragonWhispererGUI") -> None:
             """
             Initialisiert den LinuxPerformanceOptimizer.
-
-            Args:
-                gui_ref: Referenz auf die Haupt-GUI (für Zugriff auf das root-Fenster).
             """
             self.gui = gui_ref
             self.is_processing = False
@@ -50415,21 +50365,18 @@ class AdvancedSettings:
     # Blacklist & Text-Filter
     blacklist: List[str] = field(
         default_factory=lambda: [
-            # Deutsche Untertitel-Credits (Öffentlich-Rechtliche)
             "Untertitelung des ZDF für funk",
             "Untertitelung des ZDF",
             "Untertitelung: ZDF",
             "Untertitelung BR",
             "Untertitelung WDR",
             "Untertitelung NDR",
-            # Internationale Copyright- und Metadaten-Hinweise
             "© 2025",
             "© 2024",
             "© 2023",
             "© 2022",
             "Copyright",
             "All rights reserved",
-            # Typische YouTube-Endcard-Phrasen
             "Abonniert den Kanal",
             "Liken, teilen, abonnieren",
             "Vielen Dank fürs Zuschauen",
@@ -50439,7 +50386,6 @@ class AdvancedSettings:
             "Like, share, subscribe",
             "Thanks for watching",
             "See you next time",
-            # Spezifische, häufig auftretende Untertitelersteller (Hardcoded in Videos)
             "Teksting av Nicolai Winther",
             "Продолжение следует...",
             "Субтитры создавал DimaTorzok",
@@ -50447,7 +50393,6 @@ class AdvancedSettings:
             "Субтитры сделал",
             "Transcription by CastingWords",
             "Subtitles by",
-            # Häufige KI-Halluzinationen bei musikalischen Intros/Outros
             "[Music]",
             "Music.",
             "Oh, oh, oh",
@@ -50462,25 +50407,22 @@ class AdvancedSettings:
         ]
     )
     blacklist_mode: str = (
-        "word"  # "word" filtert ganze Wörter, "substring" filtert Teilstrings
+        "word"
     )
     enable_noise_reduction: bool = False
     enable_audio_enhancement: bool = False
     enable_duplicate_check: bool = False
     hotwords: str = ""
 
-    # Performance (Threads)
     transcription_workers: int = 2
     translation_workers: int = 1
     cpu_threads: int = 0
 
-    # Text-to-Speech
     tts_engine: str = "piper"
     tts_voice: str = "de_DE-thorsten-medium"
     tts_length_scale: float = 0.9
     tts_sentence_silence: float = 0.1
 
-    # Erweiterte Whisper-Parameter
     best_of: int = 5
     patience: float = 1.0
     log_prob_threshold: float = -1.2
@@ -50489,16 +50431,13 @@ class AdvancedSettings:
     no_speech_threshold: float = 0.6
     suppress_tokens: str = "-1"
 
-    # VAD-Fallback & Proxy
     vad_fallback_enabled: bool = True
     proxy_url: str = "socks5://127.0.0.1:18080"
     proxy_enabled: bool = False
 
-    # Zusammenfassung (Ollama)
     summarize_temperature: float = 0.1
     summarize_model: str = "qwen2.5:7b"
 
-    # Livestream
     live_from_start: bool = False
     download_inactivity_timeout: float = 30.0 
     allowed_dirs: List[str] = field(default_factory=list)
@@ -50684,12 +50623,10 @@ class AdvancedSettings:
         Wendet modusabhängige Overrides an und sichert vorher die Originalwerte,
         falls noch nicht geschehen.
         """
-        # 1. Originalwerte sichern, falls noch nicht geschehen
         if not hasattr(self, "_original_values"):
             self._original_values = {}
 
         if not self._original_values:
-            # Nur beim ersten Aufruf sichern
             self._original_values = {
                 "chunk_duration": self.chunk_duration,
                 "vad_threshold": self.vad_threshold,
@@ -50710,7 +50647,6 @@ class AdvancedSettings:
                     "_apply_mode_overrides: Cache bereits gefüllt – überspringe Sicherung",
                 )
 
-        # 2. Hilfsfunktion zum sicheren Setzen von Werten
         def safe_set(
             attr_name: str,
             new_value: Any,
@@ -50728,7 +50664,6 @@ class AdvancedSettings:
 
             old_value = getattr(self, attr_name)
             try:
-                # Bereichsprüfung
                 if min_val is not None and new_value < min_val:
                     logger.warning(
                         f"_apply_mode_overrides: Wert {new_value} für '{attr_name}' "
@@ -50753,7 +50688,6 @@ class AdvancedSettings:
                     f"_apply_mode_overrides: Fehler beim Setzen von '{attr_name}': {e}"
                 )
 
-        # 3. Overrides für asian_mode
         if getattr(self, "asian_mode", False):
             if DEBUG_LEVEL >= 2:
                 log_debug(
@@ -50764,7 +50698,6 @@ class AdvancedSettings:
             safe_set("vad_min_speech_duration_ms", 300, min_val=0, max_val=2000)
             safe_set("vad_min_silence_duration_ms", 120, min_val=0, max_val=2000)
 
-        # 4. Overrides für precision_mode
         if getattr(self, "precision_mode", False):
             if DEBUG_LEVEL >= 2:
                 log_debug(
@@ -50778,7 +50711,6 @@ class AdvancedSettings:
             safe_set("vad_min_speech_duration_ms", 260, min_val=0, max_val=2000)
             safe_set("vad_min_silence_duration_ms", 110, min_val=0, max_val=2000)
 
-        # 5. Flag setzen, dass Overrides angewendet wurden
         self._mode_overrides_applied = True
 
         if DEBUG_LEVEL >= 2:
@@ -51128,7 +51060,6 @@ class AdvancedSettings:
                 except Exception as be:
                     logger.warning(f"Konnte kein Backup erstellen: {be}")
 
-            # Atomares Ersetzen (mit Fallback für ältere Systeme)
             try:
                 os.replace(temp_path, file_path)
             except AttributeError:
@@ -51191,7 +51122,6 @@ class AdvancedSettings:
                 except Exception:
                     pass
 
-    # Validierung und Reparatur
     def validate(self) -> List[str]:
         issues = []
         if not (1 <= self.beam_size <= 20):
@@ -51302,7 +51232,6 @@ class AdvancedSettings:
         self._apply_mode_overrides()
         self.chunk_duration = self._chunk_duration
 
-        # Neue Felder sicherstellen
         for new_field in (
             "sentence_flush_interval",
             "sentence_flush_word_threshold",
@@ -51320,7 +51249,6 @@ class AdvancedSettings:
             logger.info("✅ No repairs needed")
         return repairs
 
-    # Hilfsmethoden
     def set_config_type(self, config_type: str) -> bool:
         if config_type == self.config_type:
             return True
@@ -51516,8 +51444,6 @@ def get_advanced_settings() -> "AdvancedSettings":
                 "AdvancedSettings sind nicht verfügbar – Programm kann nicht fortgesetzt werden."
             ) from e
 
-
-# 19. HILFSFUNKTIONEN FÜR MAIN (Windows-Konsolenmanagement, System-Check, Argument-Parser, globale Exception-Handler)
 _original_console_mode: Optional[int] = None
 _original_codepage: Optional[int] = None
 
