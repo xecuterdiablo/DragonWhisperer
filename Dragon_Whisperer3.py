@@ -43300,8 +43300,6 @@ class AudioProcessor:
                 )
             self._last_queue_log_time = now
 
-    # =========================================================================
-    #  KERN: Asynchrone Transkription (läuft im Worker‑Thread)
     def _process_audio_chunk_async(
         self,
         audio_data: bytes,
@@ -43312,9 +43310,6 @@ class AudioProcessor:
         """
         Verarbeitet einen Audio‑Chunk asynchron im Transkriptions‑Executor.
         """
-        # ---------------------------------------------------------------------
-        # 1. Differenzierte Abbruchprüfung
-        # ---------------------------------------------------------------------
         if self._stop_event.is_set():
             with self._state_lock:
                 if self._state != AudioProcessor.State.IDLE:
@@ -43325,9 +43320,6 @@ class AudioProcessor:
                         )
                     return
 
-        # ---------------------------------------------------------------------
-        # 2. Transkriptions‑Engine thread‑sicher holen
-        # ---------------------------------------------------------------------
         with self._engine_lock:
             trans_engine = self._transcription_engine
 
@@ -43336,9 +43328,6 @@ class AudioProcessor:
                 log_debug("transcribe", "Transcription engine not set, skipping chunk")
             return
 
-        # ---------------------------------------------------------------------
-        # 3. Vorbereitung: Metriken und **garantierte Task‑Zählung**
-        # ---------------------------------------------------------------------
         start_time = time.perf_counter()
         chunk_duration = len(audio_data) / self.settings.config.BYTES_PER_SECOND
 
@@ -43357,15 +43346,9 @@ class AudioProcessor:
             return
 
         try:
-            # -----------------------------------------------------------------
-            # 4. Transkription mit Timeout durchführen
-            # -----------------------------------------------------------------
             segments = self._transcribe_with_timeout(audio_data, timeout=90.0)
 
         except TimeoutError as e:
-            # -----------------------------------------------------------------
-            # Timeout – Chunk überspringen, aber Statistik führen
-            # -----------------------------------------------------------------
             logger.error(
                 f"Transkription timeout nach 90s für Chunk ({len(audio_data)} bytes) – wird übersprungen"
             )
@@ -43380,9 +43363,6 @@ class AudioProcessor:
             return
 
         except TranscriptionError as e:
-            # -----------------------------------------------------------------
-            # Fehler in der Transkriptions-Engine (z. B. OOM, Modellfehler)
-            # -----------------------------------------------------------------
             logger.error(f"Transkription fehlgeschlagen: {e}")
             if DEBUG_LEVEL >= 3:
                 log_debug("transcribe", f"TranscriptionError: {e}")
@@ -43395,9 +43375,6 @@ class AudioProcessor:
             return
 
         except Exception as e:
-            # -----------------------------------------------------------------
-            # Unerwarteter Fehler – loggen und Callback
-            # -----------------------------------------------------------------
             logger.exception(f"Unerwarteter Fehler bei der Transkription: {e}")
             with self._stats_lock:
                 self._consecutive_errors += 1
@@ -43406,24 +43383,15 @@ class AudioProcessor:
             return
 
         finally:
-            # -----------------------------------------------------------------
-            # 5. Task‑Zähler GARANTIERT dekrementieren (nur wenn inkrementiert)
-            # -----------------------------------------------------------------
             if task_added:
                 self._modify_pending_tasks(-1)
 
-        # ---------------------------------------------------------------------
-        # 6. Ergebnis validieren
-        # ---------------------------------------------------------------------
         if not segments:
             if DEBUG_LEVEL >= 3:
                 log_debug("transcribe", "No segments returned")
             self._analyze_audio_for_music_silence(audio_data, valid_segments=[])
             return
 
-        # ---------------------------------------------------------------------
-        # 7. Tatsächlichen Fortschritt aus Segment‑Endzeiten ermitteln
-        # ---------------------------------------------------------------------
         max_end = 0.0
         for seg in segments:
             if hasattr(seg, "end") and seg.end is not None:
@@ -43451,9 +43419,6 @@ class AudioProcessor:
                             f"_real_processed_seconds updated to {self._real_processed_seconds:.2f}s",
                         )
 
-        # ---------------------------------------------------------------------
-        # 8. Segmente filtern und gültige Segmente sammeln
-        # ---------------------------------------------------------------------
         valid_segments = []
         for segment in segments:
             if not segment or not segment.text:
@@ -43481,9 +43446,6 @@ class AudioProcessor:
 
             valid_segments.append(segment)
 
-        # ---------------------------------------------------------------------
-        # 9. 🔥 NEU: Musik‑ / Stille‑Analyse basierend auf valid_segments
-        # ---------------------------------------------------------------------
         self._analyze_audio_for_music_silence(audio_data, valid_segments)
 
         if valid_segments:
@@ -43491,10 +43453,6 @@ class AudioProcessor:
                 valid_segments, transcription_callback, translation_callback
             )
 
-        # ---------------------------------------------------------------------
-        # 10. Übersetzung anstoßen – NUR wenn der Satzpuffer NICHT aktiv ist
-        #    (d.h. im Untertitelmodus oder bei deaktiviertem Satzpuffer)
-        # ---------------------------------------------------------------------
         if not self._enable_sentence_buffering or self.subtitle_mode:
             for segment in valid_segments:
                 if (
@@ -43503,16 +43461,10 @@ class AudioProcessor:
                 ):
                     self._handle_sentence_buffering(segment, translation_callback)
 
-        # ---------------------------------------------------------------------
-        # 11. Statistik zurücksetzen (Erfolg)
-        # ---------------------------------------------------------------------
         with self._stats_lock:
             self._consecutive_timeouts = 0
             self._consecutive_errors = 0
 
-        # ---------------------------------------------------------------------
-        # 12. Performance‑Metriken aktualisieren
-        # ---------------------------------------------------------------------
         processing_duration = time.perf_counter() - start_time
         self._update_realtime_factor(chunk_duration, processing_duration)
 
@@ -43534,17 +43486,8 @@ class AudioProcessor:
         if self._stop_event.is_set():
             return
 
-        # ---------------------------------------------------------------------
-        # 1. RMS (Lautstärke) berechnen
-        # ---------------------------------------------------------------------
-        # Verwende den vorhandenen Stille‑Detektor mit einem Schwellwert,
-        # der leises Rauschen, aber keine Musik durchlässt.
-        # Der Schwellwert 0.002 entspricht etwa -50 dBFS.
         is_silent = self._is_silent(audio_data, threshold=0.002)
 
-        # ---------------------------------------------------------------------
-        # 2. Zustandsautomaten für Musik / Stille
-        # ---------------------------------------------------------------------
         with self._music_silence_lock:
             if valid_segments:
                 # Sprache erkannt → alle Zähler zurücksetzen
@@ -43600,10 +43543,6 @@ class AudioProcessor:
     def _emit_music_silence_event(self, event_type: str) -> None:
         """
         Sendet ein Musik‑/Stille‑/Sprach‑Event sicher an den Event‑Bus.
-
-        Args:
-            event_type: Einer der Strings "music_detected", "silence_detected"
-                        oder "speech_detected".
         """
         if self._event_bus is not None:
             try:
@@ -43621,10 +43560,6 @@ class AudioProcessor:
     ) -> None:
         """
         Puffert Segmente und gibt sie in der korrekten zeitlichen Reihenfolge aus.
-
-        Im Normalmodus (kein Untertitel) wird die Ausgabe über den Satzpuffer
-        geleitet, um zusammenhängende Sätze zu bilden. Im Untertitelmodus wird
-        die Ausgabe streng nach Startzeit sortiert.
         """
         if not segments:
             if DEBUG_LEVEL >= 4:
@@ -43638,9 +43573,6 @@ class AudioProcessor:
         with self._segment_buffer_lock:
             now = time.time()
 
-            # -----------------------------------------------------------------
-            # 1. Neue Segmente in den Puffer aufnehmen
-            # -----------------------------------------------------------------
             for seg in segments:
                 # Segmente ohne Zeitstempel sofort ausgeben
                 if seg.start is None or seg.end is None:
@@ -43691,9 +43623,6 @@ class AudioProcessor:
             if not self._segment_buffer:
                 return
 
-            # -----------------------------------------------------------------
-            # 2. Puffer sortieren – je nach Modus
-            # -----------------------------------------------------------------
             if self.subtitle_mode:
                 # Untertitel-Modus: streng nach start, dann nach seq
                 self._segment_buffer = deque(
@@ -43711,9 +43640,6 @@ class AudioProcessor:
                 if DEBUG_LEVEL >= 3:
                     log_debug("SEQ", "Buffer sorted by sequence number (normal mode)")
 
-            # -----------------------------------------------------------------
-            # 3. Prüfen, ob das älteste Segment zu lange im Puffer verweilt
-            # -----------------------------------------------------------------
             if self._segment_buffer:
                 oldest_time, oldest_seg, _ = self._segment_buffer[0]
                 age = now - oldest_time
@@ -43742,14 +43668,10 @@ class AudioProcessor:
                     )
                     self._segment_buffer.popleft()
 
-            # -----------------------------------------------------------------
-            # 4. Segmente in korrekter Reihenfolge ausgeben
-            # -----------------------------------------------------------------
             flushed_segments = 0
             while self._segment_buffer:
                 _, seg, _ = self._segment_buffer[0]
 
-                # Zeitliche Prüfung nur im Untertitel-Modus
                 if self.subtitle_mode:
                     if seg.start <= self._next_expected_start + GAP_TOLERANCE:
                         if DEBUG_LEVEL >= 2:
@@ -43788,7 +43710,6 @@ class AudioProcessor:
                             )
                         break
                 else:
-                    # Normalmodus: immer ausgeben, keine zeitliche Prüfung
                     if DEBUG_LEVEL >= 2:
                         log_debug(
                             "SEQ",
@@ -43811,9 +43732,6 @@ class AudioProcessor:
                     self._segment_buffer.popleft()
                     flushed_segments += 1
 
-            # -----------------------------------------------------------------
-            # 5. Puffergröße begrenzen, um Speicherüberlauf zu vermeiden
-            # -----------------------------------------------------------------
             if len(self._segment_buffer) > self._max_segment_buffer_size:
                 overflow = len(self._segment_buffer) - self._max_segment_buffer_size
                 logger.warning(
@@ -43844,17 +43762,7 @@ class AudioProcessor:
     ) -> List[TranscriptionResult]:
         """
         Führt die Transkription eines Audio‑Chunks mit dynamischem Timeout und Selbstheilung durch.
-
-        Diese Methode ist das Herzstück der robusten Transkriptionspipeline. Sie kombiniert:
-          - Dynamisches Timeout basierend auf Chunk‑Dauer und letztem Echtzeitfaktor
-          - Automatischen Austausch des zugrundeliegenden Executors bei wiederholten Timeouts
-          - Asynchrone, nicht‑blockierende Erneuerung des Executors
-          - **Garantiert korrekte `_pending_tasks`‑Zählung** auch bei Timeout oder Fehlern
-          - Detaillierte Debug‑Ausgaben zur Nachverfolgung von Problemen
         """
-        # ---------------------------------------------------------------------
-        # 1. Eingangsvalidierung
-        # ---------------------------------------------------------------------
         if not audio_data:
             if DEBUG_LEVEL >= 4:
                 log_debug(
@@ -43865,31 +43773,20 @@ class AudioProcessor:
 
         chunk_duration = len(audio_data) / self.settings.config.BYTES_PER_SECOND
 
-        # ---------------------------------------------------------------------
-        # 2. Transkriptions‑Engine thread‑sicher holen
-        # ---------------------------------------------------------------------
         with self._engine_lock:
             engine = self._transcription_engine
             if engine is None:
                 raise TranscriptionError("Transcription engine not set")
 
-        # ---------------------------------------------------------------------
-        # 3. Dynamisches Timeout berechnen (wenn nicht explizit angegeben)
-        # ---------------------------------------------------------------------
         if timeout is None:
             with self._stats_lock:
                 rt_factor = max(1.0, self._last_realtime_factor)
-            # Sicherheitsfaktor: 5 × Chunk‑Dauer × Realtime‑Faktor
-            # Begrenzt auf 60 – 600 Sekunden, um extreme Werte zu vermeiden
             dynamic_timeout = max(60.0, min(600.0, chunk_duration * 5.0 * rt_factor))
         else:
             dynamic_timeout = timeout
             # Für Log‑Ausgaben: rt_factor manuell berechnen (nur zur Anzeige)
             rt_factor = dynamic_timeout / chunk_duration if chunk_duration > 0 else 0.0
 
-        # ---------------------------------------------------------------------
-        # 4. Executor‑Referenz holen (ggf. initialisieren)
-        # ---------------------------------------------------------------------
         executor = getattr(self, "_transcribe_timeout_executor", None)
         if executor is None:
             if DEBUG_LEVEL >= 3:
@@ -43907,9 +43804,6 @@ class AudioProcessor:
                 f"rt_factor={rt_factor:.2f}",
             )
 
-        # ---------------------------------------------------------------------
-        # 5. Hilfsfunktion für das Einreichen der Aufgabe (mit Retry bei Executor‑Fehler)
-        # ---------------------------------------------------------------------
         def submit_task(executor_instance: ThreadPoolExecutor) -> Future:
             return executor_instance.submit(
                 engine.transcribe_audio, audio_data, include_timestamps=True
@@ -43919,9 +43813,6 @@ class AudioProcessor:
         task_submitted = False
 
         try:
-            # -----------------------------------------------------------------
-            # 6. Aufgabe einreichen – mit Wiederholung bei temporären Executor‑Fehlern
-            # -----------------------------------------------------------------
             max_submit_retries = 2
             for attempt in range(max_submit_retries + 1):
                 try:
@@ -43956,13 +43847,9 @@ class AudioProcessor:
                         f"Failed to submit transcription task: {e}"
                     ) from e
 
-            # -----------------------------------------------------------------
-            # 7. Auf Ergebnis warten (mit Timeout)
-            # -----------------------------------------------------------------
             try:
                 result = future.result(timeout=dynamic_timeout)
 
-                # Erfolg: Zähler für aufeinanderfolgende Timeouts zurücksetzen
                 with self._stats_lock:
                     self._consecutive_timeouts = 0
 
@@ -43975,9 +43862,6 @@ class AudioProcessor:
                 return result
 
             except FutureTimeout as e:
-                # -------------------------------------------------------------
-                # Timeout – Zähler erhöhen und ggf. Executor austauschen
-                # -------------------------------------------------------------
                 with self._stats_lock:
                     self._consecutive_timeouts += 1
                     consecutive = self._consecutive_timeouts
@@ -44029,14 +43913,10 @@ class AudioProcessor:
                 ) from e
 
             except Exception as e:
-                # -------------------------------------------------------------
-                # Andere Fehler (z. B. OOM, Modellfehler, RuntimeError in der Engine)
-                # -------------------------------------------------------------
                 logger.error(
                     f"Transcription failed: {type(e).__name__}: {e}",
                     exc_info=DEBUG_LEVEL >= 3,
                 )
-                # Nicht abgeschlossene Futures abbrechen, um Ressourcen zu sparen
                 if not future.done():
                     future.cancel()
                     if DEBUG_LEVEL >= 3:
@@ -44044,9 +43924,6 @@ class AudioProcessor:
                 raise TranscriptionError(f"Transcription failed: {e}") from e
 
         finally:
-            # -----------------------------------------------------------------
-            # 8. Aufräumen: Future aus aktiver Liste entfernen (garantiert)
-            # -----------------------------------------------------------------
             if task_submitted and future is not None:
                 self._unregister_timeout_future(future)
                 if DEBUG_LEVEL >= 4:
@@ -44054,9 +43931,6 @@ class AudioProcessor:
                         "transcribe", "Unregistered timeout future in finally block"
                     )
 
-    # =========================================================================
-    #  PRODUCER: Wird vom StreamHandler aufgerufen (schnell, nicht‑blockierend)
-    # =========================================================================
     def _process_audio_data(
         self,
         audio_data: bytes,
@@ -44067,14 +43941,7 @@ class AudioProcessor:
     ) -> None:
         """
         Fügt einen Audio‑Chunk in die asynchrone Verarbeitungs‑Queue ein.
-
-        Diese Methode wird vom StreamHandler aufgerufen, sobald neue PCM‑Daten
-        vom FFmpeg‑Prozess gelesen werden. Sie führt leichte Vorverarbeitung
-        (Audio‑Enhancement) durch und reiht den Chunk in `_raw_audio_queue` ein.
         """
-        # -----------------------------------------------------------------
-        # 1. Eingangsvalidierung und Debug
-        # -----------------------------------------------------------------
         if DEBUG_LEVEL >= 4:
             log_debug(
                 "processor",
@@ -44089,9 +43956,6 @@ class AudioProcessor:
                 )
             return
 
-        # -----------------------------------------------------------------
-        # 2. Stilleerkennung (spart CPU)
-        # -----------------------------------------------------------------
         if self.settings.enable_audio_enhancement and self._is_silent(audio_data):
             if DEBUG_LEVEL >= 4:
                 log_debug(
@@ -44099,9 +43963,6 @@ class AudioProcessor:
                 )
             return
 
-        # -----------------------------------------------------------------
-        # 3. Optionales Audio‑Enhancement (Rauschunterdrückung, Verstärkung)
-        # -----------------------------------------------------------------
         enhanced_audio = audio_data
         if self.settings.enable_audio_enhancement:
             with self._last_confidence_lock:
@@ -44127,9 +43988,6 @@ class AudioProcessor:
                         )
                     enhanced_audio = audio_data  # Fallback auf Original
 
-        # -----------------------------------------------------------------
-        # 4. Dynamische Anpassung der Chunk‑Dauer (gedrosselt)
-        # -----------------------------------------------------------------
         qsize = self._raw_audio_queue.qsize()
         queue_maxsize = self._raw_audio_queue.maxsize
         now = time.time()
@@ -44177,9 +44035,6 @@ class AudioProcessor:
                     self._last_chunk_adjust_time = now
                     self._consecutive_low_queue = 0
 
-        # -----------------------------------------------------------------
-        # 5. Queue‑Item erstellen
-        # -----------------------------------------------------------------
         queue_item = (
             enhanced_audio,
             transcription_callback,
@@ -44187,9 +44042,6 @@ class AudioProcessor:
             error_callback,
         )
 
-        # -----------------------------------------------------------------
-        # 6. Nicht‑blockierendes Einfügen in die Queue (Backpressure durch Drop)
-        # -----------------------------------------------------------------
         enqueued = False
         try:
             self._raw_audio_queue.put_nowait(queue_item)
@@ -44247,9 +44099,6 @@ class AudioProcessor:
                 error_callback(f"Interner Queue‑Fehler: {str(e)[:100]}")
             return
 
-        # -----------------------------------------------------------------
-        # 7. Statistik und Fortschritt aktualisieren
-        # -----------------------------------------------------------------
         if enqueued:
             with self._stats_lock:
                 self._chunk_counter += 1
@@ -44278,9 +44127,6 @@ class AudioProcessor:
                 except Exception as e:
                     log_debug("processor", f"Progress callback error: {e}")
 
-        # -----------------------------------------------------------------
-        # 8. Periodische Queue‑Statistik (Debug)
-        # -----------------------------------------------------------------
         if DEBUG_LEVEL >= 3:
             now = time.time()
             if now - self._last_queue_log_time >= self._queue_log_interval:
@@ -44294,9 +44140,6 @@ class AudioProcessor:
                     )
                 self._last_queue_log_time = now
 
-    # =========================================================================
-    #  DOWNLOAD‑MODUS
-    # =========================================================================
     def _download_and_process_remaining(
         self,
         video_url: str,
@@ -44305,25 +44148,13 @@ class AudioProcessor:
     ) -> None:
         """
         Lädt den restlichen Teil eines YouTube‑VODs herunter und verarbeitet ihn.
-
-        Diese Methode wird aufgerufen, wenn der normale Stream vorzeitig endet.
-        Sie leert zunächst alle internen Puffer, um Reihenfolgeprobleme zu vermeiden,
-        korrigiert ggf. den internen Fortschrittszähler `_real_processed_seconds`,
-        und startet dann den Download‑Modus. Es werden mehrere Fallback‑Strategien
-        verwendet (--download-sections und vollständiger Download mit Seek).
         """
 
-        # -----------------------------------------------------------------
-        # Hilfsfunktion für konsistente Abbruchprüfung
-        # -----------------------------------------------------------------
         def is_stop_requested() -> bool:
             if cancel_event is not None and cancel_event.is_set():
                 return True
             return self.is_stop_requested()
 
-        # -----------------------------------------------------------------
-        # 1. Vorabprüfung: Abbruch durch Benutzer?
-        # -----------------------------------------------------------------
         if is_stop_requested():
             logger.info("Download-Modus: Abbruch vor Start erkannt")
             if self._info_callback:
@@ -44340,10 +44171,6 @@ class AudioProcessor:
                 f"Entering download mode with start_seconds={start_seconds:.1f}",
             )
 
-        # -----------------------------------------------------------------
-        # 2. 🔥 Puffer leeren, um Reihenfolgeprobleme zu vermeiden
-        # -----------------------------------------------------------------
-        # Segment-Puffer leeren (Untertitel-Modus)
         with self._segment_buffer_lock:
             flushed_segments = 0
             while self._segment_buffer:
@@ -44388,9 +44215,6 @@ class AudioProcessor:
                     f"Übersetzungs-Satzpuffer geleert: {count} Teile verworfen"
                 )
 
-        # -----------------------------------------------------------------
-        # 3. 🔥 Korrektur von _real_processed_seconds (falls überhöht)
-        # -----------------------------------------------------------------
         with self._stats_lock:
             if (
                 self._expected_duration is not None
@@ -44409,9 +44233,6 @@ class AudioProcessor:
                 # start_seconds aus dem korrigierten Wert ableiten
                 start_seconds = self._real_processed_seconds
 
-        # -----------------------------------------------------------------
-        # 4. Plausibilitätsprüfung und Korrektur von start_seconds
-        # -----------------------------------------------------------------
         original_start = start_seconds
         if self._expected_duration is not None:
             if start_seconds > self._expected_duration:
@@ -44437,9 +44258,6 @@ class AudioProcessor:
                     f"⚠️ Startposition korrigiert auf {start_seconds:.1f}s"
                 )
 
-        # -----------------------------------------------------------------
-        # 5. Dispatcher sicherstellen
-        # -----------------------------------------------------------------
         if not self._dispatcher_started or (
             self._dispatcher_thread and not self._dispatcher_thread.is_alive()
         ):
@@ -44457,9 +44275,6 @@ class AudioProcessor:
             self._start_dispatcher()
             time.sleep(0.2)
 
-        # -----------------------------------------------------------------
-        # 6. Erneute Abbruchprüfung nach Dispatcher-Start
-        # -----------------------------------------------------------------
         if is_stop_requested():
             logger.info("Download-Modus: Abbruch nach Dispatcher-Start erkannt")
             if self._info_callback:
@@ -44470,9 +44285,6 @@ class AudioProcessor:
         if self._info_callback:
             self._info_callback(f"⬇️ Lade restliches Audio ab {start_seconds:.1f}s ...")
 
-        # -----------------------------------------------------------------
-        # 7. Prüfen, ob yt-dlp --download-sections unterstützt
-        # -----------------------------------------------------------------
         use_sections = True
         try:
             result = subprocess.run(
@@ -44491,9 +44303,6 @@ class AudioProcessor:
         info_cb = self._info_callback
         error_cb = self._error_callback
 
-        # -----------------------------------------------------------------
-        # 8. Primärer Versuch: --download-sections
-        # -----------------------------------------------------------------
         if use_sections and not is_stop_requested():
             chunk_count = self._download_with_ytdlp_sections(
                 video_url,
@@ -44513,9 +44322,6 @@ class AudioProcessor:
                     "--download-sections lieferte 0 Chunks, verwende Fallback"
                 )
 
-        # -----------------------------------------------------------------
-        # 9. Fallback: Gesamtes Audio herunterladen und zuschneiden
-        # -----------------------------------------------------------------
         if chunk_count == 0 and not is_stop_requested():
             logger.info("🔄 Fallback: Lade gesamtes Audio und schneide mit ffmpeg zu")
             chunk_count = self._download_full_and_seek(
@@ -44528,9 +44334,6 @@ class AudioProcessor:
                 cancel_event,
             )
 
-        # -----------------------------------------------------------------
-        # 10. Warten auf vollständige Verarbeitung
-        # -----------------------------------------------------------------
         if chunk_count > 0 and not is_stop_requested():
             logger.info("⏳ Warte auf vollständige Verarbeitung des Downloads...")
             success = self._await_queue_drain(timeout=60.0)
@@ -44541,9 +44344,6 @@ class AudioProcessor:
                     "⚠️ Zeitüberschreitung oder Fehler beim Warten auf Queue-Drain"
                 )
 
-        # -----------------------------------------------------------------
-        # 11. Abschluss
-        # -----------------------------------------------------------------
         duration_total = time.perf_counter() - download_start
         logger.warning(
             f"Download‑Modus abgeschlossen ({chunk_count} Chunks, Dauer: {duration_total:.2f}s)"
@@ -44558,38 +44358,26 @@ class AudioProcessor:
 
         self._download_mode_active = False
 
-    # -------------------------------------------------------------------------
-    # Hilfsmethode: Robustes Warten auf Queue-Drain
-    # -------------------------------------------------------------------------
     def _await_queue_drain(self, timeout: float = 60.0) -> bool:
         """
         Wartet darauf, dass alle in die Rohdaten-Queue eingestellten Chunks
         vollständig verarbeitet werden, und beendet anschließend den Dispatcher.
         """
-        # 1. Dispatcher anweisen, nach dem aktuellen Chunk zu beenden
         self._dispatcher_shutdown.set()
         log_debug("processor", "_await_queue_drain: Dispatcher-Shutdown signalisiert")
 
-        # 2. Warten auf queue.join() mit Timeout und Abbruchprüfung
         join_success = self._join_queue_with_timeout(timeout)
 
-        # 3. Dispatcher endgültig stoppen und Thread aufräumen
         self._stop_dispatcher(clear_queue=False)
         log_debug("processor", "_await_queue_drain: Dispatcher gestoppt")
 
         return join_success
 
-    # ---------------------------------------------------------------------
-    # Hilfsmethode: queue.join() mit Timeout und umfassender Überwachung
-    # ---------------------------------------------------------------------
     def _join_queue_with_timeout(self, timeout: float) -> bool:
         """
         Wartet darauf, dass die interne Rohdaten‑Queue vollständig abgearbeitet ist
         (queue.join()), jedoch mit einem echten Timeout.
         """
-        # ---------------------------------------------------------------------
-        # 1. Fallback für Queues ohne join()‑Methode (z. B. DummyQueue)
-        # ---------------------------------------------------------------------
         if not hasattr(self._raw_audio_queue, "join"):
             if DEBUG_LEVEL >= 3:
                 log_debug(
@@ -44599,10 +44387,6 @@ class AudioProcessor:
                 )
             return self._wait_for_queue_idle(timeout)
 
-        # ---------------------------------------------------------------------
-        # 2. Optimierung: Wenn die Queue bereits leer ist, sofort Erfolg melden.
-        #    Dies vermeidet unnötiges Thread‑Starten.
-        # ---------------------------------------------------------------------
         try:
             if self._raw_audio_queue.empty():
                 if DEBUG_LEVEL >= 4:
@@ -44612,14 +44396,9 @@ class AudioProcessor:
                     )
                 return True
         except Exception as e:
-            # Falls empty() nicht implementiert ist oder eine Exception wirft,
-            # ignorieren wir es und fahren mit dem normalen Ablauf fort.
             if DEBUG_LEVEL >= 3:
                 log_debug("processor", f"Queue.empty() raised exception: {e}")
 
-        # ---------------------------------------------------------------------
-        # 3. Starte einen separaten Thread, der queue.join() ausführt.
-        # ---------------------------------------------------------------------
         join_completed = threading.Event()
         join_error: Optional[Exception] = None
 
@@ -44655,18 +44434,12 @@ class AudioProcessor:
                 f"thread={join_thread.name})",
             )
 
-        # ---------------------------------------------------------------------
-        # 4. Warte auf das Event, aber maximal `timeout` Sekunden.
-        # ---------------------------------------------------------------------
         success = join_completed.wait(timeout)
 
         if success:
             if DEBUG_LEVEL >= 3:
                 log_debug("processor", f"Queue join completed within {timeout}s")
             if join_error is not None:
-                # Obwohl join() eine Exception warf, wurde das Event gesetzt.
-                # Wir behandeln dies als Fehler, da die Queue möglicherweise
-                # nicht korrekt abgearbeitet wurde.
                 logger.warning(f"Queue join thread finished with error: {join_error}")
                 return False
             return True
@@ -44690,9 +44463,6 @@ class AudioProcessor:
                 )
             return False
 
-    # ---------------------------------------------------------------------
-    # Fallback: Warten auf Queue-Leerung ohne join() (für Dummy-Queues)
-    # ---------------------------------------------------------------------
     def _wait_for_queue_idle(self, timeout: float) -> bool:
         """
         Zeitbasierte Heuristik für Queues, die `join()` nicht unterstützen.
@@ -44767,34 +44537,20 @@ class AudioProcessor:
     ) -> int:
         """
         Lädt den restlichen Teil eines YouTube‑VODs mittels yt‑dlp `--download-sections`.
-
-        Diese Methode wird vom Download‑Modus aufgerufen, wenn der normale Stream
-        vorzeitig abgebrochen ist. Sie verwendet `--download-sections`, um gezielt
-        den fehlenden Teil des Videos ab einer bestimmten Position herunterzuladen.
         """
 
-        # -----------------------------------------------------------------
-        # Hilfsfunktion für konsistente Abbruchprüfung
-        # -----------------------------------------------------------------
         def is_stop_requested() -> bool:
             if cancel_event is not None and cancel_event.is_set():
                 return True
             return self.is_stop_requested()
 
-        # -----------------------------------------------------------------
-        # 1. Vorabprüfung: Abbruch durch Benutzer?
-        # -----------------------------------------------------------------
         if is_stop_requested():
             logger.info("Download sections: Abbruch vor Start erkannt")
             if info_cb:
                 info_cb("⏹️ Download abgebrochen")
             return 0
 
-        # -----------------------------------------------------------------
-        # 2. Startposition mit 5 Sekunden Überlappung berechnen und validieren
-        # -----------------------------------------------------------------
         rounded_start = max(0, int(start_seconds) - 5)
-        # Sicherstellen, dass rounded_start nicht größer als start_seconds ist
         rounded_start = min(rounded_start, int(start_seconds))
 
         # Zusätzliche Sicherheitsprüfungen
@@ -44839,19 +44595,11 @@ class AudioProcessor:
         if DEBUG_LEVEL >= 2:
             log_debug("SECTIONS", f"Using start position: {rounded_start}s")
 
-        # -----------------------------------------------------------------
-        # 3. Format‑Strings in absteigender Priorität
-        #    - Primär: Audio‑only m4a/webm, Fallback auf bestes Audio
-        #    - Sekundär: worstaudio als ultimativer Fallback
-        # -----------------------------------------------------------------
         format_strings = [
             "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
             "worstaudio",
         ]
 
-        # -----------------------------------------------------------------
-        # 4. Cookies und Proxy aus den Einstellungen laden
-        # -----------------------------------------------------------------
         use_cookies = getattr(self.stream_manager, "use_browser_cookies", True)
         cookies_browser = None
         if use_cookies:
@@ -44868,9 +44616,6 @@ class AudioProcessor:
         proxy_enabled = getattr(self.settings, "proxy_enabled", False)
         proxy_url = getattr(self.settings, "proxy_url", "") if proxy_enabled else ""
 
-        # -----------------------------------------------------------------
-        # 5. Dynamischen Timeout berechnen
-        # -----------------------------------------------------------------
         if self._expected_duration is not None:
             remaining = max(1, self._expected_duration - rounded_start)
             dynamic_timeout = max(30, min(1800, int(remaining * 2.5)))  # 30s – 30min
@@ -44884,9 +44629,6 @@ class AudioProcessor:
                 f"{self._expected_duration - rounded_start if self._expected_duration else 'unknown'}s)",
             )
 
-        # -----------------------------------------------------------------
-        # 6. Jedes Format der Reihe nach versuchen
-        # -----------------------------------------------------------------
         yt_cmd = []  # Für Debug-Ausgabe im Fehlerfall initialisieren
         for fmt_idx, fmt in enumerate(format_strings):
             # 6.1 Erneute Abbruchprüfung vor jedem Format
@@ -44905,7 +44647,6 @@ class AudioProcessor:
             if proxy_url:
                 yt_cmd.extend(["--proxy", proxy_url])
 
-            # 🔥 SICHERHEIT: `--` vor der URL verhindert Option‑Injection
             yt_cmd.extend(
                 [
                     "--download-sections",
@@ -44926,7 +44667,6 @@ class AudioProcessor:
                 if DEBUG_LEVEL >= 3:
                     log_debug("SECTIONS", f"yt-dlp command: {' '.join(yt_cmd)}")
 
-            # 6.3 Pipeline ausführen und Chunks zählen
             try:
                 chunk_count = self._run_ffmpeg_pipe(
                     yt_cmd,
@@ -44964,14 +44704,10 @@ class AudioProcessor:
                 # Weiter mit nächstem Format
                 continue
 
-        # -----------------------------------------------------------------
-        # 7. Kein Format erfolgreich
-        # -----------------------------------------------------------------
         logger.warning("Kein Format mit --download-sections erfolgreich")
         if info_cb:
             info_cb("⚠️ Kein Format für --download-sections erfolgreich")
 
-        # Optionale Debug-Ausgabe des letzten verwendeten Befehls
         if DEBUG_LEVEL >= 2 and yt_cmd:
             log_debug(
                 "SECTIONS",
@@ -45081,19 +44817,11 @@ class AudioProcessor:
         """
         Startet eine Pipeline aus yt‑dlp und ffmpeg, liest PCM‑Daten und speist
         sie in die asynchrone Verarbeitungs‑Queue ein.
-
-        Diese Methode wird für den Download‑Modus verwendet, wenn ein YouTube‑VOD
-        vorzeitig endet und der Rest des Videos nachgeladen werden muss. Sie baut
-        eine temporäre Pipeline auf, extrahiert die Audiodaten und übergibt sie
-        direkt an den normalen Verarbeitungsfluss (`_process_audio_data`).
         """
         start_total = time.perf_counter()
         chunk_count = 0
         total_bytes = 0
 
-        # ---------------------------------------------------------------------
-        # Hilfsfunktion für Abbruchprüfung (verhindert Code-Duplizierung)
-        # ---------------------------------------------------------------------
         def is_stop_requested() -> bool:
             """Prüft alle relevanten Abbruchbedingungen."""
             if cancel_event is not None and cancel_event.is_set():
@@ -45107,9 +44835,6 @@ class AudioProcessor:
                 info_cb("⏹️ Download abgebrochen")
             return 0
 
-        # ---------------------------------------------------------------------
-        # Dynamisches Timeout berechnen (falls nicht explizit übergeben)
-        # ---------------------------------------------------------------------
         if timeout is None:
             # Erwartete Restdauer schätzen
             if self._expected_duration is not None:
@@ -45123,8 +44848,6 @@ class AudioProcessor:
             with self._stats_lock:
                 rt_factor = max(1.0, self._last_realtime_factor)
 
-            # Dynamisches Timeout: Restdauer × Realtime‑Faktor × 2 (Sicherheit)
-            # Begrenzt auf 60–1800 Sekunden (1–30 Minuten)
             dynamic_timeout = max(60.0, min(1800.0, remaining * rt_factor * 2.0))
         else:
             dynamic_timeout = timeout
@@ -45136,10 +44859,6 @@ class AudioProcessor:
                 f"chunk_size={self.settings.config.CHUNK_SIZE_BYTES} bytes",
             )
             log_debug("download", f"yt-dlp command: {' '.join(yt_cmd)}")
-
-        # ---------------------------------------------------------------------
-        # 1. yt‑dlp starten
-        # ---------------------------------------------------------------------
         try:
             yt_proc = subprocess.Popen(
                 yt_cmd,
@@ -45156,8 +44875,6 @@ class AudioProcessor:
             if error_cb:
                 error_cb(f"yt-dlp start failed: {str(e)[:100]}")
             return 0
-
-        # Nach yt-dlp-Start erneut auf Abbruch prüfen
         if is_stop_requested():
             logger.info("Download abgebrochen nach yt-dlp-Start")
             PlatformUtils.terminate_process(yt_proc)
@@ -45165,9 +44882,6 @@ class AudioProcessor:
                 info_cb("⏹️ Download abgebrochen")
             return 0
 
-        # ---------------------------------------------------------------------
-        # 2. ffmpeg‑Befehl zusammenbauen
-        # ---------------------------------------------------------------------
         ff_cmd = [
             "ffmpeg",
             "-hide_banner",
@@ -45193,9 +44907,6 @@ class AudioProcessor:
         if DEBUG_LEVEL >= 3:
             log_debug("download", f"ffmpeg command: {' '.join(ff_cmd)}")
 
-        # ---------------------------------------------------------------------
-        # 3. ffmpeg starten
-        # ---------------------------------------------------------------------
         try:
             ff_proc = subprocess.Popen(
                 ff_cmd,
@@ -45214,7 +44925,6 @@ class AudioProcessor:
                 error_cb(f"ffmpeg start failed: {str(e)[:100]}")
             return 0
 
-        # Nach ffmpeg-Start erneut auf Abbruch prüfen
         if is_stop_requested():
             logger.info("Download abgebrochen nach ffmpeg-Start")
             PlatformUtils.terminate_process(ff_proc)
@@ -45223,9 +44933,6 @@ class AudioProcessor:
                 info_cb("⏹️ Download abgebrochen")
             return 0
 
-        # ---------------------------------------------------------------------
-        # 4. Inaktivitäts‑Timer initialisieren (mit Thread‑Sicherheit)
-        # ---------------------------------------------------------------------
         last_data_time = time.perf_counter()
         inactivity_timeout = getattr(self.settings, "download_inactivity_timeout", 30.0)
         timer = None
@@ -45267,33 +44974,25 @@ class AudioProcessor:
 
         consec_errors = 0
         MAX_CONSECUTIVE_ERRORS = 5
-        backoff_delay = 0.1  # Startwert für exponentiellen Backoff
+        backoff_delay = 0.1
 
         # Zähler für regelmäßige Stop‑Prüfung (alle 20 Chunks)
         stop_check_counter = 0
         STOP_CHECK_INTERVAL = 20
 
-        # ---------------------------------------------------------------------
-        # 5. Haupt‑Leseschleife
-        # ---------------------------------------------------------------------
         try:
             while True:
-                # 5.1 Abbruch durch Benutzer prüfen
                 if is_stop_requested():
                     logger.info("Download abgebrochen durch Benutzer (vor read)")
                     if info_cb:
                         info_cb("⏹️ Download abgebrochen")
                     break
-
-                # 5.2 Globaler Timeout
                 elapsed_total = time.perf_counter() - start_total
                 if elapsed_total > dynamic_timeout:
                     logger.warning(
                         f"Global timeout ({dynamic_timeout:.1f}s) exceeded, aborting download."
                     )
                     break
-
-                # 5.3 Daten lesen
                 try:
                     data = ff_proc.stdout.read(chunk_size)
                 except (ValueError, OSError) as e:
@@ -45308,23 +45007,14 @@ class AudioProcessor:
                     time.sleep(backoff_delay)
                     backoff_delay = min(backoff_delay * 2, 2.0)
                     continue
-
-                # 5.4 Keine Daten -> EOF
                 if not data:
                     log_debug("download", "ffmpeg stdout closed (EOF)")
                     break
-
-                # Erfolgreicher Lesevorgang – Backoff zurücksetzen
                 backoff_delay = 0.1
                 consec_errors = 0
-
-                # 5.5 Inaktivitätstimer zurücksetzen
                 last_data_time = time.perf_counter()
                 reset_inactivity_timer()
-
                 total_bytes += len(data)
-
-                # 5.6 Audiodaten verarbeiten
                 try:
                     self._process_audio_data(
                         data,
@@ -45348,10 +45038,7 @@ class AudioProcessor:
                         )
                         break
                     continue
-
                 chunk_count += 1
-
-                # 5.7 Periodische Stop-Prüfung während Chunk-Verarbeitung
                 stop_check_counter += 1
                 if stop_check_counter >= STOP_CHECK_INTERVAL:
                     stop_check_counter = 0
@@ -45362,8 +45049,6 @@ class AudioProcessor:
                         if info_cb:
                             info_cb("⏹️ Download abgebrochen")
                         break
-
-                # 5.8 Fortschrittsmeldung
                 if chunk_count % 10 == 0:
                     logger.info(
                         f"  → {chunk_count} chunks processed ({total_bytes} bytes, "
@@ -45382,9 +45067,6 @@ class AudioProcessor:
                 error_cb(f"Download loop error: {str(e)[:100]}")
 
         finally:
-            # -----------------------------------------------------------------
-            # 6. Timer abbrechen (wichtig für schnellen Shutdown)
-            # -----------------------------------------------------------------
             with timer_lock:
                 if timer:
                     timer.cancel()
@@ -45392,14 +45074,10 @@ class AudioProcessor:
             if DEBUG_LEVEL >= 3:
                 log_debug("download", "Inactivity timer cancelled")
 
-            # -----------------------------------------------------------------
-            # 7. Pipes schließen (Windows‑sicher: nicht blockierend)
-            # -----------------------------------------------------------------
             def close_pipe_safe(pipe):
                 if pipe and not pipe.closed:
                     try:
                         if IS_WINDOWS:
-                            # Unter Windows kann pipe.close() blockieren, daher in Daemon‑Thread auslagern
                             threading.Thread(target=pipe.close, daemon=True).start()
                         else:
                             pipe.close()
@@ -45408,10 +45086,6 @@ class AudioProcessor:
 
             close_pipe_safe(yt_proc.stdout)
             close_pipe_safe(ff_proc.stdout)
-
-            # -----------------------------------------------------------------
-            # 8. Prozesse sauber terminieren (nutzt PlatformUtils)
-            # -----------------------------------------------------------------
             for proc, name in ((ff_proc, "ffmpeg"), (yt_proc, "yt-dlp")):
                 if proc.poll() is None:
                     if DEBUG_LEVEL >= 3:
@@ -45430,10 +45104,6 @@ class AudioProcessor:
                             log_debug("download", f"{name} terminated")
                     except Exception as e:
                         logger.error(f"Error terminating {name}: {e}")
-
-            # -----------------------------------------------------------------
-            # 9. stderr auslesen (nur für Debug)
-            # -----------------------------------------------------------------
             if DEBUG_LEVEL >= 3:
                 for proc, name in ((ff_proc, "ffmpeg"), (yt_proc, "yt-dlp")):
                     try:
@@ -45475,9 +45145,6 @@ class AudioProcessor:
         except Exception as e:
             log_debug("processor", f"Error in safe_terminate_process: {e}")
 
-    # =========================================================================
-    #  ÖFFENTLICHE METHODEN
-    # =========================================================================
     def _get_config_type(self) -> str:
         cfg = self.settings.config
         if isinstance(cfg, RealtimeConfig):
@@ -45582,11 +45249,9 @@ class AudioProcessor:
         if special_ratio > 0.5:
             log_debug("translate", f"Too many special characters ({special_ratio:.2f})")
             return 0.2
-
         if translated.strip().lower() == original.strip().lower():
             log_debug("translate", "Translation is identical to original")
             return 0.0
-
         return 1.0
 
     def _update_chunk_size(self) -> None:
@@ -45594,7 +45259,6 @@ class AudioProcessor:
         self.chunk_size = int(
             self.settings.config.CHUNK_DURATION * self.settings.config.BYTES_PER_SECOND
         )
-        # Overlap-Größe ebenfalls aktualisieren
         self.overlap_size = int(
             self.settings.config.CHUNK_OVERLAP * self.settings.config.BYTES_PER_SECOND
         )
@@ -45674,32 +45338,17 @@ class AudioProcessor:
         """
         old_mode = self.subtitle_mode
         self.subtitle_mode = enabled
-
-        # ---------------------------------------------------------------------
-        # 1. Segment‑Puffer vollständig leeren (verhindert Vermischung)
-        # ---------------------------------------------------------------------
         with self._segment_buffer_lock:
             self._segment_buffer.clear()
             self._next_expected_start = 0.0
-
-        # ---------------------------------------------------------------------
-        # 2. Transkriptions‑Worker dynamisch anpassen
-        # ---------------------------------------------------------------------
         if enabled:
-            # Im Untertitel‑Modus ist sequenzielle Verarbeitung erforderlich,
-            # damit die Zeitstempel konsistent bleiben.
             self._set_transcription_workers(1)
         else:
-            # Normalmodus: parallele Verarbeitung für höheren Durchsatz
             cpu_count = os.cpu_count() or 4
             workers = getattr(
                 self.settings, "transcription_workers", max(1, cpu_count // 8)
             )
             self._set_transcription_workers(workers)
-
-        # ---------------------------------------------------------------------
-        # 3. Logging und Event‑Bus
-        # ---------------------------------------------------------------------
         logger.info(
             f"🎬 Subtitle mode: {'ENABLED' if enabled else 'DISABLED'} (was {old_mode})"
         )
@@ -45731,18 +45380,11 @@ class AudioProcessor:
     ) -> None:
         """
         Startet die asynchrone Audioverarbeitung für eine gegebene URL.
-
-        🛡️ Der Emergency Reset wurde vollständig aus dem IDLE‑Pfad entfernt.
-        Er wird ausschließlich dann ausgelöst, wenn der Zustand **nicht** IDLE ist und
-        kein aktiver Verarbeitungsthread existiert.
         """
         if DEBUG_LEVEL >= 3:
             log_debug("processor", ">>> start_processing FINAL <<<")
             log_debug("processor", f"start_processing called with URL: {url[:100]}...")
 
-        # -----------------------------------------------------------------
-        # 1. Atomarer Zustandsübergang
-        # -----------------------------------------------------------------
         with self._state_lock:
             current_state = self._state
 
@@ -45787,9 +45429,6 @@ class AudioProcessor:
             if DEBUG_LEVEL >= 3:
                 log_debug("processor", "State set to STARTING")
 
-        # -----------------------------------------------------------------
-        # 2. URL validieren und Dateigröße ermitteln
-        # -----------------------------------------------------------------
         url = PlatformUtils.sanitize_url(url)
         if DEBUG_LEVEL >= 3:
             log_debug("processor", f"Sanitized URL: {url[:100]}...")
@@ -45824,18 +45463,12 @@ class AudioProcessor:
             if DEBUG_LEVEL >= 3:
                 log_debug("processor", "Stream URL (non-file)")
 
-        # -----------------------------------------------------------------
-        # 3. Stop-Event und Stream‑ID zurücksetzen
-        # -----------------------------------------------------------------
         self.reset_stop_flag()
         self._current_stream_id = f"stream_{int(time.time())}"
         if DEBUG_LEVEL >= 3:
             log_debug("processor", f"Stream ID: {self._current_stream_id}")
         self.processing_completed_event.clear()
 
-        # -----------------------------------------------------------------
-        # 4. Statistik-Zähler zurücksetzen
-        # -----------------------------------------------------------------
         with self._stats_lock:
             self._chunk_counter = 0
             self._total_bytes_processed = 0
@@ -45850,30 +45483,18 @@ class AudioProcessor:
 
         self._real_processed_seconds = 0.0
 
-        # -----------------------------------------------------------------
-        # 5. Audio-Puffer leeren
-        # -----------------------------------------------------------------
         with self._buffer_lock:
             self._audio_chunks.clear()
             self._audio_total_bytes = 0
 
-        # -----------------------------------------------------------------
-        # 6. Segment-Puffer zurücksetzen
-        # -----------------------------------------------------------------
         with self._segment_buffer_lock:
             self._segment_buffer.clear()
             self._next_expected_start = 0.0
             if DEBUG_LEVEL >= 4:
                 log_debug("processor", "Segment buffer cleared for new stream")
 
-        # -----------------------------------------------------------------
-        # 7. Callback speichern
-        # -----------------------------------------------------------------
         self._finished_callback = finished_callback
 
-        # -----------------------------------------------------------------
-        # 8. Adaptive Chunk-Variablen zurücksetzen
-        # -----------------------------------------------------------------
         with self._word_count_lock:
             self._word_count_history.clear()
             self._smoothed_word_count = None
@@ -45881,9 +45502,6 @@ class AudioProcessor:
         self._last_chunk_duration = self.settings.config.CHUNK_DURATION
         self._chunk_stable_counter = 0
 
-        # -----------------------------------------------------------------
-        # 9. Executors konfigurieren
-        # -----------------------------------------------------------------
         cpu_count = os.cpu_count() or 4
         _transcribe_workers = getattr(
             self.settings, "transcription_workers", max(1, cpu_count // 8)
@@ -45914,9 +45532,6 @@ class AudioProcessor:
             self._set_transcription_workers(1)
             logger.info("✅ Normaler Modus: sequenzielle Transkription (1 Worker)")
 
-        # -----------------------------------------------------------------
-        # 10. Dispatcher vorbereiten und starten
-        # -----------------------------------------------------------------
         if self._dispatcher_started:
             log_debug(
                 "processor",
@@ -45941,17 +45556,11 @@ class AudioProcessor:
         if DEBUG_LEVEL >= 3:
             log_debug("processor", "Dispatcher started")
 
-        # -----------------------------------------------------------------
-        # 11. Callbacks speichern
-        # -----------------------------------------------------------------
         self._transcription_callback = transcription_callback
         self._translation_callback = translation_callback
         self._info_callback = info_callback
         self._error_callback = error_callback
 
-        # -----------------------------------------------------------------
-        # 12. _last_oom zurücksetzen
-        # -----------------------------------------------------------------
         if (
             hasattr(self, "_transcription_engine")
             and self._transcription_engine is not None
@@ -45964,9 +45573,6 @@ class AudioProcessor:
             except Exception as e:
                 logger.warning(f"Failed to reset _last_oom: {e}")
 
-        # -----------------------------------------------------------------
-        # 13. Verarbeitungs-Thread starten
-        # -----------------------------------------------------------------
         def _process_thread(
             url: str,
             trans_cb: TranscriptionCallback,
@@ -46012,9 +45618,6 @@ class AudioProcessor:
         self._processing_thread = thread
         thread.start()
 
-        # -----------------------------------------------------------------
-        # 14. Zustand auf PROCESSING setzen
-        # -----------------------------------------------------------------
         with self._state_lock:
             if self._state == AudioProcessor.State.STARTING:
                 self._set_state(AudioProcessor.State.PROCESSING)
