@@ -48344,17 +48344,8 @@ class AudioProcessor:
     ) -> None:
         """
         Leert den internen Audio‑Puffer und sendet die gesammelten Daten zur Verarbeitung.
-
-        Diese Methode wird während der `cleanup_after_stream`-Phase aufgerufen, um
-        sicherzustellen, dass keine Audiodaten verloren gehen, die noch im Puffer
-        auf eine ausreichende Größe warten. Sie fasst alle gepufferten Chunks zu
-        einem einzigen Chunk zusammen und übergibt ihn an die asynchrone
-        Verarbeitungskette.
         """
 
-        # ---------------------------------------------------------------------
-        # 1. Fallback‑Callbacks definieren (sichert gegen None)
-        # ---------------------------------------------------------------------
         def dummy_transcription_callback(result: TranscriptionResult) -> None:
             log_debug("audio", "Dummy transcription callback called – result discarded")
 
@@ -48369,9 +48360,6 @@ class AudioProcessor:
         effective_transl_cb = translation_callback or dummy_translation_callback
         effective_error_cb = error_callback or dummy_error_callback
 
-        # ---------------------------------------------------------------------
-        # 2. Puffer auslesen und leeren (unter Lock)
-        # ---------------------------------------------------------------------
         with self._buffer_lock:
             chunk_count = len(self._audio_chunks)
             if chunk_count == 0:
@@ -48383,9 +48371,6 @@ class AudioProcessor:
             self._audio_chunks.clear()
             self._audio_total_bytes = 0
 
-        # ---------------------------------------------------------------------
-        # 3. Plausibilitätsprüfung der kombinierten Audiodaten
-        # ---------------------------------------------------------------------
         if not combined_audio:
             log_debug("audio", "_flush_audio_buffer: Kombinierte Audiodaten sind leer")
             return
@@ -48397,9 +48382,6 @@ class AudioProcessor:
             f"({duration:.2f}s) werden verarbeitet",
         )
 
-        # ---------------------------------------------------------------------
-        # 4. Transkriptions‑Engine prüfen
-        # ---------------------------------------------------------------------
         with self._engine_lock:
             trans_engine = self._transcription_engine
 
@@ -48413,9 +48395,6 @@ class AudioProcessor:
             )
             return
 
-        # ---------------------------------------------------------------------
-        # 5. Executor‑Verfügbarkeit prüfen und Chunk asynchron verarbeiten
-        # ---------------------------------------------------------------------
         executor = getattr(self, "_transcription_executor", None)
         if executor is None:
             logger.warning(
@@ -48463,18 +48442,9 @@ class AudioProcessor:
     def _guaranteed_cleanup(self) -> None:
         """
         Führt eine garantierte finale Bereinigung des AudioProcessors durch.
-
-        Diese Methode wird nach der Stream‑Verarbeitung aufgerufen und stellt
-        sicher, dass alle internen Zustände, Zähler und Puffer zurückgesetzt
-        werden. Sie versetzt den AudioProcessor in den IDLE‑Zustand und
-        signalisiert über den Event‑Bus, dass er bereit für einen neuen Stream
-        ist.
         """
         logger.info("\n🧹 [GUARANTEED_CLEANUP]")
 
-        # -----------------------------------------------------------------
-        # Hilfsfunktion für sichere Teil‑Resets
-        # -----------------------------------------------------------------
         def safe_reset_step(step_name: str, func: Callable[[], None]) -> None:
             """Führt einen Reset‑Schritt aus und fängt alle Exceptions ab."""
             try:
@@ -48491,9 +48461,6 @@ class AudioProcessor:
                         level="debug",
                     )
 
-        # -----------------------------------------------------------------
-        # 1. Zustand auf IDLE setzen (unter state_lock)
-        # -----------------------------------------------------------------
         with self._state_lock:
             old_state = self._state
             self._set_state(AudioProcessor.State.IDLE)
@@ -48503,7 +48470,6 @@ class AudioProcessor:
                     f"State changed from {old_state.name} to IDLE in guaranteed_cleanup",
                 )
 
-        # 2. Aktuelle Stream‑ID löschen und Statistiken zurücksetzen
         with self._resource_lock:
             self._current_stream_id = None
 
@@ -48521,7 +48487,6 @@ class AudioProcessor:
                 if DEBUG_LEVEL >= 4:
                     log_debug("processor", "Stats counters reset")
 
-            # Audio‑Puffer leeren
             safe_reset_step(
                 "clear audio buffer",
                 lambda: (
@@ -48530,13 +48495,11 @@ class AudioProcessor:
                 ),
             )
 
-        # 3. Satzpuffer leeren (falls noch Texte ausstehen)
         safe_reset_step(
             "clear sentence buffer",
             lambda: (self._sentence_parts.clear(), self._sentence_segments.clear()),
         )
 
-        # 4. Segment‑Puffer leeren (Untertitel‑Modus)
         safe_reset_step(
             "clear segment buffer",
             lambda: (
@@ -48545,7 +48508,6 @@ class AudioProcessor:
             ),
         )
 
-        # 5. Duplikat‑Cache leeren (optional, aber sauber)
         safe_reset_step(
             "clear duplicate cache",
             lambda: (
@@ -48554,7 +48516,6 @@ class AudioProcessor:
             ),
         )
 
-        # 6. Stop‑Flags korrekt zurücksetzen (WICHTIG)
         with self._stop_lock:
             self._stop_event.clear()
             self._processing_completed.clear()
@@ -48564,7 +48525,6 @@ class AudioProcessor:
                     "Stop flags cleared (stop_event and processing_completed)",
                 )
 
-        # 7. Event‑Bus benachrichtigen (außerhalb von Locks)
         if self._event_bus is not None:
             try:
                 self._event_bus.emit("audio_processor_idle", None)
@@ -48938,10 +48898,6 @@ class AudioProcessor:
                 self._transcript_segments.clear()
                 self._transcript_last_flush = now
 
-            # -----------------------------------------------------------------
-            # 3. Benutzerabbruch? Puffer sofort leeren und aktuelles Segment
-            #    einzeln ausgeben, um Datenverlust zu vermeiden.
-            # -----------------------------------------------------------------
             if self._stop_event.is_set():
                 if DEBUG_LEVEL >= 2:
                     log_debug(
@@ -49036,14 +48992,9 @@ class AudioProcessor:
                 timestamp=time.time(),
             )
 
-        # 2. Text kombinieren
-
-        # Die Texte sind bereits in self._transcript_parts gespeichert und
-        # sollten synchron mit self._transcript_segments sein.
         if self._transcript_parts:
             combined_text = " ".join(self._transcript_parts)
         else:
-            # Fallback: Text aus den Segmenten extrahieren
             combined_text = " ".join(
                 seg.text.strip() for seg in self._transcript_segments
             )
@@ -49053,7 +49004,6 @@ class AudioProcessor:
                     "Used segment texts as fallback because _transcript_parts was empty",
                 )
 
-        # 3. Erstes und letztes Segment für Zeitstempel
         first_seg = self._transcript_segments[0]
         last_seg = self._transcript_segments[-1]
 
@@ -49077,7 +49027,7 @@ class AudioProcessor:
         if valid_conf_count > 0:
             avg_confidence = total_conf / valid_conf_count
         else:
-            avg_confidence = 0.5  # Neutraler Fallback
+            avg_confidence = 0.5
             if DEBUG_LEVEL >= 3:
                 log_debug(
                     "transcript_buffer",
@@ -49156,15 +49106,11 @@ class AudioProcessor:
             )
             return
 
-        # Prüfen, ob der Executor noch existiert und nicht heruntergefahren ist
         executor = self._translation_executor
         if executor is None:
             logger.warning("🌐 Translation executor is None – cannot submit task")
             return
 
-        # -----------------------------------------------------------------
-        # 2. Semaphor für parallele Übersetzungen
-        # -----------------------------------------------------------------
         acquired = self._translation_semaphore.acquire(blocking=True, timeout=3.0)
         if not acquired:
             logger.warning("🌐 Translation semaphore timeout – discarding request")
@@ -49183,9 +49129,6 @@ class AudioProcessor:
             f"target={target_lang}, seq={current_seq}"
         )
 
-        # -----------------------------------------------------------------
-        # 3. Worker‑Funktion für den Executor
-        # -----------------------------------------------------------------
         def task() -> None:
             start_time = time.perf_counter()
             translation = None
@@ -49314,9 +49257,6 @@ class AudioProcessor:
             finally:
                 self._translation_semaphore.release()
 
-        # -----------------------------------------------------------------
-        # 4. Task an Executor übergeben
-        # -----------------------------------------------------------------
         try:
             executor.submit(task)
             logger.warning("🌐 Translation task submitted to executor")
@@ -49350,7 +49290,6 @@ class AudioProcessor:
             # EMA-Glättung (Alpha = 0.3 für moderate Dämpfung)
             ALPHA = 0.3
             if self._last_realtime_factor == 0.0:
-                # Erster Wert – direkt übernehmen
                 self._last_realtime_factor = raw_factor
             else:
                 self._last_realtime_factor = (
@@ -49950,8 +49889,6 @@ class WhisperLayoutManager:
             win_w = self.root.winfo_width()
             win_h = self.root.winfo_height()
 
-            # Bei sehr kleinen Werten (Fenster noch nicht vollständig
-            # aufgebaut) auf die angeforderte Größe zurückgreifen
             if win_w <= 1 or win_h <= 1:
                 win_w = self.root.winfo_reqwidth()
                 win_h = self.root.winfo_reqheight()
@@ -50076,12 +50013,6 @@ class WhisperLayoutManager:
     def create_compact_control_panel(self, parent: tk.Frame) -> None:
         """
         Erstellt die optimierte Steuerleiste mit drei Bereichen (grid).
-
-        Optimierungen:
-        - Konsistente Schriftarten über Fonts.*
-        - Robuste Widget‑Erstellung mit Exception‑Handling
-        - Dynamischere Größenanpassung durch flexiblere Gewichte
-        - Ausführliche Tooltips und verbessertes Debug‑Logging
         """
         gui = self.gui_ref
         theme = gui.current_theme
@@ -50111,9 +50042,6 @@ class WhisperLayoutManager:
         control_frame.grid_columnconfigure(1, weight=1)  # Mittlere Einstellungen
         control_frame.grid_columnconfigure(2, weight=0)  # Rechte Buttons
 
-        # =================================================================
-        # Linke Buttons (Datei, Zwischenablage, Layout)
-        # =================================================================
         left_controls = tk.Frame(control_frame, bg=theme.BG_PRIMARY)
         left_controls.grid(row=0, column=0, sticky="w")
 
@@ -50145,9 +50073,6 @@ class WhisperLayoutManager:
         gui.layout_btn.pack(side="left", padx=5)
         ToolTip(gui.layout_btn, "Layout umschalten (vertikal ↔ horizontal)")
 
-        # =================================================================
-        # Zentrale Steuerelemente (Sprache, Modell, Zielsprache)
-        # =================================================================
         center_controls = tk.Frame(control_frame, bg=theme.BG_PRIMARY)
         center_controls.grid(row=0, column=1, padx=15, sticky="ew")
         # Gleichmäßige Verteilung der drei Einstellungsgruppen
@@ -50254,13 +50179,8 @@ class WhisperLayoutManager:
         ToolTip(gui.lang_combo, "Zielsprache für die Übersetzung")
         gui.lang_combo.bind("<<ComboboxSelected>>", gui.on_language_change)
 
-        # =================================================================
-        # Rechte Buttons (START, STOP, Übersetzung, Untertitel)
-        # =================================================================
         right_controls = tk.Frame(control_frame, bg=theme.BG_PRIMARY)
         right_controls.grid(row=0, column=2, sticky="e")
-
-        # Gemeinsame Button‑Eigenschaften für die rechten Buttons
         action_btn_kwargs = {
             "relief": "flat",
             "font": Fonts.BUTTON,
@@ -50580,7 +50500,6 @@ class WhisperLayoutManager:
             if DEBUG_LEVEL >= 3:
                 log_exception("layout", "transla_header creation failed", e)
 
-        # 7. Übersetzungs-Textfeld
         try:
             gui.translation_text = self.create_text_widget(transla_frame, height=6)
             gui.translation_text.grid(row=1, column=0, sticky="nsew", padx=2, pady=2)
@@ -50595,10 +50514,6 @@ class WhisperLayoutManager:
     def create_horizontal_layout(self) -> None:
         """
         Erstellt das horizontale Layout der GUI.
-
-        Diese Methode konfiguriert das Hauptfenster mit einem horizontalen Layout.
-        Sie verwendet ein `PanedWindow`, um die Textbereiche nebeneinander anzuordnen.
-        Die Widgets werden in einem `ttk.LabelFrame`-Container platziert.
         """
         gui = self.gui_ref
         theme = gui.current_theme
@@ -50606,7 +50521,6 @@ class WhisperLayoutManager:
         if DEBUG_LEVEL >= 3:
             log_debug("layout", "Creating horizontal layout...")
 
-        # 1. Hauptcontainer erstellen
         try:
             main_frame = tk.LabelFrame(
                 gui.text_container,
@@ -50628,7 +50542,6 @@ class WhisperLayoutManager:
                 log_exception("layout", "main_frame creation failed", e)
             return
 
-        # 2. PanedWindow für horizontal geteilte Bereiche
         try:
             gui.paned_window = tk.PanedWindow(
                 main_frame,
@@ -50645,7 +50558,6 @@ class WhisperLayoutManager:
                 log_exception("layout", "paned_window creation failed", e)
             return
 
-        # 3. Linker Frame (Transkription)
         try:
             left_frame = tk.Frame(gui.paned_window, bg=theme.BG_TERTIARY)
             gui.paned_window.add(left_frame, stretch="always", width=400)
@@ -50658,7 +50570,6 @@ class WhisperLayoutManager:
                 log_exception("layout", "left_frame creation failed", e)
             return
 
-        # 4. Header für Transkription
         try:
             trans_header = tk.Frame(left_frame, bg=theme.BG_TERTIARY)
             trans_header.grid(row=0, column=0, sticky="ew", padx=3, pady=2)
@@ -50673,7 +50584,6 @@ class WhisperLayoutManager:
                 else ("Segoe UI", 9, "bold"),
             ).pack(side="left")
 
-            # Auto-Scroll Checkbox
             gui.transcript_scroll_var = tk.BooleanVar(value=True)
             scroll_cb = tk.Checkbutton(
                 trans_header,
@@ -50693,7 +50603,6 @@ class WhisperLayoutManager:
             ).pack(side="right", padx=1)
             ToolTip(scroll_cb, "Automatisch zum Ende scrollen")
 
-            # Auto-TTS Checkbox
             tts_cb = tk.Checkbutton(
                 trans_header,
                 variable=gui.auto_tts_transcript_var,
@@ -50717,7 +50626,6 @@ class WhisperLayoutManager:
             if DEBUG_LEVEL >= 3:
                 log_exception("layout", "trans_header creation failed", e)
 
-        # 5. Transkriptions-Textfeld
         try:
             gui.transcript_text = self.create_text_widget(left_frame)
             gui.transcript_text.grid(row=1, column=0, sticky="nsew", padx=2, pady=2)
@@ -50726,7 +50634,6 @@ class WhisperLayoutManager:
             if DEBUG_LEVEL >= 3:
                 log_exception("layout", "transcript_text creation failed", e)
 
-        # 6. Rechter Frame (Übersetzung)
         try:
             right_frame = tk.Frame(gui.paned_window, bg=theme.BG_TERTIARY)
             gui.paned_window.add(right_frame, stretch="always", width=400)
@@ -50739,7 +50646,6 @@ class WhisperLayoutManager:
                 log_exception("layout", "right_frame creation failed", e)
             return
 
-        # 7. Header für Übersetzung
         try:
             transla_header = tk.Frame(right_frame, bg=theme.BG_TERTIARY)
             transla_header.grid(row=0, column=0, sticky="ew", padx=3, pady=2)
@@ -50799,7 +50705,6 @@ class WhisperLayoutManager:
             if DEBUG_LEVEL >= 3:
                 log_exception("layout", "transla_header creation failed", e)
 
-        # 8. Übersetzungs-Textfeld
         try:
             gui.translation_text = self.create_text_widget(right_frame)
             gui.translation_text.grid(row=1, column=0, sticky="nsew", padx=2, pady=2)
@@ -50808,7 +50713,6 @@ class WhisperLayoutManager:
             if DEBUG_LEVEL >= 3:
                 log_exception("layout", "translation_text creation failed", e)
 
-        # 9. PanedWindow konfigurieren
         try:
             gui.paned_window.paneconfig(left_frame, minsize=250, width=400)
             gui.paned_window.paneconfig(right_frame, minsize=250, width=400)
@@ -50840,7 +50744,6 @@ class WhisperLayoutManager:
         )
         if height:
             text_widget.config(height=height)
-        # 🔥 KEIN pack() oder grid() hier – das erledigt der Aufrufer!
         ContextMenuMixin(text_widget)
         return text_widget
 
@@ -50907,9 +50810,6 @@ if IS_LINUX and PSUTIL_AVAILABLE:
             except tk.TclError:
                 pass
 
-        # -------------------------------------------------------------------------
-        # Öffentliche Methoden
-        # -------------------------------------------------------------------------
         def optimize_for_processing(self) -> None:
             if not IS_LINUX or self._optimization_active:
                 return
@@ -50996,8 +50896,6 @@ if IS_LINUX and PSUTIL_AVAILABLE:
             """
             try:
                 import resource
-
-                # --- 1. Datenlimit (maximaler virtueller Speicher) ---
                 try:
                     soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
                     new_soft = min(hard, 1024 * 1024 * 1024)  # 1 GB
@@ -51011,7 +50909,6 @@ if IS_LINUX and PSUTIL_AVAILABLE:
                         "linux", f"  ⚠️ Daten-Limit konnte nicht erhöht werden: {e}"
                     )
 
-                # --- 2. Dateideskriptoren-Limit ---
                 try:
                     soft_fd, hard_fd = resource.getrlimit(resource.RLIMIT_NOFILE)
                     new_soft_fd = min(hard_fd, 8192)
@@ -51029,7 +50926,6 @@ if IS_LINUX and PSUTIL_AVAILABLE:
                         f"  ⚠️ Dateideskriptoren-Limit konnte nicht erhöht werden: {e}",
                     )
 
-                # --- 3. CPU-Priorität (nice) ---
                 try:
                     os.nice(-5)
                     log_debug("linux", "  ↪ CPU-Priorität erhöht (nice -5)")
@@ -51365,25 +51261,20 @@ else:
                 "linux",
                 "🐧 LinuxPerformanceOptimizer: Dummy-Modus (psutil fehlt oder nicht Linux)",
             )
-
         def optimize_for_processing(self) -> None:
             log_debug(
                 "linux", "LinuxPerformanceOptimizer (Dummy): optimize_for_processing"
             )
-
         def restore_normal_mode(self) -> None:
             log_debug("linux", "LinuxPerformanceOptimizer (Dummy): restore_normal_mode")
-
         def emergency_optimize(self) -> None:
             log_debug("linux", "LinuxPerformanceOptimizer (Dummy): emergency_optimize")
-
         def get_optimization_status(self) -> Dict[str, Any]:
             return {
                 "platform": SYSTEM,
                 "dummy_mode": True,
                 "psutil_missing": not PSUTIL_AVAILABLE,
             }
-
         def dispose(self) -> None:
             pass
 
@@ -51393,7 +51284,6 @@ class AdvancedSettings:
     """Erweiterte Einstellungen für Dragon Whisperer.
     Enthält Parameter für Transkription, Übersetzung, GUI und System.
     """
-
     # Transkriptions-Parameter
     beam_size: int = 10
     temperature: float = Config.DEFAULT_TEMPERATURE
@@ -51523,43 +51413,24 @@ class AdvancedSettings:
 
     # Livestream
     live_from_start: bool = False
-
-    # Download-Modus
-    download_inactivity_timeout: float = 30.0  # Sekunden
-
-    # Erweiterte Pfade (für Dateizugriff)
+    download_inactivity_timeout: float = 30.0 
     allowed_dirs: List[str] = field(default_factory=list)
-
-    # Auto‑TTS
     auto_tts_transcript: bool = False
     auto_tts_translation: bool = False
     auto_tts_delay_ms: int = 1500
-
-    # Zielsprache (für Übersetzung)
     target_language: str = "de"
-
-    # Satzpufferung (für kontinuierliche Übersetzung)
-    sentence_flush_interval: float = 3.0  # Sekunden
-    sentence_flush_word_threshold: int = 30  # Anzahl Wörter
-
-    # Reflection (selbstkorrigierende Übersetzung)
+    sentence_flush_interval: float = 3.0 
+    sentence_flush_word_threshold: int = 30 
     enable_reflection: bool = False
-
-    # Interna (nicht direkt speicherbar)
     config: Config = field(init=False, repr=False, compare=False)
     _chunk_duration: float = field(
         default=Config.BASE_CHUNK_DURATION, init=False, repr=False
     )
-
-    # 🔥 NEU: Felder für die Verwaltung von Modus-Overrides
     _original_values: Dict[str, Any] = field(
         default_factory=dict, init=False, repr=False
     )
     _mode_overrides_applied: bool = field(default=False, init=False, repr=False)
 
-    # -------------------------------------------------------------------------
-    # Property chunk_duration mit Setter, der config.CHUNK_DURATION aktualisiert
-    # -------------------------------------------------------------------------
     @property
     def chunk_duration(self) -> float:
         return self._chunk_duration
@@ -51578,15 +51449,11 @@ class AdvancedSettings:
         if hasattr(self, "config") and self.config is not None:
             self.config.CHUNK_DURATION = value
 
-    # -------------------------------------------------------------------------
-    # Initialisierung
-    # -------------------------------------------------------------------------
     def __post_init__(self) -> None:
         """
         Initialisiert die erweiterten Einstellungen nach der Dataclass-Erstellung.
         """
         try:
-            # 1. Fallback für Quellsprache sicherstellen
             if (
                 not hasattr(self, "fallback_source_language")
                 or self.fallback_source_language is None
@@ -51606,8 +51473,6 @@ class AdvancedSettings:
                     f"verwende 'de'"
                 )
                 self.fallback_source_language = "de"
-
-            # 2. Ollama‑Temperatur validieren (0.0 – 2.0)
             if hasattr(self, "ollama_temperature"):
                 if not (0.0 <= self.ollama_temperature <= 2.0):
                     logger.warning(
@@ -51617,8 +51482,6 @@ class AdvancedSettings:
                     self.ollama_temperature = 0.0
             else:
                 self.ollama_temperature = 0.0
-
-            # 3. Ollama‑Timeout validieren (30 – 300 Sekunden)
             if hasattr(self, "ollama_timeout"):
                 if not (30 <= self.ollama_timeout <= 300):
                     logger.warning(
@@ -51628,8 +51491,6 @@ class AdvancedSettings:
                     self.ollama_timeout = 90
             else:
                 self.ollama_timeout = 90
-
-            # 4. Zielsprache validieren (muss in SUPPORTED_LANGUAGES sein)
             if (
                 not hasattr(self, "target_language")
                 or self.target_language not in SUPPORTED_LANGUAGES
@@ -51640,23 +51501,17 @@ class AdvancedSettings:
                         "settings",
                         f"target_language auf 'de' zurückgesetzt (war: {getattr(self, 'target_language', None)})",
                     )
-
-            # 5. Blacklist-Modus validieren
             if not hasattr(self, "blacklist_mode") or self.blacklist_mode not in (
                 "word",
                 "substring",
             ):
                 self.blacklist_mode = "word"
-
-            # 6. TTS-Engine validieren
             if not hasattr(self, "tts_engine") or self.tts_engine not in (
                 "piper",
                 "pyttsx3",
                 "espeak",
             ):
                 self.tts_engine = "piper"
-
-            # 7. Weitere numerische Werte auf Plausibilität prüfen (clamping)
             if hasattr(self, "chunk_duration"):
                 min_dur = Config.MIN_CHUNK_DURATION
                 max_dur = Config.MAX_CHUNK_DURATION
@@ -51666,31 +51521,19 @@ class AdvancedSettings:
                         f"chunk_duration {self.chunk_duration} außerhalb [{min_dur}, {max_dur}] – auf {clamped} geklemmt"
                     )
                     self.chunk_duration = clamped
-
             if hasattr(self, "beam_size"):
                 if not (1 <= self.beam_size <= 20):
                     self.beam_size = max(1, min(self.beam_size, 20))
-
             if hasattr(self, "temperature"):
                 if not (0.0 <= self.temperature <= 2.0):
                     self.temperature = max(0.0, min(self.temperature, 2.0))
-
-            # 8. Config-Instanz erstellen (über _recreate_config)
             self._recreate_config()
-
-            # 9. Chunk-Dauer synchronisieren (Property chunk_duration setzt config.CHUNK_DURATION)
             self.chunk_duration = self._chunk_duration
-
-            # 10. Neue Felder für Override-Management initialisieren
             if not hasattr(self, "_original_values"):
                 self._original_values = {}
             if not hasattr(self, "_mode_overrides_applied"):
                 self._mode_overrides_applied = False
-
-            # 11. Modusabhängige Overrides anwenden (mit Sicherung der Originalwerte)
             self._apply_mode_overrides()
-
-            # 12. Debug-Ausgaben (nur bei ausreichendem Debug-Level)
             if DEBUG_LEVEL >= 2:
                 log_debug("settings", f"Target language: {self.target_language}")
                 log_debug(
@@ -51725,15 +51568,11 @@ class AdvancedSettings:
         except Exception as e:
             logger.exception(f"Fehler in AdvancedSettings.__post_init__: {e}")
         finally:
-            # -----------------------------------------------------------------
-            # GARANTIERT: self.config existiert immer, selbst wenn oben etwas schiefging.
-            # -----------------------------------------------------------------
             if not hasattr(self, "config") or self.config is None:
                 logger.warning("Config fehlt – erstelle Standard‑Config")
                 self.config = Config()
                 self.chunk_duration = self.config.CHUNK_DURATION
 
-            # Stelle sicher, dass _original_values existiert
             if not hasattr(self, "_original_values"):
                 self._original_values = {}
             if not hasattr(self, "_mode_overrides_applied"):
@@ -52957,8 +52796,6 @@ def setup_platform_environment() -> None:
         _setup_windows_console()
     PlatformUtils.setup_platform_environment()
 
-
-# System‑Info und Kompatibilitätsprüfung (print_system_info_debug3 ist bereits vorhanden)
 def _run_system_check() -> int:
     """Führt eine umfassende System‑ und Abhängigkeitsprüfung durch."""
     issues = check_platform_compatibility()
@@ -53106,7 +52943,6 @@ def run_tests() -> int:
                 int(config.CHUNK_DURATION * config.BYTES_PER_SECOND),
             )
 
-    # TestGoogleTranslationEngine (mit Mock)
     class TestGoogleTranslationEngine(unittest.TestCase):
         def setUp(self):
             self.engine = GoogleTranslationEngine(target_lang="de")
@@ -53280,7 +53116,6 @@ def run_tests() -> int:
             # Nach erfolglosem Versuch sollte der Device auf "cpu" gesetzt sein
             self.assertEqual(self.whisper_engine.device, "cpu")
 
-    # Tests zusammenstellen und ausführen
     loader = unittest.TestLoader()
     suite = loader.loadTestsFromTestCase(TestPlatformUtils)
     suite.addTests(loader.loadTestsFromTestCase(TestStreamManager))
@@ -53297,8 +53132,6 @@ def run_tests() -> int:
     result = runner.run(suite)
     return 0 if result.wasSuccessful() else 1
 
-
-# Argument‑Parser
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="🐉 Dragon Whisperer - Livestream Transcription & Translation",
@@ -53410,32 +53243,26 @@ def _handle_headless_mode(args: argparse.Namespace) -> int:
     """
     logger = logging.getLogger("dragon")
     logger.info("🐉 Starting in headless mode...")
-
     if not args.url:
         logger.error("❌ --url required in headless mode")
         return 1
-
     try:
         PlatformUtils.check_platform_dependencies()
     except RuntimeError as e:
         _show_user_error(str(e))
         return 1
-
     app_settings = AppSettings.load_from_file()
     adv_settings = AdvancedSettings()
-
     if args.model and args.model in Config.WHISPER_MODELS:
         app_settings.default_model = args.model
         logger.info(f"Model override: {args.model}")
     elif args.model:
         logger.warning(f"⚠️ Unknown model '{args.model}', using default")
-
     if args.language and args.language in SUPPORTED_LANGUAGES:
         app_settings.default_language = args.language
         logger.info(f"Language override: {args.language}")
     elif args.language:
         logger.warning(f"⚠️ Unknown language '{args.language}', using default")
-
     ffmpeg_manager = FFmpegManager(adv_settings.config, settings=adv_settings)
     stream_manager = StreamManager(
         enable_debug=(DEBUG_LEVEL >= 1),
@@ -53443,7 +53270,6 @@ def _handle_headless_mode(args: argparse.Namespace) -> int:
         proxy=adv_settings.proxy_url,
         proxy_enabled=adv_settings.proxy_enabled,
     )
-
     if WHISPER_AVAILABLE:
         transcription_engine = TranscriptionEngine(adv_settings)
         logger.info(f"📁 Loading model {app_settings.default_model}...")
@@ -53532,14 +53358,11 @@ def _handle_headless_mode(args: argparse.Namespace) -> int:
 
     return 0
 
-
 def main() -> int:
     """
     Hauptfunktion des Dragon Whisperer.
     """
-
     args = parse_arguments()
-
     debug_level = 0
     debug_components: List[str] = []
     if args.debug != "0":
@@ -53548,26 +53371,20 @@ def main() -> int:
         else:
             debug_components = args.debug.split(",")
             debug_level = 1
-
     configure_logging(debug_level, debug_components, args.quiet)
     setup_platform_environment()
-
     if args.version:
         print("🐉 Dragon Whisperer v4.1 (optimized)")
         print(f"Platform: {SYSTEM} {'ARM' if IS_ARM else 'x86'}")
         print(f"Python: {sys.version.split()[0]}")
         return 0
-
     if args.sysinfo:
         print_system_info_debug3()
         return 0
-
     if args.check:
         return _run_system_check()
-
     if args.test:
         return run_tests()
-
     if args.headless or args.url:
         if not args.url:
             print(
@@ -53580,10 +53397,8 @@ def main() -> int:
             _show_user_error(str(e))
             return 1
         return _handle_headless_mode(args)
-
     logger.info("🐉 Dragon Whisperer starting...")
     logger.debug("🔍 Checking dependencies...")
-
     dependency_issue = False
     try:
         PlatformUtils.check_platform_dependencies()
@@ -53599,15 +53414,11 @@ def main() -> int:
             e,
         )
         dependency_issue = True
-
     logger.debug("✅ Dependencies OK (fehlende werden über GUI nachinstalliert)")
-
     app = None
     try:
         logger.debug("🖥️ Initializing GUI...")
         app = DragonWhispererGUI()
-
-        # Benutzerdefiniertes Profil laden, falls angegeben
         if args.profile:
             try:
                 profile_path = (
@@ -53628,43 +53439,30 @@ def main() -> int:
                     )
             except Exception as e:
                 logger.warning(f"⚠️ Failed to load profile: {e}")
-
         if args.url:
-
             def _set_url(url: str) -> None:
                 if hasattr(app, "url_entry") and app.url_entry.winfo_exists():
                     app.url_entry.delete(0, "end")
                     app.url_entry.insert(0, url)
                     logger.info(f"📌 URL from command line: {url}")
-
             app._safe_after(500, _set_url, args.url)
-
         if dependency_issue:
-
             def _open_installer() -> None:
                 if hasattr(app, "show_install_dialog") and not app.is_shutting_down():
                     app.show_install_dialog()
-
             app._safe_after(1500, _open_installer)
-
-        # Debug-Informationen ausgeben (nur wenn nicht im Quiet-Mode)
         if debug_level >= 1 and not args.quiet:
             _print_welcome(debug_level, args.quiet)
         if debug_level >= 3:
             print_system_info_debug3()
-
         logger.info("🚀 Starting main loop...")
         app.run()
         logger.info("✅ Application closed normally")
-
-        # Terminal wiederherstellen (Linux/macOS)
         if not IS_WINDOWS:
             try:
                 subprocess.run(["stty", "sane"], check=False, timeout=1)
             except Exception:
                 pass
-
-        # Debug: aktive Threads nach GUI-Close auflisten
         if debug_level >= 1:
             active = threading.enumerate()
             logger.info(
@@ -53674,8 +53472,6 @@ def main() -> int:
             for t in active:
                 if t.is_alive() and t != threading.main_thread():
                     logger.debug("  Non-main thread: %s (daemon=%s)", t.name, t.daemon)
-
-        # Sauberes Beenden – kein sys.exit() nötig, da die mainloop vorbei ist.
         logger.info("Forcing immediate exit with sys.exit(0)")
         sys.exit(0)
         return 0
@@ -53699,7 +53495,6 @@ def main() -> int:
         logger.debug("🧹 Final minimal cleanup...")
         if app is not None:
             try:
-                # Bereits vorhandene Aufräumlogik nutzen
                 if hasattr(app, "_safe_stop_all_processes"):
                     app._safe_stop_all_processes()
                 if app.app_context:
