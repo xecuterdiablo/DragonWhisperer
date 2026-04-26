@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """🐉 THE DRAGON WHISPERER (v4.0) - Ultimate Stream Transcription & Translation"""
-
 from __future__ import annotations
-
-# 1. STANDARDBIBLIOTHEK
 import atexit
 import gc
 import glob
@@ -59,8 +56,6 @@ from typing import (
     get_origin,
     get_args,
 )
-
-# urllib3 MONKEY-PATCH (maximal robust für Kompatibilität mit urllib3 >= 2.0)
 
 def _filter_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -337,22 +332,18 @@ def unpatch() -> None:
 
     _patch_applied = False
 
-    # Debug-Ausgabe mit Schutz gegen undefinierte Variablen
     try:
         if DEBUG_LEVEL >= 4:
             log_debug("monkey", "urllib3 monkey-patch removed")
     except NameError:
         pass
 
-
-# Automatische Anwendung beim Import dieses Moduls
 apply()
 
 warnings.filterwarnings(
     "ignore", category=UserWarning, module="multiprocessing.resource_tracker"
 )
 
-# 2. DRITTBIBLIOTHEKEN
 try:
     import requests
 except ImportError:
@@ -367,7 +358,6 @@ except ImportError:
     GUI_AVAILABLE = False
     tk = ttk = scrolledtext = filedialog = None
 
-# 4. KOMMANDOZEILEN-PARAMETER (DEBUG, QUIET)
 DEBUG_LEVEL = 0
 DEBUG_COMPONENTS = []
 
@@ -383,7 +373,6 @@ for arg in sys.argv:
 
 QUIET_MODE = "--quiet" in sys.argv or "-q" in sys.argv
 
-# 5. LOGGING KONFIGURATION
 logging.basicConfig(
     level=logging.WARNING,
     format="[%(asctime)s.%(msecs)03d] [%(levelname)s] %(message)s",
@@ -407,7 +396,6 @@ if QUIET_MODE:
 warnings.filterwarnings("ignore", message=".*pynvml.*")
 warnings.filterwarnings("ignore", message=".*The pynvml package is deprecated.*")
 
-# 6. PLATTFORMERKENNUNG & UMWELTVARIABLEN
 SYSTEM = platform.system()
 IS_WINDOWS = SYSTEM == "Windows"
 IS_MACOS = SYSTEM == "Darwin"
@@ -570,7 +558,7 @@ class TranscriptionError(Exception):
 
 BASE_LANGUAGES: Dict[str, str] = {
     "auto": "Automatisch",
-    # --------------------------- Europäische Sprachen ---------------------------
+    # --------------------------- Europäische Sprachen
     "de": "Deutsch",
     "en": "Englisch",
     "fr": "Französisch",
@@ -612,7 +600,7 @@ BASE_LANGUAGES: Dict[str, str] = {
     "ga": "Irisch",
     "gd": "Schottisch-Gälisch",
     "mt": "Maltesisch",
-    # --------------------------- Asiatische Sprachen ---------------------------
+    # --------------------------- Asiatische Sprachen
     "ja": "Japanisch",
     "zh": "Chinesisch (vereinfacht)",
     "yue": "Kantonesisch",
@@ -640,7 +628,7 @@ BASE_LANGUAGES: Dict[str, str] = {
     "hi": "Hindi",
     "as": "Assamesisch",
     "or": "Oriya",
-    # --------------------------- Naher Osten / Afrika ---------------------------
+    # --------------------------- Naher Osten / Afrika
     "ar": "Arabisch",
     "fa": "Persisch",
     "he": "Hebräisch",
@@ -756,10 +744,6 @@ def is_valid_source_language(display_name: str) -> bool:
     """
     return display_name in DISPLAY_NAME_TO_CODE
 
-
-# -----------------------------------------------------------------------------
-# 8.6 Vordefinierte Gruppen für die GUI (Common, Asian, More)
-# -----------------------------------------------------------------------------
 COMMON_LANGUAGE_CODES: List[str] = [
     "de",
     "en",
@@ -785,7 +769,6 @@ ASIAN_LANGUAGE_CODES: List[str] = [
     "tr",
 ]
 
-# Für bessere Performance: Vorberechnete Namenslisten (nur einmal initialisiert)
 _COMMON_NAMES: Optional[List[str]] = None
 _ASIAN_NAMES: Optional[List[str]] = None
 _OTHER_NAMES: Optional[List[str]] = None
@@ -823,7 +806,6 @@ def get_other_language_names() -> List[str]:
     global _OTHER_NAMES
     if _OTHER_NAMES is None:
         excluded = set(COMMON_LANGUAGE_CODES + ASIAN_LANGUAGE_CODES)
-        # SORTED_LANGUAGES enthält Tupel (name, code)
         _OTHER_NAMES = [
             name
             for name, code in SORTED_LANGUAGES
@@ -863,9 +845,6 @@ class EventBus:
         if debug:
             logger.debug("EventBus initialisiert (debug=True)")
 
-    # -------------------------------------------------------------------------
-    # Scheduler
-    # -------------------------------------------------------------------------
     def set_scheduler(self, scheduler: Callable[[Callable, int], None]) -> None:
         """
         Setzt einen Scheduler, der alle Callbacks in den Hauptthread verschiebt.
@@ -876,9 +855,6 @@ class EventBus:
         if self._debug:
             logger.debug("EventBus: Scheduler gesetzt")
 
-    # -------------------------------------------------------------------------
-    # Abonnements
-    # -------------------------------------------------------------------------
     def subscribe(self, event_type: str, callback: Callable[[Any], None]) -> None:
         """
         Abonniert einen exakten Event-Typ.
@@ -895,10 +871,6 @@ class EventBus:
     def subscribe_pattern(self, pattern: str, callback: Callable[[Any], None]) -> None:
         """
         Abonniert ein Muster (Wildcard) mit fnmatch.
-
-        Args:
-            pattern: Muster wie 'model_*' oder 'audio_*'.
-            callback: Callback, der bei passendem Event-Typ aufgerufen wird.
         """
         with self._lock:
             self._patterns.append((pattern, callback))
@@ -908,13 +880,6 @@ class EventBus:
     def unsubscribe(self, event_type: str, callback: Callable) -> bool:
         """
         Entfernt ein exaktes Abonnement.
-
-        Args:
-            event_type: Event-Typ.
-            callback: Die zu entfernende Callback-Funktion.
-
-        Returns:
-            True, wenn das Abonnement existierte und entfernt wurde, sonst False.
         """
         with self._lock:
             if event_type not in self._exact:
@@ -932,13 +897,6 @@ class EventBus:
     def unsubscribe_pattern(self, pattern: str, callback: Callable) -> bool:
         """
         Entfernt ein Muster-Abonnement.
-
-        Args:
-            pattern: Das Muster.
-            callback: Die zu entfernende Callback-Funktion.
-
-        Returns:
-            True, wenn das Abonnement existierte und entfernt wurde, sonst False.
         """
         with self._lock:
             for i, (p, cb) in enumerate(self._patterns):
@@ -954,10 +912,6 @@ class EventBus:
         """
         Sendet ein Event an alle Abonnenten.
         Callbacks werden ggf. über den Scheduler im Hauptthread ausgeführt.
-
-        Args:
-            event_type: Der Event-Typ.
-            data: Beliebige Daten, die an die Callbacks übergeben werden.
         """
         if self._metrics_enabled:
             with self._lock:
@@ -1005,10 +959,6 @@ class EventBus:
         """
         Kontext-Manager für temporäre Subscriptions.
         Das Abonnement wird am Ende des Blocks automatisch entfernt.
-
-        Beispiel:
-            with event_bus.subscription_context("progress", on_progress):
-                # hier werden Events empfangen
         """
         self.subscribe(event_type, callback)
         try:
@@ -1145,7 +1095,6 @@ class PeriodicTaskMixin:
     def is_running(self) -> bool:
         return not self._stop_event.is_set() and self._thread.is_alive()
 
-
 class BaseDialog:
     """
     Optimierte Basisklasse für alle modalen Dialoge in Dragon Whisperer.
@@ -1211,7 +1160,6 @@ class BaseDialog:
         if hasattr(parent, "_open_dialogs"):
             parent._open_dialogs.append(self.dialog)
 
-        # Unterklassen sollen hier ihre UI aufbauen
         self.build_ui()
 
         if DEBUG_LEVEL >= 3:
@@ -1873,7 +1821,6 @@ class PastelTheme:
 
 class TokyoNightTheme:
     """Sanftes, dunkles Theme mit gutem Kontrast, ideal für die Nacht."""
-
     BG_PRIMARY = "#1a1b26"
     BG_SECONDARY = "#16161e"
     BG_TERTIARY = "#24283b"
@@ -2044,7 +1991,6 @@ class DraculaTheme:
 
 class NordTheme:
     """Nord Theme – arktische, bläulich-kühle Farbpalette."""
-
     BG_PRIMARY = "#2e3440"
     BG_SECONDARY = "#3b4252"
     BG_TERTIARY = "#434c5e"
@@ -2167,7 +2113,6 @@ class GruvboxDarkTheme:
 
 class OneDarkTheme:
     """One Dark – Atom-Editor Standard, klares modernes Dark Theme."""
-
     BG_PRIMARY = "#282c34"
     BG_SECONDARY = "#21252b"
     BG_TERTIARY = "#3e4452"
@@ -2245,7 +2190,6 @@ class MonokaiTheme:
     STATUS_BAR_BG = "#3e3d32"
     STATUS_BAR_FG = "#75715e"
     STATUS_BAR_ACCENT = "#f92672"
-
 
 CURRENT_THEME = DarkTheme()
 
@@ -6123,13 +6067,6 @@ class CacheManager:
     ) -> Optional[TranscriptionResult]:
         """
         Ruft eine Transkription aus dem Cache ab (falls vorhanden).
-
-        Args:
-            text: Der Text, nach dem gesucht wird.
-            language: Die Sprache des Textes.
-
-        Returns:
-            Das zwischengespeicherte TranscriptionResult oder None.
         """
         key = hashlib.sha256(f"{text}:{language}".encode()).hexdigest()
         result = self.transcription_cache.get(key)
@@ -6147,12 +6084,6 @@ class CacheManager:
     def cache_transcription(self, result: TranscriptionResult) -> str:
         """
         Speichert eine Transkription im Cache.
-
-        Args:
-            result: Das zu speichernde TranscriptionResult.
-
-        Returns:
-            Der generierte Cache‑Schlüssel (z. B. für spätere Referenzen).
         """
         key = hashlib.sha256(f"{result.text}:{result.language}".encode()).hexdigest()
         self.transcription_cache.put(key, result)
@@ -6165,13 +6096,6 @@ class CacheManager:
     ) -> Optional[TranslationResult]:
         """
         Ruft eine Übersetzung aus dem Cache ab (falls vorhanden).
-
-        Args:
-            original: Der Originaltext.
-            target_lang: Die Zielsprache.
-
-        Returns:
-            Das zwischengespeicherte TranslationResult oder None.
         """
         key = hashlib.sha256((original + target_lang).encode()).hexdigest()
         result = self.translation_cache.get(key)
@@ -24194,15 +24118,11 @@ class SummarizeDialog(BaseDialog):
         self._chunk_executor: Optional[ThreadPoolExecutor] = None
         self._chunk_semaphore = threading.BoundedSemaphore(value=2)
         self._worker_thread: Optional[threading.Thread] = None
-
-        # Flag für manuelle Prompt‑Bearbeitung
         self._prompt_manually_edited = False
 
-        # Vorkompilierte Blacklist-Patterns
         self._blacklist_patterns: List[re.Pattern] = []
         self._prepare_blacklist_patterns()
 
-        # Backup‑Datei für Notfall‑Wiederherstellung
         self._backup_file = os.path.join(
             tempfile.gettempdir(), "dragon_summary_backup.txt"
         )
@@ -34884,7 +34804,6 @@ class DragonWhispererGUI:
                 if DEBUG_LEVEL >= 3:
                     log_debug("gui", f"Failed to set Windows DPI awareness: {e}")
 
-        # 9. Einstellungen laden (mit Fehlertoleranz)
         try:
             self.settings = AppSettings.load_from_file()
             if not self.settings.last_url:
@@ -34934,7 +34853,6 @@ class DragonWhispererGUI:
         except (tk.TclError, RuntimeError) as e:
             raise RuntimeError(f"Tkinter Fehler: {e}") from e
 
-        # --- 🔧 Verbesserung 1: Tkinter-Callback-Exception-Handler ---
         def _tk_exception_handler(exc_type, exc_val, exc_tb):
             """Fängt Tkinter-Callback-Fehler ab und verhindert das Standard-Popup."""
             import traceback
@@ -34949,9 +34867,6 @@ class DragonWhispererGUI:
                 pass
 
         self.root.report_callback_exception = _tk_exception_handler
-        # ----------------------------------------------------------------
-
-        # Event-Bus mit Scheduler verbinden (GUI-Thread)
         self.event_bus.set_scheduler(
             lambda delay, cb, *args: self.root.after(delay, cb, *args)
         )
@@ -34971,7 +34886,6 @@ class DragonWhispererGUI:
             else "🐉 Dragon Whisperer (DEMO MODE)"
         )
 
-        # 13. Queues für GUI-Updates (mit Fallback auf DummyQueue)
         try:
             self.gui_queue: queue.Queue = queue.Queue(maxsize=200)
         except Exception as e:
@@ -34988,7 +34902,6 @@ class DragonWhispererGUI:
             )
             self._text_update_queue = DummyQueue(maxsize=150)
 
-        # 14. TTS-Warteschlange und Worker-Thread (mit robuster Fehlerbehandlung)
         try:
             self._tts_queue = queue.Queue(maxsize=50)
         except Exception as e:
@@ -35010,21 +34923,17 @@ class DragonWhispererGUI:
             self._tts_worker_running = False
             self._tts_worker_thread = None
 
-        # 15. Performance-Monitor
         self.performance_monitor = SimplePerformanceTracker()
         self._last_text_queue_size = 0
 
-        # 16. StreamInfoExtractor
         self.stream_info_extractor = StreamInfoExtractor()
         self.stream_info_extractor.use_browser_cookies = (
             self.settings.use_browser_cookies
         )
 
-        # 17. Event-Bus Abonnements registrieren
         self._register_event_bus_subscriptions()
         self.event_bus.subscribe("gpu_status_changed", self._on_gpu_status_changed)
 
-        # 18. Controller erstellen (kritisch – aber Fehler abfangen)
         try:
             self.controller = WhisperController(gui_ref=self, event_bus=self.event_bus)
             if DEBUG_LEVEL >= 3:
@@ -35034,11 +34943,9 @@ class DragonWhispererGUI:
             self._show_error_and_exit(f"Controller Fehler: {e}")
             return
 
-        # 19. Manager und Engines initialisieren (alle mit try/except)
         self._init_managers()
         self._init_engines()
 
-        # Automatische Modellauswahl (mit robuster VRAM‑Ermittlung)
         try:
             if self.settings.default_model is None:
                 free_vram = self._get_free_vram_gb()
@@ -35102,10 +35009,7 @@ class DragonWhispererGUI:
             if hasattr(self, "model_var") and self.model_var is not None:
                 self.model_var.set("base")
 
-        # 21. Präzisionsoptimierungen
         self._apply_precision_optimizations()
-
-        # 22. GUI aufbauen (Layout & StatusBar)
         self.layout = WhisperLayoutManager(gui_ref=self)
         self.queue_manager = QueueManager(self)
 
@@ -35167,7 +35071,6 @@ class DragonWhispererGUI:
 
             self._safe_after(1500, _open_installer)
 
-    # Initialisierungshilfen (private)
     def _set_initial_url(self) -> None:
         """Setzt die initiale URL im Eingabefeld, falls vorhanden."""
         if hasattr(self, "url_entry") and self.url_entry.winfo_exists():
@@ -35783,9 +35686,6 @@ class DragonWhispererGUI:
         """
         Ultimative Verarbeitung eines Transkriptionsergebnisses.
         """
-        # -----------------------------------------------------------------
-        # 1. Eingangsvalidierung
-        # -----------------------------------------------------------------
         if not result or not result.text:
             if DEBUG_LEVEL >= 4:
                 log_debug("gui", "handle_transcription: empty result or text")
@@ -35801,9 +35701,6 @@ class DragonWhispererGUI:
         confidence = getattr(result, "confidence", 0.0)
         video_timestamp = getattr(result, "start", None)
 
-        # -----------------------------------------------------------------
-        # 2. Warnung bei unsicherer Spracherkennung (gedrosselt)
-        # -----------------------------------------------------------------
         if lang != "unknown" and confidence < 0.3 and self.is_processing:
             now = time.time()
             if now - self._last_low_conf_warning_time > 60:
@@ -35816,26 +35713,17 @@ class DragonWhispererGUI:
                     f"⚠️ Unsichere Spracherkennung ({lang}). Bitte Quellsprache manuell einstellen.",
                 )
 
-        # -----------------------------------------------------------------
-        # 3. Duplikaterkennung
-        # -----------------------------------------------------------------
         with self._duplicate_lock:
             if current_text == self._last_transcription_text:
                 if DEBUG_LEVEL >= 3:
                     log_debug("gui", "handle_transcription: duplicate text ignored")
                 return
 
-        # -----------------------------------------------------------------
-        # 4. Blacklist‑Filter
-        # -----------------------------------------------------------------
         if self._apply_blacklist_filter(current_text, lang):
             if DEBUG_LEVEL >= 3:
                 log_debug("gui", "handle_transcription: blacklisted text ignored")
             return
 
-        # -----------------------------------------------------------------
-        # 5. Statistiken & Auto‑TTS
-        # -----------------------------------------------------------------
         self._last_transcription_time = time.time()
         self._schedule_tts(current_text, "transcript")
         self.performance_monitor.log_transcription()
@@ -35843,9 +35731,6 @@ class DragonWhispererGUI:
         with self._history_lock:
             self.transcript_history.append(result)
 
-        # -----------------------------------------------------------------
-        # 6. Untertitelmodus: unveränderte Einzelausgabe
-        # -----------------------------------------------------------------
         if self.subtitle_mode:
             timestamp = (
                 self._format_timestamp(video_timestamp)
@@ -35869,10 +35754,8 @@ class DragonWhispererGUI:
         MERGE_MIN_CONFIDENCE = 0.4  # Confidence‑Schwelle für Zusammenführung
 
         with self._duplicate_lock:
-            # Aktuelle Lücke zum vorherigen Segment berechnen
             time_gap = (video_timestamp or 0) - self._last_segment_end
 
-            # Prüfen, ob ein gepuffertes Segment existiert und die Bedingungen für eine Zusammenführung erfüllt sind
             if (
                 self._pending_transcript_segment is not None
                 and time_gap < MERGE_MAX_TIME_GAP
@@ -35929,12 +35812,7 @@ class DragonWhispererGUI:
                     self._pending_transcript_segment = None
                     # Rekursion für das gepufferte Segment
                     self.handle_transcription(flush_result)
-                    # Danach wird das aktuelle Segment normal verarbeitet (kein return)
 
-            # -----------------------------------------------------------------
-            # Normale Verarbeitung (keine Zusammenführung oder nach Flush)
-            # -----------------------------------------------------------------
-            # Bestimme, ob ein neuer Block begonnen werden muss
             start_new_block = (
                 not self._last_output_text or self._last_output_text[-1] in ".!?。！？"
             )
@@ -35967,16 +35845,10 @@ class DragonWhispererGUI:
         if DEBUG_LEVEL >= 4:
             log_debug("gui", f"handle_transcription: formatted='{formatted[:100]}...'")
 
-        # -----------------------------------------------------------------
-        # 7. Thread‑sichere Übergabe an die Text‑Queue
-        # -----------------------------------------------------------------
         self.queue_manager.safe_put(
             self.QUEUE_TYPE_TEXT, (self.UPDATE_TYPE_TRANSCRIPT, formatted)
         )
 
-    # ---------------------------------------------------------------------
-    # Hilfsmethode: Satzkontext erkennen
-    # ---------------------------------------------------------------------
     def _is_new_sentence_context(self) -> bool:
         """
         Gibt zurück, ob der zuletzt ausgegebene Text mit einem Satzendzeichen endete.
@@ -36039,7 +35911,6 @@ class DragonWhispererGUI:
 
         if self.is_shutting_down():
             logger.warning("🌐 GUI is shutting down – will attempt direct insert")
-            # Wir versuchen dennoch, den Text direkt anzuzeigen (Fallback)
             shutdown_active = True
         else:
             shutdown_active = False
@@ -36130,14 +36001,8 @@ class DragonWhispererGUI:
         if DEBUG_LEVEL >= 3:
             log_debug("gui", f"handle_translation (normal): '{formatted[:100]}...'")
 
-        # -----------------------------------------------------------------
-        # 7. Einfügen in Queue oder direkt
-        # -----------------------------------------------------------------
         self._insert_translation_text(formatted, shutdown_active)
 
-    # ---------------------------------------------------------------------
-    # Hilfsmethode: Text in GUI einfügen (Queue oder Direkt-Fallback)
-    # ---------------------------------------------------------------------
     def _insert_translation_text(
         self, formatted: str, force_direct: bool = False
     ) -> None:
@@ -36146,10 +36011,6 @@ class DragonWhispererGUI:
         Bevorzugt den QueueManager; falls dieser nicht verfügbar ist oder
         force_direct=True gesetzt ist, wird der Text direkt per root.after
         in das Übersetzungs‑Widget geschrieben.
-
-        Args:
-            formatted: Der formatierte Text, der eingefügt werden soll.
-            force_direct: Wenn True, wird der QueueManager umgangen.
         """
         # Prüfen, ob QueueManager verfügbar ist
         qm_available = (
@@ -36249,9 +36110,6 @@ class DragonWhispererGUI:
         """
         Wird aufgerufen, wenn die TranscriptionEngine das aktive Modell wechselt.
         Aktualisiert die GUI-ComboBox, die Statusleiste und den VRAM-Button.
-
-        Args:
-            data: Dictionary mit 'requested', 'actual', 'backend', 'fallback_occurred'
         """
         actual = data.get("actual")
         requested = data.get("requested")
@@ -36583,8 +36441,6 @@ class DragonWhispererGUI:
                         log_debug("gui", "Stream info GUI reset to 'No active stream'")
                     return
 
-                # Gültige Stream-Informationen anzeigen
-                # Titel (auf 80 Zeichen gekürzt)
                 title = info.title
                 if len(title) > 80:
                     title = title[:77] + "..."
@@ -37196,9 +37052,6 @@ class DragonWhispererGUI:
         """
         lines = ["🐉 DRAGON WHISPERER STATISTICS", "=" * 70, ""]
 
-        # -----------------------------------------------------------------
-        # SESSION OVERVIEW
-        # -----------------------------------------------------------------
         lines.append("📊 SESSION OVERVIEW")
         lines.append(f"   Runtime: {perf_stats['uptime_minutes']:.1f} minutes")
         lines.append(f"   Platform: {SYSTEM} {'ARM' if IS_ARM else 'x86'}")
@@ -37208,9 +37061,6 @@ class DragonWhispererGUI:
         lines.append(f"   Translation: {'ON' if self.translate_active else 'OFF'}")
         lines.append("")
 
-        # -----------------------------------------------------------------
-        # HARDWARE DETAILS (NEU: von TranscriptionEngine)
-        # -----------------------------------------------------------------
         hw = None
         if (
             hasattr(self, "transcription_engine")
@@ -37381,9 +37231,6 @@ class DragonWhispererGUI:
         """
         Setzt den Fortschrittsbalken und das zugehörige Label in der GUI zurück.
         """
-        # -----------------------------------------------------------------
-        # 1. Prüfen, ob die benötigten Widgets existieren
-        # -----------------------------------------------------------------
         if not hasattr(self, "progress_bar") or self.progress_bar is None:
             if DEBUG_LEVEL >= 4:
                 log_debug("gui", "_reset_progress: progress_bar nicht vorhanden")
@@ -37394,9 +37241,6 @@ class DragonWhispererGUI:
             # Nur der Balken wird zurückgesetzt, Label ignorieren wir
             pass
 
-        # -----------------------------------------------------------------
-        # 2. Fortschrittsbalken zurücksetzen
-        # -----------------------------------------------------------------
         try:
             if self.progress_bar.winfo_exists():
                 # Zuerst die Animation stoppen (falls aktiv)
@@ -37457,9 +37301,6 @@ class DragonWhispererGUI:
                 log_debug("tts_gui", "speak_current_text: TTS-Manager fehlt")
             return
 
-        # -----------------------------------------------------------------
-        # 2. Prüfen, ob bereits eine TTS-Ausgabe läuft – falls ja, stoppen
-        # -----------------------------------------------------------------
         if self._tts_active:
             if DEBUG_LEVEL >= 3:
                 log_debug("tts_gui", "speak_current_text: TTS bereits aktiv – stoppe")
@@ -37469,9 +37310,6 @@ class DragonWhispererGUI:
             self.update_status("⏹️ Sprachausgabe gestoppt")
             return
 
-        # -----------------------------------------------------------------
-        # 3. Text aus dem fokussierten Widget extrahieren
-        # -----------------------------------------------------------------
         try:
             focused = self.root.focus_get()
         except Exception as e:
@@ -37505,9 +37343,6 @@ class DragonWhispererGUI:
             self.update_status("❌ Textfeld existiert nicht mehr")
             return
 
-        # -----------------------------------------------------------------
-        # 4. Text extrahieren (Auswahl oder gesamter Inhalt)
-        # -----------------------------------------------------------------
         try:
             # Prüfen, ob eine Auswahl existiert
             if widget.tag_ranges(tk.SEL):
@@ -37536,9 +37371,6 @@ class DragonWhispererGUI:
             self.update_status("❌ Fehler beim Auslesen des Textes")
             return
 
-        # -----------------------------------------------------------------
-        # 5. Text bereinigen (Zeitstempel und Sprachkürzel entfernen)
-        # -----------------------------------------------------------------
         if not text or not text.strip():
             self.update_status("❌ Kein Text zum Vorlesen")
             if DEBUG_LEVEL >= 3:
@@ -37580,7 +37412,6 @@ class DragonWhispererGUI:
         self._update_tts_button_state()
         self.update_status(f"🔊 Lese {source_description} vor...")
 
-        # Callback für das Ende der Sprachausgabe
         def on_tts_finished(success: bool, message: str) -> None:
             self._tts_active = False
             self._safe_gui_update(self._update_tts_button_state)
@@ -37627,9 +37458,6 @@ class DragonWhispererGUI:
         Bereinigt einen Text für die Sprachausgabe, indem Zeitstempel und
         Sprachkürzel entfernt werden.
         """
-        # -----------------------------------------------------------------
-        # 1. Eingabevalidierung und früher Ausstieg
-        # -----------------------------------------------------------------
         if not text:
             if DEBUG_LEVEL >= 4:
                 log_debug("tts", "_clean_tts_text: Leerer Text – nichts zu bereinigen")
@@ -37644,9 +37472,6 @@ class DragonWhispererGUI:
         original = text
         original_len = len(original)
 
-        # 2. Zeitstempel mit Sprachkürzel entfernen
-        #    Format: [HH:MM:SS] [XYZ] am Zeilenanfang
-
         text = re.sub(
             r"^\[\d{2}:\d{2}:\d{2}(?:\.\d{3})?\]\s*\[[A-Za-z]{2,3}\]\s*",
             "",
@@ -37660,14 +37485,11 @@ class DragonWhispererGUI:
             r"^\[\d{2}:\d{2}:\d{2}(?:\.\d{3})?\]\s*", "", text, flags=re.MULTILINE
         )
 
-        # 4. Mehrfache Leerzeichen und Zeilenumbrüche normalisieren
-
         text = re.sub(r"\s+", " ", text)
 
         cleaned = text.strip()
         cleaned_len = len(cleaned)
 
-        # 5. Debug-Ausgabe bei Änderungen
 
         if DEBUG_LEVEL >= 3 and original != cleaned:
             # Bei sehr hohem Debug-Level mehr Text anzeigen
@@ -37896,8 +37718,6 @@ class DragonWhispererGUI:
 
         self.advanced_settings.chunk_duration = new_duration
 
-        # 5. AudioProcessor synchronisieren (falls vorhanden)
-
         if hasattr(self, "audio_processor") and self.audio_processor is not None:
             try:
                 # Korrigierter Zugriff: über settings.config
@@ -37916,8 +37736,6 @@ class DragonWhispererGUI:
                     log_debug(
                         "gui", f"AudioProcessor Synchronisation fehlgeschlagen: {e}"
                     )
-
-        # 6. GUI-Elemente aktualisieren
 
         self._update_live_mode_button()
 
@@ -37949,8 +37767,6 @@ class DragonWhispererGUI:
         """
         Aktualisiert die Beschriftung des Live‑Mode‑Buttons mit der aktuellen
         Chunk‑Dauer. Thread‑sicher durch Bindung des Werts an das Lambda.
-
-        Die Methode ist idempotent und kann aus beliebigen Threads aufgerufen werden.
         """
         if not hasattr(self, "live_mode_btn") or self.live_mode_btn is None:
             if DEBUG_LEVEL >= 3:
@@ -38013,18 +37829,7 @@ class DragonWhispererGUI:
     def _schedule_tts(self, text: str, source: str) -> None:
         """
         Plant eine TTS-Ausgabe für den übergebenen Text, sofern Auto‑TTS aktiviert ist.
-
-        Diese Methode wird von den Transkriptions- und Übersetzungs-Callbacks
-        aufgerufen, wenn ein neuer vollständiger Satz erkannt wurde. Sie prüft,
-        ob Auto‑TTS für die angegebene Quelle (`transcript` oder `translation`)
-        aktiviert ist, und reiht den Text **direkt und ohne Timer-Debouncing**
-        in die interne Warteschlange (`_tts_queue`) ein. Ein separater
-        Worker‑Thread (`_tts_worker`) entnimmt die Texte sequenziell und
-        übergibt sie an den TTS-Manager.
         """
-        # -----------------------------------------------------------------
-        # 1. Grundlegende Verfügbarkeitsprüfungen
-        # -----------------------------------------------------------------
         if self.is_shutting_down():
             if DEBUG_LEVEL >= 3:
                 log_debug("tts", "_schedule_tts: GUI im Shutdown – ignoriert")
@@ -38040,9 +37845,6 @@ class DragonWhispererGUI:
                 log_debug("tts", "_schedule_tts: TTS-Queue nicht initialisiert")
             return
 
-        # -----------------------------------------------------------------
-        # 2. Prüfen, ob Auto‑TTS für die Quelle aktiviert ist
-        # -----------------------------------------------------------------
         if source == "transcript":
             if not self.auto_tts_transcript_var.get():
                 if DEBUG_LEVEL >= 4:
@@ -38061,9 +37863,6 @@ class DragonWhispererGUI:
             logger.warning(f"_schedule_tts: Unbekannte Quelle '{source}' – ignoriert")
             return
 
-        # -----------------------------------------------------------------
-        # 3. Text vorbereiten (leere oder zu kurze Texte ignorieren)
-        # -----------------------------------------------------------------
         if not text or not text.strip():
             if DEBUG_LEVEL >= 4:
                 log_debug("tts", f"_schedule_tts: Leerer Text für {source} – ignoriert")
@@ -38082,9 +37881,6 @@ class DragonWhispererGUI:
                     f"_schedule_tts: Text von {original_len} auf {len(text)} Zeichen gekürzt",
                 )
 
-        # -----------------------------------------------------------------
-        # 4. Text in die Warteschlange einreihen (nicht blockierend)
-        # -----------------------------------------------------------------
         try:
             # Verwende put_nowait, falls verfügbar (Standard-Queue)
             if hasattr(self._tts_queue, "put_nowait"):
@@ -38109,9 +37905,6 @@ class DragonWhispererGUI:
                 log_debug("tts", f"_schedule_tts: Exception: {type(e).__name__}: {e}")
             return
 
-        # -----------------------------------------------------------------
-        # 5. Erfolgreiche Planung protokollieren
-        # -----------------------------------------------------------------
         if DEBUG_LEVEL >= 3:
             try:
                 qsize = self._tts_queue.qsize()
@@ -38272,9 +38065,6 @@ class DragonWhispererGUI:
         """
         Öffnet den Installationsdialog für fehlende Pakete.
         """
-        # -----------------------------------------------------------------
-        # 1. Shutdown-Prüfung
-        # -----------------------------------------------------------------
         if self.is_shutting_down():
             if DEBUG_LEVEL >= 3:
                 log_debug(
@@ -38282,9 +38072,6 @@ class DragonWhispererGUI:
                 )
             return
 
-        # -----------------------------------------------------------------
-        # 2. Prüfen, ob bereits ein Dialog existiert und noch anzeigbar ist
-        # -----------------------------------------------------------------
         if hasattr(self, "_install_dialog") and self._install_dialog is not None:
             dlg = self._install_dialog
             try:
@@ -38310,9 +38097,6 @@ class DragonWhispererGUI:
                 logger.warning(f"Fehler beim Prüfen des vorhandenen Dialogs: {e}")
                 self._install_dialog = None  # Sicherer Reset
 
-        # -----------------------------------------------------------------
-        # 3. Neuen Dialog erstellen (mit Fehlerbehandlung)
-        # -----------------------------------------------------------------
         try:
             dlg = InstallDependencyDialog(self.root, self)
         except Exception as e:
@@ -38324,9 +38108,6 @@ class DragonWhispererGUI:
 
         self._install_dialog = dlg
 
-        # -----------------------------------------------------------------
-        # 4. Callback für das Schließen des Dialogs registrieren
-        # -----------------------------------------------------------------
         def on_destroy():
             """Setzt die Referenz zurück, sobald das Fenster geschlossen wird."""
             if DEBUG_LEVEL >= 3:
@@ -38338,8 +38119,6 @@ class DragonWhispererGUI:
         # Protokolliere sowohl den Fenster-Close als auch den programmatischen close()
         dlg.dialog.protocol("WM_DELETE_WINDOW", lambda: [on_destroy(), dlg.close()])
 
-        # Zusätzlich die originale close-Methode von BaseDialog überschreiben,
-        # um sicherzustellen, dass die Referenz auch bei Button-Klick gelöscht wird.
         original_close = dlg.close
 
         def _close_wrapper():
@@ -38476,9 +38255,6 @@ class DragonWhispererGUI:
     ) -> Optional[BaseTranslationEngine]:
         return self._create_engine_by_name(engine_name, target_lang, for_dialog=True)
 
-    # ------------------------------------------------------------------------
-    # System‑ und Lebenszyklus
-    # ------------------------------------------------------------------------
     def _start_system_monitoring(self) -> None:
         def monitor():
             if self.is_shutting_down() or not self.root.winfo_exists():
@@ -38500,8 +38276,6 @@ class DragonWhispererGUI:
         try:
             import psutil
 
-            # cpu_percent mit interval=None blockiert nicht, sondern liefert
-            # den Wert seit dem letzten Aufruf (oder 0.0 beim ersten).
             cpu = psutil.cpu_percent(interval=None)
             mem = psutil.virtual_memory()
             ram_used = mem.used / (1024**3)
@@ -38837,16 +38611,7 @@ class DragonWhispererGUI:
     def _direct_shutdown(self) -> None:
         """
         Führt einen direkten, garantierten Shutdown der Anwendung durch.
-
-        Diese Methode wird aufgerufen, wenn der Benutzer das Programm über den
-        Exit‑Button oder das Bestätigungsdialogfeld beendet. Sie stellt sicher,
-        dass alle Ressourcen freigegeben, Einstellungen gespeichert und das
-        Hauptfenster zerstört werden – **selbst dann, wenn während der Bereinigung
-        ein Fehler auftritt**.
         """
-        # ---------------------------------------------------------------------
-        # 1. Shutdown-Flag setzen (weitere GUI-Updates unterbinden)
-        # ---------------------------------------------------------------------
         with self._shutdown_lock:
             if self._shutting_down:
                 log_debug("gui", "_direct_shutdown: Bereits im Shutdown – kehre zurück")
@@ -38856,9 +38621,6 @@ class DragonWhispererGUI:
         logger.info("🔧 Führe bestätigten Shutdown durch...")
         shutdown_start = time.perf_counter()
 
-        # ---------------------------------------------------------------------
-        # 2. Einstellungen vollständig speichern
-        # ---------------------------------------------------------------------
         try:
             # 2.1 Aktuelle URL
             if hasattr(self, "url_entry") and self.url_entry is not None:
@@ -38918,9 +38680,6 @@ class DragonWhispererGUI:
             if DEBUG_LEVEL >= 3:
                 log_exception("gui", "Settings save error", e, level="debug")
 
-        # ---------------------------------------------------------------------
-        # 3. Alle offenen Dialogfenster schließen
-        # ---------------------------------------------------------------------
         try:
             for dlg in self._open_dialogs[:]:
                 try:
@@ -38933,20 +38692,13 @@ class DragonWhispererGUI:
         except Exception as e:
             logger.warning(f"⚠️ Fehler beim Schließen der Dialoge: {e}")
 
-        # ---------------------------------------------------------------------
-        # 4. Ressourcenbereinigung durchführen (mit Fehlerbehandlung)
-        # ---------------------------------------------------------------------
         cleanup_success = False
         try:
             self._cleanup_resources(emergency=False)
             cleanup_success = True
         except Exception as e:
             logger.exception(f"💥 Fehler während _cleanup_resources: {e}")
-            # Trotz Fehler weitermachen – GUI muss geschlossen werden
 
-        # ---------------------------------------------------------------------
-        # 5. Tkinter-Hauptschleife beenden und Fenster zerstören (GARANTIERT)
-        # ---------------------------------------------------------------------
         try:
             if (
                 hasattr(self, "root")
@@ -38973,9 +38725,6 @@ class DragonWhispererGUI:
         except Exception as e:
             logger.warning(f"⚠️ Fehler bei root.destroy(): {e}")
 
-        # ---------------------------------------------------------------------
-        # 6. Residuelle Threads und Prozess‑Exit (optimierte Endphase)
-        # ---------------------------------------------------------------------
         shutdown_duration = (time.perf_counter() - shutdown_start) * 1000
         if cleanup_success:
             logger.info(
@@ -38990,8 +38739,6 @@ class DragonWhispererGUI:
             active = [t.name for t in threading.enumerate() if t.is_alive()]
             log_debug("gui", f"Noch aktive Threads nach root.destroy(): {active}")
 
-        # Gnadenfrist für verbliebene Nicht‑Daemon‑Threads (0,5 Sekunden)
-        # In dieser Zeit können sie sich selbst beenden.
         try:
             # Verwende monotonic(), um unabhängig von Systemuhr‑Änderungen zu sein
             deadline = time.monotonic() + 0.5
@@ -39009,9 +38756,6 @@ class DragonWhispererGUI:
         except KeyboardInterrupt:
             pass
 
-        # Falls danach immer noch nicht‑daemontische Threads leben, beenden wir den
-        # Prozess hart mit os._exit(0). Dies umgeht weitere atexit‑Handler und
-        # verhindert ein Hängen des Prozesses.
         remaining_threads = [
             t
             for t in threading.enumerate()
@@ -39026,9 +38770,6 @@ class DragonWhispererGUI:
             os._exit(0)
         else:
             logger.info("Alle Threads beendet – Python-Prozess endet natürlich")
-            # Kein expliziter sys.exit() – der Interpreter beendet sich von selbst,
-            # nachdem die mainloop und alle Threads durch sind.
-            # Dies erlaubt verbleibenden finally‑Blöcken die Ausführung.
 
     def _register_signal_handlers(self) -> None:
         def signal_handler(signum, frame):
@@ -39056,11 +38797,6 @@ class DragonWhispererGUI:
     def _tts_worker(self) -> None:
         """
         Hintergrund-Thread für die sequenzielle Verarbeitung der TTS-Warteschlange.
-
-        Dieser Worker entnimmt Texte aus `_tts_queue` und übergibt sie an den
-        TTS-Manager (`tts_manager`). Er läuft als Daemon-Thread und beendet sich
-        automatisch, wenn das Flag `_tts_worker_running` auf `False` gesetzt wird
-        oder ein Sentinel (`None`) empfangen wird.
         """
 
         # Hilfsfunktion: Sichere Prüfung der GUI‑Existenz
@@ -39085,9 +38821,6 @@ class DragonWhispererGUI:
 
         log_debug("tts", "TTS-Worker-Thread gestartet")
 
-        # ---------------------------------------------------------------------
-        # Hauptschleife
-        # ---------------------------------------------------------------------
         while getattr(self, "_tts_worker_running", True):
             # -----------------------------------------------------------------
             # 1. Element aus der Queue holen (mit kurzem Timeout)
