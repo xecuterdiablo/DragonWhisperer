@@ -3855,8 +3855,6 @@ class PlatformUtils:
                     "  ✓ numpy available", extra={"component": cls._DEBUG_COMPONENT}
                 )
 
-            # ==================== OPTIONALE ABHÄNGIGKEITEN ====================
-            # Whisper-Backend
             if not WHISPER_AVAILABLE:
                 missing_optional.append("whisper (faster-whisper/openai-whisper)")
                 cls._logger.warning(
@@ -4086,7 +4084,6 @@ class PlatformUtils:
                     extra={"component": cls._DEBUG_COMPONENT},
                 )
 
-            # ==================== FEHLERBEHANDLUNG KRITISCHE ABHÄNGIGKEITEN ====================
             if missing_critical:
                 error_msg = f"❌ Fehlende kritische Abhängigkeiten: {', '.join(missing_critical)}\n\n"
                 error_msg += "\n".join(issues) + "\n"
@@ -4115,7 +4112,6 @@ class PlatformUtils:
                 cls._dependencies_checked = False
                 raise RuntimeError(error_msg)
 
-            # ==================== AUSGABE OPTIONALE ABHÄNGIGKEITEN ====================
             if missing_optional:
                 cls._logger.warning(
                     f"⚠️ Optionale Pakete fehlen: {', '.join(missing_optional)}"
@@ -4143,6 +4139,30 @@ class PlatformUtils:
                 "Dependency check completed", extra={"component": cls._DEBUG_COMPONENT}
             )
             return True
+
+    @classmethod
+    def _find_executable(cls, name: str) -> Optional[str]:
+        """
+        Findet eine ausführbare Datei (z.B. 'yt-dlp', 'ffmpeg', 'piper').
+        """
+        exe = shutil.which(name)
+        if exe:
+            if cls._logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"  → {name} gefunden im PATH: {exe}")
+            return exe
+
+        scripts_dir = os.path.dirname(sys.executable)
+        if IS_WINDOWS:
+            candidate = os.path.join(scripts_dir, f"{name}.exe")
+        else:
+            candidate = os.path.join(scripts_dir, name)
+
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            if DEBUG_LEVEL >= 3:
+                log_debug("platform", f"  → {name} gefunden unter {candidate} (venv‑Fallback)")
+            return candidate
+
+        return None
 
     @classmethod
     def setup_platform_environment(cls) -> None:
@@ -21878,7 +21898,6 @@ class TTSManager:
         else:
             return False, f"Unbekannte Engine: {engine}"
 
-    # Piper-Implementierung (primär)
     @staticmethod
     def get_piper_cache_dir() -> str:
         """Plattformübergreifendes Piper‑Cache‑Verzeichnis."""
@@ -21903,11 +21922,9 @@ class TTSManager:
         model_path = cache_dir / f"{voice_name}.onnx"
         json_path = cache_dir / f"{voice_name}.onnx.json"
 
-        # Minimale erwartete Dateigrößen (schützt vor unvollständigen Downloads)
         MIN_MODEL_SIZE = 1024 * 1024
         MIN_JSON_SIZE = 512
 
-        # Hilfsfunktion: Dateivalidierung mit erweiterten Prüfungen
         def is_file_valid(
             path: Path, min_size: int, desc: str
         ) -> Tuple[bool, Optional[str]]:
@@ -21926,7 +21943,6 @@ class TTSManager:
                     f"{desc} ist zu klein ({size} Bytes, erwartet >={min_size}): {path}",
                 )
 
-            # Zusätzliche JSON‑Validierung, falls es sich um die Konfigurationsdatei handelt
             if desc == "Konfigurationsdatei":
                 try:
                     with path.open("r", encoding="utf-8") as f:
@@ -21935,7 +21951,6 @@ class TTSManager:
                     return False, f"{desc} enthält ungültiges JSON: {e}"
             return True, None
 
-        # Hilfsfunktion: Sicheres Löschen mit Wiederholungen (Windows‑kompatibel)
         def safe_unlink(
             path: Path, desc: str, max_retries: int = 3, delay: float = 0.2
         ) -> Optional[str]:
@@ -21973,11 +21988,9 @@ class TTSManager:
                         )
                     time.sleep(delay)
                 except Exception as e:
-                    # Unerwarteter Fehler – sofort abbrechen
                     return f"{desc} konnte nicht gelöscht werden (unerwarteter Fehler): {e}"
             return f"{desc} konnte nach {max_retries} Versuchen nicht gelöscht werden"
 
-        # 1. Beide Dateien validieren
         model_ok, model_err = is_file_valid(model_path, MIN_MODEL_SIZE, "Modelldatei")
         json_ok, json_err = is_file_valid(
             json_path, MIN_JSON_SIZE, "Konfigurationsdatei"
@@ -21990,9 +22003,7 @@ class TTSManager:
                 )
             return True, ""
 
-        # 2. Reparaturlogik
         if not attempt_repair:
-            # Ohne Reparatur geben wir den ersten gefundenen Fehler zurück
             return False, model_err or json_err or "Unbekannter Validierungsfehler"
 
         logger.warning(
@@ -22002,17 +22013,14 @@ class TTSManager:
             f"Lösche beide Dateien, um einen sauberen Zustand herzustellen."
         )
 
-        # 3. Atomares Löschen beider Dateien
         delete_errors = []
 
-        # Zuerst die Modelldatei löschen (größer, daher zuerst)
         err = safe_unlink(model_path, "Modelldatei")
         if err:
             delete_errors.append(err)
         else:
             logger.info(f"  ✓ Modelldatei gelöscht: {model_path}")
 
-        # Dann die Konfigurationsdatei löschen
         err = safe_unlink(json_path, "Konfigurationsdatei")
         if err:
             delete_errors.append(err)
@@ -22035,7 +22043,6 @@ class TTSManager:
             download_success = False
 
         if not download_success:
-            # Fallback: Manueller Hinweis für den Benutzer
             manual_hint = (
                 f"Download der Konfigurationsdatei für '{voice_name}' fehlgeschlagen.\n"
                 f"Bitte laden Sie die Datei manuell herunter:\n"
@@ -22049,7 +22056,6 @@ class TTSManager:
             f"✅ Konfigurationsdatei für '{voice_name}' erfolgreich heruntergeladen."
         )
 
-        # 5. Erneute Validierung (ohne Reparatur, um Endlosschleife zu vermeiden)
         return self._validate_piper_model(voice_name, attempt_repair=False)
 
     def _download_piper_json(self, voice_name: str, cache_dir: str) -> bool:
@@ -22085,38 +22091,68 @@ class TTSManager:
         return False
 
     def _find_piper_executable(self) -> str:
-        exe = shutil.which("piper")
-        if exe:
-            return exe
+        """
+        Sucht zuverlässig nach dem Piper‑Executable (piper / piper.exe).
+        """
+        exe_path = shutil.which("piper")
+        if exe_path:
+            log_debug("tts", f"Piper gefunden (PATH): {exe_path}")
+            return exe_path
 
-        # winget / Standard-Installationsorte
-        candidates = []
-        local = os.environ.get("LOCALAPPDATA", "")
-        if local:
-            # Platzhalter für die dynamische Package‑ID
-            candidates.append(
-                os.path.join(
-                    local,
-                    "Microsoft",
-                    "WinGet",
-                    "Packages",
-                    "GitHub.Piper_*",
-                    "piper.exe",
-                )
-            )
-        prog = os.environ.get("ProgramFiles", "C:\\Program Files")
-        candidates.append(os.path.join(prog, "piper", "piper.exe"))
-        prog86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
-        candidates.append(os.path.join(prog86, "piper", "piper.exe"))
+        if DEBUG_LEVEL >= 3:
+            log_debug("tts", "Piper nicht im System‑PATH, suche in venv‑Scripts...")
 
-        for pattern in candidates:
-            for path in glob.glob(pattern):
+        scripts_dir = os.path.dirname(sys.executable)
+        candidate = os.path.join(scripts_dir, "piper.exe" if IS_WINDOWS else "piper")
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            if DEBUG_LEVEL >= 2:
+                log_debug("tts", f"Piper gefunden (venv‑Scripts): {candidate}")
+            return candidate
+
+        if IS_WINDOWS:
+            local_appdata = os.environ.get("LOCALAPPDATA", "")
+            if local_appdata:
+                base = os.path.join(local_appdata, "Microsoft", "WinGet", "Packages")
+                pattern = os.path.join(base, "GitHub.Piper_*", "piper.exe")
+                matches = glob.glob(pattern)
+                if matches:
+                    best = max(matches, key=os.path.getmtime)
+                    log_debug("tts", f"Piper gefunden (winget): {best}")
+                    return best
+
+            extra_paths = [
+                os.path.expandvars(r"%ProgramFiles%\piper\piper.exe"),
+                os.path.expandvars(r"%ProgramFiles(x86)%\piper\piper.exe"),
+                r"C:\Program Files\piper\piper.exe",
+                r"C:\Program Files (x86)\piper\piper.exe",
+            ]
+            for path in extra_paths:
                 if os.path.isfile(path):
+                    log_debug("tts", f"Piper gefunden (Standardpfad): {path}")
                     return path
-        raise FileNotFoundError(
-            "Piper nicht gefunden. Bitte installieren Sie es und stellen Sie sicher, "
-            "dass es im PATH ist."
+
+        if not IS_WINDOWS:
+            for path in ["/usr/bin/piper", "/usr/local/bin/piper", "/opt/homebrew/bin/piper"]:
+                if os.path.isfile(path) and os.access(path, os.X_OK):
+                    log_debug("tts", f"Piper gefunden (Unix‑Fallback): {path}")
+                    return path
+
+        msg = (
+            "Piper wurde nicht gefunden.\n\n"
+            "Installationsmöglichkeiten:\n"
+            "  • pip install piper-tts          (in das aktuelle venv)\n"
         )
+        if IS_WINDOWS:
+            msg += "  • winget install GitHub.Piper   (systemweit)\n"
+        msg += (
+            "  • Manuell von https://github.com/rhasspy/piper/releases\n\n"
+            "Stellen Sie sicher, dass die ausführbare Datei im PATH liegt oder\n"
+            "im selben Verzeichnis wie python.exe (z. B. innerhalb des venv)."
+        )
+        logger.warning(msg)
+        if DEBUG_LEVEL >= 2:
+            log_debug("tts", f"Fehlermeldung Piper nicht gefunden: {msg[:100]}...")
+        raise FileNotFoundError(msg)
 
     def _prepare_piper_model(self) -> Tuple[str, str]:
         """Bereitet Modell- und Konfigurationspfade vor, lädt ggf. JSON nach."""
