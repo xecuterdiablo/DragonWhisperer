@@ -27059,11 +27059,13 @@ class InstallDependencyDialog(BaseDialog):
     def _install_python_packages(
         self, packages: List[str], upgrade: bool = False
     ) -> bool:
+        """        Installiert oder aktualisiert eine Liste von Python‑Paketen mit pip.        """
         if not packages:
             self._append_output("ℹ️ Keine Python‑Pakete angegeben – überspringe.\n")
             return True
 
         python_exe = sys.executable
+
         self._append_output("🔍 Prüfe pip...\n")
         try:
             subprocess.run(
@@ -27091,9 +27093,53 @@ class InstallDependencyDialog(BaseDialog):
         env["PYTHONUTF8"] = "1"
 
         if DEBUG_LEVEL >= 3:
-            log_debug("install", f"pip install: {' '.join(cmd)}")
+            log_debug("install", f"pip install (1. Versuch): {' '.join(cmd)}")
 
-        return self._run_subprocess(cmd, f"pip install {' '.join(packages)}", env=env)
+        success = self._run_subprocess(cmd, f"pip install {' '.join(packages)}", env=env)
+
+        if not success and IS_WINDOWS:
+            self._append_output(
+                "⚠️ Erster Versuch fehlgeschlagen. "
+                "Zweiter Versuch mit '--only-binary :all:' (ohne Kompilierung) ...\n"
+            )
+            fallback_cmd = [
+                python_exe, "-m", "pip", "install",
+                "--no-cache-dir", "--disable-pip-version-check",
+                "--only-binary", ":all:",
+            ]
+            if upgrade:
+                fallback_cmd.append("--upgrade")
+            if not self.in_venv:
+                fallback_cmd.append("--user")
+            fallback_cmd.extend(packages)
+
+            if DEBUG_LEVEL >= 3:
+                log_debug("install", f"pip install (Binary‑Fallback): {' '.join(fallback_cmd)}")
+
+            success = self._run_subprocess(
+                fallback_cmd,
+                f"pip install {' '.join(packages)} (binary only)",
+                env=env,
+            )
+
+            if not success:
+                self._append_output(
+                    "\n💡 Tipp:\n"
+                    "Einige Pakete benötigen einen C++ Compiler.\n"
+                    "Installieren Sie die Microsoft C++ Build Tools:\n"
+                    "https://visualstudio.microsoft.com/visual-cpp-build-tools/\n"
+                    "Danach das Update erneut ausführen.\n"
+                )
+
+        if not success and not IS_WINDOWS:
+            self._append_output(
+                "\n💡 Tipp:\n"
+                "Stellen Sie sicher, dass ein C++ Compiler (gcc/clang) und die\n"
+                "Python‑Entwicklungsheader installiert sind, z.B.:\n"
+                "  sudo apt install build-essential python3-dev\n"
+            )
+
+        return success
 
     def _download_piper_voices(self, voices: List[str]) -> bool:
         """Lädt Piper-Stimmen mit Fortschrittsanzeige herunter."""
