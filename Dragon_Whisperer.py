@@ -21273,34 +21273,24 @@ class TTSManager:
         self._forward_stop = threading.Event()
         self._stop_requested = threading.Event()
         self._lock = threading.RLock()
-        self._dispose_lock = threading.RLock()          # ← NEU
-
-        # TTS-Parameter aus Einstellungen
+        self._dispose_lock = threading.RLock()       # für dispose()-Absicherung
+        self._disposed = False                       # Status-Flag (noch nicht entsorgt)
         self._voice = getattr(settings, "tts_voice", "de_DE-thorsten-medium")
         self._length_scale = getattr(settings, "tts_length_scale", 0.9)
         self._sentence_silence = getattr(settings, "tts_sentence_silence", 0.1)
         self._volume = getattr(settings, "tts_volume", 1.0)
         self._engine_name = getattr(settings, "tts_engine", "piper")
-
-        # Optionen für Textbereinigung und Normalisierung
         self._clean_markup = getattr(settings, "tts_clean_markup", True)
         self._normalize_text = getattr(settings, "tts_normalize_text", True)
-
-        # Verfügbare Player und Engines erkennen
         self._available_players = self._detect_audio_players()
         self._available_engines = self._detect_engines()
-
-        # Queue für sequenzielle Wiedergabe (Auto-TTS)
         self._queue = queue.Queue(maxsize=90)
         self._queue_stop = threading.Event()
         self._queue_worker = threading.Thread(
             target=self._queue_worker_loop, daemon=True, name="TTSQueue"
         )
         self._queue_worker.start()
-
-        # Diagnose: Zähler für verworfene Queue-Einträge
         self._queue_discarded_count = 0
-
         self._log_initialization()
 
     def _log_initialization(self) -> None:
@@ -27099,7 +27089,7 @@ class InstallDependencyDialog(BaseDialog):
         self, packages: List[str], upgrade: bool = False
     ) -> bool:
         """
-        Installiert oder aktualisiert eine Liste von Python‑Paketen mit pip.
+        Installiert eine Liste von Python‑Paketen mit pip – mehrstufig und fehlertolerant.
         """
         if not packages:
             self._append_output("ℹ️ Keine Python‑Pakete angegeben – überspringe.\n")
@@ -27111,9 +27101,7 @@ class InstallDependencyDialog(BaseDialog):
         try:
             subprocess.run(
                 [python_exe, "-m", "pip", "--version"],
-                capture_output=True,
-                check=True,
-                timeout=10,
+                capture_output=True, check=True, timeout=10,
             )
         except Exception:
             self._append_output(
@@ -27122,10 +27110,8 @@ class InstallDependencyDialog(BaseDialog):
             return False
 
         cmd = [
-            python_exe,
-            "-m", "pip", "install",
-            "--no-cache-dir",
-            "--disable-pip-version-check",
+            python_exe, "-m", "pip", "install",
+            "--no-cache-dir", "--disable-pip-version-check",
         ]
         if upgrade:
             cmd.append("--upgrade")
@@ -27140,7 +27126,7 @@ class InstallDependencyDialog(BaseDialog):
         if DEBUG_LEVEL >= 3:
             log_debug("install", f"pip install (1. Versuch): {' '.join(cmd)}")
 
-        # Ausgabe von stdout/stderr merken für spätere Analyse
+        # _run_subprocess setzt self._last_stderr
         output = self._run_subprocess(
             cmd, f"pip install {' '.join(packages)}", env=env
         )
@@ -27152,10 +27138,8 @@ class InstallDependencyDialog(BaseDialog):
                 "Zweiter Versuch mit '--only-binary :all:' (ohne Kompilierung) …\n"
             )
             fallback_cmd = [
-                python_exe,
-                "-m", "pip", "install",
-                "--no-cache-dir",
-                "--disable-pip-version-check",
+                python_exe, "-m", "pip", "install",
+                "--no-cache-dir", "--disable-pip-version-check",
                 "--only-binary", ":all:",
             ]
             if upgrade:
@@ -27187,8 +27171,7 @@ class InstallDependencyDialog(BaseDialog):
                 )
 
         if not success and not IS_WINDOWS:
-            # Prüfen, ob die Umgebung extern verwaltet wird
-            stderr_text = output or ""
+            stderr_text = self._last_stderr   # von _run_subprocess gefüllt
             if "externally-managed-environment" in stderr_text:
                 self._append_output(
                     "\n⚠️  Ihr System schützt die systemweite Python‑Installation (PEP 668).\n"
@@ -27200,7 +27183,7 @@ class InstallDependencyDialog(BaseDialog):
                     "    Alternativ können Sie die Installation mit einem risikobehafteten\n"
                     "    Flag erzwingen (nur für erfahrene Benutzer!).\n"
                 )
-                # Sicherheitsabfrage für --break-system-packages
+                # Bestätigung für --break-system-packages einholen
                 if self.dialog and self.dialog.winfo_exists():
                     if DarkMessageBox.askyesno(
                         title="⚠️ Systemweite Installation erzwingen?",
@@ -27211,7 +27194,7 @@ class InstallDependencyDialog(BaseDialog):
                         ),
                         parent=self.dialog,
                     ):
-                        # Erzwungene Installation mit Break-Flag
+                        # Erzwungene Installation
                         cmd_forced = cmd + ["--break-system-packages"]
                         output = self._run_subprocess(
                             cmd_forced, "pip install (forced)", env=env
@@ -27234,10 +27217,8 @@ class InstallDependencyDialog(BaseDialog):
                 "Zweiter Versuch mit '--only-binary :all:' (ohne Kompilierung) …\n"
             )
             fallback_cmd = [
-                python_exe,
-                "-m", "pip", "install",
-                "--no-cache-dir",
-                "--disable-pip-version-check",
+                python_exe, "-m", "pip", "install",
+                "--no-cache-dir", "--disable-pip-version-check",
                 "--only-binary", ":all:",
             ]
             if upgrade:
@@ -27269,6 +27250,14 @@ class InstallDependencyDialog(BaseDialog):
                     "  • Arch/Manjaro:   sudo pacman -S base-devel python3\n"
                     "  • openSUSE:       sudo zypper install python3-devel gcc\n"
                 )
+
+        if success:
+            try:
+                FastLazyLoader.clear_cache()
+                if DEBUG_LEVEL >= 3:
+                    log_debug("install", "FastLazyLoader cache cleared")
+            except Exception as e:
+                logger.warning(f"Fehler beim Leeren des Modul‑Caches: {e}")
 
         return success
 
@@ -27597,45 +27586,81 @@ class InstallDependencyDialog(BaseDialog):
 
     def _run_subprocess(
         self, cmd: List[str], description: str = "", env: Optional[Dict] = None
-    ) -> bool:
+    ) -> Optional[str]:
+        """
+        Führt einen externen Befehl aus (ohne Shell) und gibt bei Erfolg die
+        stdout-Ausgabe zurück.  Im Fehlerfall wird None zurückgegeben, aber der
+        stderr-Text wird in `self._last_stderr` gespeichert, sodass der Aufrufer
+        die genaue Ursache analysieren kann (z. B. PEP 668).
+        """
+        # Letzten Fehlertext zurücksetzen
+        self._last_stderr = ""
+
         self._append_output(f"  🔧 {description}...\n")
+
+        proc = None
         try:
-            with self._process_lock:
-                self._current_process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    env=env or os.environ.copy(),
-                )
-            proc = self._current_process
-            for line in proc.stdout:
+            creationflags = subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env=env if env is not None else os.environ.copy(),
+                creationflags=creationflags,
+            )
+
+            # Periodisch das Stop-Event prüfen, bis der Prozess beendet ist
+            while proc.poll() is None:
                 if self._stop_event.is_set():
+                    self._append_output("    ⏹️ Abbruch durch Benutzer.\n")
                     self._terminate_current_process()
-                    break
-                line = line.strip()
-                if line:
-                    self._append_output(f"    {line}\n")
-                    if IS_WINDOWS and "E_ADMIN_REQUIRED" in line:
-                        self._append_output(
-                            "⚠️ Administratorrechte erforderlich! Bitte als Admin neu starten.\n"
-                        )
-            proc.wait()
+                    return None
+                time.sleep(0.05)
+
+            stdout, stderr = proc.communicate(timeout=5.0)
+            self._last_stderr = stderr.strip() if stderr else ""
+
             if proc.returncode == 0:
-                self._append_output(f"  ✅ {description} erfolgreich.\n")
-                return True
+                out = stdout.strip()
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "install",
+                        f"_run_subprocess: {description} erfolgreich, stdout={len(out)} Zeichen",
+                    )
+                return out
             else:
+                stderr_short = (
+                    self._last_stderr[:200] + "..."
+                    if len(self._last_stderr) > 200
+                    else self._last_stderr
+                )
                 self._append_output(
                     f"  ❌ {description} fehlgeschlagen (Code {proc.returncode}).\n"
+                    f"     stderr: {stderr_short}\n"
                 )
-                return False
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "install",
+                        f"_run_subprocess: {description} fehlgeschlagen, "
+                        f"rc={proc.returncode}, stderr={self._last_stderr[:500]}",
+                    )
+                return None
+
+        except subprocess.TimeoutExpired:
+            self._append_output(f"  ⏰ {description} Timeout nach Beendigung.\n")
+            self._terminate_current_process()
+            return None
         except Exception as e:
             self._append_output(f"  ❌ Fehler in {description}: {e}\n")
-            return False
+            if DEBUG_LEVEL >= 3:
+                log_debug("install", f"_run_subprocess: Exception {e}")
+            return None
         finally:
-            with self._process_lock:
-                self._current_process = None
+            # Sicherstellen, dass der Prozess nicht mehr läuft
+            if proc is not None and proc.poll() is None:
+                self._terminate_current_process()
 
     def _terminate_current_process(self) -> None:
         with self._process_lock:
