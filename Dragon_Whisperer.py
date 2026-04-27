@@ -21273,6 +21273,7 @@ class TTSManager:
         self._forward_stop = threading.Event()
         self._stop_requested = threading.Event()
         self._lock = threading.RLock()
+        self._dispose_lock = threading.RLock()          # ← NEU
 
         # TTS-Parameter aus Einstellungen
         self._voice = getattr(settings, "tts_voice", "de_DE-thorsten-medium")
@@ -21326,9 +21327,6 @@ class TTSManager:
     def _detect_audio_players(self) -> List[Tuple[str, List[str]]]:
         """
         Ermittelt verfügbare Audio-Player auf dem System.
-
-        Returns:
-            Liste von (name, command)-Tupeln in Prioritätsreihenfolge.
         """
         players = []
         is_unix = sys.platform.startswith("linux") or sys.platform == "darwin"
@@ -21347,17 +21345,13 @@ class TTSManager:
         Ermittelt die verfügbaren TTS‑Engines mit maximaler Robustheit.
         """
         engines: List[str] = []
-
-        # 1. piper  (Qualitäts‑TTS)
         piper_available = False
         try:
-            # a) Ausführbare Datei im PATH?
             if shutil.which("piper"):
                 piper_available = True
                 if DEBUG_LEVEL >= 3:
                     log_debug("tts", "_detect_engines: piper.exe gefunden (PATH)")
             else:
-                # b) Stimmen im Cache?
                 voices = self.get_installed_piper_voices()
                 if voices:
                     piper_available = True
@@ -21373,31 +21367,46 @@ class TTSManager:
         if piper_available:
             engines.append("piper")
 
-        # 2. pyttsx3  (plattformübergreifend, nutzt natives TTS)
         pyttsx3_available = False
         try:
             if importlib.util.find_spec("pyttsx3") is not None:
-                # Kurzer Funktionstest – nur wenn wirklich nutzbar
                 import pyttsx3
-
-                try:
-                    test_engine = pyttsx3.init()
-                    voices = test_engine.getProperty("voices")
-                    test_engine.stop()
-                    if voices:
+                test_engine = pyttsx3.init()
+                voices = test_engine.getProperty("voices")
+                if voices:
+                    some_voice_works = False
+                    for voice in voices:
+                        try:
+                            test_engine.setProperty("voice", voice.id)
+                            test_engine.say("")
+                            test_engine.runAndWait()
+                            some_voice_works = True
+                            if DEBUG_LEVEL >= 3:
+                                log_debug(
+                                    "tts",
+                                    f"_detect_engines: pyttsx3-Stimme '{voice.id}' funktioniert",
+                                )
+                            break
+                        except Exception:
+                            continue
+                    if some_voice_works:
                         pyttsx3_available = True
                         if DEBUG_LEVEL >= 3:
                             log_debug(
                                 "tts",
                                 f"_detect_engines: pyttsx3 initialisiert, "
-                                f"{len(voices)} Stimme(n) gefunden",
+                                f"{len(voices)} Stimme(n) gefunden, mindestens eine nutzbar",
                             )
                     else:
                         logger.warning(
-                            "pyttsx3 hat keine Stimmen – Engine nicht verfügbar"
+                            "pyttsx3 hat Stimmen, aber keine konnte initialisiert werden – "
+                            "Engine nicht verfügbar"
                         )
-                except Exception as e:
-                    logger.warning(f"pyttsx3 initialisation fehlgeschlagen: {e}")
+                else:
+                    logger.warning(
+                        "pyttsx3 hat keine Stimmen – Engine nicht verfügbar"
+                    )
+                test_engine.stop()
             else:
                 if DEBUG_LEVEL >= 3:
                     log_debug(
@@ -21412,7 +21421,6 @@ class TTSManager:
         if pyttsx3_available:
             engines.append("pyttsx3")
 
-        # 3. espeak  (leichter Fallback)
         try:
             if shutil.which("espeak"):
                 engines.append("espeak")
@@ -21421,7 +21429,6 @@ class TTSManager:
         except Exception as e:
             logger.warning(f"Fehler bei espeak-Erkennung: {e}")
 
-        # 4. Ergebnis protokollieren
         if DEBUG_LEVEL >= 3:
             log_debug(
                 "tts", f"_detect_engines: {len(engines)} Engine(s) verfügbar: {engines}"
@@ -27091,28 +27098,34 @@ class InstallDependencyDialog(BaseDialog):
     def _install_python_packages(
         self, packages: List[str], upgrade: bool = False
     ) -> bool:
-        """        Installiert oder aktualisiert eine Liste von Python‑Paketen mit pip.        """
+        """
+        Installiert oder aktualisiert eine Liste von Python‑Paketen mit pip.
+        """
         if not packages:
             self._append_output("ℹ️ Keine Python‑Pakete angegeben – überspringe.\n")
             return True
 
         python_exe = sys.executable
 
-        self._append_output("🔍 Prüfe pip...\n")
+        self._append_output("🔍 Prüfe pip…\n")
         try:
             subprocess.run(
                 [python_exe, "-m", "pip", "--version"],
-                capture_output=True, check=True, timeout=10,
+                capture_output=True,
+                check=True,
+                timeout=10,
             )
         except Exception:
             self._append_output(
-                "❌ pip ist nicht funktionsfähig. Bitte überprüfen Sie Ihre Python-Installation.\n"
+                "❌ pip ist nicht funktionsfähig. Bitte überprüfen Sie Ihre Python‑Installation.\n"
             )
             return False
 
         cmd = [
-            python_exe, "-m", "pip", "install",
-            "--no-cache-dir", "--disable-pip-version-check",
+            python_exe,
+            "-m", "pip", "install",
+            "--no-cache-dir",
+            "--disable-pip-version-check",
         ]
         if upgrade:
             cmd.append("--upgrade")
@@ -27127,16 +27140,22 @@ class InstallDependencyDialog(BaseDialog):
         if DEBUG_LEVEL >= 3:
             log_debug("install", f"pip install (1. Versuch): {' '.join(cmd)}")
 
-        success = self._run_subprocess(cmd, f"pip install {' '.join(packages)}", env=env)
+        # Ausgabe von stdout/stderr merken für spätere Analyse
+        output = self._run_subprocess(
+            cmd, f"pip install {' '.join(packages)}", env=env
+        )
+        success = output is not None
 
         if not success and IS_WINDOWS:
             self._append_output(
                 "⚠️ Erster Versuch fehlgeschlagen. "
-                "Zweiter Versuch mit '--only-binary :all:' (ohne Kompilierung) ...\n"
+                "Zweiter Versuch mit '--only-binary :all:' (ohne Kompilierung) …\n"
             )
             fallback_cmd = [
-                python_exe, "-m", "pip", "install",
-                "--no-cache-dir", "--disable-pip-version-check",
+                python_exe,
+                "-m", "pip", "install",
+                "--no-cache-dir",
+                "--disable-pip-version-check",
                 "--only-binary", ":all:",
             ]
             if upgrade:
@@ -27146,13 +27165,17 @@ class InstallDependencyDialog(BaseDialog):
             fallback_cmd.extend(packages)
 
             if DEBUG_LEVEL >= 3:
-                log_debug("install", f"pip install (Binary‑Fallback): {' '.join(fallback_cmd)}")
+                log_debug(
+                    "install",
+                    f"pip install (Binary‑Fallback): {' '.join(fallback_cmd)}",
+                )
 
-            success = self._run_subprocess(
+            output = self._run_subprocess(
                 fallback_cmd,
                 f"pip install {' '.join(packages)} (binary only)",
                 env=env,
             )
+            success = output is not None
 
             if not success:
                 self._append_output(
@@ -27164,12 +27187,88 @@ class InstallDependencyDialog(BaseDialog):
                 )
 
         if not success and not IS_WINDOWS:
+            # Prüfen, ob die Umgebung extern verwaltet wird
+            stderr_text = output or ""
+            if "externally-managed-environment" in stderr_text:
+                self._append_output(
+                    "\n⚠️  Ihr System schützt die systemweite Python‑Installation (PEP 668).\n"
+                    "    Bitte führen Sie Dragon Whisperer in einer virtuellen Umgebung aus:\n\n"
+                    "      python3 -m venv venv\n"
+                    "      source venv/bin/activate\n"
+                    "      pip install -r requirements.txt\n"
+                    "      python dwai.py\n\n"
+                    "    Alternativ können Sie die Installation mit einem risikobehafteten\n"
+                    "    Flag erzwingen (nur für erfahrene Benutzer!).\n"
+                )
+                # Sicherheitsabfrage für --break-system-packages
+                if self.dialog and self.dialog.winfo_exists():
+                    if DarkMessageBox.askyesno(
+                        title="⚠️ Systemweite Installation erzwingen?",
+                        message=(
+                            "Möchten Sie die Pakete trotzdem systemweit installieren?\n"
+                            "Dies kann Ihre System‑Python‑Installation beschädigen!\n\n"
+                            "Wir empfehlen dringend die Verwendung einer virtuellen Umgebung."
+                        ),
+                        parent=self.dialog,
+                    ):
+                        # Erzwungene Installation mit Break-Flag
+                        cmd_forced = cmd + ["--break-system-packages"]
+                        output = self._run_subprocess(
+                            cmd_forced, "pip install (forced)", env=env
+                        )
+                        success = output is not None
+                        if success:
+                            self._append_output("✅ Pakete trotzdem installiert.\n")
+                        else:
+                            self._append_output(
+                                "❌ Auch die erzwungene Installation schlug fehl.\n"
+                            )
+                else:
+                    self._append_output(
+                        "ℹ️ Installation nicht erzwungen – Bitte richten Sie ein venv ein.\n"
+                    )
+                return success
+
             self._append_output(
-                "\n💡 Tipp:\n"
-                "Stellen Sie sicher, dass ein C++ Compiler (gcc/clang) und die\n"
-                "Python‑Entwicklungsheader installiert sind, z.B.:\n"
-                "  sudo apt install build-essential python3-dev\n"
+                "⚠️ Erster Versuch fehlgeschlagen. "
+                "Zweiter Versuch mit '--only-binary :all:' (ohne Kompilierung) …\n"
             )
+            fallback_cmd = [
+                python_exe,
+                "-m", "pip", "install",
+                "--no-cache-dir",
+                "--disable-pip-version-check",
+                "--only-binary", ":all:",
+            ]
+            if upgrade:
+                fallback_cmd.append("--upgrade")
+            if not self.in_venv:
+                fallback_cmd.append("--user")
+            fallback_cmd.extend(packages)
+
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "install",
+                    f"pip install (Binary‑Fallback): {' '.join(fallback_cmd)}",
+                )
+
+            output = self._run_subprocess(
+                fallback_cmd,
+                f"pip install {' '.join(packages)} (binary only)",
+                env=env,
+            )
+            success = output is not None
+
+            if not success:
+                self._append_output(
+                    "\n💡 Tipp:\n"
+                    "Stellen Sie sicher, dass ein C++ Compiler (gcc/clang) und die\n"
+                    "Python‑Entwicklungsheader installiert sind:\n"
+                    "  • Debian/Ubuntu:  sudo apt install build-essential python3-dev\n"
+                    "  • Fedora/RHEL:    sudo dnf install python3-devel gcc\n"
+                    "  • Arch/Manjaro:   sudo pacman -S base-devel python3\n"
+                    "  • openSUSE:       sudo zypper install python3-devel gcc\n"
+                )
 
         return success
 
