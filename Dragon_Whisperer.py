@@ -28296,7 +28296,7 @@ class AdvancedSettingsDialog:
             button_frame,
             text="✕ Cancel",
             command=self._on_close,
-            bg=theme.BG_TERTIARI,
+            bg=theme.BG_TERTIARY,
             fg=theme.TEXT_PRIMARY,
             **btn_common,
         )
@@ -30049,7 +30049,7 @@ class AdvancedSettingsDialog:
         creation_errors = []
 
         def safe_create(widget_cls, parent, **kwargs):
-            """Erstellt ein tk‑Widget und fängt TclError ab."""
+            """Erstellt ein tk‑Widget und fängt TclError sicher ab."""
             try:
                 widget = widget_cls(parent, **kwargs)
                 return widget
@@ -30266,7 +30266,6 @@ class AdvancedSettingsDialog:
             "Proxy‑Adresse, z.B. socks5://127.0.0.1:18080 oder http://proxy:8080.\n"
             "Nur aktiv, wenn 'Proxy aktivieren' ausgewählt ist.",
         )
-        # FocusOut‑Validierung
         self.proxy_entry.bind("<FocusOut>", lambda e: self._validate_proxy_field())
 
         mode_frame = tk.LabelFrame(
@@ -30463,7 +30462,6 @@ class AdvancedSettingsDialog:
             "Verbessert die Kontinuität der Transkription.",
         )
 
-        # Suppress Tokens
         lbl = safe_create(
             tk.Label,
             whisper_frame,
@@ -30493,12 +30491,10 @@ class AdvancedSettingsDialog:
             "Kommagetrennte Token‑IDs, die unterdrückt werden sollen.\n"
             "-1 = Standard, leeres Feld = keine Unterdrückung.",
         )
-        # FocusOut‑Validierung
         self.suppress_entry.bind(
             "<FocusOut>", lambda e: self._validate_suppress_field()
         )
 
-        # Fallback Source Language
         lbl = safe_create(
             tk.Label,
             whisper_frame,
@@ -30846,6 +30842,58 @@ class AdvancedSettingsDialog:
             "angezeigt.",
         )
 
+        if hasattr(self, "_pending_blacklist") and self._pending_blacklist is not None:
+            if hasattr(self, "blacklist_text") and self.blacklist_text.winfo_exists():
+                self.blacklist_text.delete("1.0", "end")
+                self.blacklist_text.insert("1.0", "\n".join(self._pending_blacklist))
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "advanced_tab",
+                        "Blacklist aus pending-Werten übertragen",
+                    )
+            self._pending_blacklist = None
+
+        if (
+            hasattr(self, "_pending_allowed_dirs")
+            and self._pending_allowed_dirs is not None
+        ):
+            if (
+                hasattr(self, "allowed_dirs_text")
+                and self.allowed_dirs_text.winfo_exists()
+            ):
+                self.allowed_dirs_text.delete("1.0", "end")
+                self.allowed_dirs_text.insert(
+                    "1.0", "\n".join(self._pending_allowed_dirs)
+                )
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "advanced_tab",
+                        "Erlaubte Verzeichnisse aus pending-Werten übertragen",
+                    )
+            self._pending_allowed_dirs = None
+
+        if hasattr(self, "blacklist_text") and self.blacklist_text.winfo_exists():
+            if not self.blacklist_text.get("1.0", "end-1c").strip():
+                bl = getattr(self.gui.advanced_settings, "blacklist", [])
+                if bl:
+                    self.blacklist_text.insert("1.0", "\n".join(bl))
+                    if DEBUG_LEVEL >= 3:
+                        log_debug(
+                            "advanced_tab",
+                            "Blacklist per Fallback aus den Einstellungen geladen",
+                        )
+
+        if hasattr(self, "allowed_dirs_text") and self.allowed_dirs_text.winfo_exists():
+            if not self.allowed_dirs_text.get("1.0", "end-1c").strip():
+                dirs = getattr(self.gui.advanced_settings, "allowed_dirs", [])
+                if dirs:
+                    self.allowed_dirs_text.insert("1.0", "\n".join(dirs))
+                    if DEBUG_LEVEL >= 3:
+                        log_debug(
+                            "advanced_tab",
+                            "Erlaubte Verzeichnisse per Fallback aus den Einstellungen geladen",
+                        )
+
         info_label = safe_create(
             tk.Label,
             parent,
@@ -31112,7 +31160,6 @@ class AdvancedSettingsDialog:
                 "gui_tab", "Tab 'GUI & Anzeige' vollständig und optimiert aufgebaut"
             )
 
-    #  Hilfsmethoden für Widget‑Erstellung
     def _add_label_value(
         self, parent: tk.Widget, label: str, value: str, row: int
     ) -> None:
@@ -32740,7 +32787,6 @@ class AdvancedSettingsDialog:
 
         self.tts_engine_var.set(gv("tts_engine", "piper"))
         self.tts_voice_var.set(gv("tts_voice", "de_DE-thorsten-medium"))
-        # Umrechnung von piper‑intern (0‥2) in GUI‑Darstellung (0‥2)
         self.tts_length_scale_var.set(
             self._piper_speed_to_gui(gv("tts_length_scale", 0.9))
         )
@@ -32801,7 +32847,6 @@ class AdvancedSettingsDialog:
 
         self.min_lang_conf_var.set(gv("min_language_confidence", 0.2))
 
-        # Fallback‑Sprache: Code → lesbarer Name
         fallback_code = gv("fallback_source_language", "de")
         try:
             fallback_name = SUPPORTED_LANGUAGES.get(fallback_code, "Deutsch")
@@ -32830,12 +32875,10 @@ class AdvancedSettingsDialog:
                 if allowed_dirs:
                     self.allowed_dirs_text.insert("1.0", "\n".join(allowed_dirs))
             except tk.TclError:
-                # Widget ist kaputt – Wert penden
                 self._pending_allowed_dirs = allowed_dirs
         else:
             self._pending_allowed_dirs = allowed_dirs
 
-        # 19b. Blacklist
         if hasattr(self, "blacklist_text") and self.blacklist_text is not None:
             try:
                 self.blacklist_text.delete("1.0", "end")
@@ -50037,13 +50080,11 @@ class AdvancedSettings:
             "Transcription by CastingWords",
             "Subtitles by",
             "[Music]",
-            "Music.",
             "Oh, oh, oh",
             "Oh,",
             "[Applause]",
             "Thank you.",
             "Thank you very much.",
-            "We'll be right back.",
             "We'll be right back",
             "We'll see you next time.",
             "Stay tuned.",
@@ -50685,7 +50726,7 @@ class AdvancedSettings:
             data.pop("config", None)
             data.pop("_chunk_duration", None)
             data["chunk_duration"] = self.chunk_duration
-            data["_version"] = 2  # Version für zukünftige Migrationen
+            data["_version"] = 2
 
             if DEBUG_LEVEL >= 3:
                 log_debug("settings", f"Writing settings to temp file: {temp_path}")
