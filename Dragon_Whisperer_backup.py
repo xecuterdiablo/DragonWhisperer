@@ -4105,28 +4105,45 @@ class PlatformUtils:
             )
             return True
 
+    _executable_cache: Dict[str, Optional[str]] = {}
+    _executable_cache_lock = threading.RLock()
+
     @classmethod
     def _find_executable(cls, name: str) -> Optional[str]:
         """
         Findet eine ausführbare Datei (z.B. 'yt-dlp', 'ffmpeg', 'piper').
         """
+        with cls._executable_cache_lock:
+            if name in cls._executable_cache:
+                return cls._executable_cache[name]
         exe = shutil.which(name)
         if exe:
+            with cls._executable_cache_lock:
+                cls._executable_cache[name] = exe
             if cls._logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"  → {name} gefunden im PATH: {exe}")
+                cls._logger.debug(f"  → {name} gefunden im PATH: {exe}")
             return exe
-
         scripts_dir = os.path.dirname(sys.executable)
         if IS_WINDOWS:
             candidate = os.path.join(scripts_dir, f"{name}.exe")
+            if os.path.isfile(candidate):
+                with cls._executable_cache_lock:
+                    cls._executable_cache[name] = candidate
+                if DEBUG_LEVEL >= 3:
+                    log_debug("platform",
+                              f"  → {name} gefunden unter {candidate} (venv‑Fallback)")
+                return candidate
         else:
             candidate = os.path.join(scripts_dir, name)
-
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            if DEBUG_LEVEL >= 3:
-                log_debug("platform", f"  → {name} gefunden unter {candidate} (venv‑Fallback)")
-            return candidate
-
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                with cls._executable_cache_lock:
+                    cls._executable_cache[name] = candidate
+                if DEBUG_LEVEL >= 3:
+                    log_debug("platform",
+                              f"  → {name} gefunden unter {candidate} (venv‑Fallback)")
+                return candidate
+        with cls._executable_cache_lock:
+            cls._executable_cache[name] = None
         return None
 
     @classmethod
@@ -26858,39 +26875,39 @@ class InstallDependencyDialog(BaseDialog):
         return search_widget(self.scrollable_frame)
 
     def _is_tool_installed(self, name: str) -> bool:
-        """Robuste Prüfung mit Cache."""
+        """        Robuste Prüfung mit Cache.        """
         if name in self._tool_installed_cache:
             return self._tool_installed_cache[name]
+
+        found = PlatformUtils._find_executable(name) is not None
+        if found:
+            self._tool_installed_cache[name] = True
+            return True
+
         if name == "vlc":
             result = self._vlc_installed
-        elif name == "piper":
-            exe = shutil.which("piper")
-            if exe:
-                result = True
-            elif IS_WINDOWS:
-                local_appdata = os.environ.get("LOCALAPPDATA", "")
-                if local_appdata:
-                    base = os.path.join(local_appdata, "Microsoft", "WinGet", "Packages")
-                    pattern = os.path.join(base, "GitHub.Piper_*", "piper.exe")
-                    result = bool(glob.glob(pattern))
-                else:
-                    result = False
-            else:
-                result = False
-        else:
-            result = shutil.which(name) is not None
-        self._tool_installed_cache[name] = result
-        return result
+            self._tool_installed_cache[name] = result
+            return result
+
+        if name == "piper" and IS_WINDOWS:
+            local_appdata = os.environ.get("LOCALAPPDATA", "")
+            if local_appdata:
+                base = os.path.join(local_appdata, "Microsoft", "WinGet", "Packages")
+                pattern = os.path.join(base, "GitHub.Piper_*", "piper.exe")
+                result = bool(glob.glob(pattern))
+                self._tool_installed_cache[name] = result
+                return result
+
+        self._tool_installed_cache[name] = False
+        return False
 
     def install_selected(self) -> None:
         sys_pkgs = [pkg for pkg, var in self.sys_vars.items() if var.get()]
         py_pkgs = [pkg for pkg, var in self.py_vars.items() if var.get()]
         voices = [voice for voice, var in self.voice_vars.items() if var.get()]
-
         if not (sys_pkgs or py_pkgs or voices):
             self.status_var.set("❌ Nichts ausgewählt")
             return
-
         self.output_text.delete("1.0", "end")
         self._append_output("🚀 Der Drache erhebt sich – Installation beginnt...\n")
         self._enable_ui(False)
@@ -27274,8 +27291,6 @@ class InstallDependencyDialog(BaseDialog):
                     f"  ⚠️ Unerwartetes Voice-Format: {voice}, versuche direkten Pfad\n"
                 )
 
-            base_remote = f"{base_url}/{remote_dir}"
-
             need_model = (
                 not os.path.exists(model_path) or os.path.getsize(model_path) == 0
             )
@@ -27636,9 +27651,7 @@ class AdvancedSettingsDialog:
     }
 
     def __init__(self, parent: tk.Tk, gui: "DragonWhispererGUI") -> None:
-        """
-        Initialisiert den optimierten AdvancedSettingsDialog.
-        """
+        """        Initialisiert den optimierten AdvancedSettingsDialog.        """
         self.parent = parent
         self.gui = gui
 
@@ -28257,7 +28270,6 @@ class AdvancedSettingsDialog:
             "cursor": "hand2",
         }
 
-        # Reset
         reset_btn = tk.Button(
             button_frame,
             text="↻ Reset to Defaults",
@@ -28623,10 +28635,6 @@ class AdvancedSettingsDialog:
         """
         Wendet das aktuelle Theme rekursiv (iterativ) auf alle Widgets im
         Teilbaum ab *root_widget* an.
-
-        Erweiterung:
-        - Behandelt scrolledtext.ScrolledText speziell, um das innere
-          tk.Text-Widget und die Scrollbar korrekt zu färben.
         """
         theme = None
         if (
@@ -28692,10 +28700,8 @@ class AdvancedSettingsDialog:
 
             # ---- Special handling for ScrolledText ----
             if w_class == scrolledtext.ScrolledText:
-                # The outer widget is a Frame; we color the contained tk.Text
-                # and the scrollbar.
                 try:
-                    inner_text = widget.text  # standard attribute name
+                    inner_text = widget.text
                     if inner_text and inner_text.winfo_exists():
                         _safe_configure(
                             inner_text,
@@ -28721,8 +28727,6 @@ class AdvancedSettingsDialog:
                 except Exception:
                     pass
 
-                # Now add the children of the inner frame (the text widget and scrollbar
-                # are already handled, but there may be other children).
                 try:
                     stack.extend(widget.winfo_children())
                 except tk.TclError:
@@ -28930,7 +28934,7 @@ class AdvancedSettingsDialog:
         werden können.
         """
         # Scrollgeschwindigkeit: Anzahl der "Einheiten" pro Mausrad‑"Klick"
-        SCROLL_SPEED = 2  # vorher implizit 1 – jetzt etwas zügiger
+        SCROLL_SPEED = 2
 
         if DEBUG_LEVEL >= 3:
             log_debug("scrollframe", f"_make_scrollable: parent={parent!r}")
