@@ -26152,9 +26152,7 @@ class ShortcutsDialog(BaseDialog):
 
 
 class InstallDependencyDialog(BaseDialog):
-    """
-    🐉 DRACHENWARTUNG – Abhängigkeiten installieren & aktualisieren
-    """
+    """    🐉 DRACHENWARTUNG – Abhängigkeiten installieren & aktualisieren    """
 
     CRITICAL_SYSTEM_PACKAGES: ClassVar[Set[str]] = {"ffmpeg", "yt-dlp", "numpy"}
     CRITICAL_PYTHON_PACKAGES: ClassVar[Set[str]] = {
@@ -26186,8 +26184,7 @@ class InstallDependencyDialog(BaseDialog):
             "apt": "piper",
             "pacman": "piper",
             "brew": "piper",
-            "winget": "GitHub.Piper",
-            "fallback": "winget install --source winget GitHub.Piper",
+            "pip": "piper-tts",
         },
         "ollama": {
             "apt": "ollama",
@@ -26311,7 +26308,6 @@ class InstallDependencyDialog(BaseDialog):
 
         self._vlc_installed = self._is_vlc_installed()
 
-        # Caches
         self._tool_installed_cache: Dict[str, bool] = {}
 
         super().__init__(
@@ -26462,7 +26458,6 @@ class InstallDependencyDialog(BaseDialog):
                 justify="left",
             ).pack(fill="x", pady=5)
             
-            # --- NEU: Button für den automatischen Admin-Neustart ---
             tk.Button(
                 sys_frame,
                 text="🛡️ Als Administrator neu starten",
@@ -26933,6 +26928,10 @@ class InstallDependencyDialog(BaseDialog):
     def _install_system_package(self, pkg: str) -> bool:
         pkg_data = self.SYSTEM_PACKAGES.get(pkg, {})
 
+        if IS_WINDOWS and "pip" in pkg_data:
+            self._append_output(f"🐍 Installiere {pkg} über pip...\n")
+            return self._install_python_packages([pkg_data["pip"]], upgrade=True)
+
         if self.pkg_manager == "winget" and "winget" in pkg_data:
             if not self._is_admin():
                 self._append_output(
@@ -27071,9 +27070,7 @@ class InstallDependencyDialog(BaseDialog):
     def _install_python_packages(
         self, packages: List[str], upgrade: bool = False
     ) -> bool:
-        """
-        Installiert oder aktualisiert eine Liste von Python‑Paketen mit pip.
-        """
+        """        Installiert oder aktualisiert eine Liste von Python‑Paketen mit pip.        """
         if not packages:
             self._append_output("ℹ️ Keine Python‑Pakete angegeben – überspringe.\n")
             return True
@@ -31764,7 +31761,6 @@ class AdvancedSettingsDialog:
         Validiert die Proxy‑URL bei Fokusverlust und markiert das Feld bei
         ungültigen Eingaben rot.
         """
-        # Widget‑Referenz robust ermitteln (kann None sein bei fehlerhafter Erstellung)
         widget = getattr(self, "proxy_entry", None)
         if widget is None:
             if DEBUG_LEVEL >= 3:
@@ -31780,7 +31776,6 @@ class AdvancedSettingsDialog:
         except tk.TclError:
             return
 
-        # Aktuellen Inhalt und Proxy‑Status ermitteln
         try:
             proxy_enabled = self.proxy_enabled_var.get()
             url = self.proxy_var.get().strip()
@@ -31791,7 +31786,6 @@ class AdvancedSettingsDialog:
 
         # Nur prüfen, wenn der Proxy aktiviert ist UND eine URL eingetragen wurde
         if not proxy_enabled or not url:
-            # Sauberer Zustand – etwaige Fehlermarkierung entfernen
             self._clear_validation_error(widget)
             return
 
@@ -31799,7 +31793,6 @@ class AdvancedSettingsDialog:
         is_valid = self._validate_proxy_url(url)
 
         if not is_valid:
-            # Hilfreiche Fehlermeldung je nach Art des Problems
             try:
                 parsed = urllib.parse.urlparse(url)
                 if not parsed.scheme:
@@ -31858,7 +31851,6 @@ class AdvancedSettingsDialog:
                 else:
                     widget.bell()
             except (tk.TclError, AttributeError):
-                # bell() ist nicht auf allen Plattformen / Widgets verfügbar
                 pass
             except Exception as e:
                 logger.warning(f"_show_validation_error: bell() fehlgeschlagen: {e}")
@@ -31898,7 +31890,6 @@ class AdvancedSettingsDialog:
                 widget.config(bg=ERROR_BG)
 
             else:
-                # Generischer Fall: versuche bg zu setzen, falls möglich.
                 try:
                     widget.config(bg=ERROR_BG)
                 except tk.TclError:
@@ -31982,7 +31973,6 @@ class AdvancedSettingsDialog:
                     pass
 
         except tk.TclError:
-            # Widget wurde während der Konfiguration zerstört – harmlos
             pass
         except Exception as e:
             logger.warning(
@@ -32006,7 +31996,6 @@ class AdvancedSettingsDialog:
         raw = self._search_text.get()
         term = raw.strip().lower() if raw else ""
 
-        # Kein Suchtext → nichts tun
         if not term:
             if DEBUG_LEVEL >= 4:
                 log_debug("search", "_on_search_changed: kein Suchtext – Abbruch")
@@ -32070,11 +32059,9 @@ class AdvancedSettingsDialog:
                 except tk.TclError:
                     continue
 
-                # Tab auswählen → löst Lazy Loading aus
                 self.notebook.select(pos)
                 self._flash_tab(pos)
 
-                # Hervorhebung *nach* dem Laden des Tabs ausführen
                 def _highlight_after_load(tab=tab_widget, t=term):
                     self._highlight_search_widget(tab, t)
 
@@ -32181,11 +32168,6 @@ class AdvancedSettingsDialog:
         Öffnet einen Hinweis‑Dialog, der die Bedienung der Suche erklärt.
         Der aktuelle Suchtext (falls vorhanden) wird in die Meldung
         übernommen, sodass der Anwender ihn nicht erneut eintippen muss.
-
-        Die Funktion verwendet DarkMessageBox mit einem defensiven
-        Fallback – sollte das Fenster aus irgendeinem Grund nicht
-        darstellbar sein (z. B. beschädigtes Tkinter), wird die Meldung
-        stattdessen ins Log geschrieben.
         """
         term = self._search_text.get().strip()
         info = (
@@ -32228,15 +32210,6 @@ class AdvancedSettingsDialog:
         *term* enthält, und hebt das erste gefundene Widget kurz optisch
         hervor (gelber Hintergrund), um dem Benutzer die Navigation zu
         erleichtern.
-
-        Optimierungen:
-        - Keine Rekursionstiefe – verwendet einen expliziten Stack.
-        - Unterschiedliche Widget‑Typen werden korrekt ausgelesen
-          (Label, Checkbutton, Button, Entry, Spinbox, Text).
-        - Die Originalfarbe wird gesichert und nach 800 ms
-          wiederhergestellt.
-        - Fehler während des Einfärbens (z. B. zerstörtes Widget) werden
-          abgefangen und geloggt.
         """
         # Suchtext wird klein geschrieben für case‑insensitive Suche
         term_lower = term.lower()
@@ -32250,9 +32223,6 @@ class AdvancedSettingsDialog:
             except tk.TclError:
                 continue
 
-            # ------------------------------------------------
-            # Text aus dem Widget extrahieren
-            # ------------------------------------------------
             text = ""
             try:
                 if isinstance(
@@ -32278,9 +32248,6 @@ class AdvancedSettingsDialog:
                         f"Fehler beim Auslesen von {type(widget).__name__}: {e}",
                     )
 
-            # ------------------------------------------------
-            # Treffer?
-            # ------------------------------------------------
             if text and term_lower in text.lower():
                 original_bg = ""
                 try:
@@ -32323,9 +32290,6 @@ class AdvancedSettingsDialog:
                 # Nur das erste passende Widget hervorheben
                 return
 
-            # ------------------------------------------------
-            # Kinder in die Suche einbeziehen
-            # ------------------------------------------------
             try:
                 stack.extend(widget.winfo_children())
             except tk.TclError:
@@ -32771,7 +32735,7 @@ class AdvancedSettingsDialog:
 
         self.trans_lines_var.set(gv("transcript_max_lines", 800))
         self.transl_lines_var.set(gv("translation_max_lines", 600))
-        self.theme_var.set(app.theme)  # aus AppSettings
+        self.theme_var.set(app.theme)
         self.auto_save_var.set(app.auto_save_on_completion)
 
         self.cache_var.set(gv("max_cache_size", 200))
@@ -33526,16 +33490,6 @@ class AdvancedSettingsDialog:
         """
         Wird aufgerufen, nachdem der InstallDependencyDialog geschlossen wurde,
         um die Status‑Labels der optionalen Python‑Pakete zu aktualisieren.
-
-        Diese Methode ist idempotent und thread‑sicher: sie prüft, ob das Tab
-        „Pakete & Updates“ bereits geladen ist, und frischt nur dann die Anzeige auf.
-        Falls das Tab noch nicht geladen wurde, ist kein Refresh nötig, da der Status
-        beim nächsten Öffnen des Tabs automatisch aktuell ermittelt wird.
-
-        Einschränkung: Die Anzeige der Systempakete (ffmpeg, yt‑dlp, …) wird derzeit
-        nicht automatisch aktualisiert.  Sie wird nur beim ersten Laden des Tabs
-        statisch gesetzt.  Für eine vollständige Aktualisierung müsste das Tab
-        neu aufgebaut oder die System‑Labels dynamisch gehalten werden.
         """
         # Prüfen, ob das Tab bereits geladen wurde (Lazy Loading)
         if "packages" not in self._loaded_tabs:
@@ -34184,10 +34138,6 @@ class DragonWhispererGUI:
         def __init__(self, max_updates_per_second: int = 60) -> None:
             """
             Initialisiert den RateLimiter.
-
-            Args:
-                max_updates_per_second: Maximale Anzahl Updates pro Sekunde.
-                                        Standard: 60 (vorher 30).
             """
             if max_updates_per_second <= 0:
                 raise ValueError("max_updates_per_second must be > 0")
@@ -34278,9 +34228,6 @@ class DragonWhispererGUI:
         def reset(self, update_type: Optional[str] = None) -> None:
             """
             Setzt den Zähler für einen oder alle Update‑Typen zurück.
-
-            Args:
-                update_type: Der zurückzusetzende Typ. Wenn None, werden alle zurückgesetzt.
             """
             with self._lock:
                 if update_type is None:
@@ -34662,7 +34609,6 @@ class DragonWhispererGUI:
 
         # 23. Signal-Handler und Cookie-Hinweis
         self._register_signal_handlers()
-        # Cookie‑Hinweis nur zeigen, wenn keine kritischen Pakete fehlen
         if self._show_cookie_notice and not self._dependency_issue:
             self._safe_after(500, self._show_cookie_notice_dialog)
 
@@ -36357,7 +36303,6 @@ class DragonWhispererGUI:
         """
         self.subtitle_mode = not self.subtitle_mode
 
-        # 1. AudioProcessor informieren und Segment‑Puffer bereinigen
         if hasattr(self, "audio_processor") and self.audio_processor is not None:
             self.audio_processor.enable_subtitle_mode(self.subtitle_mode)
             try:
@@ -36365,9 +36310,7 @@ class DragonWhispererGUI:
                     self.audio_processor._segment_buffer.clear()
                     self.audio_processor._next_expected_start = 0.0
             except AttributeError:
-                # Falls die Attribute nicht existieren (ältere Version), ignorieren
                 pass
-        # 2. GUI‑Elemente aktualisieren
         if hasattr(self, "subtitle_btn"):
             self._safe_widget_config(
                 "subtitle_btn",
@@ -37319,8 +37262,8 @@ class DragonWhispererGUI:
             return
 
         # Zielwerte definieren (könnten später konfigurierbar gemacht werden)
-        DURATION_LOW = 10.0  # niedrige Latenz
-        DURATION_HIGH = 20.0  # hohe Genauigkeit
+        DURATION_LOW = 10.0
+        DURATION_HIGH = 20.0
 
         # Bestimme den neuen Wert (Toggle)
         if abs(current_duration - DURATION_LOW) < 0.1:
@@ -37363,8 +37306,6 @@ class DragonWhispererGUI:
         self.update_status(f"⏱️ Chunk-Dauer auf {new_duration:.0f}s umgestellt")
 
         self._schedule_settings_save()
-
-        # 8. Event-Bus benachrichtigen (optional, für andere Komponenten)
 
         if hasattr(self, "event_bus") and self.event_bus is not None:
             try:
