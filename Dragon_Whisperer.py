@@ -1931,15 +1931,16 @@ class HighContrastTheme:
 
 
 class Fonts:
-    TITLE = ("Segoe UI", 12, "bold")
-    SUBTITLE = ("Segoe UI", 10, "bold")
-    PRIMARY = ("Segoe UI", 9)
-    SECONDARY = ("Segoe UI", 8)
-    MONOSPACE = ("Cascadia Code", 9)
-    BUTTON = ("Segoe UI", 9, "bold")
-    STATUS = ("Segoe UI", 8)
-    SMALL = ("Segoe UI", 7)
-
+    _SANS = "Segoe UI" if IS_WINDOWS else ("Helvetica Neue" if IS_MACOS else "Ubuntu")
+    _MONO = "Cascadia Code" if IS_WINDOWS else ("SF Mono" if IS_MACOS else "Ubuntu Mono")
+    TITLE = (_SANS, 12, "bold")
+    SUBTITLE = (_SANS, 10, "bold")
+    PRIMARY = (_SANS, 9)
+    SECONDARY = (_SANS, 8)
+    MONOSPACE = (_MONO, 9)
+    BUTTON = (_SANS, 9, "bold")
+    STATUS = (_SANS, 8)
+    SMALL = (_SANS, 7)
 
 class DraculaTheme:
     BG_PRIMARY = "#282a36"
@@ -7433,9 +7434,6 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
                 logger.warning("Google direct API für 5 Minuten deaktiviert")
         return None
 
-    # -------------------------------------------------------------------------
-    # Haupt‑API‑Aufruf — kombiniert deep_translator und direkte API
-    # -------------------------------------------------------------------------
     def _call_translation_api(
         self, text: str, source_lang: str, target_lang: str
     ) -> Optional[str]:
@@ -7486,9 +7484,6 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
 
         return self._postprocess_translation(translated, clean_text)
 
-    # -------------------------------------------------------------------------
-    # translate_text — überschrieben, um Fehlerzähler exakt zu steuern
-    # -------------------------------------------------------------------------
     def translate_text(
         self, text: str, source_lang: str = "auto", target_lang: Optional[str] = None
     ) -> Optional[TranslationResult]:
@@ -7575,9 +7570,6 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
             )
         return None
 
-    # -------------------------------------------------------------------------
-    # Qualitätsbewertung (neutral)
-    # -------------------------------------------------------------------------
     def _rate_translation_quality(self, original: str, translated: str) -> float:
         if not translated or len(translated) < 2:
             return 0.0
@@ -7595,9 +7587,6 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
             return 0.0
         return 1.0
 
-    # -------------------------------------------------------------------------
-    # Reinitialisierung nach Deaktivierung
-    # -------------------------------------------------------------------------
     def _reinitialize(self) -> None:
         logger.info("GoogleTranslationEngine reinitialisiert")
         self._setup_session()
@@ -7722,9 +7711,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                 f"OllamaTranslationEngine initialisiert: model={model}, host={self.host}",
             )
 
-    # -------------------------------------------------------------------------
-    # Host‑Validierung (unverändert)
-    # -------------------------------------------------------------------------
     @staticmethod
     def _validate_and_normalize_host(host: str) -> str:
         DEFAULT_HOST = "http://localhost:11434"
@@ -7752,9 +7738,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         normalized = urllib.parse.urlunparse((parsed.scheme, netloc, "", "", "", ""))
         return normalized.rstrip("/")
 
-    # -------------------------------------------------------------------------
-    # Session nur für /api/tags (Modell‑Liste)
-    # -------------------------------------------------------------------------
     def _get_session(self) -> Optional[requests.Session]:
         with self._session_lock:
             if self._session is None and self.available:
@@ -7784,9 +7767,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         )
         self._session.timeout = (3, 5)
 
-    # -------------------------------------------------------------------------
-    # Model‑Liste (wie gehabt)
-    # -------------------------------------------------------------------------
     def _fetch_available_models(self) -> List[str]:
         if not self.available:
             return []
@@ -7827,9 +7807,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         except Exception:
             return False
 
-    # -------------------------------------------------------------------------
-    # Prompt‑Aufbau mit Text‑Sanitization
-    # -------------------------------------------------------------------------
     def _sanitize_text(self, text: str) -> str:
         cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
         if len(cleaned) > 2000:
@@ -7857,9 +7834,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
             f"Translation:"
         )
 
-    # -------------------------------------------------------------------------
-    # API‑Aufruf – DIREKT mit requests.post (ohne Session!)
-    # -------------------------------------------------------------------------
     def _call_ollama_with_timeout_retry(
         self,
         prompt: str,
@@ -7961,9 +7935,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         log_debug("ollama", f"Backoff wegen {reason}: {delay:.2f}s")
         time.sleep(delay)
 
-    # -------------------------------------------------------------------------
-    # Haupt‑API‑Aufruf – gestaffelte Fallbacks, korrekte Fehlerzählung
-    # -------------------------------------------------------------------------
     def _call_translation_api(
         self, text: str, source_lang: str, target_lang: str
     ) -> Optional[str]:
@@ -8805,11 +8776,6 @@ class AudioEnhancer:
         return audio_np
 
 
-# =============================================================================
-# 14. TRANSKRIPTIONS-ENGINE & DUMMY
-# =============================================================================
-
-
 class TranscriptionEngine:
     """
     Optimierte Transkriptions-Engine mit automatischer Hardware-Erkennung,
@@ -9648,9 +9614,6 @@ class TranscriptionEngine:
 
         return diag
 
-    # -------------------------------------------------------------------------
-    #  Private Hilfsmethoden (optimiert)
-    # -------------------------------------------------------------------------
     def _load_modules(self) -> None:
         """
         Lädt numpy, scipy.signal und torch lazy. Ein einmal fehlgeschlagener
@@ -9874,7 +9837,7 @@ class TranscriptionEngine:
         free = self._get_free_gpu_memory()
         if free is None:
             return True
-        return free >= 0.8  # tiny benötigt ~0.8 GB
+        return free >= 0.8
 
     def _get_free_gpu_memory(self, device: Optional[str] = None) -> Optional[float]:
         """Ermittelt freien GPU-Speicher in GB (bevorzugt pynvml, sonst torch)."""
@@ -10248,6 +10211,29 @@ class TranscriptionEngine:
         Aktiviert das übergebene Modell als das aktuell aktive.
         Setzt _last_oom nur beim Modellwechsel zurück (behebt Race-Condition).
         """
+        with self._lock:
+            if self._disposing:
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "model", "Engine is disposing – discarding newly loaded model"
+                    )
+                must_unload = True
+            else:
+                requested = getattr(self, "_requested_model", None)
+                if requested is not None and requested != model_size:
+                    if DEBUG_LEVEL >= 3:
+                        log_debug(
+                            "model",
+                            f"Obsolete model '{model_size}' (requested '{requested}') – discarding",
+                        )
+                    must_unload = True
+                else:
+                    must_unload = False
+
+        if must_unload:
+            self._unload_model(model)
+            return
+
         if DEBUG_LEVEL >= 3:
             log_debug(
                 "model",
@@ -10287,7 +10273,6 @@ class TranscriptionEngine:
                 log_debug("model", "Reset _last_confidence_threshold to 0.6")
 
         with self._state_lock:
-            # _last_oom NUR beim Modellwechsel zurücksetzen – nicht bei jeder erfolgreichen Transkription!
             if self._last_oom:
                 self._last_oom = False
                 logger.info("✅ OOM‑Flag nach Modellwechsel zurückgesetzt")
@@ -19557,6 +19542,8 @@ class OllamaSummarizer:
         # Thread‑Management
         self._active_threads: List[threading.Thread] = []
         self._threads_lock = threading.RLock()
+        self._disposed = False
+        self._dispose_lock = threading.RLock()
 
     def _get_session(self) -> Optional[requests.Session]:
         """
@@ -19836,14 +19823,12 @@ class OllamaSummarizer:
             logger.info("OllamaSummarizer: Stop signalisiert (globales Event)")
 
     def dispose(self) -> None:
-        """
-        Gibt alle Ressourcen des OllamaSummarizer frei und beendet laufende Anfragen.
-        """
-        # Verhindert doppelte Ausführung
-        if getattr(self, "_disposed", False):
-            log_debug("ollama", "OllamaSummarizer.dispose() already called, skipping")
-            return
-        self._disposed = True
+        """        Gibt alle Ressourcen des OllamaSummarizer frei und beendet laufende Anfragen.        """
+        with self._dispose_lock:
+            if self._disposed:
+                log_debug("ollama", "OllamaSummarizer.dispose() already called, skipping")
+                return
+            self._disposed = True
 
         log_debug("ollama", "OllamaSummarizer.dispose() called – cleaning up resources")
 
@@ -19851,7 +19836,6 @@ class OllamaSummarizer:
             self._stop_event.set()
             log_debug("ollama", "  → Global stop event set")
 
-        # Lokales Cancel-Event (falls vorhanden) ebenfalls setzen
         if (
             hasattr(self, "_current_cancel_event")
             and self._current_cancel_event is not None
@@ -22206,9 +22190,10 @@ class TTSManager:
         Synchrone Piper‑Ausgabe (wird im Worker‑Thread aufgerufen).
         """
 
-        if getattr(self, "_disposed", False):
-            log_debug("tts", "_speak_piper_sync: TTSManager disposed – abort")
-            return False, "TTSManager disposed"
+        with self._dispose_lock:
+            if self._disposed:
+                log_debug("tts", "_speak_piper_sync: TTSManager disposed – abort")
+                return False, "TTSManager disposed"
         if self._stop_requested.is_set():
             log_debug("tts", "_speak_piper_sync: Stop requested – abort")
             return False, "Stop requested"
@@ -27009,7 +26994,7 @@ class InstallDependencyDialog(BaseDialog):
 
     def _get_package_manager_command(self, package_name: str) -> List[str]:
         """
-        Erzeugt den plattformspezifischen Installationsbefehl für einen
+        Erzeugt den plattformspezifischen Installationsbefehl für einenlf._translation_executor.shutd
         Paketmanager.
         """
         if self.pkg_manager == "apt":
@@ -28217,12 +28202,9 @@ class AdvancedSettingsDialog:
         self.auto_tts_translation_var = tk.BooleanVar(value=False)
 
     def _build_ui(self) -> None:
-        """
-        Erstellt die Hauptstruktur des Dialogs.
-        """
+        """        Erstellt die Hauptstruktur des Dialogs.        """
         if DEBUG_LEVEL >= 3:
             log_debug("settings", "_build_ui gestartet")
-
         try:
             theme = self.gui.current_theme
         except Exception:
@@ -28249,7 +28231,6 @@ class AdvancedSettingsDialog:
         self.notebook.pack(fill="both", expand=True, pady=(0, 10))
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
-        # Leere Frames anlegen (Inhalte werden lazy geladen)
         self.tab_audio = tk.Frame(self.notebook, bg=theme.BG_PRIMARY)
         self.tab_packages = tk.Frame(self.notebook, bg=theme.BG_PRIMARY)
         self.tab_model = tk.Frame(self.notebook, bg=theme.BG_PRIMARY)
@@ -28257,7 +28238,6 @@ class AdvancedSettingsDialog:
         self.tab_gui = tk.Frame(self.notebook, bg=theme.BG_PRIMARY)
         self.tab_advanced = tk.Frame(self.notebook, bg=theme.BG_PRIMARY)
 
-        # Reihenfolge: 1. Audio & VAD, 2. Pakete & Updates, 3. Modell, …
         self.notebook.add(self.tab_audio, text="🎵 Audio & VAD")
         self.notebook.add(self.tab_packages, text="📦 Pakete & Updates")
         self.notebook.add(self.tab_model, text="🤖 Modell & Inferenz")
@@ -28271,10 +28251,11 @@ class AdvancedSettingsDialog:
         btn_common = {
             "relief": "flat",
             "padx": 15,
-            "font": ("Segoe UI", 8),
+            "font": Fonts.SECONDARY,
             "cursor": "hand2",
         }
 
+        # Reset
         reset_btn = tk.Button(
             button_frame,
             text="↻ Reset to Defaults",
@@ -28284,6 +28265,7 @@ class AdvancedSettingsDialog:
             **btn_common,
         )
         reset_btn.pack(side="left", padx=5)
+        ToolTip(reset_btn, "Setzt alle Einstellungen auf die Standardwerte zurück.")
 
         # Apply (nur speichern, nicht schließen)
         apply_btn = tk.Button(
@@ -28292,9 +28274,10 @@ class AdvancedSettingsDialog:
             command=self.apply_settings,
             bg=theme.DRAGON_BLUE,
             fg=theme.TEXT_PRIMARY,
-            **{**btn_common, "font": ("Segoe UI", 8, "bold")},
+            **{**btn_common, "font": Fonts.BUTTON},
         )
         apply_btn.pack(side="left", padx=5)
+        ToolTip(apply_btn, "Übernimmt die Änderungen, ohne das Fenster zu schließen.")
 
         # Save & Close
         save_btn = tk.Button(
@@ -28303,20 +28286,22 @@ class AdvancedSettingsDialog:
             command=self.save_settings,
             bg=theme.SUCCESS,
             fg=theme.TEXT_PRIMARY,
-            **{**btn_common, "font": ("Segoe UI", 8, "bold")},
+            **{**btn_common, "font": Fonts.BUTTON},
         )
         save_btn.pack(side="left", padx=5)
+        ToolTip(save_btn, "Speichert die Änderungen und schließt das Fenster.")
 
         # Cancel
         cancel_btn = tk.Button(
             button_frame,
             text="✕ Cancel",
             command=self._on_close,
-            bg=theme.BG_TERTIARY,
+            bg=theme.BG_TERTIARI,
             fg=theme.TEXT_PRIMARY,
             **btn_common,
         )
         cancel_btn.pack(side="left", padx=5)
+        ToolTip(cancel_btn, "Schließt das Fenster ohne zu speichern.")
 
         if DEBUG_LEVEL >= 3:
             log_debug("settings", "_build_ui erfolgreich abgeschlossen")
@@ -29083,10 +29068,8 @@ class AdvancedSettingsDialog:
         )
         audio_frame.pack(fill="x", padx=5, pady=5)
 
-        # --- Flag, um Fehler in der Widget‑Erstellung zu sammeln ---
         creation_errors = []
 
-        # Hilfsfunktion für sicheres Erstellen von tk‑Widgets
         def safe_create(widget_cls, parent, **kwargs):
             try:
                 widget = widget_cls(parent, **kwargs)
@@ -29098,7 +29081,6 @@ class AdvancedSettingsDialog:
                         "audio_tab",
                         f"Fehler beim Erstellen von {widget_cls.__name__}: {e}",
                     )
-                # Dummy‑Label als Platzhalter
                 return tk.Label(parent, text="⚠️ Fehler", bg="red", fg="white")
 
         # 1.1 Sample Rate (statisch)
@@ -29210,7 +29192,7 @@ class AdvancedSettingsDialog:
             increment=0.5,
             textvariable=self.chunk_var,
             width=self.SPINBOX_WIDTH,
-            bg=self.gui.current_theme.BG_TERTIARY,
+            bg=getattr(self.gui.current_theme, 'INPUT_BG', self.gui.current_theme.BG_TERTIARY),
             fg=self.gui.current_theme.TEXT_PRIMARY,
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
             font=Fonts.MONOSPACE,
@@ -29302,7 +29284,7 @@ class AdvancedSettingsDialog:
             increment=50,
             textvariable=self.vad_min_speech_var,
             width=self.SPINBOX_WIDTH,
-            bg=self.gui.current_theme.BG_TERTIARY,
+            bg=getattr(self.gui.current_theme, 'INPUT_BG', self.gui.current_theme.BG_TERTIARY),
             fg=self.gui.current_theme.TEXT_PRIMARY,
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
             font=Fonts.MONOSPACE,
@@ -29335,7 +29317,7 @@ class AdvancedSettingsDialog:
             increment=50,
             textvariable=self.vad_min_silence_var,
             width=self.SPINBOX_WIDTH,
-            bg=self.gui.current_theme.BG_TERTIARY,
+            bg=getattr(self.gui.current_theme, 'INPUT_BG', self.gui.current_theme.BG_TERTIARY),
             fg=self.gui.current_theme.TEXT_PRIMARY,
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
             font=Fonts.MONOSPACE,
@@ -29356,7 +29338,6 @@ class AdvancedSettingsDialog:
                     f"{len(creation_errors)} Widget‑Fehler aufgetreten, "
                     f"Details: {'; '.join(creation_errors)}",
                 )
-            # Fehlerlabel am Ende des Tabs anzeigen (optional)
             error_lbl = safe_create(
                 tk.Label,
                 parent,
@@ -29494,7 +29475,7 @@ class AdvancedSettingsDialog:
             to=32,
             textvariable=self.cpu_threads_var,
             width=self.SPINBOX_WIDTH,
-            bg=self.gui.current_theme.BG_TERTIARY,
+            bg=getattr(self.gui.current_theme, 'INPUT_BG', self.gui.current_theme.BG_TERTIARY),
             fg=self.gui.current_theme.TEXT_PRIMARY,
             buttonbackground=self.gui.current_theme.BG_TERTIARY,
             font=Fonts.MONOSPACE,
@@ -29565,7 +29546,7 @@ class AdvancedSettingsDialog:
             frame,
             textvariable=self.hotwords_var,
             width=30,
-            bg=self.gui.current_theme.BG_TERTIARY,
+            bg=getattr(self.gui.current_theme, 'INPUT_BG', self.gui.current_theme.BG_TERTIARY),
             fg=self.gui.current_theme.TEXT_PRIMARY,
             insertbackground=self.gui.current_theme.TEXT_PRIMARY,
             font=Fonts.PRIMARY,
@@ -29740,7 +29721,7 @@ class AdvancedSettingsDialog:
         )
         self.ollama_refresh_label.pack(side="left", padx=5)
 
-        # 1.3 Ollama‑Host
+        # 1.3 Ollama‑Host  ←  HIER DIE ÄNDERUNG
         lbl = safe_create(
             tk.Label,
             trans_frame,
@@ -29757,7 +29738,7 @@ class AdvancedSettingsDialog:
             trans_frame,
             textvariable=self.ollama_host_var,
             width=30,
-            bg=self.gui.current_theme.BG_TERTIARY,
+            bg=getattr(self.gui.current_theme, 'INPUT_BG', self.gui.current_theme.BG_TERTIARY),
             fg=self.gui.current_theme.TEXT_PRIMARY,
             insertbackground=self.gui.current_theme.TEXT_PRIMARY,
             font=Fonts.PRIMARY,
@@ -36293,16 +36274,14 @@ class DragonWhispererGUI:
 
     def _check_model_loading_complete(self, target_model: str) -> None:
         if self.transcription_engine.is_model_loading():
-            self._safe_after(
-                200, lambda: self._check_model_loading_complete(target_model)
-            )
+            self._safe_after(200, lambda: self._check_model_loading_complete(target_model))
         else:
             self._stop_progress_for_model_switch()
             current = self.transcription_engine.get_current_model()
             if current == target_model:
                 self.update_status(f"✅ Model switched to {target_model}")
             else:
-                self.update_status("❌ Model switch failed")
+                self.update_status(f"❌ Model switch failed (current: {current})")
                 self.model_var.set(current)
 
     def toggle_translation(self) -> None:
@@ -39221,38 +39200,20 @@ class WhisperController:
         ERROR = 4
 
     __slots__ = (
-        # ---------------------------------------------------------------------
-        # Externe Referenzen (weakref / stark)
-        # ---------------------------------------------------------------------
         "gui_ref",  # weakref auf DragonWhispererGUI
         "event_bus",  # EventBus für Kommunikation
-        # ---------------------------------------------------------------------
-        # Zustandsmaschine
-        # ---------------------------------------------------------------------
         "_state",  # Aktueller State (Enum)
         "_state_lock",  # RLock für Zustandsänderungen
         "_state_condition",  # Condition für wartende Threads
-        # ---------------------------------------------------------------------
-        # Shutdown & Stop-Management
-        # ---------------------------------------------------------------------
         "_shutdown_event",  # threading.Event für globalen Shutdown
         "_stop_in_progress",  # bool – verhindert parallele stop-Aufrufe
         "_stop_lock",  # RLock für _stop_in_progress
         "_disposed",  # bool – bereits entsorgt (Idempotenz)
-        # ---------------------------------------------------------------------
-        # Thread-Referenzen
-        # ---------------------------------------------------------------------
         "_processing_thread",  # Thread für start_processing
         "_stop_thread",  # (optional) Thread für asynchrones Stoppen
         "_idle_waiter_thread",  # Thread für verzögertes IDLE nach stop
         "_idle_waiter_lock",  # Lock für Zugriff auf _idle_waiter_thread
-        # ---------------------------------------------------------------------
-        # Timer & Timeouts
-        # ---------------------------------------------------------------------
         "_error_reset_timer",  # after-ID / Thread für automatischen ERROR→IDLE
-        # ---------------------------------------------------------------------
-        # Verarbeitungsdaten (Stream-spezifisch)
-        # ---------------------------------------------------------------------
         "_current_stream_id",  # ID des aktuellen FFmpeg-Streams
         "_last_transcription_text",  # Letzter Transkriptionstext (Duplikatprüfung)
         "_duplicate_check_cache",  # deque für weitere Duplikaterkennung
@@ -39326,9 +39287,6 @@ class WhisperController:
         """
         Startet die Verarbeitung asynchron mit umfassender Validierung und Fehlerbehandlung.
         """
-        # -----------------------------------------------------------------
-        # 1. GUI-Referenz und schnelle Validierungen (VOR Zustandswechsel)
-        # -----------------------------------------------------------------
         gui = self.gui_ref()
         if gui is None:
             self._handle_error("GUI nicht verfügbar", fatal=True)
@@ -40509,9 +40467,6 @@ class StreamHandler:
     Hochoptimierter Vermittler zwischen FFmpegManager und AudioProcessor.
     """
 
-    # -------------------------------------------------------------------------
-    # Konstanten (können bei Bedarf über Config gesteuert werden)
-    # -------------------------------------------------------------------------
     MAX_EMPTY_READS = 3  # Timeouts bevor Reconnect
     MAX_RECONNECT_ATTEMPTS = 2  # Max. Reconnect-Versuche pro Fehlerfall
     INACTIVITY_TIMEOUT = 30.0  # Sekunden ohne Daten bis Reconnect
@@ -40578,9 +40533,6 @@ class StreamHandler:
 
         log_debug("stream", f"StreamHandler initialisiert (session={self._session_id})")
 
-    # -------------------------------------------------------------------------
-    # Private Hilfsmethoden
-    # -------------------------------------------------------------------------
     def _get_ap(self) -> Optional["AudioProcessor"]:
         """Gibt die starke Referenz auf den AudioProcessor zurück."""
         return self._ap_ref()
@@ -40686,9 +40638,6 @@ class StreamHandler:
                 f"queue_join_timeout={queue_join_timeout}s, check_interval={check_interval}s",
             )
 
-        # -----------------------------------------------------------------
-        # Zentrale Abbruchprüfung
-        # -----------------------------------------------------------------
         def should_abort() -> bool:
             if ap.is_stop_requested():
                 logger.info("⏹️ Download completion wait aborted by user")
@@ -40709,9 +40658,6 @@ class StreamHandler:
                 return True
             return False
 
-        # -----------------------------------------------------------------
-        # 1. Sicherstellen, dass der Dispatcher läuft
-        # -----------------------------------------------------------------
         if not ap._dispatcher_started or (
             ap._dispatcher_thread and not ap._dispatcher_thread.is_alive()
         ):
@@ -40721,9 +40667,6 @@ class StreamHandler:
             ap._start_dispatcher()
             time.sleep(0.2)
 
-        # -----------------------------------------------------------------
-        # 2. Warten auf das Tasks‑Done‑Event
-        # -----------------------------------------------------------------
         last_status_time = start_wait
         last_pending_tasks = -1
         tasks_done_event_triggered = False
@@ -40754,9 +40697,6 @@ class StreamHandler:
 
             ap._tasks_done_event.wait(timeout=check_interval)
 
-        # -----------------------------------------------------------------
-        # 3. Vorbereitung auf Queue‑Join
-        # -----------------------------------------------------------------
         if should_abort() and not tasks_done_event_triggered:
             logger.warning("Wartezeit abgebrochen – leere Queue notfalls")
         else:
@@ -40770,12 +40710,8 @@ class StreamHandler:
                 "⚠️ Dispatcher ist während der Wartezeit gestorben – "
                 "leere Queue und breche ab."
             )
-            # Hier kein Return, sondern wir fallen in den finally‑Block, der die Queue leert
             tasks_done_event_triggered = False
 
-        # -----------------------------------------------------------------
-        # 4. Queue sicher leeren (mit Timeout)
-        # -----------------------------------------------------------------
         queue_join_success = False
         try:
 
@@ -40807,16 +40743,9 @@ class StreamHandler:
                     f"es verbleiben {ap._raw_audio_queue.qsize()} Elemente"
                 )
         finally:
-            # -----------------------------------------------------------------
-            # 🔥 GARANTIERTE BEREINIGUNG – nur ein Aufruf im finally-Block
-            #    Dadurch wird die doppelte Logik eliminiert und die Lesbarkeit erhöht.
-            # -----------------------------------------------------------------
             ap._clear_raw_audio_queue()
             logger.debug("Queue im finally-Block geleert (Garantiert)")
 
-        # -----------------------------------------------------------------
-        # 5. Abschließende Prüfungen und Erfolgsmeldung
-        # -----------------------------------------------------------------
         elapsed = time.time() - start_wait
 
         with ap._pending_tasks_lock:
@@ -40912,9 +40841,6 @@ class StreamHandler:
 
         return False
 
-    # -------------------------------------------------------------------------
-    # Hauptschleife
-    # -------------------------------------------------------------------------
     def run_loop(
         self,
         process: subprocess.Popen,
@@ -40931,10 +40857,6 @@ class StreamHandler:
     ) -> None:
         """
         Hochpräzise, unterbrechbare und extrem robuste Stream‑Verarbeitungsschleife.
-
-        Diese Methode ist das Herzstück des StreamHandlers. Sie liest kontinuierlich
-        PCM‑Daten vom FFmpeg‑Prozess, behandelt Timeouts und Fehler, führt bei
-        Bedarf mehrstufige Reconnects durch und leitet die Daten an den AudioProcessor weiter.
         """
         normal_ending = False
         self._reset_diagnosis()
@@ -40960,9 +40882,6 @@ class StreamHandler:
             normal_ending_container[0] = False
             return
 
-        # ---------------------------------------------------------------------
-        # 1. Zustandsvariablen initialisieren
-        # ---------------------------------------------------------------------
         last_data_time = time.monotonic()
         empty_reads = 0
         processing_errors = 0
@@ -40985,9 +40904,6 @@ class StreamHandler:
         self._update_diagnosis("is_live", is_live)
         self._update_diagnosis("is_local_file", is_local_file)
 
-        # ---------------------------------------------------------------------
-        # 2. Hilfsfunktionen
-        # ---------------------------------------------------------------------
         def is_stop_requested() -> bool:
             return ap.is_stop_requested()
 
@@ -41005,9 +40921,6 @@ class StreamHandler:
                 time.sleep(min(check_interval, end_time - time.monotonic()))
             return False
 
-        # ---------------------------------------------------------------------
-        # 3. Robuste Reconnect‑Hilfsfunktion (vereinheitlicht)
-        # ---------------------------------------------------------------------
         def safe_reconnect(
             reason: str,
             seek_seconds: Optional[float] = None,
@@ -41137,9 +41050,6 @@ class StreamHandler:
             logger.info(f"✅ Reconnect successful (PID: {new_process.pid})")
             return True
 
-        # ---------------------------------------------------------------------
-        # 4. Hauptschleife
-        # ---------------------------------------------------------------------
         while True:
             if not ap.is_processing() or is_stop_requested():
                 logger.info(
@@ -41431,9 +41341,6 @@ class StreamHandler:
                             break
                         continue
 
-        # ---------------------------------------------------------------------
-        # 5. Abschluss & Cleanup
-        # ---------------------------------------------------------------------
         try:
             ffmpeg.cancel_all_reads()
         except Exception as e:
@@ -41446,9 +41353,6 @@ class StreamHandler:
         self._update_diagnosis("end_time", time.time())
         self._update_diagnosis("normal_ending", normal_ending)
 
-    # -------------------------------------------------------------------------
-    # Diagnose / Debugging
-    # -------------------------------------------------------------------------
     def get_diagnosis(self) -> Dict[str, Any]:
         """
         Gibt eine Kopie der internen Diagnosedaten zurück.
@@ -41499,10 +41403,6 @@ class AudioProcessor:
     """
     Optimierte Audioverarbeitung mit asynchroner, nicht‑blockierender Transkription.
     """
-
-    # =========================================================================
-    #  Zustandsmaschine & Konstanten
-    # =========================================================================
     class State(Enum):
         IDLE = auto()
         STARTING = auto()
@@ -41513,9 +41413,6 @@ class AudioProcessor:
     MAX_BUFFER_SECONDS = 30
     PROGRESS_UPDATE_INTERVAL = Config.PROGRESS_UPDATE_INTERVAL
 
-    # =========================================================================
-    #  Konstruktor
-    # =========================================================================
     def __init__(
         self,
         controller_ref: Any,
@@ -42447,6 +42344,19 @@ class AudioProcessor:
                 )
             self._last_queue_log_time = now
 
+    @contextmanager
+    def _pending_task_guard(self):
+        """
+        Context Manager, der den Zähler für ausstehende Transkriptionen
+        automatisch erhöht und nach Verlassen des Blocks wieder dekrementiert.
+        Verhindert manuelle Fehler beim Zählen und ist threadsicher.
+        """
+        self._modify_pending_tasks(1)
+        try:
+            yield
+        finally:
+            self._modify_pending_tasks(-1)
+
     def _process_audio_chunk_async(
         self,
         audio_data: bytes,
@@ -42457,22 +42367,27 @@ class AudioProcessor:
         """
         Verarbeitet einen Audio‑Chunk asynchron im Transkriptions‑Executor.
         """
-        if self._stop_event.is_set():
-            with self._state_lock:
-                if self._state != AudioProcessor.State.IDLE:
-                    if DEBUG_LEVEL >= 3:
-                        log_debug(
-                            "transcribe",
-                            "User stop requested before processing, skipping chunk",
-                        )
-                    return
+        if self._stop_event.is_set() or not self.is_processing():
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "transcribe",
+                    "Chunk skipped – stop event set or not processing",
+                )
+            return
 
         with self._engine_lock:
             trans_engine = self._transcription_engine
-
         if trans_engine is None:
             if DEBUG_LEVEL >= 3:
-                log_debug("transcribe", "Transcription engine not set, skipping chunk")
+                log_debug("transcribe", "Transcription engine not set – chunk skipped")
+            return
+
+        if self._stop_event.is_set() or not self.is_processing():
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "transcribe",
+                    "Chunk skipped – stop event set after engine acquisition",
+                )
             return
 
         start_time = time.perf_counter()
@@ -42484,121 +42399,84 @@ class AudioProcessor:
                 f"Processing chunk: {len(audio_data)} bytes, {chunk_duration:.2f}s",
             )
 
-        task_added = False
-        try:
-            self._modify_pending_tasks(1)
-            task_added = True
-        except Exception as e:
-            logger.error(f"Failed to increment pending tasks: {e}", exc_info=True)
-            return
+        task_failed = False
+        segments: List[TranscriptionResult] = []
+        with self._pending_task_guard():
 
-        try:
-            segments = self._transcribe_with_timeout(audio_data, timeout=90.0)
+            if self._stop_event.is_set():
+                if DEBUG_LEVEL >= 3:
+                    log_debug("transcribe", "Chunk cancelled before task submission")
+                return
 
-        except TimeoutError as e:
-            logger.error(
-                f"Transkription timeout nach 90s für Chunk ({len(audio_data)} bytes) – wird übersprungen"
-            )
-            if DEBUG_LEVEL >= 3:
-                log_debug("transcribe", f"TimeoutError details: {e}")
-            with self._stats_lock:
-                self._consecutive_timeouts += 1
-            if error_callback:
-                error_callback("Transkription timeout – Chunk übersprungen")
-            # Fallback für Audio‑Analyse auch bei Timeout
-            self._analyze_audio_for_music_silence(audio_data, valid_segments=[])
-            return
+            try:
+                segments = self._transcribe_with_timeout(audio_data, timeout=90.0)
+            except TimeoutError as e:
+                logger.error(
+                    f"Transcription timeout for chunk ({len(audio_data)} bytes) – skipped"
+                )
+                if DEBUG_LEVEL >= 3:
+                    log_debug("transcribe", f"TimeoutError details: {e}")
+                with self._stats_lock:
+                    self._consecutive_timeouts += 1
+                if error_callback:
+                    error_callback("Transcription timeout")
+                task_failed = True
+            except TranscriptionError as e:
+                logger.error(f"Transcription failed: {e}")
+                if DEBUG_LEVEL >= 3:
+                    log_debug("transcribe", f"TranscriptionError: {e}")
+                with self._stats_lock:
+                    self._consecutive_errors += 1
+                if error_callback:
+                    error_callback(f"Transcription failed: {str(e)[:100]}")
+                task_failed = True
+            except Exception as e:
+                logger.exception(f"Unexpected transcription error: {e}")
+                with self._stats_lock:
+                    self._consecutive_errors += 1
+                if error_callback:
+                    error_callback(f"Transcription failed: {str(e)[:100]}")
+                task_failed = True
 
-        except TranscriptionError as e:
-            logger.error(f"Transkription fehlgeschlagen: {e}")
-            if DEBUG_LEVEL >= 3:
-                log_debug("transcribe", f"TranscriptionError: {e}")
-            with self._stats_lock:
-                self._consecutive_errors += 1
-            if error_callback:
-                error_callback(f"Transkription fehlgeschlagen: {str(e)[:100]}")
-            # Auch bei Fehler Analyse durchführen
-            self._analyze_audio_for_music_silence(audio_data, valid_segments=[])
-            return
+        valid_segments = []
+        if not task_failed and segments:
+            valid_segments = [
+                seg
+                for seg in segments
+                if seg and seg.text and trans_engine.is_valid_segment(
+                    seg.text.strip(), getattr(seg, "confidence", 0.0)
+                )
+            ]
+        self._analyze_audio_for_music_silence(audio_data, valid_segments)
 
-        except Exception as e:
-            logger.exception(f"Unerwarteter Fehler bei der Transkription: {e}")
-            with self._stats_lock:
-                self._consecutive_errors += 1
-            if error_callback:
-                error_callback(f"Transkription fehlgeschlagen: {str(e)[:100]}")
-            return
-
-        finally:
-            if task_added:
-                self._modify_pending_tasks(-1)
-
-        if not segments:
-            if DEBUG_LEVEL >= 3:
-                log_debug("transcribe", "No segments returned")
-            self._analyze_audio_for_music_silence(audio_data, valid_segments=[])
+        if task_failed or not valid_segments:
+            processing_duration = time.perf_counter() - start_time
+            self._update_realtime_factor(chunk_duration, processing_duration)
             return
 
         max_end = 0.0
-        for seg in segments:
-            if hasattr(seg, "end") and seg.end is not None:
-                if seg.end > max_end:
-                    max_end = seg.end
-
+        for seg in valid_segments:
+            if hasattr(seg, "end") and seg.end is not None and seg.end > max_end:
+                max_end = seg.end
         if max_end > 0:
-            if (
-                self._expected_duration is not None
-                and max_end > self._expected_duration
-            ):
+            if self._expected_duration is not None and max_end > self._expected_duration:
                 if DEBUG_LEVEL >= 3:
                     log_debug(
                         "transcribe",
                         f"Clamping max_end {max_end:.2f}s to expected {self._expected_duration:.2f}s",
                     )
                 max_end = self._expected_duration
-
             with self._stats_lock:
                 if max_end > self._real_processed_seconds:
                     self._real_processed_seconds = max_end
-                    if DEBUG_LEVEL >= 3:
-                        log_debug(
-                            "transcribe",
-                            f"_real_processed_seconds updated to {self._real_processed_seconds:.2f}s",
-                        )
 
-        valid_segments = []
-        for segment in segments:
-            if not segment or not segment.text:
-                continue
+        if self.settings.config.ENABLE_TIMED_TRANSCRIPTIONS:
+            with self._subtitle_lock:
+                self._timed_transcriptions.extend(valid_segments)
 
-            clean_text = segment.text.strip()
-            conf = getattr(segment, "confidence", 0.0)
-
-            with self._last_confidence_lock:
-                self.last_confidence = conf
-
-            with self._stats_lock:
-                if conf < 0.4:
-                    self._low_conf_counter += 1
-                else:
-                    self._low_conf_counter = 0
-
-            if not trans_engine.is_valid_segment(clean_text, conf):
-                continue
-
-            # Zeitstempel für den Untertitel‑Modus zwischenspeichern
-            if self.settings.config.ENABLE_TIMED_TRANSCRIPTIONS:
-                with self._subtitle_lock:
-                    self._timed_transcriptions.append(segment)
-
-            valid_segments.append(segment)
-
-        self._analyze_audio_for_music_silence(audio_data, valid_segments)
-
-        if valid_segments:
-            self._buffer_and_flush_segments(
-                valid_segments, transcription_callback, translation_callback
-            )
+        self._buffer_and_flush_segments(
+            valid_segments, transcription_callback, translation_callback
+        )
 
         if not self._enable_sentence_buffering or self.subtitle_mode:
             for segment in valid_segments:
@@ -42629,7 +42507,6 @@ class AudioProcessor:
         Analysiert, ob der aktuelle Chunk Musik oder Stille enthält,
         und sendet entsprechende Events über den Event‑Bus.
         """
-        # Nur aktiv, wenn kein Benutzer‑Stop vorliegt
         if self._stop_event.is_set():
             return
 
@@ -42908,22 +42785,25 @@ class AudioProcessor:
         self, audio_data: bytes, timeout: Optional[float] = None
     ) -> List[TranscriptionResult]:
         """
-        Führt die Transkription eines Audio‑Chunks mit dynamischem Timeout und Selbstheilung durch.
+        Führt die Transkription eines Audio‑Chunks mit dynamischem Timeout und
+        automatischer Selbstheilung aus.
         """
         if not audio_data:
             if DEBUG_LEVEL >= 4:
-                log_debug(
-                    "transcribe",
-                    "_transcribe_with_timeout: empty audio_data – skipping",
-                )
+                log_debug("transcribe", "Empty audio data – returning no segments")
             return []
 
         chunk_duration = len(audio_data) / self.settings.config.BYTES_PER_SECOND
 
         with self._engine_lock:
             engine = self._transcription_engine
-            if engine is None:
-                raise TranscriptionError("Transcription engine not set")
+        if engine is None:
+            raise TranscriptionError("Transcription engine not set")
+
+        if self._stop_event.is_set():
+            if DEBUG_LEVEL >= 3:
+                log_debug("transcribe", "Stop event set, skipping task submission")
+            return []
 
         if timeout is None:
             with self._stats_lock:
@@ -42931,152 +42811,120 @@ class AudioProcessor:
             dynamic_timeout = max(60.0, min(600.0, chunk_duration * 5.0 * rt_factor))
         else:
             dynamic_timeout = timeout
-            # Für Log‑Ausgaben: rt_factor manuell berechnen (nur zur Anzeige)
-            rt_factor = dynamic_timeout / chunk_duration if chunk_duration > 0 else 0.0
-
-        executor = getattr(self, "_transcribe_timeout_executor", None)
-        if executor is None:
-            if DEBUG_LEVEL >= 3:
-                log_debug(
-                    "transcribe", "Timeout executor not initialized – creating now"
-                )
-            self._init_transcribe_timeout_executor()
-            executor = self._transcribe_timeout_executor
 
         if DEBUG_LEVEL >= 3:
             log_debug(
                 "transcribe",
                 f"Submitting transcription task: timeout={dynamic_timeout:.1f}s, "
-                f"chunk_duration={chunk_duration:.2f}s, "
-                f"rt_factor={rt_factor:.2f}",
+                f"chunk_duration={chunk_duration:.2f}s, audio_len={len(audio_data)}",
             )
 
-        def submit_task(executor_instance: ThreadPoolExecutor) -> Future:
-            return executor_instance.submit(
-                engine.transcribe_audio, audio_data, include_timestamps=True
-            )
+        executor = getattr(self, "_transcribe_timeout_executor", None)
+        if executor is None:
+            if DEBUG_LEVEL >= 3:
+                log_debug("transcribe", "Timeout executor not initialized – creating now")
+            self._init_transcribe_timeout_executor()
+            executor = self._transcribe_timeout_executor
 
         future: Optional[Future] = None
-        task_submitted = False
+        max_submit_attempts = 2
+        for attempt in range(1, max_submit_attempts + 1):
+            try:
+                future = executor.submit(
+                    engine.transcribe_audio, audio_data, include_timestamps=True
+                )
+                self._register_timeout_future(future)
+                if DEBUG_LEVEL >= 4:
+                    log_debug(
+                        "transcribe",
+                        f"Task submitted (attempt {attempt}/{max_submit_attempts})",
+                    )
+                break
+            except RuntimeError as exc:
+                logger.warning(
+                    f"Executor submit failed (attempt {attempt}/{max_submit_attempts}): {exc}"
+                )
+                if attempt == max_submit_attempts:
+                    raise TranscriptionError(
+                        "Failed to submit transcription task after multiple attempts"
+                    ) from exc
+                # Executor neu initialisieren und nochmals versuchen
+                self._cleanup_timeout_executor(force=True)
+                self._init_transcribe_timeout_executor()
+                executor = self._transcribe_timeout_executor
+                time.sleep(0.1)
 
         try:
-            max_submit_retries = 2
-            for attempt in range(max_submit_retries + 1):
-                try:
-                    future = submit_task(executor)
-                    self._register_timeout_future(future)
-                    task_submitted = True
-                    if DEBUG_LEVEL >= 4:
-                        log_debug(
-                            "transcribe",
-                            f"Task submitted successfully (attempt {attempt + 1})",
-                        )
-                    break
-                except RuntimeError as e:
-                    if attempt < max_submit_retries:
-                        logger.warning(
-                            f"Executor submit failed (attempt {attempt + 1}/{max_submit_retries + 1}), "
-                            f"reinitializing: {e}"
-                        )
-                        self._cleanup_timeout_executor(force=True)
-                        self._init_transcribe_timeout_executor()
-                        executor = self._transcribe_timeout_executor
-                        time.sleep(0.1)
-                    else:
-                        raise TranscriptionError(
-                            f"Failed to submit transcription task after {max_submit_retries + 1} attempts"
-                        ) from e
-                except Exception as e:
-                    logger.error(
-                        f"Unexpected error during executor submit: {e}", exc_info=True
-                    )
-                    raise TranscriptionError(
-                        f"Failed to submit transcription task: {e}"
-                    ) from e
+            result = future.result(timeout=dynamic_timeout)
+            # Erfolg: Zähler für aufeinanderfolgende Timeouts zurücksetzen
+            with self._stats_lock:
+                self._consecutive_timeouts = 0
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "transcribe",
+                    f"Transcription completed – {len(result) if result else 0} segments",
+                )
+            return result if result else []
 
-            try:
-                result = future.result(timeout=dynamic_timeout)
+        except FutureTimeout:
+            with self._stats_lock:
+                self._consecutive_timeouts += 1
+                consecutive = self._consecutive_timeouts
 
-                with self._stats_lock:
-                    self._consecutive_timeouts = 0
-
-                if not result:
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("transcribe", "Transcription returned empty result")
-                    return []
-                if DEBUG_LEVEL >= 3:
-                    log_debug("transcribe", f"Task completed: {len(result)} segments")
-                return result
-
-            except FutureTimeout as e:
-                with self._stats_lock:
-                    self._consecutive_timeouts += 1
-                    consecutive = self._consecutive_timeouts
-
-                cancelled = future.cancel()
-                if cancelled:
-                    if DEBUG_LEVEL >= 3:
-                        log_debug(
-                            "transcribe",
-                            f"Task cancelled before execution (timeout={dynamic_timeout:.1f}s)",
-                        )
-                else:
-                    if DEBUG_LEVEL >= 3:
-                        log_debug(
-                            "transcribe",
-                            f"Timeout after {dynamic_timeout:.1f}s – task already running",
-                        )
-
-                # Bei 3 aufeinanderfolgenden Timeouts den Executor asynchron austauschen
-                if consecutive >= 3:
-                    logger.warning(
-                        f"⚠️ {consecutive} consecutive timeouts in transcription executor – "
-                        "recreating executor asynchronously"
-                    )
-                    self._cleanup_timeout_executor(force=True)
-                    self._init_transcribe_timeout_executor()
-                    with self._stats_lock:
-                        self._consecutive_timeouts = 0
-                    if DEBUG_LEVEL >= 3:
-                        log_debug(
-                            "transcribe", "Timeout executor replaced successfully"
-                        )
-
-                # Realtime‑Faktor anheben, um zukünftige Timeouts zu vermeiden
-                with self._stats_lock:
-                    self._last_realtime_factor = max(
-                        self._last_realtime_factor, dynamic_timeout / chunk_duration
-                    )
-
+            cancelled = future.cancel()
+            if not cancelled:
                 if DEBUG_LEVEL >= 3:
                     log_debug(
                         "transcribe",
-                        f"_transcribe_with_timeout: Timeout after {dynamic_timeout:.1f}s for chunk "
-                        f"({len(audio_data)} bytes, consecutive={consecutive})",
+                        "Future could not be cancelled (task already running)",
                     )
-                raise TimeoutError(
-                    f"Transcription timed out after {dynamic_timeout:.1f}s "
-                    f"(chunk={chunk_duration:.2f}s, rt_factor={dynamic_timeout / chunk_duration:.1f})"
-                ) from e
 
-            except Exception as e:
-                logger.error(
-                    f"Transcription failed: {type(e).__name__}: {e}",
-                    exc_info=DEBUG_LEVEL >= 3,
+            log_msg = (
+                f"Transcription timeout after {dynamic_timeout:.1f}s "
+                f"(chunk={chunk_duration:.2f}s, consecutive={consecutive})"
+            )
+            logger.warning(log_msg)
+
+            # Executor austauschen, wenn drei Timeouts in Folge auftreten
+            if consecutive >= 3:
+                with self._timeout_executor_lock:
+                    with self._stats_lock:
+                        # Innerhalb des Locks den Wert erneut prüfen
+                        consecutive = self._consecutive_timeouts
+                    if consecutive >= 3:
+                        logger.warning(
+                            "Three consecutive transcription timeouts – "
+                            "recreating timeout executor to recover"
+                        )
+                        self._cleanup_timeout_executor(force=True)
+                        self._init_transcribe_timeout_executor()
+                        with self._stats_lock:
+                            self._consecutive_timeouts = 0
+
+            with self._stats_lock:
+                new_factor = max(
+                    self._last_realtime_factor,
+                    dynamic_timeout / chunk_duration,
                 )
-                if not future.done():
-                    future.cancel()
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("transcribe", "Cancelled future due to exception")
-                raise TranscriptionError(f"Transcription failed: {e}") from e
+                self._last_realtime_factor = min(
+                    new_factor * 0.9 + self._last_realtime_factor * 0.1,
+                    100.0,
+                )
+
+            raise TimeoutError(log_msg) from None
+
+        except Exception as exc:
+            logger.error(
+                f"Transcription task failed: {type(exc).__name__}: {exc}",
+                exc_info=DEBUG_LEVEL >= 3,
+            )
+            if future and not future.done():
+                future.cancel()
+            raise TranscriptionError(f"Transcription failed: {exc}") from exc
 
         finally:
-            if task_submitted and future is not None:
+            if future is not None:
                 self._unregister_timeout_future(future)
-                if DEBUG_LEVEL >= 4:
-                    log_debug(
-                        "transcribe", "Unregistered timeout future in finally block"
-                    )
 
     def _process_audio_data(
         self,
@@ -45907,6 +45755,7 @@ class AudioProcessor:
                 )
             except Exception as e:
                 logger.error(f"🌐 Error shutting down translation executor: {e}")
+                self._translation_executor = None
             finally:
                 # Referenz freigeben, um versehentliche spätere Nutzung zu verhindern
                 self._translation_executor = None
