@@ -26152,7 +26152,9 @@ class ShortcutsDialog(BaseDialog):
 
 
 class InstallDependencyDialog(BaseDialog):
-    """    🐉 DRACHENWARTUNG – Abhängigkeiten installieren & aktualisieren    """
+    """
+    🐉 DRACHENWARTUNG – Abhängigkeiten installieren & aktualisieren
+    """
 
     CRITICAL_SYSTEM_PACKAGES: ClassVar[Set[str]] = {"ffmpeg", "yt-dlp", "numpy"}
     CRITICAL_PYTHON_PACKAGES: ClassVar[Set[str]] = {
@@ -26452,15 +26454,25 @@ class InstallDependencyDialog(BaseDialog):
         if IS_WINDOWS and self.pkg_manager == "winget" and not self._is_admin():
             tk.Label(
                 sys_frame,
-                text="⚠️ Für die Installation einiger Pakete sind Administratorrechte erforderlich.\n"
-                "   Bitte starten Sie Dragon Whisperer als Administrator oder öffnen Sie\n"
-                "   eine Eingabeaufforderung (cmd) mit Admin‑Rechten und führen Sie den\n"
-                "   angezeigten Befehl manuell aus.",
+                text="⚠️ Für die Installation von Systempaketen sind Administratorrechte erforderlich.\n"
+                     "   Klicken Sie auf den Button unten, um das Programm automatisch neu zu starten.",
                 bg=CURRENT_THEME.BG_SECONDARY,
                 fg=CURRENT_THEME.WARNING,
                 font=Fonts.PRIMARY,
                 justify="left",
             ).pack(fill="x", pady=5)
+            
+            # --- NEU: Button für den automatischen Admin-Neustart ---
+            tk.Button(
+                sys_frame,
+                text="🛡️ Als Administrator neu starten",
+                command=self._restart_as_admin,
+                bg=CURRENT_THEME.WARNING,
+                fg=CURRENT_THEME.TEXT_PRIMARY,
+                font=Fonts.BUTTON,
+                padx=10, pady=5, cursor="hand2",
+                activebackground=CURRENT_THEME.DRAGON_GREEN,
+            ).pack(pady=(5, 0))
 
     def _build_python_packages_section(self) -> None:
         py_frame = tk.LabelFrame(
@@ -27059,7 +27071,9 @@ class InstallDependencyDialog(BaseDialog):
     def _install_python_packages(
         self, packages: List[str], upgrade: bool = False
     ) -> bool:
-        """        Installiert oder aktualisiert eine Liste von Python‑Paketen mit pip.        """
+        """
+        Installiert oder aktualisiert eine Liste von Python‑Paketen mit pip.
+        """
         if not packages:
             self._append_output("ℹ️ Keine Python‑Pakete angegeben – überspringe.\n")
             return True
@@ -27431,6 +27445,31 @@ class InstallDependencyDialog(BaseDialog):
             except Exception:
                 pass
         self._safe_after(0, _gui_update)
+
+    def _restart_as_admin(self) -> None:
+        """
+        Startet das gesamte Skript unter Windows mit Administratorrechten neu.
+        Verwendet den aktuellen venv-Python-Interpreter.
+        Funktioniert nur unter Windows. Unter Linux/macOS ist der Aufruf harmlos.
+        """
+        if not IS_WINDOWS:
+            self._append_output("Unter diesem Betriebssystem nicht nötig.\n")
+            return
+
+        self._append_output("🔄 Starte das Skript mit Administratorrechten neu...\n")
+        self._safe_after(500, self._perform_elevation)
+
+    def _perform_elevation(self) -> None:
+        """Führt die eigentliche PowerShell-Elevation aus und beendet das Programm."""
+        try:
+            python_exe = sys.executable
+            script_path = os.path.abspath(sys.argv[0])
+            ps_command = f"Start-Process -FilePath '{python_exe}' -ArgumentList '{script_path}' -Verb RunAs"
+            subprocess.Popen(["powershell", "-Command", ps_command], shell=True)
+            self._append_output("Das Programm wird beendet. Bitte warten Sie auf das neue Fenster...\n")
+            self._safe_after(500, lambda: sys.exit(0))
+        except Exception as e:
+            self._append_output(f"Fehler beim Neustart: {e}\n")
 
     def _run_subprocess(
         self, cmd: List[str], description: str = "", env: Optional[Dict] = None
@@ -31787,7 +31826,6 @@ class AdvancedSettingsDialog:
                 )
             self._show_validation_error(widget, msg)
         else:
-            # Alles in Ordnung
             self._clear_validation_error(widget)
             if DEBUG_LEVEL >= 4:
                 log_debug(
@@ -31838,7 +31876,6 @@ class AdvancedSettingsDialog:
             # Widget wurde bereits zerstört
             return
 
-        # Einheitlicher Farbcode für Validierungsfehler.
         ERROR_BG = "#ffcccc"
 
         try:
@@ -31960,7 +31997,6 @@ class AdvancedSettingsDialog:
                     level="debug",
                 )
 
-    #  Suche
     def _on_search_changed(self) -> None:
         """
         Reagiert auf Änderungen im Suchfeld.  Durchsucht zuerst die bereits
