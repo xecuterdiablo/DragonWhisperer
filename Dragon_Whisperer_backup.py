@@ -26177,14 +26177,27 @@ class InstallDependencyDialog(BaseDialog):
             "pacman": "yt-dlp",
             "brew": "yt-dlp",
             "pip": "yt-dlp",
+            "winget": "yt-dlp.yt-dlp",
         },
-        "vlc": {"apt": "vlc", "pacman": "vlc", "brew": "vlc", "winget": "VideoLAN.VLC"},
-        "espeak": {"apt": "espeak", "pacman": "espeak", "brew": "espeak"},
+        "vlc": {
+            "apt": "vlc",
+            "pacman": "vlc",
+            "brew": "vlc",
+            "winget": "VideoLAN.VLC",
+        },
+        "espeak": {
+            "apt": "espeak",
+            "pacman": "espeak",
+            "brew": "espeak",
+            "winget": "eSpeak.eSpeak",
+        },
         "piper": {
             "apt": "piper",
             "pacman": "piper",
             "brew": "piper",
+            "winget": "GitHub.Piper",
             "pip": "piper-tts",
+            "fallback": "winget install --source winget GitHub.Piper",
         },
         "ollama": {
             "apt": "ollama",
@@ -27461,9 +27474,18 @@ class InstallDependencyDialog(BaseDialog):
         try:
             python_exe = sys.executable
             script_path = os.path.abspath(sys.argv[0])
-            ps_command = f"Start-Process -FilePath '{python_exe}' -ArgumentList '{script_path}' -Verb RunAs"
-            subprocess.Popen(["powershell", "-Command", ps_command], shell=True)
-            self._append_output("Das Programm wird beendet. Bitte warten Sie auf das neue Fenster...\n")
+            ps_command = (
+                f"Start-Process -FilePath '{python_exe}' "
+                f"-ArgumentList '{script_path}' -Verb RunAs"
+            )
+            subprocess.Popen(
+                ["powershell", "-Command", ps_command],
+                shell=False,
+            )
+            self._append_output(
+                "Das Programm wird beendet. "
+                "Bitte warten Sie auf das neue Fenster...\n"
+            )
             self._safe_after(500, lambda: sys.exit(0))
         except Exception as e:
             self._append_output(f"Fehler beim Neustart: {e}\n")
@@ -35530,12 +35552,10 @@ class DragonWhispererGUI:
                     "gui", f"handle_translation (subtitle): '{formatted[:100]}...'"
                 )
 
-            # Einfügen in Queue oder direkt
             self._insert_translation_text(formatted, shutdown_active)
             return
 
         with self._duplicate_lock:
-            # Bestimme, ob ein neuer Block begonnen werden muss
             start_new_block = (
                 not self._last_output_translation
                 or self._last_output_translation[-1] in ".!?。！？"
@@ -35551,7 +35571,6 @@ class DragonWhispererGUI:
             else:
                 prefix = ""
 
-            # Für asiatische Sprachen kein Leerzeichen zwischen Sätzen
             asian_langs = {"zh", "ja", "ko", "th", "vi", "yue"}
             if target_lang in asian_langs:
                 suffix = "\n" if current_text[-1] in ".!?。！？" else ""
@@ -35560,7 +35579,6 @@ class DragonWhispererGUI:
 
             formatted = f"{prefix}{current_text}{suffix}"
 
-            # Ausgegebenen Text für Satzkontext und Duplikaterkennung speichern
             self._last_output_translation = current_text
             self._last_translation_text = current_text
 
@@ -35578,7 +35596,6 @@ class DragonWhispererGUI:
         force_direct=True gesetzt ist, wird der Text direkt per root.after
         in das Übersetzungs‑Widget geschrieben.
         """
-        # Prüfen, ob QueueManager verfügbar ist
         qm_available = (
             hasattr(self, "queue_manager")
             and self.queue_manager is not None
