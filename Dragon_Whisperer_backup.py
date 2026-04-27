@@ -3788,6 +3788,7 @@ class PlatformUtils:
     def check_platform_dependencies(cls) -> bool:
         """
         Prüft, ob alle kritischen und optionalen Abhängigkeiten vorhanden sind.
+        Verwendet die robuste _find_executable für Tools, die auch im venv liegen können.
         """
         with cls._dependencies_lock:
             if cls._dependencies_checked:
@@ -3806,8 +3807,7 @@ class PlatformUtils:
                 "Starting dependency check", extra={"component": cls._DEBUG_COMPONENT}
             )
 
-            # ==================== KRITISCHE ABHÄNGIGKEITEN ====================
-            ffmpeg_found = cls.get_ffmpeg_path() is not None
+            ffmpeg_found = cls._find_executable("ffmpeg") is not None
             if not ffmpeg_found:
                 missing_critical.append("ffmpeg")
                 issues.append("FFmpeg not found in PATH or standard locations")
@@ -3819,7 +3819,7 @@ class PlatformUtils:
                     "  ✓ ffmpeg found", extra={"component": cls._DEBUG_COMPONENT}
                 )
 
-            ytdlp_found = shutil.which("yt-dlp") is not None
+            ytdlp_found = cls._find_executable("yt-dlp") is not None
             if not ytdlp_found:
                 missing_critical.append("yt-dlp")
                 issues.append("yt-dlp not found in PATH")
@@ -3870,7 +3870,6 @@ class PlatformUtils:
                     extra={"component": cls._DEBUG_COMPONENT},
                 )
 
-            # Übersetzungs-Engines
             if not TRANSLATOR_AVAILABLE:
                 missing_optional.append("deep-translator")
                 issues.append(
@@ -3886,7 +3885,6 @@ class PlatformUtils:
                     extra={"component": cls._DEBUG_COMPONENT},
                 )
 
-            # Argos (Offline-Übersetzung)
             argos_available = importlib.util.find_spec("argostranslate") is not None
             if not argos_available:
                 missing_optional.append("argos-translate")
@@ -3903,7 +3901,6 @@ class PlatformUtils:
                     extra={"component": cls._DEBUG_COMPONENT},
                 )
 
-            # PyTorch (GPU)
             if not TORCH_AVAILABLE:
                 missing_optional.append("torch")
                 issues.append("PyTorch not available (optional for GPU acceleration)")
@@ -3915,7 +3912,6 @@ class PlatformUtils:
                     "  ✓ torch available", extra={"component": cls._DEBUG_COMPONENT}
                 )
 
-            # psutil (System-Monitoring)
             if not FastLazyLoader.is_available("psutil"):
                 missing_optional.append("psutil")
                 issues.append("psutil not available (system monitoring limited)")
@@ -3927,7 +3923,6 @@ class PlatformUtils:
                     "  ✓ psutil available", extra={"component": cls._DEBUG_COMPONENT}
                 )
 
-            # pynvml (GPU-Statistiken)
             if importlib.util.find_spec("pynvml") is None:
                 missing_optional.append("pynvml")
                 issues.append("pynvml not available (detailed GPU stats limited)")
@@ -3939,7 +3934,6 @@ class PlatformUtils:
                     "  ✓ pynvml available", extra={"component": cls._DEBUG_COMPONENT}
                 )
 
-            # noisereduce (Rauschunterdrückung)
             if importlib.util.find_spec("noisereduce") is None:
                 missing_optional.append("noisereduce")
                 issues.append("noisereduce not available (audio enhancement limited)")
@@ -3953,7 +3947,6 @@ class PlatformUtils:
                     extra={"component": cls._DEBUG_COMPONENT},
                 )
 
-            # rapidfuzz (Textähnlichkeit)
             if importlib.util.find_spec("rapidfuzz") is None:
                 missing_optional.append("rapidfuzz")
                 issues.append("rapidfuzz not available (duplicate detection slower)")
@@ -3965,26 +3958,23 @@ class PlatformUtils:
                     "  ✓ rapidfuzz available", extra={"component": cls._DEBUG_COMPONENT}
                 )
 
-            # python-docx (Word-Export)
             if importlib.util.find_spec("docx") is None:
                 missing_optional.append("python-docx")
                 issues.append("python-docx not available (Word export disabled)")
                 cls._logger.debug(
-                    "  ✗ python-docx missing", extra={"component": cls._DEBUG_COMPONENT}
+                    "  ✗ python-docx missing",
+                    extra={"component": cls._DEBUG_COMPONENT}
                 )
             else:
                 cls._logger.debug(
                     "  ✓ python-docx available",
-                    extra={"component": cls._DEBUG_COMPONENT},
+                    extra={"component": cls._DEBUG_COMPONENT}
                 )
 
-            vlc_found = shutil.which("vlc") is not None
+            vlc_found = cls._find_executable("vlc") is not None
             if not vlc_found and IS_WINDOWS:
-                # Zusätzliche Standardpfade prüfen
-                for p in [
-                    r"C:\Program Files\VideoLAN\VLC\vlc.exe",
-                    r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
-                ]:
+                for p in [r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+                          r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe"]:
                     if os.path.exists(p):
                         vlc_found = True
                         break
@@ -3999,36 +3989,22 @@ class PlatformUtils:
                     "  ✓ vlc available", extra={"component": cls._DEBUG_COMPONENT}
                 )
 
-            # Piper für TTS – zusätzlich Modell-Cache prüfen
-            piper_found = shutil.which("piper") is not None
+            piper_found = cls._find_executable("piper") is not None
             if not piper_found:
-                # Prüfe, ob im Cache-Verzeichnis mindestens eine .onnx-Datei liegt.
                 try:
-                    # Falls TTSManager bereits definiert ist, nutze dessen statische Methode
                     if "TTSManager" in globals():
                         cache_dir = TTSManager.get_piper_cache_dir()
                     else:
-                        # Fallback für die Plattform
-                        if IS_WINDOWS:
-                            cache_dir = os.path.join(
-                                os.environ.get(
-                                    "APPDATA", os.path.expanduser("~\\AppData\\Roaming")
-                                ),
-                                "piper",
-                            )
-                        else:
-                            cache_dir = os.path.join(
-                                os.environ.get(
-                                    "XDG_CACHE_HOME", os.path.expanduser("~/.cache")
-                                ),
-                                "piper",
-                            )
+                        cache_dir = os.path.join(
+                            os.environ.get("APPDATA", os.path.expanduser("~\\AppData\\Roaming")),
+                            "piper"
+                        ) if IS_WINDOWS else os.path.join(
+                            os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
+                            "piper"
+                        )
                     if os.path.isdir(cache_dir):
                         for f in os.listdir(cache_dir):
-                            if (
-                                f.endswith(".onnx")
-                                and os.path.getsize(os.path.join(cache_dir, f)) > 0
-                            ):
+                            if f.endswith(".onnx") and os.path.getsize(os.path.join(cache_dir, f)) > 0:
                                 piper_found = True
                                 break
                 except Exception as e:
@@ -4045,31 +4021,22 @@ class PlatformUtils:
                     "  ✓ piper available", extra={"component": cls._DEBUG_COMPONENT}
                 )
 
-            # espeak – unter Windows überspringen (pyttsx3/SAPI ist immer verfügbar)
             if not IS_WINDOWS:
-                espeak_found = shutil.which("espeak") is not None
+                espeak_found = cls._find_executable("espeak") is not None
                 if not espeak_found:
                     missing_optional.append("espeak")
-                    issues.append(
-                        "espeak not found (lightweight TTS fallback unavailable)"
-                    )
+                    issues.append("espeak not found (lightweight TTS fallback unavailable)")
                     cls._logger.debug(
                         "  ✗ espeak missing", extra={"component": cls._DEBUG_COMPONENT}
                     )
                 else:
                     cls._logger.debug(
-                        "  ✓ espeak available",
-                        extra={"component": cls._DEBUG_COMPONENT},
+                        "  ✓ espeak available", extra={"component": cls._DEBUG_COMPONENT}
                     )
 
-            # Audio-Player für TTS (mindestens einer wird benötigt)
             players = []
-            for name, cmd in [
-                ("ffplay", ["ffplay"]),
-                ("aplay", ["aplay"]),
-                ("paplay", ["paplay"]),
-                ("sox", ["play"]),
-            ]:
+            for name, cmd in [("ffplay", ["ffplay"]), ("aplay", ["aplay"]),
+                             ("paplay", ["paplay"]), ("sox", ["play"])]:
                 if shutil.which(cmd[0]):
                     players.append(name)
             if not players:
@@ -4081,7 +4048,7 @@ class PlatformUtils:
             else:
                 cls._logger.debug(
                     f"  ✓ audio players: {', '.join(players)}",
-                    extra={"component": cls._DEBUG_COMPONENT},
+                    extra={"component": cls._DEBUG_COMPONENT}
                 )
 
             if missing_critical:
@@ -4106,9 +4073,7 @@ class PlatformUtils:
                     error_msg += "\nnumpy Installation:\n"
                     error_msg += "  • pip install numpy\n"
 
-                error_msg += (
-                    "\n💡 Nach der Installation starten Sie Dragon Whisperer neu."
-                )
+                error_msg += "\n💡 Nach der Installation starten Sie Dragon Whisperer neu."
                 cls._dependencies_checked = False
                 raise RuntimeError(error_msg)
 
