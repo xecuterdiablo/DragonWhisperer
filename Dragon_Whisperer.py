@@ -48953,9 +48953,6 @@ class AudioProcessor:
                 # Semaphor wird in **jedem** Fall freigegeben
                 self._translation_semaphore.release()
 
-        # -----------------------------------------------------------------
-        # 5. Übersetzungs‑Task an den Executor übergeben
-        # -----------------------------------------------------------------
         try:
             executor.submit(_translation_task)
         except RuntimeError as e:
@@ -48978,21 +48975,6 @@ class AudioProcessor:
         """
         Aktualisiert den gleitenden Echtzeitfaktor (_last_realtime_factor)
         basierend auf der tatsächlichen Verarbeitungsdauer eines Chunks.
-
-        Verbesserungen gegenüber der ursprünglichen Fassung:
-            • Ausschließlich **hier** wird der Realtime‑Faktor fortgeschrieben –
-              keine Verfälschung mehr durch Timeout‑Werte aus
-              ``_transcribe_with_timeout``.
-            • Ausreißer durch sehr kurze Chunks (z. B. letzter Chunk eines
-              Videos) werden abgemildert, indem eine Mindest‑Chunkdauer von
-              2.0 s angenommen wird.
-            • Eine Warnung erscheint nur dann, wenn die Verarbeitung
-              tatsächlich länger als das Audio gedauert hat
-              (processing_duration > chunk_duration), und wird über einen
-              einfachen Zeitstempel auf maximal eine Meldung alle 10 Sekunden
-              begrenzt.
-            • EMA‑Glättung (α = 0.3) verhindert sprunghafte Änderungen.
-            • Thread‑sicher durch ``_stats_lock``.
         """
         # Plausibilitätsprüfung
         if chunk_duration <= 0.0 or processing_duration <= 0.0:
@@ -49010,11 +48992,9 @@ class AudioProcessor:
 
         raw_factor = processing_duration / effective_chunk_duration
 
-        # ── EMA‑Glättung ──
         ALPHA = 0.3
         with self._stats_lock:
             if self._last_realtime_factor <= 0.0:
-                # Erster Messwert – direkt übernehmen
                 self._last_realtime_factor = raw_factor
             else:
                 self._last_realtime_factor = (
@@ -49024,7 +49004,6 @@ class AudioProcessor:
 
             current_factor = self._last_realtime_factor
 
-        # ── Warnung nur bei echter Verlangsamung ──
         if processing_duration > chunk_duration and current_factor > 1.5:
             now = time.time()
             if not hasattr(self, "_last_rt_warning_time"):
@@ -49066,7 +49045,6 @@ class WhisperLayoutManager:
         self.root = gui_ref.root
         self._batch_timer_id: Optional[str] = None
 
-        # Sicherstellen, dass die Queues existieren (werden vom QueueManager genutzt)
         if (
             not hasattr(self.gui_ref, "_text_update_queue")
             or self.gui_ref._text_update_queue is None
@@ -49117,7 +49095,6 @@ class WhisperLayoutManager:
             pass
         if theme is None:
             try:
-                # Fallback auf das globale CURRENT_THEME (kann None sein)
                 theme = globals().get("CURRENT_THEME", DarkTheme)
                 if theme is None:
                     theme = DarkTheme
@@ -49197,7 +49174,6 @@ class WhisperLayoutManager:
 
                 w_class = widget.__class__
 
-                # ttk‑Widgets nur einmal pro Klasse loggen
                 if issubclass(w_class, ttk.Widget):
                     if w_class not in processed_ttk:
                         processed_ttk.add(w_class)
@@ -49212,7 +49188,6 @@ class WhisperLayoutManager:
                         pass
                     continue
 
-                # Farben für tkinter‑Widgets setzen
                 try:
                     if w_class in (tk.Label, tk.Button):
                         _safe_configure(
@@ -49327,7 +49302,6 @@ class WhisperLayoutManager:
                     f"apply_theme: Fehler beim Setzen des Tab-Hintergrundes: {e}"
                 )
 
-            # Canvas‑Hintergründe in scrollbaren Bereichen
             for child in tab.winfo_children():
                 if isinstance(child, tk.Canvas):
                     try:
@@ -49765,9 +49739,9 @@ class WhisperLayoutManager:
 
         control_frame = tk.Frame(parent, bg=theme_color("BG_PRIMARY", "#0f1419"))
         control_frame.pack(fill="x", pady=8)
-        control_frame.grid_columnconfigure(0, weight=0)  # Linke Buttons
-        control_frame.grid_columnconfigure(1, weight=1)  # Mittlere Einstellungen
-        control_frame.grid_columnconfigure(2, weight=0)  # Rechte Buttons
+        control_frame.grid_columnconfigure(0, weight=0)
+        control_frame.grid_columnconfigure(1, weight=1)
+        control_frame.grid_columnconfigure(2, weight=0)
 
         left_controls = tk.Frame(
             control_frame, bg=theme_color("BG_PRIMARY", "#0f1419")
@@ -49806,12 +49780,10 @@ class WhisperLayoutManager:
             control_frame, bg=theme_color("BG_PRIMARY", "#0f1419")
         )
         center_controls.grid(row=0, column=1, padx=15, sticky="ew")
-        # Gleichmäßige Verteilung der drei Einstellungsgruppen
         center_controls.grid_columnconfigure(0, weight=1)
         center_controls.grid_columnconfigure(1, weight=1)
         center_controls.grid_columnconfigure(2, weight=1)
 
-        # Quellsprache
         src_lang_frame = tk.Frame(center_controls, bg=theme_color("BG_PRIMARY", "#0f1419"))
         src_lang_frame.grid(row=0, column=0, padx=5, sticky="ew")
         safe_create(
@@ -49837,7 +49809,6 @@ class WhisperLayoutManager:
             "Automatisch = Whisper erkennt die Sprache selbst.",
         )
 
-        # Modellauswahl
         model_frame = tk.Frame(center_controls, bg=theme_color("BG_PRIMARY", "#0f1419"))
         model_frame.grid(row=0, column=1, padx=5, sticky="ew")
         safe_create(
@@ -49868,7 +49839,6 @@ class WhisperLayoutManager:
         elif gui.settings.default_model:
             gui.model_var.set(gui.settings.default_model)
 
-        # Zielsprache
         target_lang_frame = tk.Frame(
             center_controls, bg=theme_color("BG_PRIMARY", "#0f1419")
         )
@@ -49927,7 +49897,6 @@ class WhisperLayoutManager:
             "activeforeground": theme_color("TEXT_PRIMARY", "#e6edf3"),
         }
 
-        # Start-Button
         gui.start_button = safe_create(
             tk.Button,
             right_controls,
@@ -49941,7 +49910,6 @@ class WhisperLayoutManager:
         gui.start_button.pack(side="left", padx=2)
         ToolTip(gui.start_button, "Transkription und Übersetzung starten")
 
-        # Stop-Button
         gui.stop_button = safe_create(
             tk.Button,
             right_controls,
@@ -49956,7 +49924,6 @@ class WhisperLayoutManager:
         gui.stop_button.pack(side="left", padx=2)
         ToolTip(gui.stop_button, "Laufende Verarbeitung sofort stoppen")
 
-        # Übersetzungs‑Button
         translate_bg = (
             theme_color("SUCCESS", "#238636")
             if gui.translate_active
@@ -49979,7 +49946,6 @@ class WhisperLayoutManager:
         gui.translate_btn.pack(side="left", padx=2)
         ToolTip(gui.translate_btn, "Übersetzung ein‑/ausschalten")
 
-        # Untertitel‑Button
         gui.subtitle_btn = safe_create(
             tk.Button,
             right_controls,
@@ -50170,7 +50136,6 @@ class WhisperLayoutManager:
             if DEBUG_LEVEL >= 3:
                 log_exception("layout", "transcript_text creation failed", e)
 
-        # 5. Unterer Frame (Übersetzung)
         try:
             transla_frame = tk.Frame(main_frame, bg=theme.BG_SECONDARY)
             transla_frame.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
@@ -50216,7 +50181,6 @@ class WhisperLayoutManager:
             ).pack(side="right", padx=1)
             ToolTip(scroll_cb2, "Automatisch zum Ende scrollen")
 
-            # Auto-TTS Checkbox
             tts_cb2 = tk.Checkbutton(
                 transla_header,
                 variable=gui.auto_tts_translation_var,
@@ -50969,7 +50933,6 @@ if IS_LINUX and PSUTIL_AVAILABLE:
             log_debug("linux", "Linux-Performance-Optimierer entsorgt")
 
 else:
-    # Dummy-Klasse für andere Plattformen oder wenn psutil fehlt
     class LinuxPerformanceOptimizer:
         def __init__(self, gui_ref: "DragonWhispererGUI") -> None:
             self.gui = gui_ref
@@ -51001,7 +50964,6 @@ class AdvancedSettings:
     """Erweiterte Einstellungen für Dragon Whisperer.
     Enthält Parameter für Transkription, Übersetzung, GUI und System.
     """
-    # Transkriptions-Parameter
     beam_size: int = 10
     temperature: float = Config.DEFAULT_TEMPERATURE
     vad_filter: bool = False
@@ -51014,7 +50976,6 @@ class AdvancedSettings:
     vram_idle_timeout_seconds: int = 180
     optimize_translations: bool = False
 
-    # Konfigurationstypen und Audio
     config_type: str = "high_accuracy"
     transcript_max_lines: int = 800
     translation_max_lines: int = 600
@@ -51023,26 +50984,22 @@ class AdvancedSettings:
     ollama_host: str = "http://localhost:11434"
     ollama_temperature: float = 0.0
 
-    # Modi
     asian_mode: bool = False
     precision_mode: bool = False
     audio_profile: str = "transcription"
     adaptive_chunk: bool = False
 
-    # Duplikate & Confidence
     duplicate_similarity_threshold: float = 0.98
     adaptive_chunk_low_words: int = 3
     adaptive_chunk_high_words: int = 10
     min_confidence: float = 0.1
     min_language_confidence: float = 0.1
 
-    # VAD (Voice Activity Detection)
     vad_threshold: float = 0.2
     vad_min_speech_duration_ms: int = 150
     vad_min_silence_duration_ms: int = 50
     max_empty_reads: int = 30
 
-    # Blacklist & Text-Filter
     blacklist: List[str] = field(
         default_factory=lambda: [
             "Untertitelung des ZDF für funk",
