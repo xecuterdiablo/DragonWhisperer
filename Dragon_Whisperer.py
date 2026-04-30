@@ -13639,35 +13639,9 @@ class YtDlpHelper:
     ) -> Optional[Dict[str, Any]]:
         """
         Ruft die JSON-Metadaten eines Videos/Streams ab (via yt-dlp --dump-json).
-
-        **Mehrstufige Fallback-Strategie (ohne Browser‑Schleife):**
-        1. Versuch ohne Cookies (schnell, oft ausreichend).
-        2. Falls `use_cookies` aktiv ist: Versuch mit dem angegebenen Browser (einmalig).
-        3. Minimaler JSON‑Fallback (ohne erweiterte Optionen) als letzte Rettung.
-
-        **Verbesserungen:**
-        - Keine Schleife über mehrere Browser – nur der konfigurierte Browser wird getestet.
-        - Dynamische Timeout-Anpassung bei langen URLs.
-        - Robuste JSON‑Extraktion (auch wenn Warnungen vorausgehen).
-        - Detaillierte Debug‑Ausgaben (mit `extra_debug`).
-        - Abbruch über `cancel_event`.
-
-        Args:
-            url: Die Video-/Stream-URL.
-            timeout: Basis-Timeout in Sekunden (kann intern verlängert werden).
-            use_cookies: Ob Cookies aus dem Browser verwendet werden sollen.
-            browser: Bevorzugter Browser. Wenn None, wird aus den Einstellungen geladen.
-            proxy: Proxy-URL (z.B. "socks5://127.0.0.1:18080").
-            prefer_ipv4: Ob IPv4 bevorzugt werden soll.
-            cancel_event: Optionales Event, das bei Setzen den Befehl abbricht.
-            extra_debug: Wenn True, werden sehr ausführliche Debug‑Logs geschrieben.
-
-        Returns:
             Das geparste JSON-Dictionary oder None bei Fehlschlag.
         """
-        # ---------------------------------------------------------------
-        # 0. Vorbereitung & Validierung
-        # ---------------------------------------------------------------
+
         if not url:
             logger.error("get_json: Leere URL – Abbruch")
             return None
@@ -13694,9 +13668,6 @@ class YtDlpHelper:
             if extra_debug:
                 log_debug("ytdlp", f"  Verwende Browser aus Einstellungen: {effective_browser}")
 
-        # ---------------------------------------------------------------
-        # 1. Interne Helfer-Funktion für einen einzelnen Versuch
-        # ---------------------------------------------------------------
         def try_json_attempt(
             use_cookies_flag: bool,
             browser_name: Optional[str],
@@ -13838,26 +13809,6 @@ class YtDlpHelper:
     ) -> Optional[str]:
         """
         Extrahiert die direkte Audio-URL aus einem Video/Stream (via yt-dlp -g -f).
-
-        Die Methode implementiert eine mehrstufige Fallback-Strategie:
-        1. Zuerst wird der übergebene Format-String verwendet (ohne Cookies).
-        2. Falls fehlschlägt: Versuch mit demselben Format, aber mit Cookies.
-        3. Fallback auf alternative Formate (z.B. "worstaudio", "bestaudio").
-        4. Letzter Ausweg: JSON-Fallback (direktes Parsen der Format-Liste).
-
-        Args:
-            url: Die Video-/Stream-URL.
-            format_str: Format-String für yt-dlp (z.B. "bestaudio[ext=m4a]/bestaudio").
-            timeout: Basis-Timeout in Sekunden.
-            use_cookies: Ob Cookies aus dem Browser verwendet werden sollen.
-            browser: Bevorzugter Browser. Wenn None, wird aus Einstellungen geladen.
-            proxy: Proxy-URL.
-            prefer_ipv4: IPv4 bevorzugen.
-            cancel_event: Event für vorzeitigen Abbruch.
-            extra_debug: Sehr ausführliche Debug-Logs.
-
-        Returns:
-            Die direkte Audio-URL (String) oder None bei Fehlschlag.
         """
         # ---------------------------------------------------------------
         # 0. Vorbereitung & Validierung
@@ -13895,9 +13846,6 @@ class YtDlpHelper:
             if extra_debug:
                 log_debug("ytdlp", f"  Lange URL erkannt, Timeout auf {adjusted_timeout}s erhöht")
 
-        # ---------------------------------------------------------------
-        # 1. Interne Helfer-Funktion für einen einzelnen Versuch
-        # ---------------------------------------------------------------
         def try_audio_attempt(
             fmt: str,
             use_cookies_flag: bool,
@@ -13958,9 +13906,6 @@ class YtDlpHelper:
                     log_debug("ytdlp", "    ❌ Keine gültige URL in der Ausgabe gefunden")
             return None
 
-        # ---------------------------------------------------------------
-        # 2. Liste der zu testenden Format-Strings (Priorität)
-        # ---------------------------------------------------------------
         format_variants = [
             format_str,                                           # Bevorzugtes Format
             "bestaudio/best",                                     # Standard
@@ -13976,10 +13921,6 @@ class YtDlpHelper:
                 seen.add(fmt)
                 unique_formats.append(fmt)
 
-        # ---------------------------------------------------------------
-        # 3. Versuche in definierter Reihenfolge: ohne Cookies → mit Cookies → Fallback-Formate
-        # ---------------------------------------------------------------
-        # 3.1 Zuerst ohne Cookies (schnellster Pfad)
         for fmt in unique_formats:
             if cancel_event is not None and cancel_event.is_set():
                 logger.info("get_audio_url: Abbruch durch cancel_event")
@@ -14014,10 +13955,6 @@ class YtDlpHelper:
                     if result:
                         return result
 
-        # ---------------------------------------------------------------
-        # 4. JSON-Fallback (direktes Parsen der Format-Liste aus --dump-json)
-        #    Dies ist der letzte Ausweg, wenn -g -f keine URL liefert.
-        # ---------------------------------------------------------------
         if extra_debug:
             log_debug("ytdlp", "  🔄 JSON-Fallback: Versuche Audio-URL aus --dump-json zu extrahieren")
 
@@ -14065,9 +14002,6 @@ class YtDlpHelper:
                     log_debug("ytdlp", f"    ✅ JSON-Fallback erfolgreich: {best_audio_url[:100]}...")
                 return best_audio_url
 
-        # ---------------------------------------------------------------
-        # 5. Alles fehlgeschlagen
-        # ---------------------------------------------------------------
         logger.warning(f"get_audio_url: Alle Extraktionsversuche für {url[:80]}... fehlgeschlagen")
         return None
 
@@ -15830,36 +15764,7 @@ class FFmpegManager:
     def _check_youtube_live_by_metadata(self, url: str) -> bool:
         """
         Ultraschnelle YouTube‑Live‑Erkennung mit Cache, ohne langsamen JSON‑Fallback.
-
-        Diese Methode wird verwendet, um zu entscheiden, ob ein YouTube‑Video
-        ein Livestream ist. Sie arbeitet nach folgendem Prinzip:
-
-        1. **Cache (5 Minuten)** – Wiederholte Anfragen für dieselbe URL werden
-           sofort aus dem Cache beantwortet (Dauer < 1 ms).
-        2. **Schnelle JSON‑Anfrage ohne Cookies** – Es wird ein einzelner
-           ``yt-dlp --dump-json``-Befehl mit einem Timeout von **3 Sekunden**
-           ausgeführt. Auf Cookies wird bewusst verzichtet, um die Latenz
-           minimal zu halten.
-        3. **Kein Fallback** – Wenn der 3‑Sekunden‑Versuch scheitert, wird das
-           Video **konservativ als VOD eingestuft** und der Cache entsprechend
-           befüllt. Ein zweiter, langsamer Versuch findet **nicht** statt, weil
-           die Wartezeit inakzeptabel wäre und die Fehlerquote (kein JSON)
-           bereits eine sichere Entscheidung erlaubt.
-
-        **Performance:**
-        - Cache‑Treffer: < 1 ms
-        - Cache‑Fehlschlag mit erfolgreicher JSON‑Antwort: ~100–300 ms (Netzwerk)
-        - Cache‑Fehlschlag mit Timeout: genau 3 s (Worst Case, sehr selten)
-
-        Args:
-            url: Vollständige YouTube‑URL.
-
-        Returns:
-            ``True``, wenn das Video ein Livestream ist, sonst ``False``.
         """
-        # -----------------------------------------------------------------
-        # 1. Cache‑Schlüssel erzeugen und prüfen
-        # -----------------------------------------------------------------
         cache_key = f"live_meta_{hashlib.md5(url.encode()).hexdigest()[:16]}"
         cached = self._live_detection_cache.get(cache_key)
         if cached is not None:
@@ -15870,9 +15775,6 @@ class FFmpegManager:
                 )
             return cached.get("is_live", False)
 
-        # -----------------------------------------------------------------
-        # 2. Nur EINEN schnellen JSON‑Versuch starten (keine weiteren Fallbacks)
-        # -----------------------------------------------------------------
         try:
             # Kurzer Timeout, keine Cookies, keine weiteren Versuche.
             # Wir verwenden direkt run_command, um den minimalen Fallback
@@ -16539,7 +16441,6 @@ class FFmpegManager:
                 ):
                     del self._pid_tracking[yt_process.pid]
 
-            # skip_semaphore_release zurücksetzen, falls alter Prozess überschrieben wurde
             if old_pinfo is not None:
                 old_pinfo._skip_semaphore_release = False
                 if DEBUG_LEVEL >= 3:
@@ -16549,7 +16450,6 @@ class FFmpegManager:
                         "skip_semaphore_release zurückgesetzt",
                     )
 
-            # Exception weiterwerfen, damit der Aufrufer reagieren kann
             raise RuntimeError(
                 f"Registrierung von Prozess {process_id} fehlgeschlagen: {e}"
             ) from e
@@ -17839,7 +17739,6 @@ class FFmpegManager:
 
         cmd.extend(["-af", audio_filter])
 
-        # Zusätzliche Flags für saubere Ausgabe
         cmd.extend(
             [
                 "-avoid_negative_ts",
@@ -17973,7 +17872,6 @@ class AppSettings:
             with open(file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            # Nur Felder übernehmen, die in der Dataclass existieren
             valid_fields = {f.name for f in fields(cls) if f.init}
             filtered = {k: v for k, v in data.items() if k in valid_fields}
 
@@ -18061,7 +17959,6 @@ class AppSettings:
                 "cookies_browser": self.cookies_browser,
             }
 
-            # DEBUG: Ausgabe des zu speichernden Modells
             logger.debug(
                 f"💾 save_to_file: writing default_model = {self.default_model}"
             )
@@ -18207,7 +18104,7 @@ class StreamInfoExtractor:
         )
         self._lock = threading.RLock()
         self._debug = DEBUG_LEVEL >= 1
-        self.use_browser_cookies = True  # Wird von außen gesetzt (z. B. von der GUI)
+        self.use_browser_cookies = True
 
         try:
             settings = AppSettings.load_from_file()
@@ -18307,8 +18204,8 @@ class StreamInfoExtractor:
                 logger.debug("_run_ytdlp_json: Leere URL – Abbruch")
             return None
 
-        timeout = 5  # +++ KURZER TIMEOUT (5 s) statt 15/10 s +++
-        use_cookies = False  # +++ KEINE COOKIES für Metadatenabfrage +++
+        timeout = 5
+        use_cookies = False
 
         try:
             data = YtDlpHelper.get_json(
@@ -18802,7 +18699,6 @@ class StreamInfoExtractor:
             logger.warning(f"      ⚠️ Direct extraction failed completely: {e}")
             return None
 
-    # Twitch-optimierte Extraktion
     def _extract_twitch_info_optimized(self, url: str) -> Optional[StreamInfo]:
         """
         Optimierte Twitch-Extraktion mit minimaler Latenz und robustem Fallback.
@@ -19073,7 +18969,6 @@ class ExportManager:
         if not transcript_data:
             raise ProcessingError("Keine Transkriptionsdaten zum Exportieren")
 
-        # Versuche DOCX‑Export mit python-docx
         if self._docx_available:
             try:
                 doc = self._docx.Document()
@@ -19100,7 +18995,6 @@ class ExportManager:
                     f"python-docx Export fehlgeschlagen, verwende Fallback: {e}"
                 )
 
-        # Fallback: Export als einfache Textdatei
         try:
             content = self._generate_txt_content(transcript_data, None)
             out_path = Path(filename)
@@ -19219,11 +19113,6 @@ class ExportManager:
 class ResourceManager:
     """
     Zentrale Verwaltung von Systemressourcen (Prozesse, Threads, temporäre Dateien).
-
-    **Verwendung:**
-        - ``register_*()``-Methoden fügen Ressourcen hinzu.
-        - ``dispose()`` (öffentlich) oder ``cleanup()`` führen die Bereinigung durch.
-        - ``_atexit_cleanup()`` stellt sicher, dass auch bei Programmabbruch aufgeräumt wird.
     """
 
     __slots__ = (
@@ -19343,7 +19232,6 @@ class ResourceManager:
         """Gibt zurück, ob der Shutdown eingeleitet wurde."""
         return self._shutdown_event.is_set()
 
-    # Hauptbereinigung
     def cleanup(self, timeout: float = 5.0) -> bool:
         """
         Führt die Bereinigung aller registrierten Ressourcen durch.
@@ -19356,7 +19244,6 @@ class ResourceManager:
         start_time = time.time()
         remaining_timeout = timeout
 
-        # 1. Prozesse beenden
         with self._lock:
             processes_to_terminate = self.processes[:]
         for proc in processes_to_terminate:
