@@ -52574,7 +52574,6 @@ def configure_logging(
     """
     Konfiguriert das Logging basierend auf Debug-Level und Quiet-Modus.
     """
-    # Basis-Log-Level bestimmen
     if quiet:
         log_level = logging.ERROR
     elif debug_level >= 1:
@@ -52582,33 +52581,26 @@ def configure_logging(
     else:
         log_level = logging.WARNING
 
-    # Root-Logger konfigurieren
     logging.basicConfig(
         level=log_level,
         format="[%(asctime)s.%(msecs)03d] [%(levelname)s] %(message)s",
         datefmt="%H:%M:%S",
     )
 
-    # Sicherstellen, dass der 'dragon' Logger das gewünschte Level hat
     dragon_logger = logging.getLogger("dragon")
     dragon_logger.setLevel(log_level)
 
-    # Externe Bibliotheken: bei DEBUG_LEVEL >= 3 auf DEBUG, sonst WARNING
     level_ext = logging.DEBUG if debug_level >= 3 else logging.WARNING
     for lib in ["huggingface_hub", "faster_whisper", "httpx", "urllib3", "httpcore"]:
         logging.getLogger(lib).setLevel(level_ext)
 
-    # Debug-Filter: Steuert, welche DEBUG-Meldungen tatsächlich ausgegeben werden
     class DebugFilter(logging.Filter):
         def filter(self, record):
-            # Bei debug_level >= 3 alles durchlassen
             if debug_level >= 3:
                 return True
-            # Prüfen, ob die Meldung von einer gewünschten Komponente stammt
             component = getattr(record, "component", None)
             if component and component in debug_components:
                 return True
-            # Alle Meldungen ab WARNING immer durchlassen
             return record.levelno >= logging.WARNING
 
     debug_filter = DebugFilter()
@@ -52727,7 +52719,6 @@ def run_tests() -> int:
             result = self.enhancer.is_duplicate("Hello world", "Goodbye world", deque())
             self.assertFalse(result)
 
-    # TestTranscriptionEngine
     class TestTranscriptionEngine(unittest.TestCase):
         def setUp(self):
             self.settings = AdvancedSettings()
@@ -52793,7 +52784,6 @@ def run_tests() -> int:
                 result = self.engine.translate_text("Hallo Welt")
                 self.assertIsNone(result)
 
-    # TestQueueManager (mit echter Queue)
     class TestQueueManager(unittest.TestCase):
         def setUp(self):
             self.gui_mock = MagicMock()
@@ -53177,9 +53167,7 @@ def _handle_headless_mode(args: argparse.Namespace) -> int:
     return 0
 
 def main() -> int:
-    """
-    Hauptfunktion des Dragon Whisperer.
-    """
+    """    Hauptfunktion des Dragon Whisperer.    """
     args = parse_arguments()
     debug_level = 0
     debug_components: List[str] = []
