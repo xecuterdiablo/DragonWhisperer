@@ -51455,7 +51455,6 @@ class AdvancedSettings:
         """
         start = time.perf_counter()
 
-        # --- Cache‑Infrastruktur einmalig initialisieren (thread‑sicher) ---
         if not hasattr(cls, "_cache"):
             cls._cache: Dict[str, "AdvancedSettings"] = {}
             cls._cache_lock = threading.RLock()
@@ -51467,7 +51466,6 @@ class AdvancedSettings:
         backup_path = file_path.with_suffix(".json.bak")
         cache_key = str(file_path)
 
-        # --- 1. Cache‑Treffer? ---
         with cls._cache_lock:
             if cache_key in cls._cache:
                 if DEBUG_LEVEL >= 3:
@@ -51480,7 +51478,6 @@ class AdvancedSettings:
                     )
                 return cls._cache[cache_key]
 
-        # --- 2. Datei existiert nicht → saubere Standardwerte ---
         if not file_path.exists():
             logger.info(
                 "📝 Keine gespeicherten erweiterten Einstellungen – verwende Standard."
@@ -51489,7 +51486,6 @@ class AdvancedSettings:
             cls._cache_and_log(instance, cache_key, start)
             return instance
 
-        # --- 3. JSON einlesen – mit Fallback auf Backup-Datei ---
         data = cls._read_json_safe(file_path)
         if data is None and backup_path.exists():
             logger.warning(
@@ -51499,7 +51495,6 @@ class AdvancedSettings:
             data = cls._read_json_safe(backup_path)
             if data is not None:
                 logger.info("✅ Backup erfolgreich geladen.")
-                # Die erfolgreiche Backup‑Datei sofort als Hauptdatei speichern
                 try:
                     shutil.copy2(backup_path, file_path)
                 except Exception as e:
@@ -51513,7 +51508,6 @@ class AdvancedSettings:
             cls._cache_and_log(instance, cache_key, start)
             return instance
 
-        # --- 4. Versionsprüfung und ggf. Migration ---
         file_version = data.get("_version", 1)
         if file_version > 2:
             logger.warning(
@@ -51528,7 +51522,6 @@ class AdvancedSettings:
                 file_version,
             )
 
-        # --- 5. Nur Felder übernehmen, die der Dataclass bekannt sind ---
         valid_fields = {f.name for f in fields(cls) if f.init}
         filtered: Dict[str, Any] = {}
         outdated: List[str] = []
@@ -51547,7 +51540,6 @@ class AdvancedSettings:
                         key,
                     )
 
-        # --- 6. Typ‑Konvertierung ---
         type_map = cls._build_type_map()
         for key in list(filtered.keys()):
             if key not in type_map:
@@ -51558,10 +51550,8 @@ class AdvancedSettings:
                 key,
             )
 
-        # --- 7. ``chunk_duration`` separat behandeln (wird per Property gesetzt) ---
         chunk_duration_val = filtered.pop("chunk_duration", None)
 
-        # --- 8. Instanz erzeugen ---
         try:
             instance = cls(**filtered)
         except Exception as e:
@@ -51581,10 +51571,8 @@ class AdvancedSettings:
                     chunk_duration_val,
                 )
 
-        # --- 9. Gesundheitscheck & Reparatur ---
         instance._repair_if_needed()
 
-        # --- 10. Bereinigte Version speichern, wenn veraltete Felder gefunden wurden ---
         if outdated:
             logger.info(
                 "🔧 %d veraltete(s) Feld(er) erkannt: %s. Speichere bereinigte Konfiguration…",
@@ -51709,7 +51697,7 @@ class AdvancedSettings:
                     )
                 return None
             if target_type is int:
-                return int(float(value))  # toleriert "5.0"
+                return int(float(value))
             if target_type is float:
                 return float(value)
             if target_type is str:
@@ -51718,7 +51706,6 @@ class AdvancedSettings:
                 if isinstance(value, list):
                     return [str(v).strip() for v in value if str(v).strip()]
                 if isinstance(value, str):
-                    # Komma‑ oder Semikolon‑separierte Liste
                     parts = [v.strip() for v in re.split(r"[;,]", value) if v.strip()]
                     return parts
                 return []
@@ -51741,7 +51728,6 @@ class AdvancedSettings:
         sich die Datenstruktur ändert.
         """
         if from_version < 2:
-            # Entferne alte Schlüssel, die es in v2 nicht mehr gibt
             data.pop("some_old_key", None)
             if "old_name" in data:
                 data["new_name"] = data.pop("old_name")
@@ -51870,7 +51856,6 @@ class AdvancedSettings:
             if file_path.exists():
                 backup_path = file_path.with_suffix(".json.bak")
 
-            # Daten vorbereiten
             data = asdict(self)
             data.pop("config", None)
             data.pop("_chunk_duration", None)
@@ -51880,11 +51865,9 @@ class AdvancedSettings:
             if DEBUG_LEVEL >= 3:
                 log_debug("settings", f"Writing settings to temp file: {temp_path}")
 
-            # Temporäre Datei schreiben
             with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
 
-            # Optionales Backup der bisherigen Datei (falls vorhanden)
             if backup_path is not None and file_path.exists():
                 try:
                     shutil.copy2(file_path, backup_path)
@@ -51896,7 +51879,6 @@ class AdvancedSettings:
             try:
                 os.replace(temp_path, file_path)
             except AttributeError:
-                # Fallback für Python ohne os.replace (Python < 3.3)
                 if IS_WINDOWS:
                     os.replace(
                         temp_path, file_path
@@ -52264,9 +52246,7 @@ def get_advanced_settings() -> "AdvancedSettings":
     try:
         return AdvancedSettings.load_from_file()
     except Exception as e:
-        # Fallback für den unwahrscheinlichen Fall, dass selbst die Standardwerte fehlschlagen
         logger.critical(f"❌ Konnte AdvancedSettings nicht laden: {e}", exc_info=True)
-        # Versuche, eine absolute Minimalinstanz zu erzeugen
         try:
             return AdvancedSettings()
         except Exception:
@@ -52311,7 +52291,6 @@ def _restore_console_state() -> None:
         except Exception as e:
             logger.debug(f"Fehler beim Wiederherstellen der Windows-Konsole: {e}")
     else:
-        # Linux / macOS: Terminal wieder in den normalen Modus versetzen
         try:
             subprocess.run(["stty", "sane"], check=False, timeout=1)
         except Exception as e:
@@ -52571,9 +52550,7 @@ threading.excepthook = thread_exception_handler
 def configure_logging(
     debug_level: int, debug_components: List[str], quiet: bool
 ) -> None:
-    """
-    Konfiguriert das Logging basierend auf Debug-Level und Quiet-Modus.
-    """
+    """    Konfiguriert das Logging basierend auf Debug-Level und Quiet-Modus.    """
     if quiet:
         log_level = logging.ERROR
     elif debug_level >= 1:
