@@ -40409,8 +40409,6 @@ class WhisperController:
 
         if DEBUG_LEVEL >= 3:
             log_debug("controller", f"Fatal error – entering ERROR state: {message}")
-
-        # Notfall‑Cleanup (beendet laufende Prozesse, ohne Zustand zu ändern)
         self._emergency_cleanup()
 
         if self.event_bus is not None:
@@ -40462,7 +40460,6 @@ class WhisperController:
                                 "controller", "ERROR reset thread started (no GUI)"
                             )
                 else:
-                    # Shutdown läuft – kein Timer nötig
                     if DEBUG_LEVEL >= 3:
                         log_debug(
                             "controller", "Shutdown active, skipping error reset timer"
@@ -40651,7 +40648,6 @@ class WhisperController:
             except Exception as e:
                 logger.warning(f"⚠️ Stream Info Extractor Error: {e}")
 
-            # Falls die Extraktion fehlschlägt, ein rudimentäres Info-Objekt erstellen
             if stream_info is None:
                 stream_info = StreamInfo(
                     title="Live Stream" if "live" in url.lower() else "Stream",
@@ -40661,7 +40657,6 @@ class WhisperController:
                     platform=platform_type,
                 )
 
-            # Stream-Info an GUI senden
             if stream_info:
                 self.event_bus.emit("stream_info", stream_info)
                 logger.info(f"📡 Stream: {stream_info.title[:50]}...")
@@ -40683,7 +40678,6 @@ class WhisperController:
                         logger.warning(
                             "⚠️ No duration available – download mode may not trigger correctly"
                         )
-                        # Bei Live-Streams oder unbekannter Dauer auf None setzen
                         gui.audio_processor.set_expected_duration(None)
                         if DEBUG_LEVEL >= 3:
                             log_debug(
@@ -40697,7 +40691,6 @@ class WhisperController:
 
         except Exception as e:
             logger.warning(f"⚠️ Stream Info Error: {e}")
-            # Im Fehlerfall trotzdem versuchen, expected_duration zurückzusetzen
             if hasattr(gui, "audio_processor") and gui.audio_processor is not None:
                 gui.audio_processor.set_expected_duration(None)
 
@@ -40721,7 +40714,6 @@ class WhisperController:
 
             result = gui.transcription_engine.load_model(model_name, set_active=True)
             if result is not None:
-                # Nach erfolgreichem Laden prüfen, ob es sich um eine Dummy-Engine handelt
                 if not gui.transcription_engine.is_functional():
                     self.event_bus.emit(
                         "info",
@@ -40781,7 +40773,6 @@ class WhisperController:
             self._sync_audio_processor_engine(engine)
             return
 
-        # Normalisierung: sicherstellen, dass der Code in Kleinbuchstaben vorliegt
         code = code.lower()
 
         if code not in WHISPER_SUPPORTED_LANGUAGES:
@@ -40901,16 +40892,10 @@ class WhisperController:
     def _processing_finished(self) -> None:
         """
         Wird aufgerufen, wenn die Verarbeitung im AudioProcessor abgeschlossen ist.
-
-        Diese Methode stellt sicher, dass der Controller in den IDLE‑Zustand
-        zurückkehrt und die entsprechenden Events emittiert werden.  Sie ist
-        vollständig still im Normalbetrieb – alle Statusmeldungen erscheinen
-        ausschließlich auf DEBUG‑Level.
         """
         if DEBUG_LEVEL >= 3:
             logger.debug("🌐 WhisperController._processing_finished ENTERED")
 
-        # 1. Zustandswechsel mit robustem Wert‑Vergleich (.value)
         with self._state_lock:
             old_state = self._state
             if old_state.value != WhisperController.State.IDLE.value:
@@ -40925,10 +40910,8 @@ class WhisperController:
                         "🌐 Controller already IDLE – skipping state change"
                     )
 
-        # 2. Referenz auf den Verarbeitungsthread freigeben
         self._processing_thread = None
 
-        # 3. Event‑Bus nur benachrichtigen, wenn zuvor nicht bereits IDLE war
         if old_state.value != WhisperController.State.IDLE.value:
             try:
                 self.event_bus.emit("processing_finished", None)
@@ -40982,7 +40965,6 @@ class WhisperController:
             if hasattr(gui, "audio_processor") and gui.audio_processor is not None:
                 log_debug("controller", "  → Stoppe AudioProcessor...")
                 try:
-                    # Timeout auf 1 Sekunde reduziert – verhindert langes Hängen
                     gui.audio_processor.stop_processing(wait=True, timeout=1.0)
                     log_debug("controller", "  → AudioProcessor erfolgreich gestoppt")
                 except Exception as e:
@@ -40999,9 +40981,7 @@ class WhisperController:
                     "controller", "  → Stoppe FFmpegManager (kill_all_streams)..."
                 )
                 try:
-                    # `kill_all_streams` ist nicht blockierend und beendet alle Prozesse sofort
                     gui.ffmpeg_manager.kill_all_streams()
-                    # Stream‑ID zurücksetzen (wichtig für nachfolgende Starts)
                     self._current_stream_id = None
                     log_debug(
                         "controller",
@@ -41039,7 +41019,6 @@ class WhisperController:
                         f"  → Controller‑Zustand ist {self._state.name}, kein IDLE‑Wechsel nötig",
                     )
 
-            # Flag zurücksetzen, damit ein erneuter Stop möglich ist
             with self._stop_lock:
                 self._stop_in_progress = False
 
@@ -41069,8 +41048,8 @@ class StreamHandler:
     MIN_TIME_FOR_PREMATURE_CHECK = 2.0
 
     # Slow-Read-Erkennung
-    SLOW_READ_BITRATE_FACTOR = 0.5  # Warnung bei < 50% der erwarteten Bitrate
-    SLOW_READ_CONSECUTIVE_CHUNKS = 5  # Anzahl langsamer Chunks für Warnung
+    SLOW_READ_BITRATE_FACTOR = 0.5
+    SLOW_READ_CONSECUTIVE_CHUNKS = 5
 
     # Verzögerungen (Sekunden)
     DELAY_EMPTY_READ = 0.2
@@ -41090,26 +41069,22 @@ class StreamHandler:
         self.stream_manager = stream_manager
         self._ffmpeg_manager_ref = weakref.ref(audio_processor.ffmpeg_manager)
 
-        # Konfiguration aus dem AudioProcessor beziehen
         ap = audio_processor
         if hasattr(ap, "settings") and ap.settings is not None:
             self._config = ap.settings.config
         else:
-            from ..config import Config  # Fallback
+            from ..config import Config
 
             self._config = Config()
 
-        # Diagnose & Monitoring
         self._diagnosis: Dict[str, Any] = {}
         self._diagnosis_lock = threading.RLock()
         self._session_id = str(uuid.uuid4())[:8]
 
-        # Metrik-Historien
         self._read_durations: Deque[float] = deque(maxlen=50)
         self._error_timestamps: Deque[float] = deque(maxlen=20)
         self._slow_read_counter = 0
 
-        # TTL-Cache für _is_stream_still_alive
         self._alive_cache: Dict[str, Tuple[bool, float]] = {}
         self._alive_cache_ttl = 60.0
         self._alive_cache_maxsize = 10
@@ -41141,7 +41116,6 @@ class StreamHandler:
             self._diagnosis["total_reconnects"] = 0
             self._diagnosis["total_chunks"] = 0
             self._diagnosis["slow_read_events"] = 0
-        # Cache für _is_stream_still_alive leeren
         with self._alive_cache_lock:
             self._alive_cache.clear()
 
@@ -41280,7 +41254,6 @@ class StreamHandler:
         else:
             logger.info("Tasks‑Done‑Event gesetzt – leere Queue...")
 
-        # Prüfen, ob der Dispatcher noch lebt (wichtig für join)
         if not ap._dispatcher_started or (
             ap._dispatcher_thread and not ap._dispatcher_thread.is_alive()
         ):
@@ -41471,7 +41444,6 @@ class StreamHandler:
         total_reconnects = 0
         reconnect_backoff = self.RECONNECT_BACKOFF_BASE
 
-        # Byte‑Zähler (reset bei Reconnect)
         process_bytes_processed = 0
 
         self._is_live = is_live
