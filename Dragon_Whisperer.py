@@ -1485,9 +1485,7 @@ class ContextMenuMixin:
 
 
 class DarkTheme:
-    """
-    Standard-Dunkel-Theme für Dragon Whisperer.
-    """
+    """    Standard-Dunkel-Theme für Dragon Whisperer.    """
 
     BG_PRIMARY = "#0f1419"
     BG_SECONDARY = "#1a2129"
@@ -1527,7 +1525,7 @@ class DarkTheme:
     CHECKBOX_SELECTED = "#238636"
     CHECKBOX_ACTIVE = "#0d1117"
 
-    SUBTITLE_ACTIVE = "#8957e5"
+    SUBTITLE_ACTIVE = "#238636"
     SUBTITLE_INACTIVE = "#30363d"
 
     STATUS_BAR_BG = "#0d1117"
@@ -1581,7 +1579,6 @@ class A11yDarkTheme:
 
 class CatppuccinMochaTheme:
     """Weiches, modernes Theme der Catppuccin-Familie."""
-
     BG_PRIMARY = "#1e1e2e"
     BG_SECONDARY = "#181825"
     BG_TERTIARY = "#313244"
@@ -1622,7 +1619,6 @@ class CatppuccinMochaTheme:
 
 class PastelTheme:
     """Sanftes Pastell-Theme mit verbesserter Scrollbar-Sichtbarkeit."""
-
     BG_PRIMARY = "#e6f0fa"
     BG_SECONDARY = "#d4e3f0"
     BG_TERTIARY = "#c2d6e8"
@@ -1742,7 +1738,6 @@ class LightTheme:
 
 class HighContrastTheme:
     """Hochkontrast-Theme mit extrem gut sichtbarer Scrollbar."""
-
     BG_PRIMARY = "#000000"
     BG_SECONDARY = "#1a1a1a"
     BG_TERTIARY = "#333333"
@@ -1874,7 +1869,6 @@ class NordTheme:
 
 class SolarizedDarkTheme:
     """Solarized Dark – legendäres, augenschonendes Theme von Ethan Schoonover."""
-
     BG_PRIMARY = "#002b36"
     BG_SECONDARY = "#073642"
     BG_TERTIARY = "#586e75"
@@ -1996,7 +1990,6 @@ class OneDarkTheme:
 
 class MonokaiTheme:
     """Monokai – klassisches Syntax-Highlighting-Theme."""
-
     BG_PRIMARY = "#272822"
     BG_SECONDARY = "#3e3d32"
     BG_TERTIARY = "#49483e"
@@ -2440,9 +2433,7 @@ class ConfigDefaults:
 
 @dataclass
 class Config(ConfigDefaults):
-    """
-    Dynamische Konfiguration für Dragon Whisperer.
-    """
+    """    Dynamische Konfiguration für Dragon Whisperer.    """
     _base_chunk_duration: int = ConfigDefaults.BASE_CHUNK_DURATION
     CHUNK_OVERLAP: float = ConfigDefaults.CHUNK_OVERLAP
     MIN_CHUNK_DURATION: int = ConfigDefaults.MIN_CHUNK_DURATION
@@ -2593,10 +2584,7 @@ class Config(ConfigDefaults):
     def get_audio_filter(
         self, language: Optional[str] = None, profile: Optional[str] = None
     ) -> str:
-        """
-        Gibt einen optimierten Audiofilter basierend auf Sprache und Profil zurück.
-        """
-        # Basis: Standardfilter aus Konfiguration
+        """        Gibt einen optimierten Audiofilter basierend auf Sprache und Profil zurück.        """
         filter_str = self.AUDIO_FILTER
 
         # Profil-Override
@@ -2699,8 +2687,6 @@ class Config(ConfigDefaults):
                     f"CHANNELS={self.CHANNELS} ist ungültig. Setze auf 1 (Mono)."
                 )
                 self.CHANNELS = 1
-
-            # Cache nach Korrekturen erneut füllen, da Werte geändert worden sein können
             self._cached_bytes_per_second = (
                 self.SAMPLE_RATE * self.CHANNELS * self.BYTES_PER_SAMPLE
             )
@@ -36003,15 +35989,11 @@ class DragonWhispererGUI:
         blacklist = getattr(self.advanced_settings, "blacklist", [])
         if not blacklist:
             return False
-
         if not text or not text.strip():
-            # Leerer Text wird nicht gefiltert (er wäre ohnehin irrelevant)
             return False
 
         mode = getattr(self.advanced_settings, "blacklist_mode", "word")
         asian_langs = {"zh", "ja", "ko", "th", "vi", "tl", "yue", "lo", "km", "my"}
-
-        # Asiatische Sprachen ohne Wortgrenzen → substring-Modus
         if lang in asian_langs:
             effective_mode = "substring"
         else:
@@ -36025,14 +36007,12 @@ class DragonWhispererGUI:
         if cache_key in self._blacklist_regex_cache:
             regex = self._blacklist_regex_cache[cache_key]
         else:
-            # Neue Regex kompilieren
             if effective_mode == "word":
                 escaped_phrases = [re.escape(phrase) for phrase in blacklist if phrase]
                 if not escaped_phrases:
                     return False
                 pattern = r"\b(" + "|".join(escaped_phrases) + r")\b"
             else:
-                # Einfache Verkettung mit |, case-insensitive
                 escaped_phrases = [re.escape(phrase) for phrase in blacklist if phrase]
                 if not escaped_phrases:
                     return False
@@ -36040,13 +36020,10 @@ class DragonWhispererGUI:
             try:
                 regex = re.compile(pattern, re.IGNORECASE)
             except re.error as e:
-                # Falls ein Pattern ungültig ist (sollte nicht vorkommen, aber abfangen)
                 logger.warning(f"Ungültiges Blacklist-Pattern: {e}")
                 return False
             self._blacklist_regex_cache[cache_key] = regex
-            # Cache-Größe begrenzen (einfache LRU durch Löschen des ältesten)
             if len(self._blacklist_regex_cache) > 10:
-                # Entferne ersten Eintrag (OrderedDict wäre besser, aber für 10 Einträge ausreichend)
                 oldest = next(iter(self._blacklist_regex_cache))
                 del self._blacklist_regex_cache[oldest]
 
@@ -36079,8 +36056,6 @@ class DragonWhispererGUI:
         mode = getattr(self.advanced_settings, "blacklist_mode", "word")
         asian_langs = {"zh", "ja", "ko", "th", "vi", "tl", "yue", "lo", "km", "my"}
         effective_mode = mode if lang not in asian_langs else "substring"
-
-        # ── 1. Regex aus dem Cache holen (mit Lock) ──
         if not hasattr(self, "_blacklist_regex_cache"):
             self._blacklist_regex_cache = {}
         if not hasattr(self, "_blacklist_cache_lock"):
@@ -36091,7 +36066,6 @@ class DragonWhispererGUI:
         with self._blacklist_cache_lock:
             regex = self._blacklist_regex_cache.get(cache_key)
             if regex is None:
-                # Regex neu erstellen
                 if effective_mode == "word":
                     pattern = (
                         r"\b("
@@ -36115,18 +36089,15 @@ class DragonWhispererGUI:
 
                 self._blacklist_regex_cache[cache_key] = regex
 
-                # Cache‑Größe begrenzen (LRU durch Löschen des ältesten)
                 if len(self._blacklist_regex_cache) > 10:
                     oldest_key = next(iter(self._blacklist_regex_cache))
                     del self._blacklist_regex_cache[oldest_key]
 
-        # ── 2. Blacklist‑Phrasen entfernen ──
         cleaned = regex.sub("", text)
         cleaned = re.sub(r"\s+", " ", cleaned)
         cleaned = re.sub(r"\s([.,!?;:])", r"\1", cleaned)
         cleaned = cleaned.strip()
 
-        # ── 4. Ergebnis auswerten ──
         if not cleaned:
             if DEBUG_LEVEL >= 3:
                 log_debug(
@@ -36263,11 +36234,9 @@ class DragonWhispererGUI:
         """
         Fügt den formatierten Übersetzungstext in die GUI ein.
         """
-        # ── 0. Nichts zu tun, wenn der Text leer oder nur Whitespace ist ──
         if not formatted or not formatted.strip():
             return
 
-        # ── 1. QueueManager‑Weg, falls verfügbar und nicht erzwungener Direktmodus ──
         qm_available = (
             hasattr(self, "queue_manager")
             and self.queue_manager is not None
@@ -36294,7 +36263,6 @@ class DragonWhispererGUI:
                         "QueueManager safe_put failed – falling back to direct insert",
                     )
 
-        # ── 2. Fallback: direkte GUI‑Manipulation im Hauptthread ──
         if DEBUG_LEVEL >= 3:
             log_debug("gui", "Using direct root.after fallback for translation")
 
@@ -36319,7 +36287,6 @@ class DragonWhispererGUI:
                 if DEBUG_LEVEL >= 3:
                     log_debug("gui", f"Direct insert TclError: {e}")
             except Exception as e:
-                # Echte Fehler werden weiterhin als ERROR geloggt
                 logger.error("Direct insert unexpected error: %s", e)
 
         self.root.after(0, direct_insert)
@@ -36329,7 +36296,6 @@ class DragonWhispererGUI:
         try:
             screen_w = self.root.winfo_screenwidth()
             screen_h = self.root.winfo_screenheight()
-            # ca. 5 % Rand für Taskleiste lassen
             usable_w = int(screen_w * 0.85)
             usable_h = int(screen_h * 0.80)
             width = min(950, usable_w)
@@ -36384,26 +36350,22 @@ class DragonWhispererGUI:
             return
 
         def update_gui():
-            # 1. ComboBox aktualisieren (ohne winfo_exists, da StringVar)
             if hasattr(self, "model_var") and self.model_var.get() != actual:
                 self.model_var.set(actual)
                 if DEBUG_LEVEL >= 3:
                     log_debug("gui", f"Modell-ComboBox aktualisiert auf {actual}")
 
-            # 2. VRAM-Button aktivieren (da jetzt ein Modell geladen ist)
             if hasattr(self, "vram_unload_btn") and self.vram_unload_btn.winfo_exists():
                 self.vram_unload_btn.config(state="normal")
                 if DEBUG_LEVEL >= 3:
                     log_debug("gui", "VRAM-Button aktiviert")
 
-            # 3. Statusmeldung
             if fallback and requested != actual:
                 self.update_status(f"⚠️ {requested} nicht verfügbar – verwende {actual}")
                 logger.warning(f"Modell-Fallback in GUI: {requested} → {actual}")
             elif DEBUG_LEVEL >= 3:
                 self.update_status(f"✅ Modell geladen: {actual}")
 
-            # 4. Systeminfo aktualisieren (enthält Modellname)
             self._start_system_monitoring()
 
         self._safe_gui_update(update_gui, important=True)
@@ -36662,7 +36624,6 @@ class DragonWhispererGUI:
         Aktualisiert die Stream‑Info‑Anzeige in der GUI.
         """
         if info is not None:
-            # Stream-Info dauerhaft speichern – wird nie gelöscht
             self.last_completed_stream_info = info
             self.last_stream_title = info.title
             self.current_stream_info = info
@@ -36672,7 +36633,6 @@ class DragonWhispererGUI:
                     f"update_stream_info: persisted stream info - title='{info.title[:50]}...'",
                 )
         else:
-            # Nur current_stream_info zurücksetzen, persistente bleibt erhalten
             self.current_stream_info = None
             if DEBUG_LEVEL >= 3:
                 log_debug(
@@ -36683,7 +36643,6 @@ class DragonWhispererGUI:
             """Aktualisiert die Widgets im Hauptthread."""
             try:
                 if info is None:
-                    # Kein aktiver Stream – Widgets auf Standardtext setzen
                     if (
                         hasattr(self, "stream_title_label")
                         and self.stream_title_label is not None
@@ -36714,7 +36673,6 @@ class DragonWhispererGUI:
                     if self.stream_title_label.winfo_exists():
                         self.stream_title_label.config(text=f"📡 {title}")
 
-                # Details: Uploader, Dauer, Plattform
                 details_parts = [f"👤 {info.uploader}"]
                 if info.duration and info.duration != "Live":
                     details_parts.append(f"⏱️ {info.duration}")
@@ -36936,7 +36894,6 @@ class DragonWhispererGUI:
         if self.transcription_engine.reload_model(new_model):
             self.update_status(f"🔄 Switching to {new_model}...")
             self._check_model_loading_complete(new_model)
-            # WICHTIG: Den gewählten Wert in den Einstellungen speichern
             self.settings.default_model = new_model
             self.settings.save_to_file()
             logger.info(f"✅ Modell {new_model} gespeichert und geladen")
@@ -36991,32 +36948,86 @@ class DragonWhispererGUI:
 
     def toggle_subtitle_mode(self) -> None:
         """
-        Schaltet den Untertitel‑Modus um und sorgt für einen sofortigen visuellen Effekt.
-
+        Magischer Untertitel‑Schalter 🔥🐉
         """
-        self.subtitle_mode = not self.subtitle_mode
+        if getattr(self, "_toggling_subtitle", False):
+            return
+        self._toggling_subtitle = True
 
-        if hasattr(self, "audio_processor") and self.audio_processor is not None:
-            self.audio_processor.enable_subtitle_mode(self.subtitle_mode)
+        new_mode = not self.subtitle_mode
+
+        ap = getattr(self, "audio_processor", None)
+        if ap is not None:
             try:
-                with self.audio_processor._segment_buffer_lock:
-                    self.audio_processor._segment_buffer.clear()
-                    self.audio_processor._next_expected_start = 0.0
-            except AttributeError:
-                pass
-        if hasattr(self, "subtitle_btn"):
-            self._safe_widget_config(
-                "subtitle_btn",
-                bg=self.current_theme.SUBTITLE_ACTIVE
-                if self.subtitle_mode
-                else self.current_theme.SUBTITLE_INACTIVE,
-            )
+                ap.enable_subtitle_mode(new_mode)
+            except Exception as exc:
+                logger.error("Subtitle-Mode Fehler im AudioProcessor: %s", exc)
+                self.update_status("❌ Untertitel‑Modus konnte nicht aktiviert werden")
+                self._toggling_subtitle = False
+                return
 
-        self.update_status(
-            "🎬 SUBTITLE MODE: Timestamps activated"
-            if self.subtitle_mode
-            else "📝 NORMAL MODE: Continuous text"
-        )
+        self.subtitle_mode = new_mode
+
+        btn = getattr(self, "subtitle_btn", None)
+        if btn is None or not btn.winfo_exists():
+            self._toggling_subtitle = False
+            return
+
+        if not hasattr(self, "_subtitle_btn_original_font"):
+            self._subtitle_btn_original_font = btn.cget("font")
+
+        active_color = getattr(self.current_theme, "SUBTITLE_ACTIVE", "#238636")
+        inactive_color = getattr(self.current_theme, "SUBTITLE_INACTIVE", "#30363d")
+
+        if new_mode:
+            steps = [
+                (0,   "🐉🔥",     14, "#d4a017"),
+                (120, "🐉🔥",     16, "#f0c040"),
+                (240, "🎬 UT ON", 14, "#f0c040"),
+                (360, "🎬 UT ON", 10, active_color),
+            ]
+            for delay, text, size, color in steps:
+                self.root.after(
+                    delay,
+                    lambda t=text, s=size, c=color: self._animate_button(btn, t, s, c)
+                )
+
+            self.root.after(500, lambda: btn.config(font=self._subtitle_btn_original_font))
+        else:
+            btn.config(text="🎬 UT", bg=inactive_color, font=self._subtitle_btn_original_font)
+
+        try:
+            if hasattr(btn, "tooltip") and btn.tooltip is not None:
+                btn.tooltip.text = (
+                    "Untertitel‑Modus ist AKTIV – Zeitstempel werden angezeigt"
+                    if new_mode else
+                    "Untertitel‑Modus deaktiviert – fortlaufender Text"
+                )
+        except Exception:
+            pass
+
+        if new_mode:
+            self.update_status("🔥 Untertitel AKTIV – der Drache spuckt Zeitstempel!")
+        else:
+            self.update_status("📝 Normaler Modus – fortlaufender Text")
+
+        if self.event_bus is not None:
+            try:
+                self.event_bus.emit("subtitle_mode_changed", new_mode)
+            except Exception:
+                pass
+
+        if DEBUG_LEVEL >= 2:
+            log_debug("gui", "toggle_subtitle_mode: jetzt %s", new_mode)
+
+        self.root.after(600, lambda: setattr(self, "_toggling_subtitle", False))
+
+    def _animate_button(self, btn: tk.Button, text: str, font_size: int, color: str) -> None:
+        """Setzt Text, Schriftgröße und Farbe – fängt TclError bei Shutdown ab."""
+        try:
+            btn.config(text=text, font=("Segoe UI", font_size, "bold"), bg=color)
+        except tk.TclError:
+            pass
 
     def _on_start_click(self) -> None:
         if self.is_processing:
