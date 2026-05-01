@@ -45980,10 +45980,8 @@ class AudioProcessor:
         except Exception as e:
             logger.warning(f"{name}: shutdown(wait=True) raised exception: {e}")
 
-        # Zusätzliche Sicherheit: explizites Join aller Worker-Threads
         worker_threads = list(getattr(executor, "_threads", set()))
         if not worker_threads:
-            # Falls _threads nicht verfügbar, suche nach Threads mit passendem Namenspräfix
             prefix = getattr(executor, "_thread_name_prefix", name)
             worker_threads = [
                 t for t in threading.enumerate()
@@ -46113,11 +46111,9 @@ class AudioProcessor:
                 return
             log_debug("shutdown", f"Shutting down {name} executor...")
             try:
-                # Versuche cancel_futures (Python >= 3.9)
                 executor.shutdown(wait=True, cancel_futures=True)
                 log_debug("shutdown", f"{name} executor shut down with cancel_futures")
             except TypeError:
-                # Fallback für ältere Python-Versionen
                 executor.shutdown(wait=True)
                 log_debug("shutdown", f"{name} executor shut down (fallback)")
             except Exception as e:
@@ -46500,31 +46496,6 @@ class AudioProcessor:
         nach dem Ende der Stream‑Verarbeitung.  Die Methode wird
         **einmalig** durchlaufen – unabhängig davon, ob der Stream
         regulär endete oder durch einen Fehler abgebrochen wurde.
-
-        Ablauf (vereinfacht)
-        --------------------
-        1. FFmpeg‑Prozesse beenden
-        2. Dispatcher stoppen und Rohdaten‑Queue leeren
-        3. Laufende Transkriptionen abwarten
-        4. Transkriptions‑Executor herunterfahren
-        5. Satzpuffer (Übersetzung & Transkription) leeren
-        6. Übersetzungs‑Executor herunterfahren
-        7. GUI‑Queue entleeren und restliche Ereignisse verarbeiten
-        8. Timeout‑Executor und Engine‑Fallbacks zurücksetzen
-        9. Temporäre Dateien löschen
-        10. Statistiken ausgeben
-        11. Benutzer‑Callbacks (finished / error) aufrufen
-        12. Cleanup‑Event an den Event‑Bus senden
-        13. Referenzen auf Executoren freigeben
-        14. ``_cleanup_done``‑Flag setzen (Idempotenz)
-
-        Wichtiger Hinweis
-        -----------------
-        Das letzte unvollständige Transkriptionssegment
-        (``_pending_transcript_segment``) wird **nicht** von dieser
-        Methode behandelt, da es ein Attribut der GUI‑Klasse
-        ``DragonWhispererGUI`` ist.  Die GUI selbst kümmert sich im
-        ``_on_file_finished``‑Callback um das Leeren dieses Puffers.
         """
         step_times: Dict[str, float] = {}
         start_total = time.perf_counter()
@@ -46676,7 +46647,6 @@ class AudioProcessor:
             )
             log_debug("processor", f"Cleanup step timings: {steps_summary}")
 
-        # Sicherstellen, dass finale Flags zurückgesetzt sind
         try:
             self._in_final_flush.clear()
         except Exception:
@@ -46722,7 +46692,6 @@ class AudioProcessor:
 
         logger.info("⏳ Verarbeitung der letzten Transkriptionen läuft...")
         try:
-            # Blockierendes Herunterfahren – verarbeitet noch alle eingereihten Aufgaben.
             executor.shutdown(wait=True, cancel_futures=False)
             logger.debug("Transcription executor shut down after completing all pending tasks")
         except TypeError:
@@ -46847,7 +46816,6 @@ class AudioProcessor:
                 log_debug(
                     "processor", "  No FFmpeg manager available – nothing to stop"
                 )
-            # Trotzdem Stream-ID zurücksetzen
             self._current_stream_id = None
             return
 
@@ -46920,7 +46888,6 @@ class AudioProcessor:
         """
         Thread‑sichere Änderung des Zählers für ausstehende Transkriptions‑Tasks.
         """
-        # Nur delta = +1 oder -1 sind erlaubt
         if delta not in (1, -1):
             logger.warning(
                 f"_modify_pending_tasks: Ungültiges delta={delta}. "
@@ -46939,7 +46906,6 @@ class AudioProcessor:
                         f"_pending_tasks became negative ({old_value} + {delta} = {new_value}). "
                         "Resetting to 0 to prevent deadlock. This is usually harmless."
                     )
-                    # Optional: Stacktrace für tiefere Analyse (nur bei extra_debug)
                     if DEBUG_LEVEL >= 4:
                         import traceback
                         stack = traceback.format_stack()[-4:-1]
@@ -47103,9 +47069,9 @@ class AudioProcessor:
             log_debug("processor", f"  GUI root window check failed: {e}")
             return
 
-        MAX_WAIT_SECONDS = 3.0  # Maximale Gesamtwartezeit
-        IDLE_ITERATIONS_BEFORE_BREAK = 3  # Anzahl leerer Durchläufe vor Abbruch
-        SLEEP_INTERVAL = 0.05  # Sekunden zwischen Verarbeitungszyklen
+        MAX_WAIT_SECONDS = 3.0  
+        IDLE_ITERATIONS_BEFORE_BREAK = 3  
+        SLEEP_INTERVAL = 0.05  
 
         start_time = time.perf_counter()
         queue_manager = getattr(gui, "queue_manager", None)
@@ -47548,7 +47514,6 @@ class AudioProcessor:
 
             if gui is not None and hasattr(gui, "root") and gui.root is not None:
                 try:
-                    # Prüfen, ob das root-Fenster noch existiert
                     if gui.root.winfo_exists():
                         gui.root.after(0, lambda: self._call_callback_safely(cb, *args))
                         if DEBUG_LEVEL >= 4:
@@ -47747,7 +47712,6 @@ class AudioProcessor:
                     f"reduziere Chunk von {current_duration:.1f}s auf {new_duration:.1f}s"
                 )
         elif smoothed < low_thresh and current_duration > min_dur + 0.5:
-            # Wenig Wörter pro Chunk → möglicherweise zu kurze Chunks, reduziere
             new_duration = max(min_dur, current_duration - 1.0)
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
@@ -47755,7 +47719,6 @@ class AudioProcessor:
                     f"reduziere Chunk von {current_duration:.1f}s auf {new_duration:.1f}s"
                 )
         elif smoothed > high_thresh and current_duration < max_dur - 0.5:
-            # Viele Wörter pro Chunk → möglicherweise zu lange Chunks, erhöhe
             new_duration = min(max_dur, current_duration + 1.0)
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
@@ -47781,7 +47744,6 @@ class AudioProcessor:
                 self._chunk_adjust_count += 1
                 self._chunk_stable_counter = 0
         else:
-            # Keine Änderung vorgeschlagen → Zähler zurücksetzen
             self._chunk_stable_counter = 0
             self._last_chunk_duration = current_duration
 
@@ -47796,7 +47758,6 @@ class AudioProcessor:
             self._consecutive_queue_drops += 1
             consec = self._consecutive_queue_drops
 
-        # Gedrosselte Warnung (nur alle 10 Drops, um Log-Spam zu vermeiden)
         if total_drops % 10 == 0:
             logger.warning(
                 f"⚠️ Transkriptions‑Queue voll – Chunk verworfen "
@@ -47827,10 +47788,7 @@ class AudioProcessor:
                 self._consecutive_queue_drops = 0
 
     def _reset_consecutive_queue_drops(self) -> None:
-        """
-        Setzt den Zähler für aufeinanderfolgende Queue-Drops zurück.
-        Wird aufgerufen, wenn ein Chunk erfolgreich in die Queue eingefügt wurde.
-        """
+        """Setzt den Zähler für aufeinanderfolgende Queue-Drops zurück. Wird aufgerufen, wenn ein Chunk erfolgreich in die Queue eingefügt wurde."""
         with self._stats_lock:
             self._consecutive_queue_drops = 0
 
@@ -48036,7 +47994,6 @@ class AudioProcessor:
                 "audio",
                 f"_flush_audio_buffer: Sende finalen Chunk an Executor ({len(combined_audio)} Bytes)",
             )
-            # Verwende die vorhandene asynchrone Verarbeitungsmethode
             self._process_audio_chunk_async(
                 combined_audio,
                 effective_trans_cb,
@@ -48167,7 +48124,6 @@ class AudioProcessor:
 
         with self._stop_lock:
             self._stop_event.clear()
-            # Unterstützung für ältere und neuere Completion‑Events
             for attr in ("_processing_completed", "processing_completed_event"):
                 event = getattr(self, attr, None)
                 if event is not None and hasattr(event, "clear"):
