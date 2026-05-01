@@ -43671,7 +43671,6 @@ class AudioProcessor:
                     self._consecutive_high_queue = 0
                     self._consecutive_low_queue = 0
 
-                # Nur anpassen, wenn die Abkühlphase abgelaufen ist
                 if (now - self._last_chunk_adjust_time) >= self._chunk_adjust_cooldown:
                     current_duration = self.settings.config.CHUNK_DURATION
 
@@ -43733,7 +43732,6 @@ class AudioProcessor:
                 )
 
         except queue.Full:
-            # Queue ist voll – Chunk muss verworfen werden.
             with self._stats_lock:
                 self._queue_drop_counter += 1
                 total_drops = self._queue_drop_counter
@@ -43753,7 +43751,6 @@ class AudioProcessor:
                     total_drops,
                 )
 
-            # Bei wiederholten Drops die Chunk‑Dauer zwangsweise reduzieren
             with self._stats_lock:
                 if self._consecutive_queue_drops > 3:
                     current_duration = self.settings.config.CHUNK_DURATION
@@ -43789,7 +43786,6 @@ class AudioProcessor:
                     self._total_bytes_processed / self.settings.config.BYTES_PER_SECOND
                 )
 
-            # Periodische Info (alle 50 Chunks)
             if self._chunk_counter % 50 == 0:
                 if info_callback:
                     info_callback(f"📊 {self._chunk_counter} Chunks verarbeitet...")
@@ -43803,7 +43799,6 @@ class AudioProcessor:
                         qsize,
                     )
 
-            # Fortschritts‑Callback (alle 10 Chunks)
             if self._progress_callback and self._chunk_counter % 10 == 0:
                 try:
                     self._progress_callback(
@@ -43881,7 +43876,6 @@ class AudioProcessor:
                     f"Segment-Puffer geleert: {flushed_segments} Segmente ausgegeben"
                 )
 
-        # Transkriptions-Satzpuffer leeren
         with self._transcript_sentence_lock:
             if self._transcript_parts:
                 try:
@@ -43923,7 +43917,6 @@ class AudioProcessor:
                         "DOWNLOAD",
                         f"Corrected _real_processed_seconds from {old_value:.1f} to {self._real_processed_seconds:.1f}",
                     )
-                # start_seconds aus dem korrigierten Wert ableiten
                 start_seconds = self._real_processed_seconds
 
         original_start = start_seconds
@@ -43940,7 +43933,6 @@ class AudioProcessor:
             if start_seconds < 0:
                 start_seconds = 0.0
 
-        # +++ Problem D: Nur 1 Sekunde Überlappung statt 5 Sekunden +++
         start_seconds = max(0.0, start_seconds - 1.0)
 
         if start_seconds != original_start:
@@ -43969,7 +43961,7 @@ class AudioProcessor:
             if cleared > 0:
                 logger.debug(f"Queue vor Neustart geleert: {cleared} Elemente entfernt")
             self._start_dispatcher()
-            time.sleep(0.2)  # Kurze Pause, damit der Thread hochfahren kann
+            time.sleep(0.2)
 
         if is_stop_requested():
             logger.info("Download-Modus: Abbruch nach Dispatcher-Start erkannt")
@@ -44084,7 +44076,6 @@ class AudioProcessor:
         self._clear_raw_audio_queue()
 
         while True:
-            # Timeout‑Prüfung
             elapsed = time.monotonic() - start_time
             if elapsed >= timeout:
                 with self._pending_tasks_lock:
@@ -44097,13 +44088,11 @@ class AudioProcessor:
                 )
                 return False
 
-            # Benutzerabbruch
             if self._stop_event.is_set():
                 if DEBUG_LEVEL >= 3:
                     log_debug("processor", "_await_queue_drain: Stop‑Event gesetzt – Abbruch.")
                 return False
 
-            # Zähler unter Lock prüfen
             with self._pending_tasks_lock:
                 pending = self._pending_tasks
 
@@ -44117,7 +44106,6 @@ class AudioProcessor:
                     )
                 break
 
-            # Kurze Pause, dann erneut prüfen
             time.sleep(0.1)
 
         self._stop_dispatcher(clear_queue=False)
@@ -44197,13 +44185,11 @@ class AudioProcessor:
                 return False
             return True
         else:
-            # Timeout erreicht – der join()-Thread hängt noch.
             logger.warning(
                 f"Queue join timed out after {timeout}s – "
                 f"the queue may be stuck (unfinished_tasks > 0)"
             )
             if DEBUG_LEVEL >= 3:
-                # Versuche, die Anzahl unerledigter Tasks zu ermitteln (nur für Debug)
                 try:
                     with self._raw_audio_queue.mutex:
                         unfinished = self._raw_audio_queue.unfinished_tasks
@@ -44264,14 +44250,11 @@ class AudioProcessor:
                             f"_wait_for_queue_idle: Queue stabil leer nach {elapsed:.2f}s",
                         )
                     return True
-                # Queue ist leer – kurze Pause, dann erneut prüfen
                 time.sleep(current_sleep)
             else:
-                # Queue ist nicht leer – Idle‑Timer zurücksetzen
                 idle_start = None
                 time.sleep(current_sleep)
 
-            # Backoff: Schrittweise erhöhen, aber maximal max_sleep
             current_sleep = min(max_sleep, current_sleep * backoff_factor)
 
         logger.warning(f"_wait_for_queue_idle: Timeout nach {timeout}s")
@@ -44304,7 +44287,6 @@ class AudioProcessor:
             return 0
 
         rounded_start = max(0, int(start_seconds))
-        # Nur 1 Sekunde Überlappung, um Dopplungen zu vermeiden (vorher: -5)
         rounded_start = max(0, rounded_start - 1)
         rounded_start = min(rounded_start, int(start_seconds))
 
@@ -44317,7 +44299,6 @@ class AudioProcessor:
                 rounded_start = max(0, int(self._expected_duration) - 30)
                 rounded_start = max(0, rounded_start)
 
-        # Absolute Obergrenze (24 Stunden) als zusätzliche Sicherheitsmaßnahme
         MAX_REASONABLE_START = 86400
         if rounded_start > MAX_REASONABLE_START:
             logger.warning(
@@ -44363,7 +44344,7 @@ class AudioProcessor:
             remaining = max(1, self._expected_duration - rounded_start)
             dynamic_timeout = max(30, min(1800, int(remaining * 2.5)))
         else:
-            dynamic_timeout = 300  # Fallback: 5 Minuten
+            dynamic_timeout = 300
 
         if DEBUG_LEVEL >= 2:
             log_debug(
@@ -44374,14 +44355,12 @@ class AudioProcessor:
 
         yt_cmd: List[str] = []
         for fmt_idx, fmt in enumerate(format_strings):
-            # 5.1 Erneute Abbruchprüfung vor jedem Format
             if is_stop_requested():
                 logger.info("Download sections: Abbruch vor Formatversuch")
                 if info_cb:
                     info_cb("⏹️ Download abgebrochen")
                 return 0
 
-            # 5.2 yt‑dlp Befehl zusammenbauen
             yt_cmd = ["yt-dlp", "-f", fmt]
 
             if use_cookies and cookies_browser:
@@ -44444,7 +44423,6 @@ class AudioProcessor:
                 )
                 if info_cb:
                     info_cb(f"❌ Fehler bei Format '{fmt}': {str(e)[:50]}")
-                # Weiter mit nächstem Format
                 continue
 
         logger.warning("Kein Format mit --download-sections erfolgreich")
@@ -44578,15 +44556,13 @@ class AudioProcessor:
             return 0
 
         if timeout is None:
-            # Erwartete Restdauer schätzen
             if self._expected_duration is not None:
                 remaining = max(
                     1.0, self._expected_duration - self._real_processed_seconds
                 )
             else:
-                remaining = 300.0  # Fallback: 5 Minuten
+                remaining = 300.0
 
-            # Realtime‑Faktor aus Stats holen
             with self._stats_lock:
                 rt_factor = max(1.0, self._last_realtime_factor)
 
@@ -44706,10 +44682,7 @@ class AudioProcessor:
                     timer = threading.Timer(inactivity_timeout, inactivity_killer)
                     timer.daemon = True
                     timer.start()
-
-        # Timer erstmalig starten
         reset_inactivity_timer()
-
         chunk_size = self.settings.config.CHUNK_SIZE_BYTES
         if DEBUG_LEVEL >= 3:
             log_debug("download", f"Entering read loop, chunk_size={chunk_size} bytes")
