@@ -38743,7 +38743,6 @@ class DragonWhispererGUI:
         if self.queue_manager and not self.is_shutting_down():
             self.queue_manager._check_queue_sizes()
 
-    # VRAM-Idle-Timeout
     def _schedule_vram_idle_check(self) -> None:
         if self._vram_idle_timer is not None:
             try:
@@ -38758,7 +38757,6 @@ class DragonWhispererGUI:
         entladen werden kann. Verhindert mehrfaches Entladen durch
         Deaktivierung des Timers nach erfolgreichem Entladen.
         """
-        # 1. Frühzeitiger Ausstieg bei Shutdown oder fehlender GUI
         if getattr(self, "_shutting_down", False) or not self.root.winfo_exists():
             if DEBUG_LEVEL >= 3:
                 log_debug(
@@ -38767,7 +38765,6 @@ class DragonWhispererGUI:
                 )
             return
 
-        # 2. Timeout aus den Einstellungen lesen (0 = deaktiviert)
         try:
             timeout = self.advanced_settings.vram_idle_timeout_seconds
         except AttributeError:
@@ -38795,7 +38792,6 @@ class DragonWhispererGUI:
             self._schedule_vram_idle_check()
             return
 
-        # 4. Idle‑Zeit berechnen
         idle_seconds = time.time() - self._last_transcription_time
         if idle_seconds < timeout:
             if DEBUG_LEVEL >= 4:
@@ -38806,7 +38802,6 @@ class DragonWhispererGUI:
             self._schedule_vram_idle_check()
             return
 
-        # 5. Timeout erreicht – Modell entladen, falls vorhanden
         logger.info(
             f"💤 VRAM‑Idle‑Timeout ({timeout}s) erreicht – versuche, Whisper‑Modell zu entladen"
         )
@@ -38819,7 +38814,6 @@ class DragonWhispererGUI:
             self._set_vram_button_disabled()
             return
 
-        # 5.1 Modellnamen ermitteln (sicher)
         try:
             current_model = engine.get_current_model()
         except Exception as e:
@@ -38836,7 +38830,6 @@ class DragonWhispererGUI:
             self._set_vram_button_disabled()
             return
 
-        # 5.2 Modell entladen (mit Fallback für Engines ohne die Methode)
         try:
             if hasattr(engine, "_force_model_cleanup"):
                 engine._force_model_cleanup()
@@ -38859,13 +38852,11 @@ class DragonWhispererGUI:
                 exc_info=True,
             )
 
-        # 5.3 GUI‑Status aktualisieren
         self.update_status(
             f"💤 Whisper‑Modell aus VRAM entladen (Inaktivität > {timeout}s)"
         )
         self._last_transcription_time = 0.0
 
-        # 5.4 VRAM‑Button deaktivieren und Timer stoppen – Modell ist jetzt entladen
         self._set_vram_button_disabled()
 
     def _set_vram_button_disabled(self) -> None:
@@ -38930,7 +38921,6 @@ class DragonWhispererGUI:
         shutdown_start = time.perf_counter()
 
         try:
-            # 2.1 Aktuelle URL
             if hasattr(self, "url_entry") and self.url_entry is not None:
                 try:
                     if self.url_entry.winfo_exists():
@@ -38940,7 +38930,6 @@ class DragonWhispererGUI:
                 except (tk.TclError, AttributeError):
                     pass
 
-            # 2.2 Gewähltes Modell (nur gültige Modelle)
             if hasattr(self, "model_var") and self.model_var is not None:
                 try:
                     model = self.model_var.get()
@@ -38949,7 +38938,6 @@ class DragonWhispererGUI:
                 except (tk.TclError, AttributeError):
                     pass
 
-            # 2.3 Zielsprache (Anzeigename → ISO-Code)
             if hasattr(self, "lang_var") and self.lang_var is not None:
                 try:
                     selected_name = self.lang_var.get()
@@ -38958,17 +38946,14 @@ class DragonWhispererGUI:
                 except (tk.TclError, AttributeError):
                     pass
 
-            # 2.4 Layout-Modus
             if hasattr(self, "layout_mode"):
                 self.settings.layout_mode = self.layout_mode
 
-            # 2.5 Theme – robuste Ermittlung des Theme-Namens
             try:
                 theme_name = None
                 if hasattr(self, "settings") and hasattr(self.settings, "theme"):
                     theme_name = self.settings.theme
                 elif hasattr(self, "current_theme"):
-                    # Fallback: aus der aktuellen Theme-Klasse den Namen ableiten
                     theme_class_name = self.current_theme.__class__.__name__
                     name_lower = theme_class_name.replace("Theme", "").lower()
                     if name_lower in {"dark", "light", "pastel", "highcontrast"}:
@@ -38978,7 +38963,6 @@ class DragonWhispererGUI:
             except Exception:
                 pass
 
-            # 2.6 Persistieren
             if hasattr(self, "settings") and self.settings is not None:
                 self.settings.save_to_file()
                 log_debug("gui", "✅ Benutzereinstellungen vollständig gespeichert")
@@ -39048,7 +39032,6 @@ class DragonWhispererGUI:
             log_debug("gui", f"Noch aktive Threads nach root.destroy(): {active}")
 
         try:
-            # Verwende monotonic(), um unabhängig von Systemuhr‑Änderungen zu sein
             deadline = time.monotonic() + 0.5
             while time.monotonic() < deadline:
                 remaining = [
@@ -39074,7 +39057,6 @@ class DragonWhispererGUI:
             logger.warning(
                 f"⚠️ Erzwinge Prozess‑Exit wegen verbliebener Nicht‑Daemon‑Threads: {thread_names}"
             )
-            # os._exit(0) beendet den Prozess sofort, ohne weitere atexit-Handler
             os._exit(0)
         else:
             logger.info("Alle Threads beendet – Python-Prozess endet natürlich")
@@ -39119,10 +39101,8 @@ class DragonWhispererGUI:
                     and self.root.winfo_exists()
                 )
             except tk.TclError:
-                # Fenster wurde während der Prüfung zerstört – normal beim Shutdown
                 return False
             except AttributeError:
-                # self.root existiert nicht (sollte nicht vorkommen, aber sicher)
                 return False
 
         log_debug("tts", "TTS-Worker-Thread gestartet")
@@ -39133,21 +39113,17 @@ class DragonWhispererGUI:
             except queue.Empty:
                 continue
             except Exception as e:
-                # Unerwarteter Fehler beim Queue‑Zugriff – loggen und weitermachen
                 logger.error(
                     f"TTS-Worker: Kritischer Fehler beim Holen aus Queue: {e}",
                     exc_info=True,
                 )
-                # Da kein Element entnommen wurde, darf task_done() NICHT aufgerufen werden
                 continue
 
-            # Sentinel‑Erkennung (muss VOR task_done() behandelt werden)
             if text is None:
                 log_debug("tts", "TTS-Worker: Sentinel empfangen, beende Schleife")
                 self._tts_queue.task_done()
                 break
 
-            # 2. Leere oder nur aus Whitespace bestehende Texte ignorieren
             if not text or not isinstance(text, str) or not text.strip():
                 if DEBUG_LEVEL >= 4:
                     log_debug(
@@ -39169,7 +39145,6 @@ class DragonWhispererGUI:
                     f"  Text: {preview}",
                 )
 
-            # 4. Shutdown- und GUI-Prüfung VOR der TTS-Übergabe
             if self.is_shutting_down() or not is_root_alive():
                 log_debug(
                     "tts",
@@ -39186,7 +39161,6 @@ class DragonWhispererGUI:
                 self._tts_queue.task_done()
                 continue
 
-            # Zusätzliche Prüfung: Ist die konfigurierte Engine überhaupt bereit?
             if not self.tts_manager.is_available():
                 log_debug(
                     "tts",
@@ -39195,12 +39169,9 @@ class DragonWhispererGUI:
                 self._tts_queue.task_done()
                 continue
 
-            # 6. Text an TTS-Manager übergeben (mit umfassendem Fehlerschutz)
             try:
-                # speak_queued ist nicht blockierend und reiht den Text nur ein
                 self.tts_manager.speak_queued(text)
             except queue.Full:
-                # Die interne Queue des TTS-Managers ist voll
                 logger.warning(
                     f"TTS-Worker: TTS-Queue voll – Text wird verworfen "
                     f"(Länge: {len(text)} Zeichen)"
@@ -39673,14 +39644,12 @@ class DragonWhispererGUI:
         )
 
         try:
-            # Versuche, cancel_futures zu verwenden (Python >= 3.9)
             executor.shutdown(wait=False, cancel_futures=True)
             log_debug(
                 "shutdown",
                 f"  → {name}: shutdown(wait=False, cancel_futures=True) aufgerufen",
             )
         except TypeError:
-            # Fallback für ältere Python-Versionen
             try:
                 executor.shutdown(wait=False)
                 log_debug(
@@ -39699,7 +39668,6 @@ class DragonWhispererGUI:
                 "shutdown", f"  → {name}: {len(worker_threads)} Worker-Threads gefunden"
             )
         else:
-            # Fallback: Suche nach Threads mit passendem Namenspräfix
             prefix = getattr(executor, "_thread_name_prefix", name)
             for t in threading.enumerate():
                 if t.name.startswith(prefix) and t.is_alive():
@@ -39733,7 +39701,6 @@ class DragonWhispererGUI:
                 logger.warning(
                     f"{name}: Thread {t.name} beendet sich nicht innerhalb des Timeouts"
                 )
-                # Versuche, den Thread als Daemon zu markieren, damit er den Shutdown nicht blockiert
                 try:
                     t.daemon = True
                     log_debug(
@@ -39936,39 +39903,28 @@ class WhisperController:
     def __init__(self, gui_ref: Any, event_bus: EventBus) -> None:
         """
         Initialisiert den WhisperController.
-
-        Args:
-            gui_ref: Referenz auf die DragonWhispererGUI (wird als weakref gehalten).
-            event_bus: Der zentrale Event-Bus für die Kommunikation.
         """
         self.gui_ref = weakref.ref(gui_ref)
         self.event_bus = event_bus
 
-        # Zustandsmaschine
         self._state = WhisperController.State.IDLE
         self._state_lock = threading.RLock()
         self._state_condition = threading.Condition(self._state_lock)
 
-        # Shutdown‑Event (wird in stop_processing gesetzt)
         self._shutdown_event = threading.Event()
 
-        # Threads
         self._processing_thread: Optional[threading.Thread] = None
         self._stop_thread: Optional[threading.Thread] = None
         self._stop_in_progress = False
         self._stop_lock = threading.RLock()
 
-        # Timer für automatischen ERROR-Reset (wichtig für sauberen Shutdown)
         self._error_reset_timer: Optional[Any] = None
 
-        # Idle-Waiter-Thread (verzögertes IDLE nach stop_processing)
         self._idle_waiter_thread: Optional[threading.Thread] = None
         self._idle_waiter_lock = threading.RLock()
 
-        # Aktuelle Stream‑ID (für FFmpegManager)
         self._current_stream_id: Optional[str] = None
 
-        # Duplikatschutz
         self._last_transcription_text = ""
         self._duplicate_check_cache: deque = deque(maxlen=20)
 
@@ -40002,13 +39958,11 @@ class WhisperController:
             self._handle_error("GUI nicht verfügbar", fatal=True)
             return
 
-        # URL validieren
         url = gui.url_entry.get().strip()
         if not url:
             self._handle_error("Keine URL eingegeben", fatal=True)
             return
 
-        # Modell validieren und ggf. .en-Korrektur durchführen
         model_name = gui.model_var.get()
         original_model = model_name
         if model_name.endswith(".en"):
@@ -40018,7 +39972,6 @@ class WhisperController:
                     f"⚠️ Monolinguales Modell '{model_name}' erkannt – wechsle zu multilingualem '{corrected}'"
                 )
                 model_name = corrected
-                # GUI im Hauptthread aktualisieren
                 gui.model_var.set(model_name)
             else:
                 logger.error(
@@ -40081,7 +40034,6 @@ class WhisperController:
                 logger.error(f"❌ Start Processing Error: {e}", exc_info=True)
                 self._handle_error(f"Start fehlgeschlagen: {str(e)[:50]}", fatal=True)
             finally:
-                # Thread-Referenz freigeben
                 with self._state_lock:
                     if self._processing_thread == threading.current_thread():
                         self._processing_thread = None
@@ -40214,7 +40166,6 @@ class WhisperController:
                 self._idle_waiter_thread = None
 
         with self._idle_waiter_lock:
-            # Falls bereits ein Waiter läuft, nicht erneut starten
             if self._idle_waiter_thread and self._idle_waiter_thread.is_alive():
                 log_debug("controller", "Idle waiter thread already running")
             else:
@@ -40351,11 +40302,9 @@ class WhisperController:
 
         logger.debug(f"Controller state: {old.name} -> {new_state.name}")
 
-        # Zusätzliches Debug bei hohem Debug-Level
         if DEBUG_LEVEL >= 3:
             import traceback
 
-            # Letzte 2 Stack‑Ebenen außerhalb dieser Methode
             stack = traceback.extract_stack()[-3:-1]
             caller_info = " <- ".join(
                 [f"{frame.name} (line {frame.lineno})" for frame in stack]
