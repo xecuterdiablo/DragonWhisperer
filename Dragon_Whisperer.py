@@ -41619,7 +41619,6 @@ class StreamHandler:
                 normal_ending = True
                 break
 
-            # Prozess unerwartet beendet?
             if current_process.poll() is not None:
                 logger.info("FFmpeg process terminated.")
                 if is_stop_requested():
@@ -41675,7 +41674,6 @@ class StreamHandler:
                 self._update_diagnosis("premature", premature)
 
                 if premature:
-                    # YouTube‑VOD → bevorzugt Download‑Modus
                     if is_youtube and not is_live:
                         current_pos = (
                             ap._real_processed_seconds or ap._processed_seconds
@@ -41692,14 +41690,12 @@ class StreamHandler:
                         normal_ending_container[0] = True
                         break
 
-                    # Stream existiert nicht mehr → sauber beenden
                     if not self._is_stream_still_alive(original_video_url):
                         logger.info("Stream is no longer available – ending normally")
                         normal_ending = True
                         normal_ending_container[0] = True
                         break
 
-                    # VOD‑Reconnect (begrenzte Anzahl)
                     if vod_reconnect_attempts < self.MAX_VOD_RECONNECT_ATTEMPTS:
                         vod_reconnect_attempts += 1
                         seek_param = None if is_youtube else ap._real_processed_seconds
@@ -41731,7 +41727,6 @@ class StreamHandler:
                         normal_ending_container[0] = normal_ending
                         break
                 else:
-                    # Normales Ende (alle Bytes oder genügend Zeit)
                     normal_ending = True
                     normal_ending_container[0] = True
                     break
@@ -41929,10 +41924,8 @@ class StreamHandler:
         Thread-sicher durch _diagnosis_lock.
         """
         with self._diagnosis_lock:
-            # Geschützte Kopie der Diagnosedaten erstellen
             diag = self._diagnosis.copy()
 
-            # Sensible Werte unter demselben Lock lesen
             if self._read_durations:
                 diag["avg_read_duration_ms"] = (
                     sum(self._read_durations) / len(self._read_durations)
@@ -41945,7 +41938,6 @@ class StreamHandler:
             diag["error_count_recent"] = len(self._error_timestamps)
             diag["slow_read_counter"] = self._slow_read_counter
 
-        # Dynamische Werte (kein Lock erforderlich, da sie atomar oder unter anderem Schutz stehen)
         ap = self._get_ap()
         if ap is not None:
             diag["audio_processor_state"] = (
@@ -41960,7 +41952,6 @@ class StreamHandler:
                     ap._real_processed_seconds / ap._expected_duration
                 ) * 100
 
-        # Abgeleitete Werte
         if "start_time" in diag:
             diag["uptime_seconds"] = time.time() - diag["start_time"]
 
@@ -41971,7 +41962,7 @@ class AudioProcessor:
     """
     Optimierte Audioverarbeitung mit asynchroner, nicht‑blockierender Transkription.
     """
-    SHUTDOWN_TIMEOUT_EXECUTOR = 10.0  # Sekunden
+    SHUTDOWN_TIMEOUT_EXECUTOR = 10.0
     class State(Enum):
         IDLE = auto()
         STARTING = auto()
@@ -42002,12 +41993,10 @@ class AudioProcessor:
         self.ffmpeg_manager = ffmpeg_manager
         self.settings = settings or AdvancedSettings()
 
-        # Event‑Bus für lose Kopplung
         self._event_bus = getattr(self.controller_ref, "event_bus", None)
         if DEBUG_LEVEL >= 3:
             log_debug("processor", "Event‑Bus verfügbar: %s", self._event_bus is not None)
 
-        # Browser‑Cookies an den StreamManager durchreichen
         self.use_browser_cookies = use_browser_cookies
 
         class State(Enum):
@@ -42026,12 +42015,10 @@ class AudioProcessor:
         self.processing_completed_event = threading.Event()
         self._stop_lock = threading.RLock()
 
-        # Finalisierung / Cleanup
         self._cleanup_done = False
         self._finalizing = False
         self._in_final_flush = threading.Event()
 
-        # Idle‑Waiter (wird nach einem Stop asynchron gestartet)
         self._idle_waiter_thread: Optional[threading.Thread] = None
         self._idle_waiter_lock = threading.Lock()
 
@@ -42043,7 +42030,6 @@ class AudioProcessor:
         self._translation_executor: Optional[OptimizedThreadPoolExecutor] = None
         self._transcribe_timeout_executor: Optional[ThreadPoolExecutor] = None
 
-        # Verwaltung der Timeout‑Futures
         self._timeout_futures_lock = threading.RLock()
         self._active_timeout_futures: Set[Future] = set()
 
@@ -42063,7 +42049,6 @@ class AudioProcessor:
         self._fallback_translation_engine: Optional[BaseTranslationEngine] = None
         self._engine_lock = threading.RLock()
 
-        # Verzögerte Entsorgung alter Engines
         self._pending_dispose: List[Any] = []
         self._dispose_thread: Optional[threading.Thread] = None
         self._dispose_stop_event = threading.Event()
@@ -42081,17 +42066,14 @@ class AudioProcessor:
                 max_translation_workers,
             )
 
-        # Übersetzung global ein‑/ausschaltbar
         self._translation_enabled = threading.Event()
         self._translation_enabled.set()
 
-        # Sequenznummer für Übersetzungen (Sprachwechsel)
         self._translation_seq = 0
         self._translation_seq_lock = threading.RLock()
 
         self._update_derived_attributes()
 
-        # Audio‑Puffer
         self._audio_chunks: deque = deque()
         self._audio_total_bytes = 0
         self._max_buffer_bytes = (
@@ -42114,7 +42096,6 @@ class AudioProcessor:
         )
         self._sentence_lock = threading.RLock()
 
-        # Satzpufferung (Transkription)
         self._enable_sentence_buffering = getattr(
             self.settings, "enable_sentence_buffering", True
         )
@@ -42129,7 +42110,6 @@ class AudioProcessor:
             self.settings, "transcript_word_threshold", 40
         )
 
-        # Zähler und Synchronisation für ausstehende Transkriptions‑Tasks
         self._pending_tasks = 0
         self._pending_tasks_lock = threading.RLock()
         self._pending_tasks_cond = threading.Condition(self._pending_tasks_lock)
@@ -42176,7 +42156,6 @@ class AudioProcessor:
         self._low_conf_counter = 0
         self._read_error_count = 0
 
-        # Queue‑Backpressure
         self._queue_enqueue_counter = 0
         self._queue_dequeue_counter = 0
         self._queue_drop_counter = 0
@@ -42184,7 +42163,6 @@ class AudioProcessor:
         self._last_queue_log_time = 0.0
         self._queue_log_interval = 10.0
 
-        # Adaptive Chunk‑Anpassung
         self._consecutive_high_queue = 0
         self._consecutive_low_queue = 0
         self._last_chunk_adjust_time = 0.0
@@ -42323,8 +42301,8 @@ class AudioProcessor:
             return
 
         cpu_count = os.cpu_count() or 4
-        workers = max(1, cpu_count // 4)  # 1–4 Worker, je nach CPU
-        workers = min(workers, 4)  # Maximal 4 Worker (verhindert Überlastung)
+        workers = max(1, cpu_count // 4)
+        workers = min(workers, 4)
 
         self._transcribe_timeout_executor = ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="TranscribeTimeout"
@@ -42333,7 +42311,6 @@ class AudioProcessor:
             "processor", f"TranscribeTimeout executor created with {workers} worker(s)"
         )
 
-        # Initialisiere auch die Lock für die Verwaltung aktiver Futures
         self._timeout_futures_lock = threading.RLock()
         self._active_timeout_futures: Set[Future] = set()
 
@@ -42405,7 +42382,6 @@ class AudioProcessor:
                 executor.shutdown(wait=True, cancel_futures=True)
             log_debug("processor", "TranscribeTimeout executor shut down")
         except TypeError:
-            # Fallback für ältere Python-Versionen
             executor.shutdown(wait=not force)
             log_debug("processor", "TranscribeTimeout executor shut down (fallback)")
         except Exception as e:
@@ -42502,7 +42478,6 @@ class AudioProcessor:
         Plant die verzögerte Entsorgung alter Übersetzungs-Engines über einen abbrechbaren Thread.
         """
         with self._engine_lock:
-            # Falls bereits ein Dispose-Thread läuft, diesen abbrechen
             if self._dispose_thread is not None and self._dispose_thread.is_alive():
                 if DEBUG_LEVEL >= 3:
                     log_debug("engine", "Laufender Dispose-Thread wird abgebrochen")
@@ -42512,7 +42487,6 @@ class AudioProcessor:
 
             def worker() -> None:
                 """Wartet 0,5 Sekunden mit Abbruchmöglichkeit."""
-                # 5 × 0,1 Sekunden warten, dabei regelmäßig Stop-Event prüfen
                 for _ in range(5):
                     if self._dispose_stop_event.wait(0.1):
                         if DEBUG_LEVEL >= 3:
