@@ -42672,12 +42672,10 @@ class AudioProcessor:
         """
         logger.debug("🔄 Dispatcher‑Loop läuft")
         while True:
-            # Vor dem blockierenden get prüfen, ob wir beenden sollen
             if self._dispatcher_shutdown.is_set() and self._raw_audio_queue.empty():
                 break
 
             try:
-                # Kürzeres Timeout für schnellere Shutdown‑Reaktion
                 item = self._raw_audio_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
@@ -42687,7 +42685,6 @@ class AudioProcessor:
 
             if item is None:
                 logger.debug("Dispatcher: Sentinel empfangen, beende")
-                # Wichtig: task_done() für den Sentinel aufrufen, damit join() nicht hängt
                 self._raw_audio_queue.task_done()
                 break
 
@@ -42873,7 +42870,6 @@ class AudioProcessor:
 
         valid_segments: List[TranscriptionResult] = []
         if not task_failed and segments:
-            # 3a. Basisfilter (min. Confidence, Textlänge etc.)
             valid_segments = [
                 seg
                 for seg in segments
@@ -42894,9 +42890,8 @@ class AudioProcessor:
             for seg in valid_segments[:]:
                 seg_lang = getattr(seg, "language", "unknown")
                 if seg_lang in ("zh", "ja", "ko", "th", "vi", "yue", "lo", "km", "my"):
-                    # CJK-Sprachen → Zeichenebene
                     chars = list(seg.text.replace(" ", ""))
-                    if len(chars) > 10:            # nur bei ausreichend Text
+                    if len(chars) > 10:
                         unique_ratio = len(set(chars)) / max(len(chars), 1)
                         if unique_ratio < 0.15:
                             valid_segments.remove(seg)
@@ -42908,9 +42903,8 @@ class AudioProcessor:
                                     f"(unique_ratio={unique_ratio:.2f})"
                                 )
                 else:
-                    # Wortbasierte Sprachen
                     words = seg.text.split()
-                    if len(words) > 5:             # nur bei längeren Phrasen
+                    if len(words) > 5:
                         unique_ratio = len(set(words)) / len(words)
                         if DEBUG_LEVEL >= 2:
                             log_debug(
@@ -42918,7 +42912,7 @@ class AudioProcessor:
                                 f"Repetition check: {len(words)} words, unique_ratio={unique_ratio:.2f}, "
                                 f"text='{seg.text[:50]}...'"
                             )
-                        if unique_ratio < 0.15:    # weniger als 15 % einmalige Wörter
+                        if unique_ratio < 0.15:
                             valid_segments.remove(seg)
                             if DEBUG_LEVEL >= 2:
                                 log_debug(
@@ -42989,17 +42983,14 @@ class AudioProcessor:
             self._total_subtitle_segments = 0
 
         if self.subtitle_mode:
-            # Untertitel‑Modus: direkte Ausgabe mit absoluten Zeitstempeln
             if DEBUG_LEVEL >= 3:
                 log_debug("transcribe", "Subtitle mode: direct output with absolute timestamps")
             for seg in valid_segments:
-                # Zeitstempel absolut machen
                 if hasattr(seg, "start") and seg.start is not None:
                     seg.start += absolute_offset
                 if hasattr(seg, "end") and seg.end is not None:
                     seg.end += absolute_offset
 
-                # Niedrige Konfidenz protokollieren
                 conf = getattr(seg, "confidence", 0.0)
                 if conf < 0.3:
                     logger.warning(
@@ -43007,7 +42998,6 @@ class AudioProcessor:
                         f"start={seg.start:.2f}, end={seg.end:.2f})"
                     )
 
-                # Debug‑Log für jedes einzelne Segment
                 if DEBUG_LEVEL >= 3:
                     log_debug(
                         "subtitle_segment",
@@ -43016,7 +43006,6 @@ class AudioProcessor:
                         f"conf={conf:.2f} text='{seg.text}'",
                     )
 
-                # An den GUI‑Callback übergeben
                 try:
                     transcription_callback(seg)
                 except Exception as e:
@@ -43026,12 +43015,10 @@ class AudioProcessor:
 
                 self._total_subtitle_segments += 1
 
-            # Zeitgesteuerte Transkriptionen für Export trotzdem ablegen
             if self.settings.config.ENABLE_TIMED_TRANSCRIPTIONS:
                 with self._subtitle_lock:
                     self._timed_transcriptions.extend(valid_segments)
 
-            # Übersetzung im Untertitel‑Modus: IMMER ausführen
             if (
                 self.translation_engine is not None
                 and self._translation_enabled.is_set()
@@ -43051,7 +43038,6 @@ class AudioProcessor:
                 )
             except Exception as e:
                 logger.error("Error in buffer_and_flush_segments: %s", e)
-                # Fallback: direkte Ausgabe, falls die Pufferung fehlschlägt
                 for seg in valid_segments:
                     try:
                         transcription_callback(seg)
@@ -43072,7 +43058,6 @@ class AudioProcessor:
         for seg in valid_segments:
             end_attr = getattr(seg, "end", None)
             if end_attr is not None:
-                # Immer die absolute Endzeit verwenden (Offset bereits in den Segmenten enthalten)
                 abs_end = end_attr if self.subtitle_mode else absolute_offset + end_attr
                 if abs_end > max_end:
                     max_end = abs_end
@@ -43142,7 +43127,6 @@ class AudioProcessor:
 
         with self._music_silence_lock:
             if valid_segments:
-                # Sprache erkannt → alle Zähler zurücksetzen
                 self._consecutive_music_chunks = 0
                 self._consecutive_silence_chunks = 0
 
@@ -43151,7 +43135,6 @@ class AudioProcessor:
                     self._silence_state_active = False
                     self._emit_music_silence_event("speech_detected")
             else:
-                # Keine validen Segmente
                 if is_silent:
                     self._consecutive_music_chunks = 0
                     self._consecutive_silence_chunks += 1
@@ -43165,8 +43148,8 @@ class AudioProcessor:
                         self._consecutive_music_chunks, 1000
                     )
 
-                MUSIC_THRESHOLD = 5  # ca. 15–25 Sekunden (bei 3–5s Chunks)
-                SILENCE_THRESHOLD = 10  # ca. 30–60 Sekunden
+                MUSIC_THRESHOLD = 5
+                SILENCE_THRESHOLD = 10
 
                 now = time.time()
                 if (
@@ -43221,7 +43204,6 @@ class AudioProcessor:
         with self._segment_buffer_lock:
             now = time.time()
 
-            # 1. Neue Segmente einfügen
             for seg in segments:
                 if seg.start is None or seg.end is None:
                     try:
@@ -43242,7 +43224,6 @@ class AudioProcessor:
                 self._segment_buffer.append((now, seg, self._segment_counter))
                 self._segment_counter += 1
 
-            # 2. Zähler normalisieren, um Überlauf zu verhindern
             if self._segment_counter % COUNTER_NORMALIZE_EVERY == 0:
                 normalized = []
                 for item in self._segment_buffer:
@@ -43251,7 +43232,6 @@ class AudioProcessor:
                 self._segment_buffer = deque(normalized)
                 self._segment_counter -= COUNTER_NORMALIZE_EVERY
 
-            # 3. Puffer sortieren (je nach Modus)
             if self.subtitle_mode:
                 self._segment_buffer = deque(
                     sorted(
@@ -43291,7 +43271,6 @@ class AudioProcessor:
             if overflow_count and last_flushed_end > 0:
                 self._next_expected_start = max(self._next_expected_start, last_flushed_end)
 
-            # 5. Herauszögern älterer Segmente
             if self._segment_buffer:
                 oldest_time, oldest_seg, _ = self._segment_buffer[0]
                 age = now - oldest_time
@@ -43314,7 +43293,6 @@ class AudioProcessor:
                             self._next_expected_start, stuck_seg.end
                         )
 
-            # 6. Fortlaufend ausgeben, solange die Startzeit innerhalb der Toleranz liegt
             flushed_segments = 0
             while self._segment_buffer:
                 _, seg, _ = self._segment_buffer[0]
@@ -43443,7 +43421,7 @@ class AudioProcessor:
 
         future: Optional[Future] = None
         max_submit_attempts = 2
-        backoff_base = 0.1  # Sekunden
+        backoff_base = 0.1
 
         for attempt in range(1, max_submit_attempts + 1):
             if not self.is_processing() or self._stop_event.is_set():
@@ -43507,20 +43485,17 @@ class AudioProcessor:
                     )
                     return []
 
-                # Vor dem nächsten Versuch den Executor neu initialisieren
                 self._cleanup_timeout_executor(force=True)
                 self._init_transcribe_timeout_executor()
                 executor = self._transcribe_timeout_executor
                 if executor is None:
                     return []
 
-                # Exponentieller Backoff (max. 1 Sekunde)
                 time.sleep(min(backoff_base * (2 ** (attempt - 1)), 1.0))
 
         try:
             result = future.result(timeout=dynamic_timeout)
 
-            # Erfolg → Timeout‑Zähler zurücksetzen
             with self._stats_lock:
                 self._consecutive_timeouts = 0
 
@@ -43534,7 +43509,6 @@ class AudioProcessor:
             return result if result else []
 
         except FutureTimeout:
-            # === Timeout ===
             cancel_event.set()
             if DEBUG_LEVEL >= 3:
                 log_debug("transcribe", "Cancel‑Event gesetzt (Timeout).")
@@ -43653,14 +43627,12 @@ class AudioProcessor:
         try:
             queue_maxsize = self._raw_audio_queue.maxsize
         except AttributeError:
-            # Fallback für Queue‑Implementierungen ohne ``maxsize``
             queue_maxsize = 1000
 
         now = time.time()
 
         if getattr(self.settings, "adaptive_chunk", False):
             with self._stats_lock:
-                # Zustandsverfolgung
                 if qsize > queue_maxsize * 0.8:
                     self._consecutive_high_queue += 1
                     self._consecutive_low_queue = 0
