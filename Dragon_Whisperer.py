@@ -48189,7 +48189,6 @@ class AudioProcessor:
                     e,
                 )
 
-        # Das "Verarbeitung abgeschlossen"‑Signal für den Controller
         if (
             hasattr(self, "processing_completed_event")
             and self.processing_completed_event is not None
@@ -48348,13 +48347,11 @@ class AudioProcessor:
                 log_debug("translate", "Übersetzung global deaktiviert.")
             return
 
-        # Während des finalen Cleanups keine neuen Übersetzungsaufträge
         if getattr(self, "_finalizing", False):
             if DEBUG_LEVEL >= 3:
                 log_debug("translate", "Processor finalisiert – Übersetzung wird nicht gestartet.")
             return
 
-        # Engine‑Referenz holen (unter Lock, damit kein paralleler Austausch stört)
         with self._engine_lock:
             engine = self._translation_engine
         if engine is None:
@@ -48385,7 +48382,6 @@ class AudioProcessor:
         with self._sentence_lock:
             now = time.time()
 
-            # --- Hilfsfunktion: Puffer leeren und Übersetzungsauftrag absetzen ---
             def flush_buffer(reason: str) -> None:
                 """Leert den aktuellen Satzpuffer und stößt eine Übersetzung an."""
                 if not self._sentence_parts:
@@ -48398,7 +48394,6 @@ class AudioProcessor:
                     return
 
                 combined_text = " ".join(self._sentence_parts).strip()
-                # Sprache aus dem ersten gespeicherten Segment beziehen
                 lang = (
                     self._sentence_segments[0].language
                     if self._sentence_segments
@@ -48417,7 +48412,6 @@ class AudioProcessor:
                         lang,
                     )
 
-                # Asynchrone Übersetzung starten – Fehler werden dort geloggt.
                 self._translate_and_send_async(
                     combined_text,
                     lang,
@@ -48426,19 +48420,15 @@ class AudioProcessor:
                     end=last_seg.end if last_seg else None,
                 )
 
-                # Pufferzustand zurücksetzen
                 self._sentence_parts.clear()
                 self._sentence_segments.clear()
                 self._last_sentence_time = now
 
-            # --- Stop‑Event hat Vorrang, aber nicht während des finalen Flushs ---
             in_final_flush = getattr(self, "_in_final_flush", False)
             if self._stop_event.is_set() and not in_final_flush:
                 if self._sentence_parts:
-                    # Alles, was noch im Puffer ist, wird übersetzt.
                     flush_buffer("stop_event")
                 else:
-                    # Nur das aktuelle Segment direkt übersetzen.
                     self._translate_and_send_async(
                         text,
                         detected_lang,
@@ -48448,7 +48438,6 @@ class AudioProcessor:
                     )
                 return
 
-            # --- Sprachwechsel erzwingt vorheriges Leeren des Puffers ---
             if self._sentence_segments:
                 last_lang = self._sentence_segments[-1].language
                 if (
@@ -48477,21 +48466,17 @@ class AudioProcessor:
                     )
                 flush_buffer("timeout")
 
-            # --- Aktuelles Segment an den Puffer anhängen ---
             self._sentence_parts.append(text)
             self._sentence_segments.append(result)
             self._last_sentence_time = now
 
-            # --- Entscheiden, ob der Puffer jetzt ausgegeben werden muss ---
             should_flush = False
             flush_reason = ""
 
-            # Bedingung 1: aktueller Text endet mit Satzendepunktuation
             if text and text[-1] in ".!?。！？":
                 should_flush = True
                 flush_reason = "punctuation"
 
-            # Bedingung 2: Wortanzahl im gesamten Puffer überschreitet Schwellwert
             if not should_flush:
                 total_words = sum(len(part.split()) for part in self._sentence_parts)
                 if total_words >= self._sentence_flush_word_threshold:
@@ -48657,7 +48642,6 @@ class AudioProcessor:
         """
         Erzeugt ein kombiniertes TranscriptionResult aus den gepufferten Segmenten.
         """
-        # 1. Leerer Puffer – Fallback
         if not self._transcript_segments:
             logger.warning(
                 "_create_combined_transcript_segment called with empty buffer"
@@ -48692,7 +48676,6 @@ class AudioProcessor:
         if hasattr(last_seg, "end") and last_seg.end is not None:
             end_time = last_seg.end
 
-        # 4. Durchschnittliche Confidence berechnen
         total_conf = 0.0
         valid_conf_count = 0
         for seg in self._transcript_segments:
@@ -48711,10 +48694,8 @@ class AudioProcessor:
                     "No valid confidence values found, using default 0.5",
                 )
 
-        # 5. Sprache bestimmen (Mehrheitsentscheidung oder erstes Segment)
         language = "unknown"
         if self._transcript_segments:
-            # Versuche, die häufigste Sprache zu ermitteln
             lang_counts: Dict[str, int] = {}
             for seg in self._transcript_segments:
                 lang = getattr(seg, "language", "unknown")
@@ -48766,7 +48747,6 @@ class AudioProcessor:
                 log_debug("translate", "Übersetzung global deaktiviert.")
             return
 
-        # Keine Übersetzungen mehr, sobald der Processor finalisiert
         if getattr(self, "_finalizing", False):
             if DEBUG_LEVEL >= 3:
                 log_debug("translate", "Processor finalisiert – Übersetzung ignoriert.")
@@ -48781,7 +48761,6 @@ class AudioProcessor:
                 log_debug("translate", "Keine Übersetzungs‑Engine gesetzt.")
             return
 
-        # Zielsprache ermitteln, um unnötige Übersetzungen zu vermeiden.
         target_lang = engine.default_target_lang
         if source_lang != "auto" and source_lang == target_lang:
             if DEBUG_LEVEL >= 4:
@@ -48841,7 +48820,6 @@ class AudioProcessor:
             task_start = time.perf_counter()
             translation = None
             try:
-                # --- Primäre Engine ---
                 if engine is not None and (
                     not hasattr(engine, "is_functional") or engine.is_functional()
                 ):
@@ -48854,7 +48832,6 @@ class AudioProcessor:
                             exc_info=DEBUG_LEVEL >= 3,
                         )
 
-                # --- Fallback‑Engine, falls nötig ---
                 if translation is None and fallback is not None and (
                     not hasattr(fallback, "is_functional") or fallback.is_functional()
                 ):
@@ -48869,7 +48846,6 @@ class AudioProcessor:
                             exc_info=DEBUG_LEVEL >= 3,
                         )
 
-                # Wie lange hat's gedauert?
                 duration_ms = (time.perf_counter() - task_start) * 1000
                 if DEBUG_LEVEL >= 3:
                     log_debug(
@@ -48879,7 +48855,6 @@ class AudioProcessor:
                         len(text),
                     )
 
-                # Veraltete Übersetzung verwerfen (Sprachwechsel o. ä.)
                 with self._translation_seq_lock:
                     if current_seq != self._translation_seq:
                         if DEBUG_LEVEL >= 3:
@@ -48898,16 +48873,13 @@ class AudioProcessor:
                     )
                     return
 
-                # Zeitstempel aus dem Quellsegment übernehmen
                 translation.start = start
                 translation.end = end
 
-                # In den Untertitel‑Puffer, falls der Modus aktiv ist
                 if self.subtitle_mode and self.settings.config.ENABLE_TIMED_TRANSLATIONS:
                     with self._subtitle_lock:
                         self._timed_translations.append(translation)
 
-                # Qualitätsbewertung und ggf. Warnung senden
                 quality = self._assess_translation_quality(
                     text, translation.translated, target_lang
                 )
@@ -48926,7 +48898,6 @@ class AudioProcessor:
                             if DEBUG_LEVEL >= 3:
                                 log_debug("translate", "Event‑Emission fehlgeschlagen: %s", emit_err)
 
-                # GUI‑Callback – immer aufrufen, auch wenn die GUI nicht mehr lebt
                 try:
                     translation_callback(translation)
                 except Exception as cb_err:
@@ -48950,7 +48921,6 @@ class AudioProcessor:
                     exc,
                 )
             finally:
-                # Semaphor wird in **jedem** Fall freigegeben
                 self._translation_semaphore.release()
 
         try:
@@ -48960,7 +48930,6 @@ class AudioProcessor:
                 "Übersetzungs‑Executor bereits heruntergefahren – Auftrag verworfen: %s",
                 e,
             )
-            # Semaphor freigeben, weil der Task niemals gestartet wird
             self._translation_semaphore.release()
         except Exception as e:
             logger.warning(
@@ -48976,7 +48945,6 @@ class AudioProcessor:
         Aktualisiert den gleitenden Echtzeitfaktor (_last_realtime_factor)
         basierend auf der tatsächlichen Verarbeitungsdauer eines Chunks.
         """
-        # Plausibilitätsprüfung
         if chunk_duration <= 0.0 or processing_duration <= 0.0:
             if DEBUG_LEVEL >= 4:
                 log_debug(
