@@ -45074,7 +45074,6 @@ class AudioProcessor:
         Reihenfolge verarbeitet werden.
         """
         if getattr(self, "subtitle_mode", False) == enabled:
-            # Kein Zustandswechsel – unnötige Arbeit vermeiden
             if DEBUG_LEVEL >= 3:
                 log_debug(
                     "subtitle",
@@ -45094,7 +45093,6 @@ class AudioProcessor:
         if enabled:
             self._set_transcription_workers(1)
         else:
-            # Normalmodus: Workers aus den Einstellungen übernehmen
             cpu_count = os.cpu_count() or 4
             normal_workers = getattr(
                 self.settings,
@@ -45105,7 +45103,6 @@ class AudioProcessor:
 
         try:
             if enabled:
-                # Alten Executor sicher beenden und durch Single‑Worker ersetzen
                 self._cleanup_timeout_executor(force=True)
                 self._transcribe_timeout_executor = ThreadPoolExecutor(
                     max_workers=1,
@@ -45117,7 +45114,6 @@ class AudioProcessor:
                         "Timeout executor auf 1 Worker reduziert",
                     )
             else:
-                # Normalmodus: Standard‑Workers wiederherstellen
                 self._cleanup_timeout_executor(force=True)
                 self._init_transcribe_timeout_executor()
                 if DEBUG_LEVEL >= 3:
@@ -45178,7 +45174,6 @@ class AudioProcessor:
             log_debug("processor", f"URL: {url[:120]}...")
             log_debug("processor", ">>> _cleanup_done auf False gesetzt")
 
-        # ── 1. Alte Idle‑Waiter‑Threads beenden (veraltete Wait‑Calls vom vorigen Lauf) ──
         with self._idle_waiter_lock:
             idle_waiter = self._idle_waiter_thread
             if idle_waiter is not None and idle_waiter.is_alive():
@@ -45218,7 +45213,6 @@ class AudioProcessor:
                         )
                     return
 
-                # Zustand ist hängen geblieben – Notfall‑Reset
                 logger.warning(
                     "AudioProcessor steckt im Zustand '%s' ohne aktive Threads. "
                     "Führe Emergency‑Reset durch.", state.name
@@ -45244,19 +45238,16 @@ class AudioProcessor:
                 self._set_state(AudioProcessor.State.IDLE)
 
             else:
-                # Wirklich unbekannter Zustand – zur Sicherheit hart auf IDLE
                 logger.debug(
                     "Unbekannter AudioProcessor‑Zustand '%s' – erzwungener IDLE.",
                     state.name if hasattr(state, 'name') else repr(state),
                 )
                 self._set_state(AudioProcessor.State.IDLE)
 
-            # Jetzt sicher in STARTING wechseln
             self._set_state(AudioProcessor.State.STARTING)
             if DEBUG_LEVEL >= 3:
                 log_debug("processor", "Status gewechselt → STARTING")
 
-        # ── 3. URL bereinigen und validieren ──
         url = PlatformUtils.sanitize_url(url)
         if DEBUG_LEVEL >= 3:
             log_debug("processor", f"Sanitized URL: {url[:120]}...")
@@ -45291,7 +45282,6 @@ class AudioProcessor:
             if DEBUG_LEVEL >= 3:
                 log_debug("processor", "Stream URL (non-file)")
 
-        # ── 4. Stop‑Flags und Stream‑ID initialisieren ──
         self.reset_stop_flag()
         self._current_stream_id = f"stream_{int(time.time())}"
         event = getattr(self, 'processing_completed_event', None)
@@ -45300,7 +45290,6 @@ class AudioProcessor:
         if DEBUG_LEVEL >= 3:
             log_debug("processor", f"Stream ID: {self._current_stream_id}")
 
-        # ── 5. Statistik‑Zähler zurücksetzen ──
         with self._stats_lock:
             self._chunk_counter = 0
             self._total_bytes_processed = 0
@@ -45319,7 +45308,6 @@ class AudioProcessor:
 
         self._real_processed_seconds = 0.0
 
-        # ── 6. Audio‑ und Segmentpuffer leeren ──
         with self._buffer_lock:
             self._audio_chunks.clear()
             self._audio_total_bytes = 0
@@ -45329,7 +45317,6 @@ class AudioProcessor:
             if DEBUG_LEVEL >= 4:
                 log_debug("processor", "Segment buffer cleared")
 
-        # ── 7. Callbacks, Wort‑Historie und Chunk‑Adaption zurücksetzen ──
         self._finished_callback = finished_callback
 
         with self._word_count_lock:
@@ -45339,11 +45326,9 @@ class AudioProcessor:
         self._last_chunk_duration = self.settings.config.CHUNK_DURATION
         self._chunk_stable_counter = 0
 
-        # ── 8. Translation‑Engine / Sequenz‑ID initialisieren ──
         with self._translation_seq_lock:
             self._translation_seq = 0
 
-        # ── 9. Executor für Übersetzungen (einmalig anlegen / wiederverwenden) ──
         translate_workers = getattr(
             self.settings, "translation_workers",
             min(8, max(1, (os.cpu_count() or 4) // 2))
@@ -45363,7 +45348,6 @@ class AudioProcessor:
             if DEBUG_LEVEL >= 3:
                 log_debug("processor", "Translation executor already exists, reusing")
 
-        # ── 10. Transkriptions‑Worker: Untertitel‑Modus = 1 Worker, sonst 1 ──
         if self.subtitle_mode:
             self._set_transcription_workers(1)
             logger.info("✅ Untertitel‑Modus: sequenzielle Transkription (1 Worker)")
@@ -45371,7 +45355,6 @@ class AudioProcessor:
             self._set_transcription_workers(1)
             logger.info("✅ Normaler Modus: sequenzielle Transkription (1 Worker)")
 
-        # ── 11. Dispatcher sauber beenden und Rohdaten‑Queue vollständig leeren ──
         if self._dispatcher_started:
             log_debug(
                 "processor",
@@ -45392,18 +45375,15 @@ class AudioProcessor:
                 "Queue vor Dispatcher-Start geleert: %d Elemente entfernt", cleared
             )
 
-        # ── 12. Dispatcher (neu) starten ──
         self._start_dispatcher()
         if DEBUG_LEVEL >= 3:
             log_debug("processor", "Dispatcher gestartet")
 
-        # ── 13. Callbacks setzen ──
         self._transcription_callback = transcription_callback
         self._translation_callback = translation_callback
         self._info_callback = info_callback
         self._error_callback = error_callback
 
-        # ── 14. OOM‑Flag der Transkriptions‑Engine zurücksetzen ──
         if (
             hasattr(self, "_transcription_engine")
             and self._transcription_engine is not None
@@ -45416,7 +45396,6 @@ class AudioProcessor:
             except Exception as e:
                 logger.warning("Fehler beim Zurücksetzen von _last_oom: %s", e)
 
-        # ── 15. Hintergrund‑Thread für die Hauptverarbeitung starten ──
         def _process_thread(
             url: str,
             trans_cb: TranscriptionCallback,
@@ -45444,7 +45423,6 @@ class AudioProcessor:
                 )
                 err_cb(f"Interner Fehler: {e}")
             finally:
-                # Garantierte Rückkehr in IDLE – auch nach Exception
                 with self._state_lock:
                     self._set_state(AudioProcessor.State.IDLE)
                 self._stop_event.set()
@@ -45472,7 +45450,6 @@ class AudioProcessor:
         self._processing_thread = thread
         thread.start()
 
-        # ── 16. Zustand auf PROCESSING setzen (final) ──
         with self._state_lock:
             if self._state.value == AudioProcessor.State.STARTING.value:
                 self._set_state(AudioProcessor.State.PROCESSING)
@@ -45970,11 +45947,9 @@ class AudioProcessor:
 
         log_debug("shutdown", f"Shutting down {name} executor (wait=True, timeout={timeout}s)...")
         try:
-            # Python >= 3.9 unterstützt cancel_futures
             executor.shutdown(wait=True, cancel_futures=True)
             log_debug("shutdown", f"  → {name}: shutdown(wait=True, cancel_futures=True) successful")
         except TypeError:
-            # Fallback für ältere Python-Versionen
             executor.shutdown(wait=True)
             log_debug("shutdown", f"  → {name}: shutdown(wait=True) successful (cancel_futures not supported)")
         except Exception as e:
