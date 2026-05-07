@@ -16249,23 +16249,6 @@ class FFmpegManager:
         is_youtube: bool,
     ) -> Optional[subprocess.Popen]:
         """Startet einen Stream im normalen Modus (direkte Audio‑URL).
-
-        Diese Methode erzeugt den FFmpeg‑Prozess, führt jedoch **keine**
-        Registrierung durch – das ist Aufgabe des Aufrufers (``start_stream``).
-
-        Args:
-            video_url: Die ursprüngliche Video‑URL.
-            output_queue: Reserviert (wird nicht verwendet).
-            process_id: Eindeutige ID des Streams.
-            force_refresh_audio_url: Erzwingt neue Extraktion der Audio‑URL.
-            audio_url: Bereits aufgelöste Audio‑URL (optional).
-            seek_seconds: Startzeit in Sekunden (nur bei nicht‑YouTube VODs).
-            detected_language: Erkannte Sprache oder None.
-            is_live: True, wenn der Stream ein Livestream ist.
-            is_youtube: True, wenn es sich um einen YouTube‑Stream handelt.
-
-        Returns:
-            Den laufenden FFmpeg‑Prozess oder None bei Fehlschlag.
         """
         if DEBUG_LEVEL >= 3:
             log_debug("ffmpeg", "Using normal mode (direct audio URL)")
@@ -23554,12 +23537,10 @@ class TTSManager:
                     "Unerwarteter Fehler bei blockierendem put: %s", exc
                 )
 
-        # ── 7. Verdrängte Callbacks benachrichtigen (außerhalb des Locks) ─
         for old_cb, old_ccb, old_text, reason in discarded_cb_info:
             _safe_cb(old_cb, False, reason)
             _safe_cb(old_ccb, False, reason)
 
-        # ── 8. Rückmeldung an die aktuellen Callbacks ──────────────────
         if enqueued:
             if DEBUG_LEVEL >= 3:
                 try:
@@ -23633,7 +23614,6 @@ class TTSManager:
             self._forward_stop.set()
             log_debug("tts", "  → _forward_stop event gesetzt")
 
-        # 3. Warteschlange leeren, aber Worker nicht beenden
         cleared = 0
         try:
             while True:
@@ -23739,7 +23719,6 @@ class TTSManager:
                         effective_engine,
                     )
 
-            # Text in Chunks zerlegen
             chunks = self._split_text(text)
             if not chunks:
                 if callback:
@@ -23946,16 +23925,9 @@ class TTSManager:
                 except Exception as e:
                     logger.error("espeak error: %s", e, exc_info=True)
                     return False, str(e)
-
-        # ---------- unbekannte Engine ----------
         else:
             logger.warning("_speak_chunk: unbekannte Engine '%s'", engine)
             return False, f"Unknown engine: {engine}"
-
-        # ---------- Nachbearbeitung ----------
-        # Kurze Pause zwischen Chunks, um Audio‑Glitches zu vermeiden.
-        # Die Dauer kann über die Umgebungsvariable TTS_CHUNK_PAUSE (Sekunden)
-        # oder später über eine GUI‑Option eingestellt werden (Default 0.05).
         try:
             chunk_pause = float(os.environ.get("TTS_CHUNK_PAUSE", "0.05"))
         except ValueError:
@@ -24217,29 +24189,6 @@ class TTSManager:
         custom_sink: str = "",
     ) -> Optional[str]:
         """Spielt eine WAV‑Datei mit dem ersten funktionierenden Audio‑Player ab.
-
-        Die verfügbaren Player (aus der internen Liste ``_available_players``
-        oder einer benutzerdefinierten Prioritätenliste) werden der Reihe nach
-        ausprobiert.  Ein Player gilt als erfolgreich, wenn der Prozess ohne
-        Fehler beendet wird und die tatsächliche Abspieldauer nicht wesentlich
-        von der erwarteten Dauer abweicht.
-
-        Args:
-            wav_file: Pfad zur WAV‑Datei (muss existieren und lesbar sein).
-            expected_duration: Erwartete Abspieldauer in Sekunden (muss > 0 sein).
-            player_priority: Optionale Liste von Player‑Namen in der gewünschten
-                Reihenfolge.  Ist sie ``None``, wird die automatisch erkannte
-                Liste verwendet.
-            custom_sink: Name eines PulseAudio‑Sinks, der für ``paplay`` oder
-                ``aplay`` als Ausgabegerät verwendet werden soll.
-
-        Returns:
-            Name des Players, mit dem die Wiedergabe erfolgreich war,
-            oder ``None``, wenn alle Versuche fehlschlugen.
-
-        .. versionchanged:: 4.1.2
-            Verbesserte Eingabevalidierung, robustere Display‑Erkennung,
-            zusätzliche Fallback‑Logik für sehr kurze Audiodateien.
         """
         # ── 1. Eingabevalidierung ──────────────────────────────────────
         if not wav_file or not isinstance(wav_file, str):
@@ -24499,34 +24448,6 @@ class TTSManager:
         apply_audio_processing: bool = False,
     ) -> Tuple[bool, str]:
         """Synthetisiert einen einzelnen Text‑Chunk mit Piper und spielt ihn ab.
-
-        Die Methode serialisiert den Zugriff auf den kritischen Abschnitt
-        (Prozess‑Start, Überwachung, Wiedergabe) über ``self._lock``.  Ein
-        vorheriger Piper‑Prozess (falls noch aktiv) wird zuverlässig beendet,
-        bevor die neue Synthese beginnt.
-
-        Temporäre Dateien werden nach der Wiedergabe garantiert gelöscht,
-        ausser die Umgebungsvariable ``DRAGON_KEEP_TEMP_TTS`` ist ``1``.
-
-        Falls die optionale Konvertierung in ein Sink‑Format aktiviert ist
-        (``self.settings.tts_convert_to_sink``) und ``sox`` oder ``ffmpeg``
-        verfügbar sind, wird die WAV‑Datei vor dem Abspielen in das native
-        Format des Audio‑Sinks umgewandelt.  Dies verhindert Knistern und
-        Rauschen, das durch Echtzeit‑Resampling in PipeWire/PulseAudio
-        entstehen kann.
-
-        Args:
-            text: Der zu sprechende, bereits bereinigte Text.
-            _depth: Wird aus Kompatibilitätsgründen akzeptiert, aber nicht
-                verwendet.  Eine Rekursion findet nicht mehr statt.
-            _retry: Wird aus Kompatibilitätsgründen akzeptiert, aber nicht
-                verwendet.
-            stop_before: Falls ``True``, wird vor dem Start der Synthese
-                eine eventuell noch laufende Wiedergabe abgebrochen.
-            apply_audio_processing: Reserviert für zukünftige Erweiterungen.
-
-        Returns:
-            Ein Tupel ``(Erfolg, Meldung)``.
         """
         with self._lock:
             if getattr(self, "_disposed", False):
@@ -24859,19 +24780,6 @@ class TTSManager:
         """
         Schreibt eine minimale WAV‑Datei mit einem 44‑Byte‑Header.
         Dient als Fallback, wenn weder sox noch ffmpeg verfügbar sind.
-
-        Parameter
-        ---------
-        filepath : str
-            Zielpfad für die WAV‑Datei.
-        pcm_data : bytes
-            Rohdaten (PCM, little-endian).
-        sample_rate : int
-            Samplerate in Hz.
-        num_channels : int
-            Anzahl Kanäle (1=Mono, 2=Stereo).
-        bits_per_sample : int
-            Bittiefe (z. B. 16).
         """
         byte_rate = sample_rate * num_channels * bits_per_sample // 8
         block_align = num_channels * bits_per_sample // 8
@@ -24895,17 +24803,6 @@ class TTSManager:
     def _get_sink_format(self, custom_sink: str = "") -> Dict[str, Any]:
         """
         Ermittelt Samplerate, Bittiefe und Kanalzahl eines Audio‑Sinks.
-
-        Wenn *custom_sink* gesetzt ist, wird dieser Sink‑Name mit ``pactl list sinks -n``
-        gezielt abgefragt. Andernfalls wird der Standard‑Sink (*) verwendet.
-
-        Unterstützt sowohl PulseAudio als auch PipeWire‑Pulse. Bei fehlerhafter oder
-        fehlender ``pactl``‑Ausgabe wird ein konservativer Fallback (48 kHz, 32 Bit,
-        Stereo) zurückgegeben, mit dem die Wiedergabe in fast allen Umgebungen
-        funktioniert.
-
-        Returns:
-            dict mit den Schlüsseln ``"rate"`` (Hz), ``"bits"`` (16|24|32), ``"channels"`` (1|2).
         """
 
         fallback = {"rate": 48000, "bits": 32, "channels": 2}
@@ -25051,21 +24948,6 @@ class TTSManager:
         Beendet den übergebenen Audio‑Player **und** den intern gehaltenen
         ``self._process`` zuverlässig, threadsicher und mit umfangreichem
         Debug‑Logging.
-
-        Die Methode verwendet das bereits vorhandene ``self._lock``, um
-        konkurrierende Zugriffe auf ``self._process`` zu verhindern.
-        Nach erfolgreicher Terminierung wird ``self._process`` auf ``None``
-        zurückgesetzt.
-
-        Parameter
-        ---------
-        audio_player : subprocess.Popen oder None
-            Ein von ``_start_audio_player`` zurückgegebener Prozess (z. B.
-            ffplay, paplay), der beendet werden soll.  Wenn ``None``,
-            wird nur ``self._process`` (Piper) behandelt.
-        force : bool
-            Wenn ``True``, wird der Prozess sofort mit SIGKILL beendet,
-            ohne vorheriges SIGTERM.
         """
         def _kill_one(proc: subprocess.Popen, label: str) -> bool:
             """
@@ -25399,33 +25281,6 @@ class TTSManager:
         Arbeitet die TTS‑Warteschlange sequenziell ab und ruft nach jeder
         abgeschlossenen (oder fehlgeschlagenen) Sprachsynthese den
         konfigurierten Rückruf auf.
-
-        **Unterstützung für ``completion_callback``**
-        Jedes Queue‑Item kann ein *Tripel* ``(text, callback,
-        completion_callback)`` sein.  Die Methode ruft nach der Synthese
-        **ausschließlich** den ``completion_callback`` auf, sofern dieser
-        vorhanden ist, andernfalls den ``callback``.  Dadurch wird
-        sichergestellt, dass Auto‑TTS und manuelle TTS getrennte
-        Benachrichtigungskanäle nutzen.
-
-        **Robustheit**
-        - ``task_done()`` wird für **jedes** aus der Queue entnommene
-          Element aufgerufen – selbst wenn die Synthese eine Exception
-          auslöst oder das Element verworfen wird.  Ein blockiertes
-          ``queue.join()`` ist damit ausgeschlossen.
-        - Die Hauptschleife prüft sowohl ``_tts_worker_running`` als
-          auch ``_queue_stop``, sodass der Worker auf ``stop()`` und
-          ``dispose()`` sofort reagiert.
-        - Fehler in den externen Callbacks werden abgefangen und
-          protokolliert; sie können den Worker nicht zum Absturz bringen.
-        - Periodische Statusmeldungen (alle 60 s) geben Auskunft über
-          verarbeitete und verworfene Elemente sowie die aktuelle
-          Queue‑Größe.
-
-        **Thread‑Sicherheit**
-        Der Worker läuft in einem eigenen Thread.  Der Zugriff auf
-        ``_queue``, ``_queue_stop`` und ``_disposed`` ist durch die
-        thread‑sichere ``queue.Queue`` bzw. atomare Flags geschützt.
         """
 
         log_debug("tts", "TTSQueue worker thread started")
@@ -25568,7 +25423,6 @@ class TTSManager:
                     preview,
                 )
 
-            # ── Synthese vorbereiten ──────────────────────────────────
             def _synthesis_done(success: bool, message: str) -> None:
                 """
                 Callback, der nach Abschluss der Sprachausgabe aufgerufen wird.
@@ -25584,8 +25438,6 @@ class TTSManager:
                             exc,
                             exc_info=DEBUG_LEVEL >= 3,
                         )
-
-            # ── Synthese ausführen ────────────────────────────────────
             try:
                 self._speak_blocking(
                     text, _synthesis_done, self._engine_name, stop_before=False
@@ -25597,27 +25449,18 @@ class TTSManager:
                     exc,
                     exc_info=True,
                 )
-                # Auch wenn _speak_blocking selbst eine Exception wirft,
-                # informieren wir den Callback, damit eine eventuelle
-                # Drosselung aufgehoben wird.
                 try:
                     _synthesis_done(False, str(exc))
                 except Exception:
-                    # Absolut nichts tun – der Worker darf nicht sterben.
                     pass
                 discarded_count += 1
             finally:
-                # Garantiert task_done(), um queue.join() nicht zu blockieren.
                 try:
                     self._queue.task_done()
                 except ValueError:
-                    # Falls der interne Zähler bereits 0 war (z.B. nach
-                    # einem vorangegangenen Fehler), ignorieren wir das.
                     pass
 
             _maybe_log_stats()
-
-        # ── Abschluss ─────────────────────────────────────────────────
         _maybe_log_stats(force=True)
         log_debug(
             "tts",
@@ -25629,14 +25472,6 @@ class TTSManager:
     def dispose(self) -> None:
         """
         Gibt alle Ressourcen des TTSManagers frei und beendet laufende Prozesse.
-
-        Verbesserungen:
-        - Worker‑Thread wird nach dem Sentinel aktiv beendet (join mit Timeout).
-        - Falls der Thread nicht rechtzeitig terminiert, wird er als Daemon markiert.
-        - Alle Subprozesse (Piper, Converter) werden sauber beendet.
-        - Die optionale requests‑Session wird geschlossen.
-        - Kein Zugriff auf nicht existierende Attribute.
-        - Erweiterte Debug‑Ausgaben dokumentieren jeden Schritt.
         """
         if getattr(self, "_disposed", False):
             log_debug("tts", "TTSManager.dispose() already called, skipping")
@@ -26521,17 +26356,8 @@ class SummarizeDialog(BaseDialog):
     -zusammenfassung mittels Ollama.  Enthält konfigurierbare mehrsprachige
     Prompts, eine robuste Chunk‑Verarbeitung mit Thread‑Pool und Timeout,
     vollständige Vorlagenverwaltung sowie einen ausgefeilten Backup‑Mechanismus.
-
-    Thread‑Sicherheit:
-        Alle Zugriffe auf den internen Zustand (_summary_state) erfolgen
-        über synchronisierte Hilfsmethoden.  GUI‑Updates werden ausnahmslos
-        über _safe_after im Hauptthread geplant.  Der Chunk‑Executor wird
-        unter _chunks_lock verwaltet.
     """
 
-    # ------------------------------------------------------------------
-    # Sprach‑abhängige Zusammenfassungs‑Prompts (verschärft)
-    # ------------------------------------------------------------------
     SUMMARY_LANGUAGE_PROMPTS: ClassVar[Dict[str, str]] = {
         "Deutsch": (
             "Du bist ein professioneller Texter.  Fasse den folgenden Text "
@@ -26561,9 +26387,6 @@ class SummarizeDialog(BaseDialog):
         SUMMARY_LANGUAGE_PROMPTS.keys()
     )
 
-    # ------------------------------------------------------------------
-    # Eingebaute Prompt‑Vorlagen
-    # ------------------------------------------------------------------
     TEMPLATES: ClassVar[Dict[str, str]] = {
         "Kritischer Kommentar (höflich)": (
             "Du erhältst die Zusammenfassung eines Videos. Erstelle daraus einen "
@@ -26603,16 +26426,12 @@ class SummarizeDialog(BaseDialog):
         self.gui: Any = gui_ref
         self.stream_title: str = self._extract_stream_title()
         self._request_cancel: threading.Event = threading.Event()
-
-        # Zentraler Summarizer mit konfigurierbarer Parallelität
         self.summarizer: OllamaSummarizer = OllamaSummarizer(
             parent,
             model=self.gui.advanced_settings.summarize_model,
             host=self.gui.advanced_settings.ollama_host,
             cache_manager=self.gui.app_context.cache_manager,
         )
-        # Neue Properties vorsichtig setzen – falls die Summarizer‑Klasse
-        # noch nicht aktualisiert wurde, ignorieren wir Attributfehler.
         for attr, val in (
             ("max_parallel_requests", 2),
             (
@@ -26739,10 +26558,6 @@ class SummarizeDialog(BaseDialog):
                     "Ungültiges Blacklist-Pattern '%s': %s", phrase, e
                 )
 
-    # ──────────────────────────────────────────────────────────────────
-    # Prompt‑Vorlagen (laden, speichern, löschen, import/export)
-    # ──────────────────────────────────────────────────────────────────
-
     def _load_user_templates(self) -> None:
         """Lädt die benutzerdefinierten Prompt‑Vorlagen aus dem Dateisystem."""
         path: Path = self._get_templates_path()
@@ -26785,10 +26600,6 @@ class SummarizeDialog(BaseDialog):
     def _get_template_prompt(self, name: str) -> str:
         """Gibt den Prompt‑Text für eine gegebene Vorlage zurück."""
         return self._user_templates.get(name) or self.TEMPLATES.get(name, "")
-
-    # ──────────────────────────────────────────────────────────────────
-    # Backup
-    # ──────────────────────────────────────────────────────────────────
 
     def _check_backup(self) -> None:
         """Prüft auf eine vorhandene Backup‑Datei und bietet Wiederherstellung an."""
@@ -26842,9 +26653,6 @@ class SummarizeDialog(BaseDialog):
         except Exception as e:
             logger.warning("Fehler beim Speichern des Backups: %s", e)
 
-    # ──────────────────────────────────────────────────────────────────
-    # Stream‑Titel
-    # ──────────────────────────────────────────────────────────────────
 
     def _extract_stream_title(self) -> str:
         """Ermittelt den Titel des aktuellen Streams aus verschiedenen Quellen."""
@@ -27378,10 +27186,6 @@ class SummarizeDialog(BaseDialog):
         )
         self.status_label.pack(pady=5)
 
-    # ──────────────────────────────────────────────────────────────────
-    # Prompt‑Logik
-    # ──────────────────────────────────────────────────────────────────
-
     def _on_prompt_edited(self) -> None:
         """Reagiert auf manuelle Änderungen des Prompt‑Textes."""
         self._prompt_manually_edited = True
@@ -27553,10 +27357,6 @@ class SummarizeDialog(BaseDialog):
         self.apply_template_btn.config(state="disabled")
         self._set_default_prompt(force=True)
         self.status_label.config(text="✅ Standard-Prompt wiederhergestellt")
-
-    # ──────────────────────────────────────────────────────────────────
-    # Start der Zusammenfassung
-    # ──────────────────────────────────────────────────────────────────
 
     def start_summarize(self) -> None:
         """Startet die Zusammenfassung mit dem konfigurierten Ollama-Modell."""
@@ -28325,9 +28125,6 @@ class SummarizeDialog(BaseDialog):
         except tk.TclError:
             pass
 
-    # ──────────────────────────────────────────────────────────────────
-    # Token‑Abschätzung und Kontextlimit
-    # ──────────────────────────────────────────────────────────────────
 
     @staticmethod
     def _estimate_tokens(text: str) -> int:
@@ -45795,45 +45592,7 @@ class StreamHandler:
     ) -> None:
         """
         Hochpräzise, adaptive und maximal robuste Stream‑Verarbeitungsschleife.
-
-        Diese Methode liest PCM‑Audiodaten von einem laufenden FFmpeg‑Prozess,
-        speist sie in den ``AudioProcessor`` ein und behandelt sämtliche Störungen
-        (Timeouts, Verbindungsabbrüche, langsame Verbindungen, Verarbeitungsfehler)
-        durch automatische Reconnects und Download‑Fallbacks.  Sie garantiert, dass
-        ``normal_ending_event`` **genau dann** gesetzt wird, wenn der Stream sein
-        natürliches Ende erreicht hat – unabhängig von Fehlern oder Ausnahmen.
-        Ein expliziter Benutzerabbruch (internes ``stop_event`` des AudioProcessors
-        oder externes ``cancel_event``) führt dazu, dass das Event **nicht** gesetzt
-        wird.
-
-        **Verbesserungen:**
-        * Externes ``cancel_event`` bricht die Schleife ab.
-        * Dynamische Timeout‑Anpassung an die gemessene Datenrate.
-        * Wiederholte Leseversuche bei kurzzeitigen IO‑Fehlern mit Backoff.
-        * Stuck‑Detection: erzwingt Reconnect nach längerer Inaktivität.
-        * Periodischer Health‑Check des AudioProcessors (Heartbeat).
-        * Detaillierte Metriken: Read‑Durchsatz, Reconnect‑Gründe, Verarbeitungs‑
-          Fehler pro Chunk.
-        * ``normal_ending_event`` wird **immer** im ``finally``‑Block gesetzt,
-          ausser bei Benutzerabbruch.
-        * Zusätzlicher Schutz gegen ``None``‑Referenzen des AudioProcessors.
-        * Alle Callback‑Aufrufe sind gegen Exceptions geschützt.
-
-        Args:
-            process: Der aktuell laufende FFmpeg‑Prozess.
-            audio_url: Die extrahierte Audio‑URL.
-            original_video_url: Die ursprüngliche Video‑URL (für Reconnects).
-            detected_language: Die erkannte Sprache oder None.
-            transcription_callback, translation_callback,
-            info_callback, error_callback: GUI‑Callbacks.
-            is_youtube: True, wenn es sich um einen YouTube‑Stream handelt.
-            normal_ending_event: Wird **gesetzt**, sobald die Methode
-                beendet ist (außer bei explizitem Benutzer‑Stopp).
-            process_id: Eindeutige ID des FFmpeg‑Prozesses.
-            cancel_event: Optionales externes Event, um die Verarbeitung
-                von außen abzubrechen.
         """
-        # ── Initialisierung ─────────────────────────────────────────────
         normal_ending_event.clear()
         user_stopped = False
 
@@ -45867,7 +45626,6 @@ class StreamHandler:
             normal_ending_event.set()
             return
 
-        # ── Stream‑Metadaten und Diagnose ───────────────────────────────
         is_live, platform = ffmpeg._detect_stream_type(original_video_url)
         is_local_file = original_video_url.startswith("file://")
         self._is_live = is_live
@@ -45888,7 +45646,6 @@ class StreamHandler:
         expected_bitrate = ap.settings.config.BYTES_PER_SECOND
         avg_read_duration: Optional[float] = None
 
-        # ── Adaptive Timeout‑Berechnung ─────────────────────────────────
         BASE_TIMEOUT = getattr(self, "PROCESS_TIMEOUT", 30.0) or 30.0
         adaptive_timeout = BASE_TIMEOUT
 
@@ -45902,7 +45659,6 @@ class StreamHandler:
             adaptive_timeout = min(BASE_TIMEOUT, avg_read_duration * 2.0 + 5.0)
             adaptive_timeout = max(adaptive_timeout, 5.0)
 
-        # ── Hilfsfunktionen ─────────────────────────────────────────────
         def safe_callback(cb: Callable, *args: Any) -> None:
             """Ruft *cb* auf und unterdrückt alle Exceptions."""
             try:
@@ -45996,7 +45752,6 @@ class StreamHandler:
                         logger.warning("🐌 Slow connection: %.1f KB/s", avg_speed / 1024)
                         safe_callback(info_callback, "⚠️ Slow connection – low data rate")
 
-        # ── Hauptschleife ───────────────────────────────────────────────
         try:
             while True:
                 if _ap() is None:
@@ -49593,14 +49348,10 @@ class AudioProcessor:
                         tail_len,
                         len(audio_data),
                     )
-            # Tail für den nächsten Chunk sichern (aus den ORIGINAL‑Daten)
             if overlap_bytes > 0 and original_length > overlap_bytes:
                 self._last_chunk_tail = audio_data[-overlap_bytes:]
             else:
                 self._last_chunk_tail = b""
-
-        # ── 4. Globalen Zähler **zuerst** lesen, dann erhöhen ─────
-        #     Damit erhält der erste Chunk garantiert Offset 0.
         with self._stats_lock:
             offset_before = self._total_bytes_processed
             self._total_bytes_processed += original_length
@@ -49611,10 +49362,7 @@ class AudioProcessor:
             self._chunk_counter += 1
             chunks_count = self._chunk_counter
             total_bytes_processed = self._total_bytes_processed
-
         chunk_byte_offset = offset_before
-
-        # Optionale Plausibilisierung (beibehalten, aber Offset nicht mehr ändern)
         deterministic_offset = (chunks_count - 1) * config.CHUNK_SIZE_BYTES
         if chunk_byte_offset != deterministic_offset and chunks_count > 1:
             if DEBUG_LEVEL >= 3:
@@ -49634,8 +49382,6 @@ class AudioProcessor:
                 chunk_byte_offset,
                 chunk_byte_offset / max(1, config.BYTES_PER_SECOND),
             )
-
-        # ── 5. Fortschritts‑Callback (alle 10 Chunks) ──────────────
         if self._progress_callback is not None and chunks_count % 10 == 0:
             try:
                 self._progress_callback(
@@ -49712,8 +49458,6 @@ class AudioProcessor:
                     else:
                         self._consecutive_high_queue = 0
                         self._consecutive_low_queue = 0
-
-        # ── 8. Queue‑Item im 5‑Tupel‑Format erstellen ─────────────
         queue_item = (
             audio_data,
             chunk_byte_offset,
@@ -49806,27 +49550,6 @@ class AudioProcessor:
 
     def _attempt_enqueue(self, item: Tuple, block_timeout: float = 0.5) -> bool:
         """Versucht ein Queue‑Item in die Verarbeitungs‑Pipeline einzureihen.
-
-        Die Methode probiert zwei Strategien:
-
-        1. **Nicht‑blockierend** (``put_nowait``) – sofortiger Erfolg, wenn
-           Platz vorhanden ist.
-        2. **Blockierend mit Timeout** – wartet maximal *block_timeout*
-           Sekunden auf einen freien Platz.
-
-        Bei Erfolg werden die internen Statistikzähler atomar aktualisiert.
-        Schlägt auch der blockierende Versuch fehl, wird der Fehler
-        protokolliert und ``False`` zurückgegeben.
-
-        Args:
-            item: Das einzureihende Queue‑Element (normalerweise ein
-                ``(audio_bytes, byte_offset, trans_cb, transl_cb, err_cb)``‑Tupel).
-            block_timeout: Maximale Wartezeit in Sekunden für den
-                blockierenden ``put``‑Versuch (Standard 0.5 s).
-
-        Returns:
-            ``True`` wenn das Element erfolgreich eingereiht wurde, sonst
-            ``False``.
         """
         q = self._raw_audio_queue
         # 1. Nicht‑blockierend
@@ -49870,19 +49593,6 @@ class AudioProcessor:
 
     def _increment_enqueue_stats(self) -> None:
         """Aktualisiert die Zähler für erfolgreich eingereihte Audio‑Chunks.
-
-        Diese Methode wird nach jedem erfolgreichen ``put`` in die
-        ``_raw_audio_queue`` aufgerufen und stellt sicher, dass die
-        internen Metriken stets konsistent sind.
-
-        Sie ist **atomar** bezüglich ``_stats_lock`` und **garantiert**,
-        dass der Zähler ``_consecutive_queue_drops`` auf 0 gesetzt wird,
-        da ein erfolgreiches Einreihen die Sequenz von Fehlversuchen
-        unterbricht.
-
-        Falls die benötigten Attribute wider Erwarten nicht existieren
-        (z. B. nach einem unvollständigen ``__init__``), werden sie hier
-        lazy initialisiert, um einen ``AttributeError`` zu vermeiden.
         """
         with self._stats_lock:
             # Defensive Initialisierung der Zähler
@@ -49904,23 +49614,6 @@ class AudioProcessor:
 
     def _handle_overflow_chunk(self, item: Tuple) -> None:
         """Verwaltet den sekundären Overflow‑Puffer für nicht einreihbare Chunks.
-
-        Wenn die Haupt‑Queue ``_raw_audio_queue`` voll ist, wird das *item*
-        in die interne ``deque`` ``_overflow_chunks`` verschoben.  Ein eigener
-        Daemon‑Worker (``_start_overflow_worker``) versucht dann periodisch,
-        diese Chunks erneut zuzustellen.
-
-        Um unkontrolliertes Speicherwachstum zu verhindern, wird bei
-        Überschreiten von ``_overflow_max_chunks`` der älteste Chunk als
-        WAV‑Datei gesichert (via ``_save_lost_chunk``) und aus dem Puffer
-        entfernt.
-
-        Zusätzlich werden die Drop‑Statistiken aktualisiert und periodische
-        Warnungen ausgegeben, falls der Puffer stark anwächst.
-
-        Args:
-            item: Das vollständige Queue‑Element (``(audio_data,
-                chunk_byte_offset, trans_cb, transl_cb, err_cb)``).
         """
         # Lazy‑Initialisierung der benötigten Attribute
         if not hasattr(self, "_overflow_chunks"):
@@ -49978,35 +49671,6 @@ class AudioProcessor:
         Overflow‑Puffer ``_overflow_chunks`` wartenden Audio‑Chunks
         wiederholt in die Haupt‑Queue ``_raw_audio_queue`` einzureihen
         versucht.
-
-        Der Thread ist als **Daemon** ausgelegt, sodass er den
-        Programm‑Shutdown nicht blockiert.  Er beendet sich **selbst**,
-        sobald der Overflow‑Puffer leer ist und setzt das Flag
-        ``_overflow_worker_started`` zurück, damit bei erneutem Bedarf
-        ein neuer Worker gestartet werden kann.
-
-        Wiederholungslogik
-        ------------------
-        Jeder Chunk wird bis zu ``max_retries_per_chunk``‑mal (derzeit 3)
-        über :meth:`_attempt_enqueue` zugestellt.  Zwischen den Versuchen
-        wird eine kurze, exponentiell wachsende Pause eingelegt.  Scheitern
-        alle Versuche endgültig, wird der Chunk **als WAV‑Datei gesichert**
-        (:meth:`_save_lost_chunk`), damit kein gesprochenes Wort
-        unwiederbringlich verloren geht.
-
-        Thread‑Sicherheit
-        -----------------
-        Der Zugriff auf ``_overflow_chunks`` und das Start‑Flag erfolgt
-        unter ``_overflow_lock``.  Die Methode selbst ist **idempotent**:
-        ein zweiter Aufruf, während der Worker bereits läuft, ist
-        gefahrlos und wird ignoriert.
-
-        Ressourcen‑Schonung
-        --------------------
-        Nach jeder Iteration (egal ob erfolgreich oder nicht) wird eine
-        kurze Pause von 50 ms eingelegt, um die CPU nicht sinnlos zu
-        belasten.  Bei einem gesetzten ``_stop_event`` wird der Worker
-        umgehend beendet.
         """
         with self._overflow_lock:
             if self._overflow_worker_started:
@@ -50102,21 +49766,6 @@ class AudioProcessor:
 
     def _compute_rms(self, audio_data: bytes) -> Optional[float]:
         """Berechnet den RMS‑Wert (Root Mean Square) eines 16‑Bit‑PCM‑Chunks.
-
-        Die Methode ist **fehlertolerant** und funktioniert auch ohne
-        ``numpy``, indem sie auf das Standardmodul ``struct`` zurückfällt.
-        Leere, zu kurze oder offensichtlich stille Daten werden frühzeitig
-        erkannt, und alle Ausnahmen werden protokolliert.
-
-        Args:
-            audio_data: PCM‑Rohdaten (16‑Bit, Little‑Endian, Mono).  Muss
-                mindestens 2 Bytes enthalten (ein Sample).  Ist der Chunk
-                kürzer, wird ``None`` zurückgegeben.
-
-        Returns:
-            Der RMS‑Wert als ``float`` oder ``None``, falls die Berechnung
-            nicht möglich ist (z. B. wegen leerer Eingabe, struktureller
-            Fehler oder fehlender Bibliotheken).
         """
         if not audio_data or len(audio_data) < 2:
             if DEBUG_LEVEL >= 4:
@@ -50182,33 +49831,7 @@ class AudioProcessor:
     def _save_lost_chunk(self, audio_data: bytes, reason: str = "unknown") -> None:
         """Sichert einen verlorenen Audio‑Chunk als WAV‑Datei mit begleitender
         JSON‑Metadatei.
-
-        Diese Methode wird als letzter Ausweg aufgerufen, wenn ein Chunk weder
-        direkt noch über den Overflow‑Puffer in die Verarbeitungs‑Pipeline
-        eingereiht werden konnte.  Sie garantiert, dass **kein** Audiosignal
-        endgültig verloren geht.
-
-        Die WAV‑Datei wird in einem datumgestempelten Unterordner von
-        ``dragon_lost_chunks`` im temporären Verzeichnis abgelegt.  Um
-        Kollisionen zu vermeiden, enthält der Dateiname eine UUID.
-
-        Zusätzlich wird eine gleichnamige ``.json``‑Datei geschrieben, die
-        sämtliche verfügbaren Metadaten (Stream‑ID, Zeitstempel, Grund,
-        Audio‑Länge, Byte‑Offset …) enthält.  Beide Dateien werden in der
-        internen ``_temp_files``‑Liste registriert, sodass sie beim nächsten
-        regulären ``_cleanup_temp_files`` automatisch gelöscht werden.
-
-        Ein globales Rate‑Limit (max. 10 Dateien pro Sekunde) verhindert,
-        dass bei einem massiven Fehlerschauer das Dateisystem überflutet wird.
-
-        Args:
-            audio_data: PCM‑Rohdaten (16‑Bit, Mono, Little‑Endian).
-            reason: Kurze, aussagekräftige Beschreibung des Verlustgrundes.
         """
-
-        # ------------------------------------------------------------------
-        # 0. Vorabprüfungen – leere oder triviale Daten sofort verwerfen
-        # ------------------------------------------------------------------
         if not audio_data or len(audio_data) < 16:
             if DEBUG_LEVEL >= 3:
                 log_debug(
@@ -50218,9 +49841,6 @@ class AudioProcessor:
                 )
             return
 
-        # ------------------------------------------------------------------
-        # 1. Rate‑Limiting – verhindert Dateisystem‑Überflutung
-        # ------------------------------------------------------------------
         if not hasattr(AudioProcessor, "_lost_chunk_rate_counter"):
             AudioProcessor._lost_chunk_rate_counter = 0
             AudioProcessor._lost_chunk_rate_timestamp = time.monotonic()
@@ -50247,9 +49867,6 @@ class AudioProcessor:
             )
             return
 
-        # ------------------------------------------------------------------
-        # 2. Metadaten sammeln
-        # ------------------------------------------------------------------
         stream_id = getattr(self, "_current_stream_id", "unknown")
         now_ts = time.time()
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -50280,10 +49897,6 @@ class AudioProcessor:
             "sample_rate": self.settings.config.SAMPLE_RATE if self.settings else 16000,
             "channels": self.settings.config.CHANNELS if self.settings else 1,
         }
-
-        # ------------------------------------------------------------------
-        # 3. Zielverzeichnis erstellen
-        # ------------------------------------------------------------------
         base_dir = os.path.join(tempfile.gettempdir(), "dragon_lost_chunks")
         date_dir = datetime.now().strftime("%Y%m%d")
         target_dir = os.path.join(base_dir, date_dir)
@@ -50299,20 +49912,12 @@ class AudioProcessor:
             # Fallback: direkt in base_dir schreiben
             target_dir = base_dir
             os.makedirs(target_dir, exist_ok=True)
-
-        # ------------------------------------------------------------------
-        # 4. Eindeutigen Basis‑Dateinamen generieren
-        # ------------------------------------------------------------------
         unique_id = uuid.uuid4().hex[:12]
         safe_reason = re.sub(r"[^\w\-]", "_", reason)[:30]
         base_name = f"lost_{stream_id}_{timestamp_str}_{unique_id}_{safe_reason}"
 
         wav_path = os.path.join(target_dir, base_name + ".wav")
         json_path = os.path.join(target_dir, base_name + ".json")
-
-        # ------------------------------------------------------------------
-        # 5. WAV‑Datei schreiben (atomar über temporäre Datei)
-        # ------------------------------------------------------------------
         try:
             # Temporäre Datei im Zielverzeichnis erstellen
             tmp_fd, tmp_wav_path = tempfile.mkstemp(
@@ -50366,9 +49971,6 @@ class AudioProcessor:
                 pass
             return
 
-        # ------------------------------------------------------------------
-        # 6. JSON‑Metadatei schreiben (ebenfalls atomar)
-        # ------------------------------------------------------------------
         try:
             tmp_fd, tmp_json_path = tempfile.mkstemp(
                 suffix=".json", prefix="tmp_", dir=target_dir
@@ -50387,10 +49989,6 @@ class AudioProcessor:
                 "_save_lost_chunk: JSON‑Metadatei konnte nicht geschrieben werden: %s",
                 exc,
             )
-
-        # ------------------------------------------------------------------
-        # 7. Dateien registrieren, damit sie später automatisch gelöscht werden
-        # ------------------------------------------------------------------
         with self._temp_files_lock:
             self._temp_files.append(wav_path)
             if os.path.exists(json_path):
@@ -50423,19 +50021,6 @@ class AudioProcessor:
         WAV‑Dateien, **ohne** ``task_done`` aufzurufen, da die Queue
         anschließend durch ``_clear_and_sync_queue`` vollständig geleert und
         synchronisiert wird.
-
-        Diese Methode ist als Schutzmechanismus konzipiert, der unmittelbar
-        vor einem harten Reset (z. B. ``_guaranteed_cleanup``) aufgerufen
-        wird, damit kein gesprochenes Wort unwiederbringlich verloren geht.
-
-        Args:
-            force_save: (Reserviert) Wenn ``True``, werden die Chunks in
-                jedem Fall gesichert.  Ein ``False``‑Wert ist für künftige,
-                weniger destruktive Szenarien vorgesehen.
-
-        Returns:
-            Ein ``dict`` mit den Schlüsseln ``saved_chunks``,
-            ``total_bytes``, ``errors`` und ``queue_was_empty``.
         """
         result: Dict[str, Any] = {
             "saved_chunks": 0,
@@ -50580,20 +50165,6 @@ class AudioProcessor:
         """
         Lädt den restlichen Teil eines YouTube‑VODs herunter und
         verarbeitet die Audiodaten asynchron.
-
-        Diese Methode wird aufgerufen, wenn ein VOD‑Stream vorzeitig
-        endet (z. B. durch Verbindungsabbruch).  Sie stoppt den laufenden
-        Dispatcher, setzt alle internen Puffer zurück und startet einen
-        neuen Download‑Durchlauf, der die verbleibenden Audiodaten über
-        die bestehende Pipeline verarbeitet.
-
-        Nach Abschluss oder Fehler wird der ``AudioProcessor`` garantiert
-        in einen definierten Zustand (IDLE) versetzt und alle temporären
-        Ressourcen freigegeben.
-
-        Returns:
-            ``True``, wenn mindestens ein Chunk erfolgreich verarbeitet
-            wurde, sonst ``False``.
         """
         # ── 0. Hilfsfunktionen & frühzeitiger Abbruch ──────────────────
         def is_stop_requested() -> bool:
@@ -50696,12 +50267,7 @@ class AudioProcessor:
                     )
                     self._pending_tasks = 0
                     self._pending_tasks_cond.notify_all()
-            # *** NEU: Event synchronisieren – stellt sicher, dass das
-            #     _tasks_done_event nach dem manuellen Reset korrekt gesetzt ist ***
             self._synchronize_tasks_done_event()
-
-            # Executors neu starten (alte werden von _stop_dispatcher
-            # bereits heruntergefahren)
             self._init_transcription_executor()
             self._shutdown_translation_executor()
             self._init_translation_executor()
@@ -50822,33 +50388,7 @@ class AudioProcessor:
     def _clear_all_buffers(self) -> None:
         """Setzt **sämtliche** internen Puffer, Zähler, Warteschlangen und
         Markierungsstrukturen des AudioProcessors zurück.
-
-        Die Methode ist **idempotent** und kann in jedem beliebigen Zustand
-        des Processors gefahrlos aufgerufen werden.  Sie stellt sicher,
-        dass nach ihrer Ausführung das ``_tasks_done_event`` mit dem
-        tatsächlichen ``_pending_tasks``‑Zähler synchronisiert ist – selbst
-        wenn ein vorangegangener Schritt eine Ausnahme ausgelöst hat.
-
-        Diese Bereinigung umfasst:
-        * den Segment‑Puffer (chronologische Subtitle‑Ausgabe)
-        * den Transkriptions‑Satzpuffer
-        * den Übersetzungs‑Satzpuffer
-        * die Rohdaten‑Queue
-        * den Audio‑Chunk‑Puffer sowie Overlap‑Tail und Hash‑Cache
-        * den Duplikaterkennungs‑Cache und ``_already_flushed_texts``
-        * die Untertitel‑Puffer
-        * die Statistik‑Zähler
-        * die adaptive‑Chunk‑Historie
-        * die Musik‑/Stille‑Erkennung
-        * die sortierten Transkriptions‑ und Übersetzungs‑Warteschlangen
-        * den Overflow‑Puffer inkl. Worker‑Flag
-        * die TTS‑Drossel‑Attribute
-        * den modusunabhängigen Integritäts‑Puffer
-        * das Stream‑Loop‑Start‑Flag
         """
-        # ------------------------------------------------------------------
-        # Fallback‑Klasse für optionale Locks
-        # ------------------------------------------------------------------
         class _NullContext:
             __slots__ = ()
             def __enter__(self) -> "_NullContext":
@@ -50856,9 +50396,6 @@ class AudioProcessor:
             def __exit__(self, *args: Any) -> None:
                 pass
 
-        # ------------------------------------------------------------------
-        # Hilfsfunktion für sichere Schrittausführung
-        # ------------------------------------------------------------------
         def _safe_step(step_name: str, action: Callable[[], None]) -> None:
             """Führt *action* aus und protokolliert Fehler, ohne den Ablauf
             zu unterbrechen.
@@ -55528,12 +55065,6 @@ class AudioProcessor:
             end=end_time,
         )
 
-        # ------------------------------------------------------------------
-        # 4. Mark the individual segments as flushed – but only if they
-        #    haven't already been marked (prevents duplicate output when
-        #    force_flush is triggered after the segments were already
-        #    output via the chronological queue).
-        # ------------------------------------------------------------------
         with flushed_lock:
             flushed_set = getattr(self, "_already_flushed_texts", set())
             for seg in segments_snapshot:
@@ -55541,10 +55072,6 @@ class AudioProcessor:
                 if text and text not in flushed_set:
                     flushed_set.add(text)
 
-        # ------------------------------------------------------------------
-        # 5. Fire the callback – errors are swallowed so the pipeline
-        #    continues unhindered.
-        # ------------------------------------------------------------------
         if transcription_callback is not None:
             try:
                 transcription_callback(combined_segment)
@@ -55555,9 +55082,6 @@ class AudioProcessor:
                     exc_info=True,
                 )
 
-    # ═══════════════════════════════════════════════════════════════
-    # Private Hilfsmethoden für _flush_transcript_buffer
-    # ═══════════════════════════════════════════════════════════════
     @staticmethod
     def _merge_transcript_parts(
         parts: List[str],
@@ -55576,12 +55100,7 @@ class AudioProcessor:
                 for seg in segments
                 if getattr(seg, "text", "").strip()
             )
-
-        # Doppelleerzeichen entfernen
         cleaned = re.sub(r"\s+", " ", raw)
-
-        # CJK‑Sprachen: Leerzeichen zwischen CJK‑Zeichen entfernen
-        # (Chinesisch, Japanisch, Koreanisch)
         cjk_range = (
             r"\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff"
             r"\uac00-\ud7af"
@@ -55638,9 +55157,6 @@ class AudioProcessor:
             getattr(last_seg, "end", None),
         )
 
-    # ------------------------------------------------------------------
-    # Hilfsmethode: Markierung als "bereits ausgegeben"
-    # ------------------------------------------------------------------
     def _mark_segments_as_flushed(self, segments: List[TranscriptionResult]) -> None:
         """
         Registriert die Einzeltexte der übergebenen Segmente im
@@ -55815,12 +55331,7 @@ class AudioProcessor:
                             new_value,
                             reason,
                         )
-
-            # ── 2c. Alle wartenden Threads benachrichtigen ──────
-            #        (insbesondere für wait_for, das auf == 0 prüft)
             self._pending_tasks_cond.notify_all()
-
-            # ── 2d. Debug und Überlastwarnung ───────────────────
             if DEBUG_LEVEL >= 3:
                 log_debug(
                     "pending",
@@ -55830,7 +55341,6 @@ class AudioProcessor:
                     delta,
                     reason,
                 )
-
             if new_value > 50 and new_value % 10 == 0:
                 logger.warning(
                     "⚠️ Hohe Anzahl ausstehender Transkriptionen: %d Tasks "
@@ -55839,36 +55349,12 @@ class AudioProcessor:
                     reason,
                 )
 
-        # ── 3. Zusätzliche Statistik (optional) ──────────────────
-        #     Falls ein Monitoring erwünscht ist, könnte hier ein
-        #     Counter für die maximale pending_tasks geführt werden.
-
     def _wait_for_pending_tasks(self, caller: str = "unknown") -> None:
         """
         Blockiert den aufrufenden Thread, bis alle ausstehenden
         Transkriptions‑Tasks abgeschlossen sind oder ein definierter
         Timeout erreicht wurde.
-
-        **Robustheit**
-        - Verwendet ``Condition.wait_for`` mit einem Prädikat, um das
-          klassische Lost‑Notify‑Problem zu vermeiden.
-        - Ein dynamischer Timeout (basierend auf Chunk‑Dauer, Anzahl
-          pendierender Tasks und dem letzten Echtzeitfaktor) verhindert
-          unbegrenztes Warten.
-        - Erkennt, ob der Dispatcher‑Thread unerwartet gestorben ist
-          und bricht die Wartezeit ab.
-        - Nach Ablauf des Timeouts oder bei Stuck‑Erkennung wird der
-          Zähler hart auf 0 zurückgesetzt und das zugehörige Event
-          gesetzt, um Deadlocks auszuschließen.
-        - Alle Zugriffe auf geteilte Zustände sind durch die Condition
-          geschützt.
-
-        **Parameter**
-        caller : str
-            Identifikation des Aufrufers für Debug‑Ausgaben.
         """
-
-        # ── 1. Initiale Prüfung (schneller Pfad) ───────────────────
         with self._pending_tasks_cond:
             if self._pending_tasks == 0:
                 if DEBUG_LEVEL >= 4:
@@ -55879,23 +55365,18 @@ class AudioProcessor:
                     )
                 return
             pending = self._pending_tasks
-
-        # ── 2. Dynamic Timeout berechnen ──────────────────────────
         chunk_duration = self.settings.config.CHUNK_DURATION
         with self._stats_lock:
             rt_factor = max(1.0, self._last_realtime_factor)
         estimated_seconds = pending * chunk_duration * rt_factor * 2.5
         MAX_WAIT_SECONDS = max(60.0, min(1200.0, estimated_seconds))
-
         STUCK_TIMEOUT = getattr(self, "STUCK_TIMEOUT", 120.0)
-        CONDITION_WAIT_TIMEOUT = 30.0   # max. Zeit pro wait_for-Aufruf
-        LOG_INTERVAL = 5.0              # Fortschrittslog alle 5 s
-
+        CONDITION_WAIT_TIMEOUT = 30.0
+        LOG_INTERVAL = 5.0
         wait_start = time.perf_counter()
         last_log_time = wait_start
         last_pending = pending
         last_change_time = wait_start
-
         if DEBUG_LEVEL >= 3:
             log_debug(
                 "pending",
@@ -55907,13 +55388,9 @@ class AudioProcessor:
                 rt_factor,
                 caller,
             )
-
-        # ── 3. Hauptwarteschleife ─────────────────────────────────
         while True:
             with self._pending_tasks_cond:
                 current_pending = self._pending_tasks
-
-                # Erfolg
                 if current_pending == 0:
                     if DEBUG_LEVEL >= 3:
                         elapsed = time.perf_counter() - wait_start
@@ -55924,8 +55401,6 @@ class AudioProcessor:
                             caller,
                         )
                     return
-
-                # Stop‑Event von außen
                 if self._stop_event.is_set():
                     if DEBUG_LEVEL >= 3:
                         log_debug(
@@ -55934,8 +55409,6 @@ class AudioProcessor:
                             caller,
                         )
                     break
-
-                # Dispatcher unerwartet tot?
                 if (
                     self._dispatcher_thread is not None
                     and not self._dispatcher_thread.is_alive()
@@ -55947,8 +55420,6 @@ class AudioProcessor:
                         caller,
                     )
                     break
-
-                # Fortschritt protokollieren
                 now = time.perf_counter()
                 elapsed = now - wait_start
                 if current_pending != last_pending or (now - last_log_time) >= LOG_INTERVAL:
@@ -55962,9 +55433,6 @@ class AudioProcessor:
                         )
                     last_pending = current_pending
                     last_log_time = now
-
-                # Stuck‑Erkennung: wenn sich der Wert trotz wartender
-                # Threads für STUCK_TIMEOUT Sekunden nicht ändert.
                 if current_pending > 0 and (now - last_change_time) > STUCK_TIMEOUT:
                     logger.warning(
                         "⚠️ Pending tasks stuck at %d for %.1fs – forcing reset. "
@@ -55978,8 +55446,6 @@ class AudioProcessor:
                     if not self._tasks_done_event.is_set():
                         self._tasks_done_event.set()
                     return
-
-                # Globaler Timeout
                 if elapsed >= MAX_WAIT_SECONDS:
                     logger.warning(
                         "⚠️ Timeout (%ds) while waiting – %d task(s) still pending "
@@ -55989,17 +55455,13 @@ class AudioProcessor:
                         caller,
                     )
                     break
-
                 if current_pending < last_pending:
                     last_change_time = now
                 last_pending = current_pending
-
-                # Warte mit Prädikat (wait_for vermeidet Lost Notify)
                 remaining = MAX_WAIT_SECONDS - elapsed
                 wait_timeout = min(CONDITION_WAIT_TIMEOUT, remaining)
                 if wait_timeout <= 0:
                     break
-
                 try:
                     predicate_met = self._pending_tasks_cond.wait_for(
                         lambda: (
@@ -56019,10 +55481,7 @@ class AudioProcessor:
                             )
                         return
                 except Exception:
-                    # Defensive: kurze Pause, um Busy-Loops zu vermeiden
                     time.sleep(0.1)
-
-        # ── 4. Notfall‑Reset nach Timeout / Abbruch ──────────────
         with self._pending_tasks_cond:
             final_pending = self._pending_tasks
             if final_pending > 0:
@@ -56478,12 +55937,8 @@ class AudioProcessor:
                     exc_info=DEBUG_LEVEL >= 3,
                 )
                 error_count += 1
-
-        # Liste vollständig leeren
         with self._temp_files_lock:
             self._temp_files.clear()
-
-        # Zusammenfassung
         if deleted_count > 0 or missing_count > 0 or error_count > 0:
             summary = (
                 f"Temporäre Dateien: {deleted_count} gelöscht, "
@@ -56494,8 +55949,6 @@ class AudioProcessor:
                 logger.warning(summary)
             elif DEBUG_LEVEL >= 3:
                 log_debug("processor", "  " + summary)
-
-        # Event‑Bus benachrichtigen, falls vorhanden
         if self._event_bus is not None and (deleted_count > 0 or error_count > 0):
             try:
                 self._event_bus.emit(
@@ -56644,7 +56097,6 @@ class AudioProcessor:
                     "  No Event-Bus available – skipping cleanup_completed event",
                 )
             return
-
         with self._stats_lock:
             chunks = self._chunk_counter
             bytes_processed = self._total_bytes_processed
@@ -56652,7 +56104,6 @@ class AudioProcessor:
 
         with self._pending_tasks_lock:
             pending = self._pending_tasks
-
         if error_occurred:
             termination_reason = "error"
         elif normal_ending:
@@ -56700,7 +56151,6 @@ class AudioProcessor:
             return False
         if audio_data.count(b"\x00") == len(audio_data):
             return True
-
         self._load_modules()
         np = self._np
         if np is not None:
@@ -56711,7 +56161,6 @@ class AudioProcessor:
                 return rms < threshold or max_amp < 100
             except Exception:
                 pass
-
         try:
             import math
 
@@ -57178,7 +56627,6 @@ class AudioProcessor:
             lambda: setattr(self, "_current_stream_id", None),
         )
 
-        # 4. Statistik‑Zähler zurücksetzen
         def _reset_stats() -> None:
             with self._stats_lock:
                 self._chunk_counter = 0
@@ -57195,10 +56643,8 @@ class AudioProcessor:
                 self._queue_enqueue_counter = 0
                 self._queue_dequeue_counter = 0
                 self._consecutive_queue_drops = 0
-
         _safe_step("reset_stats", _reset_stats)
 
-        # 5. Audio‑Puffer (inkl. Overlap und Hash‑Cache) leeren
         def _clear_audio_buffer() -> None:
             with self._buffer_lock:
                 self._audio_chunks.clear()
@@ -57212,7 +56658,6 @@ class AudioProcessor:
 
         _safe_step("clear_audio_buffer", _clear_audio_buffer)
 
-        # 6. Satzpuffer (Übersetzung) leeren
         def _clear_sentence_buffer() -> None:
             with self._sentence_lock:
                 self._sentence_parts.clear()
@@ -57220,7 +56665,6 @@ class AudioProcessor:
 
         _safe_step("clear_sentence_buffer", _clear_sentence_buffer)
 
-        # 7. Satzpuffer (Transkription) leeren
         def _clear_transcript_buffer() -> None:
             with self._transcript_sentence_lock:
                 self._transcript_parts.clear()
@@ -57244,8 +56688,6 @@ class AudioProcessor:
             if hasattr(self, "_already_flushed_texts"):
                 self._already_flushed_texts.clear()
             else:
-                # Defensiv: Attribut ggf. neu anlegen, falls es noch nie
-                # initialisiert wurde (sollte nicht vorkommen, aber sicher).
                 self._already_flushed_texts = set()
 
         _safe_step(
@@ -57261,8 +56703,6 @@ class AudioProcessor:
             ),
         )
 
-        # 11. Audiodaten aus der raw_audio_queue retten, BEVOR der
-        #     Dispatcher beendet wird
         backup_result: Dict[str, Any] = {"saved_chunks": 0}
         def _do_backup() -> None:
             nonlocal backup_result
@@ -57357,7 +56797,6 @@ class AudioProcessor:
 
         _safe_step("reset_pending_tasks", _reset_pending_tasks)
 
-        # 19. Zusätzliche finale Flags (Verarbeitungsende)
         def _final_flags() -> None:
             if hasattr(self, "_in_final_flush"):
                 self._in_final_flush.clear()
@@ -57367,13 +56806,9 @@ class AudioProcessor:
             ):
                 self.processing_completed_event.set()
             self._stream_loop_started = False
-
         _safe_step("set_final_flags", _final_flags)
-
-        # 20. Stop‑Event zurücksetzen (wieder betriebsbereit)
         _safe_step("clear_stop_event", self._stop_event.clear)
 
-        # 21. Event‑Bus benachrichtigen (idle)
         def _emit_idle() -> None:
             if self._event_bus is not None:
                 try:
@@ -57434,15 +56869,10 @@ class AudioProcessor:
                 if hasattr(self, "_integrity_segments") else None
             ),
         )
-
-        # 27. Temporäre Dateien löschen – defensiv, auch wenn das Attribut
-        #     aus irgendeinem Grund nicht initialisiert wurde
         _safe_step(
             "cleanup_temp_files",
             lambda: self._cleanup_temp_files() if hasattr(self, "_cleanup_temp_files") else None,
         )
-        # Zusätzliche Absicherung: selbst leeren, falls nach dem Löschen noch
-        # Reste in der Liste sein sollten (kann bei frühen Aufrufen auftreten)
         if not hasattr(self, "_temp_files"):
             self._temp_files = []
         else:
@@ -57602,17 +57032,6 @@ class AudioProcessor:
         Puffert ein Transkriptionssegment und stößt die Übersetzung an,
         sobald ein vollständiger Satz erkannt wird, ein konfigurierbarer
         Timeout überschritten ist oder ein Sprachwechsel auftritt.
-
-        Während der Finalisierung (``_finalizing == True``) werden Segmente
-        **nicht** mehr gepuffert, sondern sofort und direkt an den
-        ``translation_callback`` übergeben.  Ein zuvor gefüllter Puffer
-        wird in diesem Fall einmalig geleert, bevor in den Direktmodus
-        gewechselt wird.
-
-        Args:
-            result: Das zu verarbeitende Transkriptionssegment.
-            translation_callback: Callback, an den die Übersetzung (oder
-                bei Finalisierung das Originalsegment) übergeben wird.
         """
         # ── 0. Vorabprüfungen ────────────────────────────────────────
         if translation_callback is None:
@@ -57686,9 +57105,6 @@ class AudioProcessor:
                                 "Fehler beim direkten Callback im Finalisierungsmodus: %s",
                                 exc,
                             )
-
-            # Aktuelles Segment direkt ausgeben (ohne Übersetzung, da
-            # Engine evtl. bereits heruntergefahren wird)
             try:
                 translation_callback(
                     TranslationResult(
@@ -57731,17 +57147,13 @@ class AudioProcessor:
                         exc,
                         exc_info=DEBUG_LEVEL >= 3,
                     )
-                    # Fallback: direkt ausgeben
                     try:
                         original_callback(trans_res)
                     except Exception:
                         pass
-
             effective_callback = _enqueue_result
         else:
             effective_callback = translation_callback
-
-        # ── 3. Satzpuffer-Logik ─────────────────────────────────────
         with self._sentence_lock:
             now = time.time()
 
@@ -57837,8 +57249,6 @@ class AudioProcessor:
                         self._sentence_flush_interval,
                     )
                 flush_buffer("timeout")
-
-            # --- Segment anhängen ---
             self._sentence_parts.append(text)
             self._sentence_segments.append(result)
             self._last_sentence_time = now
@@ -57872,45 +57282,18 @@ class AudioProcessor:
         """
         Process the internal sorted transcript queue and emit segments
         in chronological order.
-
-        Segments that are ready (within a small tolerance of the current
-        expected start time) are forwarded to the sentence buffer, which
-        eventually triggers a flush to the GUI callback.  Segments that
-        arrive too late are **not** discarded; they are added to the
-        buffer with a warning so that no speech is lost.
-
-        An overflow guard forces a flush when the buffer exceeds a
-        configurable limit, and a post‑queue idle flush ensures that
-        remaining buffered text is emitted even if the queue becomes
-        empty for a while.
-
-        When *force_flush* is ``True``, all remaining segments in the
-        queue and any buffered text are emitted immediately.  Duplicate
-        suppression is handled by consulting ``_already_flushed_texts``
-        before calling the callback – this prevents double output when
-        the same segment is flushed both directly and via the sentence
-        buffer.
-
-        .. versionchanged:: 4.2.0
-            Added explicit duplicate checking to avoid double GUI entries
-            during forced flushes.
         """
 
         # ── 0. Guard against missing callback ──────────────────────
         if transcription_callback is None:
             return
-
-        # ── 0a. Locks (fall back to no‑op if attributes are missing) ─
         class _NullContext:
             __slots__ = ()
             def __enter__(self): return self
             def __exit__(self, *a): pass
-
         queue_lock   = getattr(self, '_transcript_queue_lock',   _NullContext())
         sentence_lock = getattr(self, '_transcript_sentence_lock', _NullContext())
         flushed_lock = getattr(self, '_duplicate_lock',           _NullContext())
-
-        # ── 1. Dynamic flush thresholds ────────────────────────────
         if self._expected_duration is not None and self._expected_duration > 0:
             effective_word_threshold  = 10
             effective_flush_interval  = 4.0
@@ -57950,8 +57333,6 @@ class AudioProcessor:
 
                 # 2b. Sort remaining segments by start time
                 self._transcript_queue.sort(key=lambda s: s.start)
-
-                # 2c. Handle late segments – buffer them instead of discarding
                 next_expected = getattr(self, '_next_expected_transcript_start', 0.0)
                 late = [s for s in self._transcript_queue
                         if s.start < next_expected - 10.0]
@@ -58015,7 +57396,6 @@ class AudioProcessor:
 
                     try:
                         with sentence_lock:
-                            # Stop event – emit directly
                             if self._stop_event.is_set():
                                 self._flush_transcript_buffer(transcription_callback)
                                 try:
@@ -58162,14 +57542,10 @@ class AudioProcessor:
                 self._transcript_segments.clear()
             if hasattr(self, "_transcript_parts"):
                 self._transcript_parts.clear()
-
-        # ── Kein Segment → nichts zu tun ──────────────────────────────
         if not segments_snapshot:
             if DEBUG_LEVEL >= 4:
                 log_debug("FALLBACK_OUTPUT", "No pending segments to output")
             return
-
-        # ── Alle Segmente einzeln ausgeben ──────────────────────────────
         output_count = 0
         for seg in segments_snapshot:
             text = getattr(seg, "text", "").strip()
@@ -58364,8 +57740,6 @@ class AudioProcessor:
                 ),
             )
             return
-
-        # ── Semaphor erwerben (begrenzte Parallelität) ──────────────
         acquired: bool = self._translation_semaphore.acquire(timeout=timeout)
         if not acquired:
             logger.warning(
@@ -58387,12 +57761,8 @@ class AudioProcessor:
             )
             safe_cb(translation_callback, fallback_result)
             return
-
-        # ── Sequenznummer für optionale Veraltungserkennung ─────────
         with self._translation_seq_lock:
             current_seq: int = self._translation_seq
-
-        # ── Watchdog‑Timeout aus den Einstellungen ──────────────────
         watchdog_timeout: float = max(
             timeout,
             getattr(self.settings, "translation_timeout", 20.0),
@@ -58589,16 +57959,12 @@ class AudioProcessor:
                     )
                     safe_cb(translation_callback, fallback_result)
             finally:
-                # Semaphor garantiert freigeben
                 self._translation_semaphore.release()
                 if watchdog_timer is not None:
                     watchdog_timer.cancel()
-
-        # ── Task einreichen ────────────────────────────────────────
         try:
             executor.submit(_translation_task)
         except RuntimeError as exc:
-            # Executor wurde bereits heruntergefahren
             self._translation_semaphore.release()
             if watchdog_timer is not None:
                 watchdog_timer.cancel()
