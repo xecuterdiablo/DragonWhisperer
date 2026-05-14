@@ -37,7 +37,7 @@ Dragon Whisperer verwandelt jeden Audio‑ oder Videostream **live** in lesbaren
 
 ## 📸 Screenshot
 
-> *(Füge hier einen aktuellen Screenshot des Hauptfensters ein. Ideal wäre ein animiertes GIF oder ein Video, das die Live‑Transkription und Übersetzung zeigt.)*
+
 
 ![dragonscreenshot.avif](https://user11029.na.imgto.link/public/20260514/dragonscreenshot-2.avif)
 
@@ -76,17 +76,14 @@ Die meisten Pakete werden **automatisch erkannt** – fehlende erzeugen eine kla
 pip install faster-whisper
 
 Alternatives Backend:
-bash
 
 pip install openai-whisper
 
 Basis‑Abhängigkeiten (einmaliger Befehl):
-bash
 
 pip install torch numpy scipy deep-translator psutil requests
 
 Für alle optionalen Funktionen (TTS, Rauschunterdrückung, Word‑Export, etc.):
-bash
 
 pip install faster-whisper argostranslate deep-translator pyttsx3 noisereduce rapidfuzz python-docx dimits langdetect pathvalidate psutil pynvml
 
@@ -99,7 +96,6 @@ GUI (tkinter)
 PyTorch mit GPU‑Unterstützung
 
 Für CUDA 11.8:
-bash
 
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 
@@ -139,6 +135,7 @@ Option	Beschreibung
 --test	Interne Unit‑Tests ausführen
 --version, -v	Versionsinformation anzeigen
 --help, -h	Hilfe anzeigen
+
 🤖 Whisper‑Modelle (Übersicht)
 Modell	RAM (ca.)	Geschwindigkeit	Genauigkeit	Empfehlung
 tiny	~1 GB	🚀 extrem schnell	🔴 gering	Echtzeit, low‑resource
