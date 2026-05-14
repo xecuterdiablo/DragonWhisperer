@@ -232,3 +232,181 @@ text
 | Doppelte Leerzeichen / Zeilenumbrüche | Bereinigt |
 | Schreibweise „Pythin“ (nicht vorhanden) | – |
 | `screenshot.png` als echter Link? | Platzhalter bleibt, aber mit Hinweis auf GIF/Video |
+
+
+🪟 Windows‑Einsteiger‑Anleitung (Schritt für Schritt)
+
+Diese Anleitung ist für absolute Anfänger geschrieben, die Python nicht kennen. Du musst keine Vorkenntnisse haben – jede Anweisung ist als genauer Befehl formuliert.
+📌 Voraussetzungen
+
+    Windows 10 oder 11 (64‑Bit)
+
+    Admin‑Rechte (für die Python‑Installation kurzzeitig nötig)
+
+1️⃣ Python installieren
+
+    Lade Python herunter
+    Gehe auf python.org/downloads und klicke auf den gelben Button „Download Python 3.13.2“ (oder eine neuere Version).
+
+    Starte die Installation
+    Führe die heruntergeladene Datei aus.
+    → Wichtig: Setze unten im Installationsfenster unbedingt den Haken bei
+    ✅ Add Python to PATH
+    → Klicke dann auf „Install Now“.
+
+    Prüfe die Installation
+    Drücke Win + R, tippe cmd ein und drücke Enter.
+    Gib im schwarzen Fenster ein:
+    cmd
+
+    python --version
+
+    Zeigt es Python 3.13.2 (oder ähnlich) an, ist alles richtig.
+
+2️⃣ Projekt‑Ordner vorbereiten
+
+    Erstelle einen Ordner (z. B. auf dem Desktop oder in Dokumente).
+    Nenne ihn z. B. DragonWhisperer.
+    Wichtig: Verwende keine Leerzeichen im Pfad, sonst klappt die Verknüpfung später nicht.
+
+    Öffne die Eingabeaufforderung in diesem Ordner
+    Gehe in den neuen Ordner, klicke in die Adressleiste, lösche den Inhalt, tippe cmd ein und drücke Enter.
+    (Es öffnet sich ein schwarzes Fenster, das bereits auf diesen Ordner zeigt.)
+
+3️⃣ Virtuelle Umgebung (venv) erstellen
+
+Im geöffneten Konsolenfenster (dort, wo du vorher cmd eingegeben hast) tippe:
+cmd
+
+python -m venv venv
+
+Nach einigen Sekunden erscheint ein Unterordner venv. Das ist die isolierte Python‑Umgebung.
+4️⃣ Skript herunterladen (weil es zu groß für die GitHub‑Vorschau ist)
+
+Warum geht nicht einfach „Download“?
+Die Datei Dragon_Whisperer_Full.py ist so groß, dass GitHub sie nicht direkt als Download anbietet – du musst den RAW‑Inhalt kopieren.
+
+    Öffne die Datei auf GitHub
+    Gehe zu:
+    https://github.com/xecuterdiablo/DragonWhisperer/blob/main/Dragon_Whisperer_Full.py
+
+    Klicke auf „RAW“
+    (Das ist ein Button rechts oben über dem Code).
+    Es öffnet sich eine neue Seite mit nur dem Code (ohne GitHub‑Menü).
+
+    Kopiere den gesamten Code
+    Drücke Strg + A (alles markieren), dann Strg + C (kopieren).
+
+    Erstelle die Datei auf deinem Rechner
+
+        Öffne den Editor (z. B. Editor – das reicht, besser ist Notepad++ oder VS Code).
+
+        Füge den kopierten Code ein (Strg + V).
+
+        Achte auf die Kodierung: Speichere die Datei als UTF‑8 (ohne BOM).
+
+            In Notepad++: Menü Kodierung → UTF‑8 ohne BOM.
+
+            Im normalen Windows‑Editor: Wähle beim Speichern als Dateityp „Alle Dateien“ und trage die Endung .py an. Der Editor speichert standardmäßig UTF‑8 – das ist in Ordnung.
+
+        Speichere die Datei unter Dragon_Whisperer_Full.py in deinem Projektordner (DragonWhisperer).
+
+        Wichtig: Die Datei muss genau diesen Namen haben und im selben Ordner wie venv liegen.
+
+    ✅ Tipp: Falls du unsicher bist, lade dir Notepad++ herunter – es ist kostenlos und zeigt das Encoding an.
+
+5️⃣ Abhängigkeiten installieren
+
+Im Konsolenfenster (immer noch im Projektordner) aktivierst du zuerst die virtuelle Umgebung:
+cmd
+
+venv\Scripts\activate
+
+Dan siehst du (venv) am Anfang der Eingabezeile.
+
+Jetzt installiere die benötigten Pakete:
+cmd
+
+pip install faster-whisper torch numpy scipy deep-translator psutil requests
+
+Für alle optionalen Funktionen (TTS, Rauschunterdrückung, DOCX‑Export):
+cmd
+
+pip install argostranslate pyttsx3 noisereduce rapidfuzz python-docx dimits langdetect pathvalidate pynvml
+
+(Das kann einige Minuten dauern – Geduld.)
+6️⃣ Skript starten
+
+Stelle sicher, dass du immer noch die (venv) aktiv hast. Dann tippe:
+cmd
+
+python Dragon_Whisperer_Full.py
+
+Das GUI‑Fenster öffnet sich. Herzlichen Glückwunsch – du hast Dragon Whisperer erfolgreich gestartet! 🎉
+
+Zum Beenden des Skripts schließe einfach das Fenster oder drücke Strg + C in der Konsole.
+7️⃣ (Optional) Desktop‑Verknüpfung für schnellen Start
+
+Damit du nicht jedes Mal die Konsole öffnen und venv\Scripts\activate eingeben musst, kannst du eine direkte Verknüpfung erstellen.
+
+    Rechtsklick auf den Desktop → Neu → Verknüpfung.
+
+    Als Pfad gibst du folgenden Befehl ein (passe den Pfad zu deinem Projektordner an!):
+    cmd
+
+    C:\Windows\System32\cmd.exe /k "cd /d C:\Users\DEIN_BENUTZERNAME\DragonWhisperer && venv\Scripts\python.exe Dragon_Whisperer_Full.py"
+
+    Erklärung:
+
+        cd /d C:\... wechselt in deinen Projektordner.
+
+        && führt den nächsten Befehl nur aus, wenn der erste geklappt hat.
+
+        venv\Scripts\python.exe startet Python direkt aus der virtuellen Umgebung (aktiviert sie automatisch).
+
+        Dragon_Whisperer_Full.py ist dein Skript.
+
+        /k bewirkt, dass das Konsolenfenster nach dem Programmende offen bleibt (du siehst eventuelle Fehlermeldungen).
+
+    Klicke auf „Weiter“, gib der Verknüpfung einen Namen (z. B. Dragon Whisperer) und dann auf „Fertig“.
+
+    Doppelklick auf die Verknüpfung – das Skript startet sofort.
+
+    ⚠️ Wichtig: Ersetze DEIN_BENUTZERNAME durch deinen echten Windows‑Benutzernamen und den Pfad, wo dein Projektordner liegt.
+    Beispiel: C:\Users\Xeqtr\DragonWhisperer
+
+❗ Häufige Probleme & Lösungen
+Problem	Lösung
+python wird nicht erkannt	Du hast beim Python‑Installieren den Haken bei „Add to PATH“ vergessen. Deinstalliere Python und installiere es erneut – diesmal mit Haken.
+Fehler „No module named …“	Du hast vergessen, die Pakete zu installieren. Führe Schritt 5 erneut aus.
+Der RAW‑Code ist sehr lang, Kopieren dauert	Einfach Strg+A, Strg+C – das funktioniert auch bei langen Texten.
+Die Desktop‑Verknüpfung startet nicht	Prüfe den Pfad: Sind alle Leerzeichen richtig? Der gesamte Befehl muss in einer Zeile stehen.
+Das Skript startet, schließt aber sofort wieder	Öffne die Konsole manuell (siehe Schritt 6) und starte es dort – dann siehst du die Fehlermeldung.
+✅ Zusammenfassung der wichtigsten Befehle (für Fortgeschrittene)
+cmd
+
+# 1. Projektordner anlegen und hineinwechseln
+mkdir C:\Users\DEIN_NAME\DragonWhisperer
+cd /d C:\Users\DEIN_NAME\DragonWhisperer
+
+# 2. Virtuelle Umgebung erstellen
+python -m venv venv
+
+# 3. Aktivieren
+venv\Scripts\activate
+
+# 4. Abhängigkeiten installieren
+pip install faster-whisper torch numpy scipy deep-translator psutil requests
+
+# 5. Skript starten
+python Dragon_Whisperer_Full.py
+
+📌 Zusätzlicher Hinweis zur Textkodierung
+
+Die Skriptdatei muss UTF‑8 kodiert sein. Der normale Windows‑Editor speichert standardmäßig UTF‑8 mit BOM (Byte Order Mark). Python kann das lesen, aber es kann zu Problemen mit Zeilenumbrüchen kommen. Empfehlung: Verwende einen besseren Editor wie Notepad++ und stelle dort explizit UTF‑8 ohne BOM ein.
+
+    In Notepad++: Oben → Kodierung → UTF‑8 ohne BOM
+
+    In VS Code: Unten rechts klickst du auf UTF-8 und wählst Save with Encoding → UTF-8
+
+Nach dem Speichern ist das Skript startbereit.
