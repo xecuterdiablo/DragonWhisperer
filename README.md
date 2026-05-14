@@ -710,13 +710,3 @@ The script file must be UTF‑8 encoded. The standard Windows Notepad saves as U
 text
 
 
----
-
-**Erklärung der wichtigsten Änderungen:**
-
-- Der **RAW‑Link** wird direkt genannt und erklärt.
-- Die Schritt‑für‑Schritt‑Anleitung für Windows enthält **keine Lücken** mehr: Ordner anlegen, venv erstellen, Datei manuell erzeugen, RAW‑Code kopieren, einfügen, speichern, Abhängigkeiten installieren, starten.
-- Die Desktop‑Verknüpfung ist optional und korrekt.
-- Die englische Version ist vollständig parallel aufgebaut.
-- Alle Formatierungen sind sauber, Code‑Blöcke mit korrekten Sprachangaben (`bash`, `cmd`, `python`).
-
