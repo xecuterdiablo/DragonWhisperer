@@ -281,7 +281,8 @@ Schritte:
 
         Kodierung: Stelle sicher, dass die Datei als UTF‑8 ohne BOM gespeichert wird.
 
-            Im normalen Windows‑Editor: Gehe auf Datei → Speichern unter… → wähle als Dateityp „Alle Dateien“ und trage die Endung .py an. Der Editor speichert standardmäßig UTF‑8 – das ist in Ordnung.
+            Im normalen Windows‑Editor: Gehe auf Datei → Speichern unter… → wähle als Dateityp „Alle Dateien“ und trage die Endung .py an.
+Der Editor speichert standardmäßig UTF‑8 – das ist in Ordnung.
 
             In Notepad++: Menü Kodierung → UTF‑8 ohne BOM.
 
@@ -362,7 +363,8 @@ python Dragon_Whisperer_Full.py
 
 📌 Hinweis zur Textkodierung
 
-Die Skriptdatei muss UTF‑8 kodiert sein. Der normale Windows‑Editor speichert als UTF‑8 mit BOM – das ist akzeptabel. Für maximale Kompatibilität empfiehlt sich Notepad++ mit UTF‑8 ohne BOM.
+Die Skriptdatei muss UTF‑8 kodiert sein. Der normale Windows‑Editor speichert als UTF‑8 mit BOM – das ist akzeptabel.
+Für maximale Kompatibilität empfiehlt sich Notepad++ mit UTF‑8 ohne BOM.
 🇬🇧 English Version
 
 For non‑German speakers, the same content in English.
@@ -376,7 +378,9 @@ https://img.shields.io/badge/platform-Windows%2520%257C%2520macOS%2520%257C%2520
 https://img.shields.io/badge/code%2520style-black-000000.svg
 🚀 Overview
 
-Dragon Whisperer turns any audio or video stream live into readable text – and simultaneously translates it into over 50 languages. Whether YouTube, Twitch, local files or HLS streams – the intelligent streaming engine reliably extracts the audio track and delivers the transcription directly into a modern, dark user interface.
+Dragon Whisperer turns any audio or video stream live into readable text – and simultaneously translates
+it into over 50 languages. Whether YouTube, Twitch, local files or HLS streams –
+the intelligent streaming engine reliably extracts the audio track and delivers the transcription directly into a modern, dark user interface.
 ✨ Highlights
 Area	Features
 Transcription	🎤 Real‑time transcription with Whisper AI (faster‑whisper or openai‑whisper)
