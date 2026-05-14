@@ -97,7 +97,6 @@ Für ROCm oder Apple MPS folge der offiziellen PyTorch‑Dokumentation.
 ⚡ Schnellstart (alle Betriebssysteme)
 
     Repository klonen oder Skript herunterladen
-    bash
 
     git clone https://github.com/xecuterdiablo/DragonWhisperer.git
     cd DragonWhisperer
@@ -106,8 +105,7 @@ Für ROCm oder Apple MPS folge der offiziellen PyTorch‑Dokumentation.
 
     Abhängigkeiten installieren (siehe oben)
 
-    Skript starten
-    bash
+    Skript starten    
 
     python Dragon_Whisperer.py
 
