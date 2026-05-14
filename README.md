@@ -720,4 +720,3 @@ text
 - Die englische Version ist vollständig parallel aufgebaut.
 - Alle Formatierungen sind sauber, Code‑Blöcke mit korrekten Sprachangaben (`bash`, `cmd`, `python`).
 
-Du kannst diesen gesamten Block direkt in deine `README.md` einfügen – er ersetzt die vorherige Version vollständig.
