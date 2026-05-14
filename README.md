@@ -39,7 +39,10 @@ Dragon Whisperer verwandelt jeden Audio‑ oder Videostream **live** in lesbaren
 
 > *(Füge hier einen aktuellen Screenshot des Hauptfensters ein. Ideal wäre ein animiertes GIF oder ein Video, das die Live‑Transkription und Übersetzung zeigt.)*
 
-![Screenshot Platzhalter](screenshot.png)
+![dragonscreenshot.avif](https://user11029.na.imgto.link/public/20260514/dragonscreenshot-2.avif)
+
+
+
 
 ---
 
