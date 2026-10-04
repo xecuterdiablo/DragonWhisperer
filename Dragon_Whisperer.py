@@ -20377,17 +20377,12 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
         "please try again later",
     )
 
-    _GOOGLE_CIRCUIT_THRESHOLD = 3
-    _GOOGLE_CIRCUIT_COOLDOWN_S = 60.0
-    # P10-4: Rate-Limits an reale Google-Free-Tier-Werte angepasst.
-    # Vorher: 0.8/s, Capacity 5 → 8+ Sätze erschöpften den Bucket sofort,
-    # parallele Threads verloren Token-Races → Silent-Untranslated.
-    # Google blockt typischerweise erst bei >5 req/s (429), Circuit-Breaker
-    # greift dann über _is_google_circuit_open().
-    _GOOGLE_RATE_START = 3.0
-    _GOOGLE_RATE_MAX = 6.0
-    _GOOGLE_RATE_MIN = 1.0
-    _GOOGLE_RATE_CAPACITY = 20.0
+    _GOOGLE_CIRCUIT_THRESHOLD = 1
+    _GOOGLE_CIRCUIT_COOLDOWN_S = 300.0
+    _GOOGLE_RATE_START = 0.8
+    _GOOGLE_RATE_MAX = 1.5
+    _GOOGLE_RATE_MIN = 0.5
+    _GOOGLE_RATE_CAPACITY = 5.0
 
     _HEALTH_FAIL_THRESHOLD: ClassVar[int] = 2
     _HEALTH_SKIP_AFTER_SUCCESS_S: ClassVar[float] = 120.0
@@ -24562,7 +24557,11 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         chunks = self._split_text_into_chunks(text, self._max_single_chunk_length)
         self._log(logging.DEBUG, f"Langer Text in {len(chunks)} Chunks aufgeteilt.")
 
-        if self._enable_parallel_chunks:
+        # Google-Web-Endpunkt (translate.google.com/translate_a/single)
+        # verträgt keine parallelen Requests → immer sequenziell.
+        # Ollama/Argos bleiben parallel (lokale Rechenleistung, keine Rate-Limits).
+        _is_google_engine = self.__class__.__name__ == "GoogleTranslationEngine"
+        if self._enable_parallel_chunks and not _is_google_engine:
             return self._translate_chunks_parallel(chunks, source_lang, target_lang)
         return self._translate_chunks_sequential(chunks, source_lang, target_lang)
 
