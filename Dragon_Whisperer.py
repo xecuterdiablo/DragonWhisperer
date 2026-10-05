@@ -306,13 +306,13 @@ def _early_bootstrap() -> None:
     from pathlib import Path as _Path
 
     if _sys.version_info < (3, 10):  # noqa: UP036
-        print("", file=_sys.stderr)
+        print(file=_sys.stderr)
         print("=" * 70, file=_sys.stderr)
         print("  ❌ Deine Python-Version ist zu alt.", file=_sys.stderr)
         print("=" * 70, file=_sys.stderr)
         print(f"  Aktuell : {_sys.version.split()[0]}", file=_sys.stderr)
         print("  Benötigt: Python 3.10 oder neuer", file=_sys.stderr)
-        print("", file=_sys.stderr)
+        print(file=_sys.stderr)
         print("  Installation:", file=_sys.stderr)
         print("    • Windows:  https://www.python.org/downloads/", file=_sys.stderr)
         print("    • macOS:    brew install python@3.12", file=_sys.stderr)
@@ -342,16 +342,16 @@ def _early_bootstrap() -> None:
                 "          das Häkchen »tcl/tk and IDLE« setzen"
             )
 
-        print("", file=_sys.stderr)
+        print(file=_sys.stderr)
         print("=" * 70, file=_sys.stderr)
         print("  ❌ tkinter fehlt — der GUI-Baukasten von Python.", file=_sys.stderr)
         print("=" * 70, file=_sys.stderr)
-        print("", file=_sys.stderr)
+        print(file=_sys.stderr)
         print("  Dragon Whisperer kann ohne tkinter nicht starten.", file=_sys.stderr)
-        print("", file=_sys.stderr)
+        print(file=_sys.stderr)
         print(f"  Installation auf deinem System ({plat}):", file=_sys.stderr)
         print(f"    {hint}", file=_sys.stderr)
-        print("", file=_sys.stderr)
+        print(file=_sys.stderr)
         print("  Danach das Skript erneut starten.", file=_sys.stderr)
         print("=" * 70, file=_sys.stderr)
         _sys.exit(1)
@@ -366,9 +366,9 @@ import concurrent.futures
 import contextlib
 import copy
 import fnmatch
+import functools
 import gc
 import glob
-import functools
 import hashlib
 import importlib
 import importlib.metadata
@@ -3850,7 +3850,7 @@ class PeriodicTaskMixin:
 class BaseDialog:
     """BASISKLASSE für alle modalen Dialoge in Dragon Whisperer."""
 
-    _LEVEL_LABELS: dict[int, str] = {
+    _LEVEL_LABELS: ClassVar[dict[int, str]] = {
         0: "TRACE",
         1: "DEBUG",
         2: "INFO",
@@ -13257,7 +13257,7 @@ class StreamInfo:
         return None
 
     @staticmethod
-    def _format_duration_from_seconds(seconds: float | int) -> str:
+    def _format_duration_from_seconds(seconds: float) -> str:
         """Formatiert Sekunden als `"Live"` / `"MM:SS"` / `"H:MM:SS"`."""
         try:
             _s = int(seconds)
@@ -17677,7 +17677,7 @@ class CacheManager:
 class DebugFilter(logging.Filter):
     """Thread-sicherer Log-Filter mit erweiterter Debug-Steuerung."""
 
-    _LEVEL_MAP = {
+    _LEVEL_MAP: ClassVar[dict[int, int]] = {
         0: logging.DEBUG,
         1: logging.INFO,
         2: logging.WARNING,
@@ -20461,6 +20461,7 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
 
     __slots__ = (
         "_api_cache",
+        "_argos_skip_logged_pairs",
         "_available",
         "_chunk_size",
         "_deep_disabled_until",
@@ -20487,8 +20488,10 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
         "_health_lock",
         "_health_stop_event",
         "_health_thread",
+        "_last_google_request_time",
         "_last_health_check_time",
         "_last_health_status",
+        "_last_real_translation_success_time",
         "_lock",
         "_max_chunks",
         "_max_delay",
@@ -20499,9 +20502,6 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
         "_translator",
         "debug_level",
         "default_target_lang",
-        "_argos_skip_logged_pairs",
-        "_last_google_request_time",
-        "_last_real_translation_success_time",
     )
 
     def __init__(
@@ -21140,8 +21140,7 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
         cut = -1
         for sep in (".", "!", "?", "。", "！", "？"):
             pos = window.rfind(sep)
-            if pos > cut:
-                cut = pos
+            cut = max(cut, pos)
 
         if cut < 100:
             space_pos = window.rfind(" ", max_input_len - 200, max_input_len)
@@ -23681,8 +23680,7 @@ class OllamaConfig:
 
     def get_timeout_backoff(self, attempt: int) -> float:
         """Berechnet die Wartezeit für einen Timeout-Retry."""
-        if attempt < 0:
-            attempt = 0
+        attempt = max(attempt, 0)
         try:
             return self.timeout_backoff_base**attempt
         except OverflowError:
@@ -23693,8 +23691,7 @@ class OllamaConfig:
 
         Formel: `min(retry_delay_max, retry_delay_base * 2 ** attempt)`.
         """
-        if attempt < 0:
-            attempt = 0
+        attempt = max(attempt, 0)
         try:
             _delay = self.retry_delay_base * (2**attempt)
         except OverflowError:
@@ -28353,7 +28350,7 @@ class TranscriptionEngine:
                 f"-> candidates={_display}",
             )
             if _excluded:
-                _excl_str = ", ".join(f"{l}({r})" for l, r in _excluded)
+                _excl_str = ", ".join(f"{lng}({r})" for lng, r in _excluded)
                 log_debug(
                     "language",
                     f"[LANG-CANDIDATES] ausgeschlossen: {_excl_str}",
@@ -35006,7 +35003,7 @@ class TranscriptionEngine:
                             )
                     return
 
-                langs = [l for l, _ in self._language_history]
+                langs = [lang for lang, _ in self._language_history]
                 confs = [c for _, c in self._language_history]
 
                 all_same = len(set(langs)) == 1
@@ -39331,8 +39328,8 @@ class YtDlpHelper:
         if not stderr or returncode == 0:
             return False
 
-        lines = [l for l in stderr.splitlines() if not l.lstrip().startswith("[debug]")]
-        error_lines = [l for l in lines if l.startswith(("ERROR:", "WARNING:"))]
+        lines = [ln for ln in stderr.splitlines() if not ln.lstrip().startswith("[debug]")]
+        error_lines = [ln for ln in lines if ln.startswith(("ERROR:", "WARNING:"))]
         error_text = "\n".join(error_lines) if error_lines else "\n".join(lines)
 
         if not error_text:
@@ -43193,7 +43190,7 @@ class StreamManager:
 
         return None
 
-    _VIDEO_ITAGS = {
+    _VIDEO_ITAGS: ClassVar[set[int]] = {
         18,
         22,
         37,
@@ -44379,10 +44376,10 @@ class FFmpegManager:
     WAIT_AFTER_KILL: float = 0.5
 
     _FORMAT_CACHE_TTL: float = 120.0
-    _format_cache: dict[str, str] = {}
-    _format_cache_time: dict[str, float] = {}
+    _format_cache: ClassVar[dict[str, str]] = {}
+    _format_cache_time: ClassVar[dict[str, float]] = {}
 
-    PIPE_PREFERRED_PLATFORMS: set[str] = {
+    PIPE_PREFERRED_PLATFORMS: ClassVar[set[str]] = {
         "youtube",
         "twitch",
         "kick",
@@ -44574,11 +44571,11 @@ class FFmpegManager:
             mit der Audio-Queue des Dispatchers), wird diese Queue direkt
             verwendet, statt eine neue zu erzeugen.
             """
-            import queue as queue_module
-            import time
-            import threading as _threading
-            from collections import deque
             import logging
+            import queue as queue_module
+            import threading as _threading
+            import time
+            from collections import deque
 
             _logger = logging.getLogger("dragon")
 
@@ -44736,8 +44733,8 @@ class FFmpegManager:
 
         def update_queue_metrics(self) -> None:
             """Aktualisiert Queue-Metriken und warnt bei Überlastung."""
-            import time
             import logging
+            import time
 
             _logger = logging.getLogger("dragon")
 
@@ -44797,8 +44794,8 @@ class FFmpegManager:
 
         def safe_put(self, data: bytes, timeout: float = 0.1) -> bool:
             """Sicheres put() mit Überlaufschutz."""
-            import queue as queue_module
             import logging
+            import queue as queue_module
 
             _logger = logging.getLogger("dragon")
 
@@ -44830,8 +44827,8 @@ class FFmpegManager:
             Audio-Queue des Dispatchers. Ein Clear würde dort laufende
             Verarbeitung zerstören. Daher: No-Op im Pipe-Modus.
             """
-            import queue as queue_module
             import logging
+            import queue as queue_module
 
             _logger = logging.getLogger("dragon")
 
@@ -47226,8 +47223,7 @@ class FFmpegManager:
             except Exception:
                 qsize = -1
 
-            if qsize > _queue_high_watermark:
-                _queue_high_watermark = qsize
+            _queue_high_watermark = max(_queue_high_watermark, qsize)
 
             if qsize > 0 or _chunks_seen > 0:
                 data_received = True
@@ -54420,7 +54416,7 @@ class FFmpegManager:
                 )
 
                 try:
-                    ready, _, _ = select.select([process.stderr], [], [], 0.5)
+                    _, _, _ = select.select([process.stderr], [], [], 0.5)
                 except (OSError, ValueError, InterruptedError) as e:
                     logger.warning(f"⏳ select fehlgeschlagen, fahre fort: {e}")
 
@@ -70320,7 +70316,7 @@ class QueueManager:
                 if q not in [qc[0] for qc in queue_configs]:
                     queue_configs.append((q, None, name, 0))
 
-        for queue, lock, name, _max_size in queue_configs:
+        for queue, lock, name, _max_size in queue_configs:  # noqa: F402
             if queue is None:
                 if debug:
                     log_debug(
@@ -80394,7 +80390,7 @@ class SummarizeDialog(BaseDialog):
             self._last_progress_update = now
 
         try:
-            clamped_value = int(round(float(value)))
+            clamped_value = round(float(value))
             clamped_value = max(0, min(100, clamped_value))
         except (ValueError, TypeError) as e:
             logger.warning(
@@ -84714,7 +84710,7 @@ class InstallPhase(Enum):
     CANCELLED = auto()
     ERROR = auto()
 
-    _ORDER = [
+    _ORDER: ClassVar[list] = [
         IDLE,
         PREPARING,
         INSTALLING_SYSTEM,
@@ -87155,7 +87151,7 @@ class InstallDependencyDialog(BaseDialog):
 
             available = _is_available(internal_name, module_name)
             self._previous_pkg_status[internal_name] = available
-            check_func = lambda mod=module_name: _check_module(mod)
+            check_func = functools.partial(_check_module, module_name)
             result.append((internal_name, display_name, check_func, install_name))
 
         self._cached_packages = result
@@ -87811,7 +87807,7 @@ class InstallDependencyDialog(BaseDialog):
 
                         now = datetime.datetime.now(datetime.UTC)
                     except AttributeError:
-                        now = datetime.datetime.utcnow()
+                        now = datetime.datetime.now(datetime.timezone.utc)
                     f.write(f"# Exported at {now.isoformat()}\n")
                     f.write(
                         f"# Total: {len(filtered_lines)} packages "
@@ -91673,10 +91669,10 @@ class InstallDependencyDialog(BaseDialog):
         """
         import logging
         import queue
+        import re
         import subprocess
         import threading
         import time
-        import re
 
         logger = logging.getLogger("dragon")
         debug_level = getattr(self, "debug_level", 0)
@@ -91817,7 +91813,7 @@ class InstallDependencyDialog(BaseDialog):
                 try:
                     line = out_queue.get_nowait()
                     stdout_lines.append(line)
-                    percent, clean_line = _parse_progress(line)
+                    percent, _ = _parse_progress(line)
                     if percent is not None and progress_callback:
                         now = time.time()
                         if (
@@ -91844,7 +91840,7 @@ class InstallDependencyDialog(BaseDialog):
                 try:
                     line = err_queue.get_nowait()
                     stderr_lines.append(line)
-                    percent, clean_line = _parse_progress(line)
+                    percent, _ = _parse_progress(line)
                     if percent is not None and progress_callback:
                         now = time.time()
                         if (
@@ -101671,7 +101667,7 @@ class ExitConfirmDialog(BaseDialog):
         _base = getattr(self, "SHUTDOWN_TIMEOUT", 5.0)
         try:
             _base = float(_base)
-            if _base <= 0 or _base != _base:  # NaN-Check
+            if _base <= 0 or _base != _base:  # noqa: PLR0124  # NaN-Check
                 _base = 5.0
         except (TypeError, ValueError):
             _base = 5.0
@@ -106197,8 +106193,8 @@ class DragonWhispererGUI:
         Heuristik: laengster gemeinsamer Suffix(prev) == Praefix(new),
         min. 3 Woerter, max. 40. Nur wenn der neue Text laenger ist.
         """
-        import re as _re  # noqa: PLC0415
         import logging as _lg  # noqa: PLC0415
+        import re as _re  # noqa: PLC0415
         logger = _lg.getLogger("dragon")
 
         _MIN_WORDS = 3
@@ -106237,10 +106233,9 @@ class DragonWhispererGUI:
                     best = n
 
             if best == 0:
-                # ▼ NEU — Fix R1 (S14): Subset-Duplikat-Guard
                 if len(new_w) >= _MIN_WORDS and len(new_w) <= len(prev_w):
                     _n = len(new_w)
-                    for _i in range(0, len(prev_w) - _n + 1):
+                    for _i in range(len(prev_w) - _n + 1):
                         if prev_w[_i:_i + _n] == new_w:
                             logger.debug(
                                 "[OVERLAP-STRIP] slot=%s subset words=%d "
@@ -106254,9 +106249,13 @@ class DragonWhispererGUI:
 
             try:
                 matches = list(_WORD_RE.finditer(text))
-                if len(matches) < best:
+                if len(matches) <= best:
+                    logger.debug(
+                        "[OVERLAP-STRIP] slot=%s full-suffix words=%d new_text=%r",
+                        slot, best, " ".join(new_w[:8]),
+                    )
                     setattr(self, _ATTR, text)
-                    return text
+                    return ""
                 cut = matches[best].start()
                 stripped = text[cut:].lstrip(" ,.;:!?-–—")
             except Exception:
@@ -106390,7 +106389,6 @@ class DragonWhispererGUI:
             logger.exception(f"[{call_id}] Fehler beim Normalisieren: {e}")
             return
 
-        # ▼ NEU — Extended Debug S14: R2-Detector (Whisper-Intra-Repetition)
         try:
             _r2_w = cleaned.lower().split()
             _r2_hit = False
@@ -106450,11 +106448,7 @@ class DragonWhispererGUI:
 
         if _dedup_ttl > 0:
             try:
-                _dedup_key = (
-                    cleaned,
-                    round(start, 2) if start is not None else None,
-                    round(end, 2) if end is not None else None,
-                )
+                _dedup_key = (cleaned,)
 
                 if not hasattr(self, "_tx_text_dedup_cache"):
                     self._tx_text_dedup_cache: dict = {}
@@ -106497,7 +106491,6 @@ class DragonWhispererGUI:
                         f"({type(_de).__name__}: {_de}) – fahre fort"
                     )
 
-        # ▼ NEU — Fix P: Overlap-Praefix an Chunk-Grenzen entfernen
         try:
             cleaned = self._strip_chunk_overlap_prefix(
                 cleaned, slot="transcript",
@@ -107487,7 +107480,6 @@ class DragonWhispererGUI:
                 def _force_exit_after_timeout() -> None:
                     """Notausgang: beendet den Prozess, wenn der Shutdown hängt."""
                     time.sleep(_wd_timeout)
-                    # S16-W3: letzte Chance für SESSION-END vor Hard-Exit.
                     with contextlib.suppress(Exception):
                         log_ai("SESSION-END", reason="watchdog_hard")
                     with contextlib.suppress(Exception):
@@ -108888,11 +108880,6 @@ class DragonWhispererGUI:
                 ap._translation_semaphore = threading.Semaphore(1)
                 logger.info("⚙️ CPU‑Modus: Übersetzungs‑Semaphor auf 1 begrenzt")
 
-        # CPU-Mode überschreibt fallback_source_language NICHT. Die Fallback-
-        # Sprache ist eine semantische Nutzer-Einstellung, kein Performance-
-        # Parameter. Ein erzwungener 'en'-Fallback produziert Whisper-
-        # Halluzinationen auf CJK/Telugu-Streams (siehe Patch 5: Fix für
-        # _get_language_candidates, Zeile 28148).
         if DEBUG_LEVEL >= 3 and hasattr(adv, "fallback_source_language"):
             logger.debug(
                 "⚙️ CPU‑Modus: Fallback‑Sprache bleibt '%s' (kein Override)",
@@ -111004,7 +110991,7 @@ class DragonWhispererGUI:
             return f"{h:d}:{m:02d}:{sec:06.3f}"
         return f"{m:02d}:{sec:06.3f}"
 
-    _LANG_FLAG_MAP: dict[str, str] = {
+    _LANG_FLAG_MAP: ClassVar[dict[str, str]] = {
         "de": "🇩🇪",
         "en": "🇬🇧",
         "fr": "🇫🇷",
@@ -111163,8 +111150,7 @@ class DragonWhispererGUI:
             elif (
                 start_f is not None
                 and end_f is not None
-                and end_f > start_f
-                and start_f >= 0.0
+                and end_f > start_f >= 0.0
             ):
                 prefix = (
                     f"[{self._format_timestamp(start_f)}"
@@ -112658,11 +112644,11 @@ class DragonWhispererGUI:
         target_lang: str,
     ) -> tuple[bool, str | None]:
         """🧠 AUDIOPROCESSOR-START – optimierte Version ohne toten Code."""
+        import contextlib
         import logging
         import os
         import threading
         import time
-        import contextlib
         from collections import deque
 
         logger = logging.getLogger("dragon")
@@ -113011,10 +112997,10 @@ class DragonWhispererGUI:
 
     def start_processing(self, url: str | None = None) -> None:
         """Startet die Audio-Verarbeitung mit der neuen AudioProcessor-Startlogik."""
+        import contextlib
         import logging
         import threading
         import time
-        import contextlib
 
         logger = logging.getLogger("dragon")
         debug_level = getattr(self, "debug_level", 0)
@@ -114780,8 +114766,7 @@ class DragonWhispererGUI:
                             try:
                                 _cur = _title_label.cget("text") or ""
                                 for _sfx in (_SUFFIX_TITLE, "   ⏹"):
-                                    if _cur.endswith(_sfx):
-                                        _cur = _cur[: -len(_sfx)]
+                                    _cur = _cur.removesuffix(_sfx)
                                 _title_label.config(
                                     text=_cur + _SUFFIX_TITLE,
                                     foreground="#808080",
@@ -114802,8 +114787,7 @@ class DragonWhispererGUI:
                             try:
                                 _cur = _details_label.cget("text") or ""
                                 for _sfx in (_SUFFIX_DETAILS, "   •"):
-                                    if _cur.endswith(_sfx):
-                                        _cur = _cur[: -len(_sfx)]
+                                    _cur = _cur.removesuffix(_sfx)
                                 _details_label.config(
                                     text=_cur + _SUFFIX_DETAILS,
                                     foreground="#808080",
@@ -133334,8 +133318,7 @@ class StreamHandler:
                             _reader_dur = float(
                                 _dur_stat.get("duration", 0.0),
                             )
-                            if _reader_dur > result["stream_duration"]:
-                                result["stream_duration"] = _reader_dur
+                            result["stream_duration"] = max(result["stream_duration"], _reader_dur)
 
             result["end_time"] = datetime.now().isoformat()
 
@@ -133542,7 +133525,7 @@ class StreamHandler:
                 ))
                 log_ai(
                     "SUMMARY",
-                    chunks_total=(_chunks_ap if _chunks_ap > 0 else (_chunks_result if _chunks_result > 0 else 0)),
+                    chunks_total=(_chunks_ap if _chunks_ap > 0 else (max(0, _chunks_result))),
                     chunks_ap=_chunks_ap,
                     chunks_reader=_chunks_reader,
                     translation_requests=_ai_sum_req,
@@ -139296,7 +139279,7 @@ class AudioProcessor:
             "transcription_workers": 2,
             "transcription_queue_size": 2000,
             "translation_workers": 2,
-            "duplicate_similarity_threshold": 0.95,
+            "duplicate_similarity_threshold": 0.93,
             "min_confidence": 0.1,
             "min_language_confidence": 0.2,
             "sentence_flush_interval": 2.5,
@@ -150839,7 +150822,7 @@ class AudioProcessor:
                 if len(candidates) == 1:
                     language = candidates[0]
                 else:
-                    language = max(candidates, key=lambda l: lang_counts.get(l, 0))
+                    language = max(candidates, key=lambda lang: lang_counts.get(lang, 0))
             elif lang_counts:
                 language = max(lang_counts, key=lang_counts.get)
 
@@ -156722,8 +156705,7 @@ class AudioProcessor:
                 f"[{call_id}] start_seconds={original_start!r} ungültig – verwende 0"
             )
             start_seconds = 0
-        if start_seconds < 0:
-            start_seconds = 0
+        start_seconds = max(start_seconds, 0)
 
         if cookies_browser is not None and not isinstance(cookies_browser, str):
             if debug_enabled:
@@ -193367,8 +193349,8 @@ def main() -> int:
     import signal
     import sys
     import threading
-    import tkinter as tk
     import time
+    import tkinter as tk
     from contextlib import suppress
 
     import urllib3
