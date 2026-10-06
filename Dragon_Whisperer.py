@@ -20378,11 +20378,11 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
     )
 
     _GOOGLE_CIRCUIT_THRESHOLD = 1
-    _GOOGLE_CIRCUIT_COOLDOWN_S = 300.0
-    _GOOGLE_RATE_START = 0.8
-    _GOOGLE_RATE_MAX = 1.5
+    _GOOGLE_CIRCUIT_COOLDOWN_S = 1800.0
+    _GOOGLE_RATE_START = 0.3
+    _GOOGLE_RATE_MAX = 0.5
     _GOOGLE_RATE_MIN = 0.5
-    _GOOGLE_RATE_CAPACITY = 5.0
+    _GOOGLE_RATE_CAPACITY = 2.0
 
     _HEALTH_FAIL_THRESHOLD: ClassVar[int] = 2
     _HEALTH_SKIP_AFTER_SUCCESS_S: ClassVar[float] = 120.0
@@ -138691,9 +138691,6 @@ class AudioProcessor:
             _override_debug = 0
 
         self.debug_level = max(_global_debug, _settings_debug, _override_debug, 0)
-
-        # S17-A6: zu debug degradiert (reine Diagnose-Info,
-        # erscheint sonst bei jedem Start als Warnung).
         logger.debug(
             "[INIT-DIAG] AudioProcessor.debug_level=%d "
             "(global=%d, settings=%d, override=%d)",
@@ -138781,7 +138778,6 @@ class AudioProcessor:
         _p = time.perf_counter()
         self._total_file_size: int | None = None
         self._expected_duration: float | None = None
-        # Session 8 - Bug W: unveraenderliche Obergrenze fuer Segment-Timestamps
         self._hard_cap: float | None = None
         self._current_stream_id: str | None = None
         self._processing_thread: threading.Thread | None = None
@@ -139278,7 +139274,7 @@ class AudioProcessor:
             "length_penalty": 0.0,
             "transcription_workers": 2,
             "transcription_queue_size": 2000,
-            "translation_workers": 2,
+            "translation_workers": 1,
             "duplicate_similarity_threshold": 0.93,
             "min_confidence": 0.1,
             "min_language_confidence": 0.2,
@@ -139328,11 +139324,6 @@ class AudioProcessor:
 
         PROTECTED_ATTRS = {"config", "_adaptive_bytes_per_sec"}
 
-        # Session 6 (Bug M): User-Setting beam_size respektieren.
-        # Die GPU/CPU-Profile setzen beam_size hart auf 3 bzw. 1. Wenn
-        # der User in der GUI einen anderen Wert als DEFAULT_BEAM_SIZE
-        # gewaehlt hat, darf das Profil ihn nicht ueberschreiben - sonst
-        # faellt der Wert nach _save_settings dauerhaft auf 3 zurueck.
         _DEFAULT_BEAM = getattr(
             getattr(adv, "config", None), "DEFAULT_BEAM_SIZE", 10,
         )
@@ -140661,9 +140652,6 @@ class AudioProcessor:
 
         if reset_executors:
             if _was_disposing:
-                # Session 6 (Bug E.2): Dispose laeuft parallel zur cleanup-Kette.
-                # Snapshot _was_disposing wurde VOR _init_state_machines gesetzt,
-                # weil das die Flags zuruecksetzt.
                 log_debug(
                     "processor",
                     "_reset_internal_state: dispose laeuft - "
@@ -146688,9 +146676,6 @@ class AudioProcessor:
             except Exception as e:
                 logger.debug("Ignored exception: %s", e, exc_info=True)
 
-        # Session 6 (Debug): pynvml-Werte (echte GPU-Belegung).
-        # torch.cuda.memory_*() zeigt nur den Prozess-Allocator - bei
-        # GPU-Arbeit in loky-Workern bleibt der Hauptprozess bei 0.0G.
         try:
             if not hasattr(self, "_pynvml_init_done"):
                 try:
@@ -147001,7 +146986,6 @@ class AudioProcessor:
                     extra={"component": "chunk", "chunk_id": chunk_id},
                 )
 
-            # Session 7 (Debug): [AUDIO-STATS] vor Audio-Enhancement
             try:
                 import numpy as _np_dbg
                 _arr_dbg = (
@@ -147909,10 +147893,6 @@ class AudioProcessor:
         _debug_verbose = DEBUG_LEVEL >= 4
         _reason_primary: str = "n/a"
         _reason_fallback: str = "n/a"
-        # Persistenter Failure-Reason fuer Caller (Session 3, Patch D2D,
-        # korrigiert S15/Bug R4): differenzierte Lost-Chunk-Dateinamen wie
-        # 'returned_empty_list_chunk_132' statt pauschal
-        # 'transcription_failed_chunk_132'. Format: '<primary>|<fallback>'.
         self._last_failure_reason: str | None = None
         _audio_len = len(audio_data) if audio_data else 0
 
@@ -148209,8 +148189,6 @@ class AudioProcessor:
                     return segments, False
 
                 _reason_fallback = "list"
-                # S17-A4: zu info degradiert (Whisper-Leerlauf ist
-                # normal bei Stille/Musik, kein Warnfall).
                 logger.info(
                     f"Chunk #{chunk_id}: Fallback returned empty list",
                 )
@@ -148263,12 +148241,6 @@ class AudioProcessor:
         chunk_id: int,
     ) -> dict[str, Any]:
         """Zentraler Einstiegspunkt für Transkriptions- UND Übersetzungs-Ausgabe.
-
-        Fix (2026-09-17): Im Subtitle-Mode wird die aggregierte Übersetzung
-        übersprungen, weil die Segment-Übersetzung bereits in
-        ``_output_segment_guaranteed`` pro Segment erfolgt. Ohne diesen
-        Guard würden dieselben Inhalte zweimal an die Translate-Queue gehen
-        (einmal aggregiert pro Chunk, einmal pro Segment).
         """
         import logging
         import threading
@@ -148370,13 +148342,10 @@ class AudioProcessor:
         else:
             with contextlib.suppress(Exception):
                 log_dbg("GUI", event="callback_unbound", chunk_id=chunk_id, cb_type=type(self._transcription_callback).__name__)
-            # S17-P2: Im Headless-Mode nur einmal pro Prozess warnen.
             _hl_run = globals().get("_DW_HEADLESS_RUN", False)
             if _hl_run:
                 if not getattr(self, "_headless_cb_warned", False):
                     self._headless_cb_warned = True
-                    # S17-A4.1: zu info degradiert – ist im Headless
-                    # normal und kein Warnfall, nur Erst-Info.
                     logger.info(
                         "[CALLBACK] Headless-Mode: Transcription-Callback "
                         "nicht an GUI gebunden – weitere Meldungen unterdrückt.",
@@ -148423,10 +148392,6 @@ class AudioProcessor:
                 if extracted and isinstance(extracted, str):
                     stripped = extracted.strip()
                     if len(stripped) >= MIN_TEXT_LENGTH:
-                        # ▼ NEU — S15 / Bug T+V final: Phrasen-Filter zentral.
-                        #   Läuft VOR Transkript-Callback UND Übersetzungs-Trigger.
-                        #   Fängt Halluzinationen ab, die durch frühere Filter
-                        #   gerutscht sind ("I'll", "Bye", "You", "Oh, oh, oh").
                         _stripped_norm = (
                             stripped.lower().rstrip(".!?,;:…").strip()
                         )
@@ -149194,9 +149159,6 @@ class AudioProcessor:
                     error_cb(f"Callback-Fehler in Chunk {chunk_id}: {e}")
 
     def _find_gui_root(self) -> Any:
-        # S17-P2: Im CLI-Headless-Mode gibt es nie eine GUI.
-        # Ohne diese Bremse durchläuft der Lookup bei JEDEM Chunk
-        # die volle Strategie-Kette (97×/90s im S17-Test).
         if globals().get("_DW_HEADLESS_RUN", False):
             return None
         """🚀
@@ -149872,11 +149834,6 @@ class AudioProcessor:
                     discarded_count += 1
                     continue
 
-            # ▼ NEU — Session 15 / Bug T: Phrasen- und Kurz-Wort-Filter.
-            #   Whisper halluziniert bei stillem Audio Einzelwoerter und
-            #   kurze Phrasen ("You", "Bye", "Wir sehen uns beim naechsten
-            #   Mal"). Zwei Trigger: (a) no_speech hoch bei 1 Wort,
-            #   (b) Text ist in _WHISPER_HALLUCINATION_PHRASES.
             _text_norm_t = clean_text.strip().lower().rstrip(".!?,;:…")
             _is_phrase_hallu_t = _text_norm_t in _WHISPER_HALLUCINATION_PHRASES
             _is_short_no_speech_t = (
@@ -151462,8 +151419,6 @@ class AudioProcessor:
 
             future_emit: list[TranslationResult] = []
             remaining_filtered: list[TranslationResult] = []
-            # Session 8 - Bug Z: Future-Emit markieren, damit wir sie
-            # in der Update-Schleife mit start statt end referenzieren.
             _future_emit_ids: set[int] = set()
             for entry in remaining:
                 if (
@@ -151505,10 +151460,6 @@ class AudioProcessor:
 
             if to_emit:
                 for entry in to_emit:
-                    # Session 8 - Bug Z: Future-Emit-Items duerfen expected
-                    # nur auf ihren start heben, nicht auf ihr end. Sonst
-                    # werden spaetere Items mit kleinerem start als
-                    # 'late' durchgewunken und erscheinen zu frueh.
                     if id(entry) in _future_emit_ids and entry.start is not None:
                         ref_val = entry.start
                     else:
@@ -151606,9 +151557,6 @@ class AudioProcessor:
                 )
             _safe_invoke_callback(entry)
 
-        # Session 8 - Bug Z: to_emit IMMER sortieren, nicht nur bei force_flush.
-        # Sonst landen future_emit-Items (via .extend) am Ende der Liste und
-        # verletzen die chronologische Reihenfolge im Widget.
         to_emit.sort(key=lambda r: r.start if r.start is not None else float("inf"))
 
         for entry in to_emit:
@@ -152165,7 +152113,12 @@ class AudioProcessor:
                         )
 
                     _old_next = self._next_expected_start
-                    self._next_expected_start = seg_start
+                    self._next_expected_start = (
+                        self._sorted_keys_cache[-1]
+                        if self._sorted_keys_cache
+                        else seg_start
+                    )
+                    
                     self._subtitle_watchdog_time = now
 
                     flush_reasons["watchdog_bulk"] += 1
@@ -154184,7 +154137,6 @@ class AudioProcessor:
             if seg.end is not None:
                 seg.end += offset
 
-            # Session 8 - Bug W: _hard_cap ueberlagert max_end (nur wenn gesetzt).
             _hc = getattr(self, "_hard_cap", None)
             _eff_max = max_end
             if _hc is not None:
@@ -155825,9 +155777,6 @@ class AudioProcessor:
 
             AudioProcessor._lost_chunk_tokens -= 1.0
 
-        # ▼ NEU — Session 15 / Bug R3: Kontext-Snapshot VOR Thread-Spawn.
-        #   Werte werden im LostChunkSaver-Thread nur gelesen und via
-        #   log_ai("R3-LOST", ...) mit ausgegeben. Additiv, kein Fix.
         _r3_caller = "unknown"
         _r3_caller_ln = -1
         _r3_chunk_id = 0
@@ -155837,7 +155786,6 @@ class AudioProcessor:
         _r3_queue = -1
         _r3_drops = -1
         _r3_stop = 0
-        # RMS immer berechnen — fuer Bug-T-Filter UND R3-Skip-Entscheidung.
         with contextlib.suppress(Exception):
             _rms_val_r3 = self._compute_rms(audio_data)
             if _rms_val_r3 is not None:
@@ -155875,8 +155823,6 @@ class AudioProcessor:
                 if _se_r3 is not None:
                     _r3_stop = int(bool(_se_r3.is_set()))
 
-        # ▼ NEU — S15 / Bug R3-Konzept B: returned_empty_* mit RMS < 0.15
-        #   als Silent-Skip markieren — kein WAV/JSON speichern.
         _reason_str = reason if isinstance(reason, str) else ""
         _reason_is_empty = (
             _reason_str.startswith("returned_empty")
@@ -155949,13 +155895,6 @@ class AudioProcessor:
         if hasattr(self, "_chunk_counter"):
             metadata["chunk_counter"] = self._chunk_counter
 
-        # Plattformkonformer Lost-Chunks-Pfad (Session 3, Patch D4):
-        #   Windows: %LOCALAPPDATA%\DragonWhisperer\lost_chunks
-        #   macOS:   ~/Library/Application Support/DragonWhisperer/lost_chunks
-        #   Linux:   $XDG_DATA_HOME/dragonwhisperer/lost_chunks
-        #            oder Fallback ~/.local/share/dragonwhisperer/lost_chunks
-        # Linux-Verhalten unveraendert; Windows/macOS nutzen jetzt die
-        # jeweilige Konvention.
         import os as _os
         if IS_WINDOWS:
             _local_appdata = _os.environ.get("LOCALAPPDATA")
@@ -156080,8 +156019,6 @@ class AudioProcessor:
                     stream_id,
                 )
 
-                # ▼ NEU — Extended Debug S14: R3-Marker
-                # ▼ S15 / R3-Debug: Kontext aus Pre-Thread-Snapshot ergänzt
                 try:  # noqa: SIM105
                     log_ai(
                         "R3-LOST",
@@ -159847,7 +159784,6 @@ class AudioProcessor:
 
     def set_expected_duration(self, duration: float | None) -> None:
         self._expected_duration = duration
-        # Session 8 - Bug W: Hard Cap aus echter Video-Dauer. Waechst nie mit.
         if duration is None or duration <= 0:
             self._hard_cap = None
         else:
@@ -159896,16 +159832,6 @@ class AudioProcessor:
         fallback_translation_engine: BaseTranslationEngine | None = None,
     ) -> None:
         """Setzt alle drei Engines atomar und entsorgt alte Engines asynchron.
-        Optimiert: keine doppelten Funktionalitätsprüfungen, robuste Fehlerbehandlung.
-
-        ★ v2.4: Reicht die Fallback-Engine zusätzlich an die Haupt-Engine
-        weiter, damit `GoogleTranslationEngine._call_argos_fallback` sie
-        findet (sonst ist Argos-Fallback faktisch tot).
-
-        ★ v2.6: Respektiert die Nutzer-Präferenz über
-        ``_apply_user_translation_preference()``. Wenn der Nutzer die
-        Übersetzung über den GUI-Toggle explizit deaktiviert hat, bleibt
-        ``_translation_enabled`` auch bei funktionsfähiger Engine False.
         """
         if (
             fallback_translation_engine is not None
@@ -161226,11 +161152,6 @@ class AudioProcessor:
         else:
             workers = optimal_workers
 
-        # Session 8 - Bug Z6: Single-Worker im Subtitle-Mode fuer
-        # deterministische Ausgabereihenfolge. Parallele Worker liefern
-        # Ergebnisse in Ankunfts- statt Video-Reihenfolge; im Subtitle-
-        # Mode mit VOD-Laeufen kostet Single-Worker kaum Performance,
-        # garantiert aber monotone Timestamps im Widget.
         if getattr(self, "subtitle_mode", False) and workers > 1:
             logger.info(
                 "[TRANS-WORKER] Subtitle-Mode aktiv - reduziere "
@@ -161756,13 +161677,8 @@ class AudioProcessor:
                 is_direct=is_direct_url,
                 live=kwargs.get("is_live", False),
             )
-            # Session 8 - Patch 7B: AI-Startup-Bundle
-            # Dokumentiert Architektur, Config, Flags, Capabilities und
-            # bekannte Bugs einmalig beim Session-Start.
             with contextlib.suppress(Exception):
                 _ai_plat = platform.node()
-                # Session 8 - Patch 7B-Fix: torch ueber sys.modules holen,
-                # nicht ueber self._torch (existiert nicht auf jedem AP).
                 _ai_torch = None
                 with contextlib.suppress(Exception):
                     import sys as _ai_sys
@@ -162089,7 +162005,6 @@ class AudioProcessor:
             self._init_transcribe_timeout_executor()
             self._synchronize_tasks_done_event()
 
-            # Session 8 - Bug O2 Diag: Queue-Identitaet dokumentieren
             _o2_ap_dbg = getattr(self, "debug_level", 0)
             if _o2_ap_dbg >= 3:
                 _o2_oq_id = id(output_queue) if output_queue is not None else None
@@ -162369,13 +162284,6 @@ class AudioProcessor:
                     and not self._stop_event.is_set()
                 ):
                     try:
-                        # Session 8 - Bug Z4: Timer mit force_flush=False.
-                        # force_flush=True umging die Sortierung und emittierte
-                        # Items in Ankunfts- statt Video-Reihenfolge. Mit False
-                        # greifen FORWARD_TOLERANCE / MAX_FUTURE_WAIT und die
-                        # chronologische Reihenfolge bleibt erhalten. Der
-                        # Timer ist weiterhin ein Safety-Net: wenn der Guard
-                        # laenger blockiert, greift MAX_FUTURE_WAIT (5s).
                         self._process_translation_queue(
                             self._translation_callback, force_flush=False
                         )
@@ -163180,10 +163088,6 @@ class AudioProcessor:
                 "condition_on_previous_text": False,
             }
 
-        # Session 6 (Bug M): User-Setting beam_size respektieren.
-        # Siehe _apply_performance_profile fuer die ausfuehrliche
-        # Begruendung. Kurz: der User-Wunsch (Wert != DEFAULT) hat
-        # Vorrang vor dem Auto-Tune fuer GPU/CPU.
         _DEFAULT_BEAM = getattr(
             getattr(settings, "config", None), "DEFAULT_BEAM_SIZE", 10,
         )
@@ -166008,11 +165912,6 @@ class AudioProcessor:
                 with self._set_state_lock:
                     self._set_state_in_progress = False
 
-    # ────────────────────────────────────────────────────────────────
-    # S17-B6: DEPRECATED – kein Aufrufer im gesamten Code (Stand S17).
-    # Methode bleibt vorerst erhalten, wird in S18 entfernt.
-    # Nicht reaktivieren – aktive Alternative in den aktiven Pfaden.
-    # ────────────────────────────────────────────────────────────────
     def _try_start_process(
         self,
         prefer_pipe: bool,
@@ -166889,15 +166788,7 @@ class AudioProcessor:
         original_url = kwargs.get("original_url", url)
         is_live = kwargs.get("is_live", False)
 
-        # S16-Kick: is_live-Nachkorrektur. Der Aufrufer übergibt oft
-        # is_live=False (Default), obwohl _detect_stream_type die
-        # Plattform korrekt als always-live erkennt (Kick-Kanal-URLs).
-        # Ohne diese Korrektur läuft Kick über den Direct-Pfad (VOD-Logik)
-        # und stirbt nach ~2 min, weil die HLS-URL abläuft.
         if not is_live:
-            # _detect_stream_type lebt auf FFmpegManager, nicht AudioProcessor.
-            # Kick-Kanal-URLs sind immer live (Stream oder off-air).
-            # Wir prüfen das direkt, ohne Klassen-übergreifenden Aufruf.
             _url_lower = url.lower()
             if "kick.com" in _url_lower:
                 is_live = True
@@ -166977,9 +166868,6 @@ class AudioProcessor:
         def _set_state_if_active(new_state, reason: str) -> bool:
             """Setzt State nur, wenn wir noch der aktive Thread sind."""
             if not _is_active_thread(f"set_state:{reason}"):
-                # S17-B2: Race-Condition beim Shutdown ist normal – Token
-                # wird extern genullt, während der Loop noch läuft. Das ist
-                # kein Warnfall, sondern erwartetes Verhalten. → debug.
                 if debug_level >= 3:
                     logger.debug(
                         "[PROCESS-LOOP] ℹ️ State-Update '%s' verworfen "
@@ -167009,9 +166897,6 @@ class AudioProcessor:
             if debug_level >= 3:
                 logger.debug("[PROCESS-LOOP] Could not get language from engine: %s", e)
 
-        # Session 7 (Bug O): konfigurierbar via DW_STREAM_TIMEOUT_S.
-        # Default: 3600s im Debug-Modus, 0 (unbegrenzt) sonst.
-        # Fuer 24/7-Livestreams mit Debug-Logging: DW_STREAM_TIMEOUT_S=0
         _env_t = os.environ.get("DW_STREAM_TIMEOUT_S", "")
         if _env_t.isdigit():
             STREAM_TIMEOUT_SECONDS = int(_env_t)
@@ -167060,8 +166945,6 @@ class AudioProcessor:
                         )
             _mark("metadata", _p)
 
-            # Session 8 - Bug W: Hard Cap aus yt-dlp-Metadaten setzen.
-            # Greift nur bei VOD (is_live=False) und gueltiger Dauer.
             if metadata and not is_live:
                 _cap_raw = metadata.get("duration")
                 _cap_val = 0.0
@@ -167781,8 +167664,6 @@ class AudioProcessor:
         error_message = None
         used_mode = None
 
-        # S17-B8b: Wenn URL bereits als permanent tot markiert ist,
-        # Attempt-Loop komplett überspringen.
         if _is_permanent_fail(url):
             logger.warning(
                 "[FFMPEG] ⛔ URL bekannt als dauerhaft nicht verfügbar "
@@ -167811,10 +167692,6 @@ class AudioProcessor:
                     max_attempts,
                 )
 
-            # S16-Kick: Live-Streams auf Pipe-preferred-Plattformen
-            # brauchen den Pipe-Modus für HLS-Refresh. Der Direct-Pfad
-            # reicht nur bei VODs oder Plattformen mit statischen URLs
-            # (BitChute, Facebook-VOD, Twitter-VOD).
             _live_pipe_required = is_live and any(
                 _d in url_lower
                 for _d in (
@@ -168310,10 +168187,6 @@ class AudioProcessor:
         output_queue = kwargs.get("output_queue")
         video_url = kwargs.get("video_url", "") or kwargs.get("url", "")
         is_live = kwargs.get("is_live", False)
-        # S16-A1: alle Keys aus kwargs entfernen, die im Fallback-Aufruf
-        # _start_pipe_mode(..., **kwargs) explizit übergeben werden – sonst
-        # "got multiple values for keyword argument '<key>'".
-        # Gilt für: video_url, url, output_queue, is_live.
         for _collision_key in ("video_url", "url", "output_queue", "is_live"):
             kwargs.pop(_collision_key, None)
 
@@ -168519,13 +168392,6 @@ class AudioProcessor:
             ready, _, _ = select.select([ff_proc.stderr], [], [], 0.5)
             if ready:
                 with contextlib.suppress(Exception):
-                    # S17-B4c: read1 statt read, sonst blockiert der
-                    # Read bis 500 Bytes vorliegen oder EOF (Prozess-
-                    # ende). Bei ffmpeg, der nur eine kurze Warnung
-                    # schreibt ("No trailing CRLF found in HTTP header",
-                    # ~65 Bytes), hängt der Aufruf bis zum Ende des
-                    # Streams. read1 liefert, was gerade im Pipe-
-                    # Puffer ist, und blockiert nicht.
                     stderr_data = ff_proc.stderr.read1(500).decode(
                         "utf-8",
                         errors="replace",
@@ -168947,11 +168813,6 @@ class AudioProcessor:
 
         return platform
 
-    # ────────────────────────────────────────────────────────────────
-    # S17-B6: DEPRECATED – kein Aufrufer im gesamten Code (Stand S17).
-    # Methode bleibt vorerst erhalten, wird in S18 entfernt.
-    # Nicht reaktivieren – aktive Alternative in den aktiven Pfaden.
-    # ────────────────────────────────────────────────────────────────
     def _should_prefer_pipe(
         self,
         platform: str,
@@ -172102,10 +171963,6 @@ class AudioProcessor:
             _err = getattr(self, "_translation_errors", 0)
             _cached = getattr(self, "_translation_cached", 0)
             _skipped = getattr(self, "_translation_skipped", 0)
-            # S17-B3: dedup_skipped abziehen – das sind Requests, die
-            # _translation_requests erhöht haben, aber bewusst verworfen
-            # wurden (Double-Trigger innerhalb 3s). Ohne Abzug entsteht
-            # ein Phantom-Pending (S16: 104 statt 0).
             _dedup_skipped = getattr(
                 self, "_translation_requests_dedup_skipped", 0
             )
@@ -176289,11 +176146,6 @@ class AudioProcessor:
                 self._translation_skipped = getattr(self, "_translation_skipped", 0) + 1
             return
 
-        # ▼ NEU — S15 / Bug V: Bekannte Whisper-Halluzinations-Phrasen
-        #   nicht übersetzen. Verhindert, dass Ein-Wort- und Kurzphrasen-
-        #   Artefakte ("You", "I'll", "Bye", "Wir sehen uns beim nächsten
-        #   Mal") über den Translation-Pfad in die GUI gelangen.
-        #   Gleiche Phrasen-Liste wie im Transcription-Filter (Bug T).
         _text_norm_v = clean_text.strip().lower().rstrip(".!?,;:…")
         if _text_norm_v in _WHISPER_HALLUCINATION_PHRASES:
             if debug_level >= 2:
@@ -176555,7 +176407,6 @@ class AudioProcessor:
             timeout=timeout,
         )
 
-        # ▼ NEU — Fix M (S14): Enqueue-Dedup gegen Doppel-Trigger
         try:
             import time as _t_dd  # noqa: PLC0415
             _dd_key = (
@@ -176580,10 +176431,6 @@ class AudioProcessor:
                             if self._enq_dedup[_k] < _cutoff:
                                 del self._enq_dedup[_k]
             if _dd_skip:
-                # S17-B3: Dedup-Skip als eigenen Zähler erfassen.
-                # _translation_requests wurde bereits inkrementiert;
-                # ohne diesen Counter zeigt die Shutdown-Drain-Formel
-                # fälschlich "pending" (S16: 104 Phantom-Requests).
                 with stats_lock:
                     self._translation_requests_dedup_skipped = (
                         getattr(self, "_translation_requests_dedup_skipped", 0) + 1
@@ -177059,10 +176906,6 @@ class AudioProcessor:
                 )
                 continue
 
-            # Session 7 (Bug L): Cache-Write im aktiven Batch-Pfad.
-            # Der tote Cache-Write bei ~175515 wurde nie erreicht,
-            # weil _run_translation_task im Live-Betrieb nicht laeuft.
-            # Hier liegt der echte Punkt: result_obj ist fertig.
             if item.text and result_obj.translated:
                 with contextlib.suppress(Exception):
                     self._cache_translation(
@@ -177312,19 +177155,6 @@ class AudioProcessor:
         2) Task-Vorbereitung (Events, Timeout-Berechnung).
         3) Task an Executor submitten – **ohne** Watchdog-Start.
         4) Fehlerbehandlung (Silent-Skip).
-
-        Änderung V3.0
-        -------------
-        * Der Watchdog wird **nicht mehr hier** gestartet, sondern in
-          ``_run_translation_task`` – erst wenn der Worker den Task
-          tatsächlich beginnt. Dadurch wird die Wartezeit in der
-          Executor-Queue nicht mitgemessen. Ohne diesen Fix feuerte
-          der Watchdog bei Backlog fälschlich und löste 60-s-Sperren
-          aus, wodurch die Übersetzung de facto tot war.
-        * ``watchdog_timeout`` (float) statt ``watchdog_timer`` wird
-          an ``_run_translation_task`` weitergereicht.
-        * Alle Fallback-Sends laufen mit ``silent=True``, damit kein
-          englischer Quelltext als Fake-Übersetzung erscheint.
         """
         import logging
 
@@ -177803,11 +177633,6 @@ class AudioProcessor:
                     )
                     translation = None
 
-                # Session 6 (Cache-Fix): Auch identische Uebersetzungen
-                # cachen (Ziel=Quelle, z.B. deutscher Stream mit de als
-                # Ziel). Ohne diesen Write bleibt der Cache leer und die
-                # Hitrate ist mathematisch 0%. Identitaets-Zaehler fuer
-                # Diagnose: zeigt verschwendete Google-Requests.
                 if translation and translation.translated:
                     if translation.translated == text:
                         self._cache_stats_identical = (
@@ -179755,13 +179580,7 @@ class AudioProcessor:
         source_lang: str,
     ) -> TranslationResult | None:
         """Holt eine Übersetzung aus dem Cache.
-
-        ★ v2.0: Poison-Check auf der Lese-Seite. Alte Cache-Einträge aus der
-        Zeit vor dem Write-Filter (bzw. von anderen Aufrufern) werden
-        erkannt und verworfen, statt sie als gültige Übersetzung an die GUI
-        oder den Subtitle-Export weiterzureichen.
         """
-        # Session 6 (Debug): Cache-Statistik-Zaehler
         self._cache_stats_calls = getattr(self, "_cache_stats_calls", 0) + 1
 
         if self._cache_manager is None:
@@ -179823,7 +179642,6 @@ class AudioProcessor:
                         f"✅ Cache-Hit für '{_preview}' "
                         f"(src={source_lang}, tgt={target_lang})",
                     )
-                # Session 6 (Debug): Cache-Hit-Zaehler
                 self._cache_stats_hits = (
                     getattr(self, "_cache_stats_hits", 0) + 1
                 )
@@ -179858,11 +179676,6 @@ class AudioProcessor:
         source_lang: str,
     ) -> None:
         """Speichert eine Übersetzung im Cache.
-
-        ★ v2.0: Poison-Filter auf der Schreib-Seite. HTTP-Fehlertexte und
-        HTML-Antworten (z. B. "Error 500 (Server Error)!!1500...") werden
-        NIEMALS in den Cache geschrieben – sonst würde der Müll bei
-        jedem weiteren Request aus dem Cache zurückkommen.
         """
         if self._cache_manager is None:
             if DEBUG_LEVEL >= 4:
@@ -179924,7 +179737,6 @@ class AudioProcessor:
 
         try:
             set_method(translation, key=cache_key)
-            # Session 6 (Debug): Write-Zaehler + Statistik alle 25 Writes
             self._cache_stats_writes = (
                 getattr(self, "_cache_stats_writes", 0) + 1
             )
@@ -180211,23 +180023,10 @@ class AudioProcessor:
                 )
                 if not _already_scheduled:
                     self._translation_drain_scheduled = True
-            # Session 8 - Bug Z1: Debounce. Parallele Worker liefern ihre
-            # Ergebnisse in Ankunfts- nicht Video-Reihenfolge. Wir warten
-            # kurz, damit die Queue sich fuellt, und sortieren dann.
             if not _already_scheduled:
                 _parent_self = self
                 _cb = callback
-                # Session 8 - Bug Z5: 1.5s Debounce. Bei parallelen
-                # Translation-Workern treffen fruehe Items teils 300-500ms
-                # nach spaeteren ein. Mit 0.5s lief der Emit zu frueh los
-                # und Item 2 wurde zum 'late' Item.
                 _DEBOUNCE_S = 1.5
-
-                # Session 8 - Bug Z3: Erst-Emit-Guard. Solange die Queue
-                # noch klein ist und expected noch nicht initialisiert,
-                # warten wir lieber, bis mehr Items angekommen sind -
-                # sonst emittieren wir die ersten 2 Eintraege zu frueh
-                # und spaetere Items mit kleinerem start wirken als 'late'.
                 _MIN_QUEUE_FOR_FIRST_EMIT = 15
 
                 def _do_drain() -> None:
@@ -180248,7 +180047,6 @@ class AudioProcessor:
                             and _q_now < _MIN_QUEUE_FOR_FIRST_EMIT
                             and _wait_rounds < _max_wait_rounds
                         ):
-                            # Noch nicht genug Items fuer erste Sortierung.
                             _wait_rounds += 1
                             import time as _t
                             _t.sleep(0.5)
@@ -180271,7 +180069,6 @@ class AudioProcessor:
                             if _seq_after == _seq_before:
                                 _parent_self._translation_drain_scheduled = False
                                 return
-                        # Neue Items waehrend Drain angekommen - nochmal.
 
                 _t = threading.Timer(_DEBOUNCE_S, _do_drain)
                 _t.daemon = True
