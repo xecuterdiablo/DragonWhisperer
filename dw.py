@@ -306,13 +306,13 @@ def _early_bootstrap() -> None:
     from pathlib import Path as _Path
 
     if _sys.version_info < (3, 10):  # noqa: UP036
-        print("", file=_sys.stderr)
+        print(file=_sys.stderr)
         print("=" * 70, file=_sys.stderr)
         print("  ❌ Deine Python-Version ist zu alt.", file=_sys.stderr)
         print("=" * 70, file=_sys.stderr)
         print(f"  Aktuell : {_sys.version.split()[0]}", file=_sys.stderr)
         print("  Benötigt: Python 3.10 oder neuer", file=_sys.stderr)
-        print("", file=_sys.stderr)
+        print(file=_sys.stderr)
         print("  Installation:", file=_sys.stderr)
         print("    • Windows:  https://www.python.org/downloads/", file=_sys.stderr)
         print("    • macOS:    brew install python@3.12", file=_sys.stderr)
@@ -342,16 +342,16 @@ def _early_bootstrap() -> None:
                 "          das Häkchen »tcl/tk and IDLE« setzen"
             )
 
-        print("", file=_sys.stderr)
+        print(file=_sys.stderr)
         print("=" * 70, file=_sys.stderr)
         print("  ❌ tkinter fehlt — der GUI-Baukasten von Python.", file=_sys.stderr)
         print("=" * 70, file=_sys.stderr)
-        print("", file=_sys.stderr)
+        print(file=_sys.stderr)
         print("  Dragon Whisperer kann ohne tkinter nicht starten.", file=_sys.stderr)
-        print("", file=_sys.stderr)
+        print(file=_sys.stderr)
         print(f"  Installation auf deinem System ({plat}):", file=_sys.stderr)
         print(f"    {hint}", file=_sys.stderr)
-        print("", file=_sys.stderr)
+        print(file=_sys.stderr)
         print("  Danach das Skript erneut starten.", file=_sys.stderr)
         print("=" * 70, file=_sys.stderr)
         _sys.exit(1)
@@ -366,9 +366,9 @@ import concurrent.futures
 import contextlib
 import copy
 import fnmatch
+import functools
 import gc
 import glob
-import functools
 import hashlib
 import importlib
 import importlib.metadata
@@ -3850,7 +3850,7 @@ class PeriodicTaskMixin:
 class BaseDialog:
     """BASISKLASSE für alle modalen Dialoge in Dragon Whisperer."""
 
-    _LEVEL_LABELS: dict[int, str] = {
+    _LEVEL_LABELS: ClassVar[dict[int, str]] = {
         0: "TRACE",
         1: "DEBUG",
         2: "INFO",
@@ -13257,7 +13257,7 @@ class StreamInfo:
         return None
 
     @staticmethod
-    def _format_duration_from_seconds(seconds: float | int) -> str:
+    def _format_duration_from_seconds(seconds: float) -> str:
         """Formatiert Sekunden als `"Live"` / `"MM:SS"` / `"H:MM:SS"`."""
         try:
             _s = int(seconds)
@@ -17677,7 +17677,7 @@ class CacheManager:
 class DebugFilter(logging.Filter):
     """Thread-sicherer Log-Filter mit erweiterter Debug-Steuerung."""
 
-    _LEVEL_MAP = {
+    _LEVEL_MAP: ClassVar[dict[int, int]] = {
         0: logging.DEBUG,
         1: logging.INFO,
         2: logging.WARNING,
@@ -20378,11 +20378,11 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
     )
 
     _GOOGLE_CIRCUIT_THRESHOLD = 1
-    _GOOGLE_CIRCUIT_COOLDOWN_S = 300.0
-    _GOOGLE_RATE_START = 0.8
-    _GOOGLE_RATE_MAX = 1.5
+    _GOOGLE_CIRCUIT_COOLDOWN_S = 1800.0
+    _GOOGLE_RATE_START = 0.3
+    _GOOGLE_RATE_MAX = 0.5
     _GOOGLE_RATE_MIN = 0.5
-    _GOOGLE_RATE_CAPACITY = 5.0
+    _GOOGLE_RATE_CAPACITY = 2.0
 
     _HEALTH_FAIL_THRESHOLD: ClassVar[int] = 2
     _HEALTH_SKIP_AFTER_SUCCESS_S: ClassVar[float] = 120.0
@@ -20461,6 +20461,7 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
 
     __slots__ = (
         "_api_cache",
+        "_argos_skip_logged_pairs",
         "_available",
         "_chunk_size",
         "_deep_disabled_until",
@@ -20487,8 +20488,10 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
         "_health_lock",
         "_health_stop_event",
         "_health_thread",
+        "_last_google_request_time",
         "_last_health_check_time",
         "_last_health_status",
+        "_last_real_translation_success_time",
         "_lock",
         "_max_chunks",
         "_max_delay",
@@ -20499,9 +20502,6 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
         "_translator",
         "debug_level",
         "default_target_lang",
-        "_argos_skip_logged_pairs",
-        "_last_google_request_time",
-        "_last_real_translation_success_time",
     )
 
     def __init__(
@@ -21140,8 +21140,7 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
         cut = -1
         for sep in (".", "!", "?", "。", "！", "？"):
             pos = window.rfind(sep)
-            if pos > cut:
-                cut = pos
+            cut = max(cut, pos)
 
         if cut < 100:
             space_pos = window.rfind(" ", max_input_len - 200, max_input_len)
@@ -23681,8 +23680,7 @@ class OllamaConfig:
 
     def get_timeout_backoff(self, attempt: int) -> float:
         """Berechnet die Wartezeit für einen Timeout-Retry."""
-        if attempt < 0:
-            attempt = 0
+        attempt = max(attempt, 0)
         try:
             return self.timeout_backoff_base**attempt
         except OverflowError:
@@ -23693,8 +23691,7 @@ class OllamaConfig:
 
         Formel: `min(retry_delay_max, retry_delay_base * 2 ** attempt)`.
         """
-        if attempt < 0:
-            attempt = 0
+        attempt = max(attempt, 0)
         try:
             _delay = self.retry_delay_base * (2**attempt)
         except OverflowError:
@@ -28353,7 +28350,7 @@ class TranscriptionEngine:
                 f"-> candidates={_display}",
             )
             if _excluded:
-                _excl_str = ", ".join(f"{l}({r})" for l, r in _excluded)
+                _excl_str = ", ".join(f"{lng}({r})" for lng, r in _excluded)
                 log_debug(
                     "language",
                     f"[LANG-CANDIDATES] ausgeschlossen: {_excl_str}",
@@ -35006,7 +35003,7 @@ class TranscriptionEngine:
                             )
                     return
 
-                langs = [l for l, _ in self._language_history]
+                langs = [lang for lang, _ in self._language_history]
                 confs = [c for _, c in self._language_history]
 
                 all_same = len(set(langs)) == 1
@@ -39331,8 +39328,8 @@ class YtDlpHelper:
         if not stderr or returncode == 0:
             return False
 
-        lines = [l for l in stderr.splitlines() if not l.lstrip().startswith("[debug]")]
-        error_lines = [l for l in lines if l.startswith(("ERROR:", "WARNING:"))]
+        lines = [ln for ln in stderr.splitlines() if not ln.lstrip().startswith("[debug]")]
+        error_lines = [ln for ln in lines if ln.startswith(("ERROR:", "WARNING:"))]
         error_text = "\n".join(error_lines) if error_lines else "\n".join(lines)
 
         if not error_text:
@@ -43193,7 +43190,7 @@ class StreamManager:
 
         return None
 
-    _VIDEO_ITAGS = {
+    _VIDEO_ITAGS: ClassVar[set[int]] = {
         18,
         22,
         37,
@@ -44379,10 +44376,10 @@ class FFmpegManager:
     WAIT_AFTER_KILL: float = 0.5
 
     _FORMAT_CACHE_TTL: float = 120.0
-    _format_cache: dict[str, str] = {}
-    _format_cache_time: dict[str, float] = {}
+    _format_cache: ClassVar[dict[str, str]] = {}
+    _format_cache_time: ClassVar[dict[str, float]] = {}
 
-    PIPE_PREFERRED_PLATFORMS: set[str] = {
+    PIPE_PREFERRED_PLATFORMS: ClassVar[set[str]] = {
         "youtube",
         "twitch",
         "kick",
@@ -44574,11 +44571,11 @@ class FFmpegManager:
             mit der Audio-Queue des Dispatchers), wird diese Queue direkt
             verwendet, statt eine neue zu erzeugen.
             """
-            import queue as queue_module
-            import time
-            import threading as _threading
-            from collections import deque
             import logging
+            import queue as queue_module
+            import threading as _threading
+            import time
+            from collections import deque
 
             _logger = logging.getLogger("dragon")
 
@@ -44736,8 +44733,8 @@ class FFmpegManager:
 
         def update_queue_metrics(self) -> None:
             """Aktualisiert Queue-Metriken und warnt bei Überlastung."""
-            import time
             import logging
+            import time
 
             _logger = logging.getLogger("dragon")
 
@@ -44797,8 +44794,8 @@ class FFmpegManager:
 
         def safe_put(self, data: bytes, timeout: float = 0.1) -> bool:
             """Sicheres put() mit Überlaufschutz."""
-            import queue as queue_module
             import logging
+            import queue as queue_module
 
             _logger = logging.getLogger("dragon")
 
@@ -44830,8 +44827,8 @@ class FFmpegManager:
             Audio-Queue des Dispatchers. Ein Clear würde dort laufende
             Verarbeitung zerstören. Daher: No-Op im Pipe-Modus.
             """
-            import queue as queue_module
             import logging
+            import queue as queue_module
 
             _logger = logging.getLogger("dragon")
 
@@ -47226,8 +47223,7 @@ class FFmpegManager:
             except Exception:
                 qsize = -1
 
-            if qsize > _queue_high_watermark:
-                _queue_high_watermark = qsize
+            _queue_high_watermark = max(_queue_high_watermark, qsize)
 
             if qsize > 0 or _chunks_seen > 0:
                 data_received = True
@@ -54420,7 +54416,7 @@ class FFmpegManager:
                 )
 
                 try:
-                    ready, _, _ = select.select([process.stderr], [], [], 0.5)
+                    _, _, _ = select.select([process.stderr], [], [], 0.5)
                 except (OSError, ValueError, InterruptedError) as e:
                     logger.warning(f"⏳ select fehlgeschlagen, fahre fort: {e}")
 
@@ -70320,7 +70316,7 @@ class QueueManager:
                 if q not in [qc[0] for qc in queue_configs]:
                     queue_configs.append((q, None, name, 0))
 
-        for queue, lock, name, _max_size in queue_configs:
+        for queue, lock, name, _max_size in queue_configs:  # noqa: F402
             if queue is None:
                 if debug:
                     log_debug(
@@ -80394,7 +80390,7 @@ class SummarizeDialog(BaseDialog):
             self._last_progress_update = now
 
         try:
-            clamped_value = int(round(float(value)))
+            clamped_value = round(float(value))
             clamped_value = max(0, min(100, clamped_value))
         except (ValueError, TypeError) as e:
             logger.warning(
@@ -84714,7 +84710,7 @@ class InstallPhase(Enum):
     CANCELLED = auto()
     ERROR = auto()
 
-    _ORDER = [
+    _ORDER: ClassVar[list] = [
         IDLE,
         PREPARING,
         INSTALLING_SYSTEM,
@@ -87155,7 +87151,7 @@ class InstallDependencyDialog(BaseDialog):
 
             available = _is_available(internal_name, module_name)
             self._previous_pkg_status[internal_name] = available
-            check_func = lambda mod=module_name: _check_module(mod)
+            check_func = functools.partial(_check_module, module_name)
             result.append((internal_name, display_name, check_func, install_name))
 
         self._cached_packages = result
@@ -87811,7 +87807,7 @@ class InstallDependencyDialog(BaseDialog):
 
                         now = datetime.datetime.now(datetime.UTC)
                     except AttributeError:
-                        now = datetime.datetime.utcnow()
+                        now = datetime.datetime.now(datetime.timezone.utc)
                     f.write(f"# Exported at {now.isoformat()}\n")
                     f.write(
                         f"# Total: {len(filtered_lines)} packages "
@@ -91673,10 +91669,10 @@ class InstallDependencyDialog(BaseDialog):
         """
         import logging
         import queue
+        import re
         import subprocess
         import threading
         import time
-        import re
 
         logger = logging.getLogger("dragon")
         debug_level = getattr(self, "debug_level", 0)
@@ -91817,7 +91813,7 @@ class InstallDependencyDialog(BaseDialog):
                 try:
                     line = out_queue.get_nowait()
                     stdout_lines.append(line)
-                    percent, clean_line = _parse_progress(line)
+                    percent, _ = _parse_progress(line)
                     if percent is not None and progress_callback:
                         now = time.time()
                         if (
@@ -91844,7 +91840,7 @@ class InstallDependencyDialog(BaseDialog):
                 try:
                     line = err_queue.get_nowait()
                     stderr_lines.append(line)
-                    percent, clean_line = _parse_progress(line)
+                    percent, _ = _parse_progress(line)
                     if percent is not None and progress_callback:
                         now = time.time()
                         if (
@@ -100539,6 +100535,190 @@ class AdvancedSettingsDialog:
             traceback.print_exc()
 
 
+class SaveOptionsDialog(BaseDialog):
+    """Dialog zur Auswahl von Inhalt + Format vor dem Speichern.
+
+    Wird von save_transcript (TXT/JSON/DOCX) und export_subtitles
+    (SRT/VTT/ASS) verwendet. Ergebnis nach close():
+      - result = {"content": "original"|"translation"|"both",
+                  "format": "txt"|"srt"|...}
+      - result = None  → Benutzer hat abgebrochen
+    """
+
+    MODE_TRANSCRIPT = "transcript"
+    MODE_SUBTITLE = "subtitle"
+
+    # Ergebnis nach close() – None = abgebrochen
+    result: dict | None = None
+
+    def __init__(
+        self,
+        parent: tk.Widget | tk.Tk,
+        title: str,
+        mode: str = "transcript",
+        has_original: bool = True,
+        has_translation: bool = True,
+    ) -> None:
+        self._mode = mode
+        self._has_original = has_original
+        self._has_translation = has_translation
+        self._content_var: tk.StringVar | None = None
+        self._format_var: tk.StringVar | None = None
+        self.result = None
+        super().__init__(parent, title, width=480, height=340, modal=True)
+
+    def build_ui(self) -> None:
+        theme = self._theme
+        bg = theme.BG_PRIMARY
+        fg = theme.TEXT_PRIMARY
+        fg_dim = theme.TEXT_SECONDARY
+        accent = theme.DRAGON_BLUE
+        border = theme.BORDER
+        card = theme.BG_CARD
+
+        main = tk.Frame(self.main, bg=bg)
+        main.pack(fill="both", expand=True, padx=20, pady=15)
+
+        # Titel
+        tk.Label(
+            main, text=self.title, bg=bg, fg=fg,
+            font=("Helvetica", 13, "bold"),
+        ).pack(anchor="w", pady=(0, 12))
+
+        # Inhalt-Sektion
+        tk.Label(
+            main, text="Inhalt:", bg=bg, fg=fg_dim,
+            font=("Helvetica", 10),
+        ).pack(anchor="w", pady=(0, 4))
+
+        content_frame = tk.Frame(
+            main, bg=card,
+            highlightthickness=1, highlightbackground=border,
+        )
+        content_frame.pack(fill="x", pady=(0, 14))
+
+        self._content_var = tk.StringVar(
+            value="original" if self._has_original else "translation"
+        )
+
+        self._add_radio(
+            content_frame, "Original (Chinesisch)", "original",
+            state=("normal" if self._has_original else "disabled"),
+            bg=card, fg=fg,
+        )
+        self._add_radio(
+            content_frame, "Übersetzung (Deutsch)", "translation",
+            state=("normal" if self._has_translation else "disabled"),
+            bg=card, fg=fg,
+        )
+
+        both_ok = self._has_original and self._has_translation
+        if self._mode == self.MODE_TRANSCRIPT:
+            both_label = "Beide (in einer Datei)"
+        else:
+            both_label = "Beide (in zwei Dateien)"
+
+        self._add_radio(
+            content_frame, both_label, "both",
+            state=("normal" if both_ok else "disabled"),
+            bg=card, fg=fg,
+        )
+
+        # Format-Sektion
+        tk.Label(
+            main, text="Format:", bg=bg, fg=fg_dim,
+            font=("Helvetica", 10),
+        ).pack(anchor="w", pady=(0, 4))
+
+        if self._mode == self.MODE_TRANSCRIPT:
+            formats = ["TXT", "JSON", "DOCX"]
+        else:
+            formats = ["SRT", "VTT", "ASS"]
+
+        self._format_var = tk.StringVar(value=formats[0])
+        combo = ttk.Combobox(
+            main, textvariable=self._format_var,
+            values=formats, state="readonly",
+            font=("Helvetica", 10),
+        )
+        combo.pack(fill="x", pady=(0, 20))
+
+        # Buttons unten
+        btn_frame = tk.Frame(main, bg=bg)
+        btn_frame.pack(fill="x", side="bottom")
+
+        tk.Button(
+            btn_frame, text="Weiter",
+            command=self._on_accept,
+            bg=accent, fg="white",
+            activebackground=accent, activeforeground="white",
+            relief="flat", bd=0, padx=22, pady=8, cursor="hand2",
+            font=("Helvetica", 10, "bold"),
+        ).pack(side="right")
+
+        tk.Button(
+            btn_frame, text="Abbrechen",
+            command=self._on_cancel,
+            bg=card, fg=fg,
+            activebackground=theme.BG_HOVER, activeforeground=fg,
+            relief="flat", bd=0, padx=22, pady=8, cursor="hand2",
+            font=("Helvetica", 10),
+        ).pack(side="right", padx=(0, 8))
+
+        # Tastatur
+        self.dialog.bind("<Escape>", lambda _e: self._on_cancel())
+        self.dialog.bind("<Return>", lambda _e: self._on_accept())
+
+    def _add_radio(
+        self, parent, text: str, value: str,
+        state: str, bg: str, fg: str,
+    ) -> None:
+        rb = tk.Radiobutton(
+            parent, text=text, value=value,
+            variable=self._content_var,
+            bg=bg, fg=fg,
+            activebackground=bg, activeforeground=fg,
+            selectcolor=bg, font=("Helvetica", 10),
+            anchor="w", padx=10, pady=6,
+            state=state, cursor="hand2",
+        )
+        rb.pack(fill="x")
+
+    def _on_accept(self) -> None:
+        try:
+            self.result = {
+                "content": self._content_var.get() if self._content_var else "original",
+                "format": (self._format_var.get().lower() if self._format_var else ""),
+            }
+        except Exception:
+            self.result = None
+        self.close()
+
+    def _on_cancel(self) -> None:
+        self.result = None
+        self.close()
+
+    @classmethod
+    def show(
+        cls,
+        parent: tk.Widget | tk.Tk,
+        title: str,
+        mode: str,
+        has_original: bool,
+        has_translation: bool,
+    ) -> dict | None:
+        """Zeigt den Dialog modal und gibt das Ergebnis zurück oder None."""
+        try:
+            dlg = cls(parent, title, mode, has_original, has_translation)
+        except Exception:
+            return None
+        try:
+            parent.wait_window(dlg.dialog)
+        except Exception:
+            pass
+        return dlg.result
+
+
 DRAGON_QUOTES = [
     "🐉 Der Drache ruht – die Welt atmet auf.",
     "🐲 Das heilige Ei bleibt unversehrt.",
@@ -101671,7 +101851,7 @@ class ExitConfirmDialog(BaseDialog):
         _base = getattr(self, "SHUTDOWN_TIMEOUT", 5.0)
         try:
             _base = float(_base)
-            if _base <= 0 or _base != _base:  # NaN-Check
+            if _base <= 0 or _base != _base:  # noqa: PLR0124  # NaN-Check
                 _base = 5.0
         except (TypeError, ValueError):
             _base = 5.0
@@ -106197,8 +106377,8 @@ class DragonWhispererGUI:
         Heuristik: laengster gemeinsamer Suffix(prev) == Praefix(new),
         min. 3 Woerter, max. 40. Nur wenn der neue Text laenger ist.
         """
-        import re as _re  # noqa: PLC0415
         import logging as _lg  # noqa: PLC0415
+        import re as _re  # noqa: PLC0415
         logger = _lg.getLogger("dragon")
 
         _MIN_WORDS = 3
@@ -106237,10 +106417,9 @@ class DragonWhispererGUI:
                     best = n
 
             if best == 0:
-                # ▼ NEU — Fix R1 (S14): Subset-Duplikat-Guard
                 if len(new_w) >= _MIN_WORDS and len(new_w) <= len(prev_w):
                     _n = len(new_w)
-                    for _i in range(0, len(prev_w) - _n + 1):
+                    for _i in range(len(prev_w) - _n + 1):
                         if prev_w[_i:_i + _n] == new_w:
                             logger.debug(
                                 "[OVERLAP-STRIP] slot=%s subset words=%d "
@@ -106254,9 +106433,13 @@ class DragonWhispererGUI:
 
             try:
                 matches = list(_WORD_RE.finditer(text))
-                if len(matches) < best:
+                if len(matches) <= best:
+                    logger.debug(
+                        "[OVERLAP-STRIP] slot=%s full-suffix words=%d new_text=%r",
+                        slot, best, " ".join(new_w[:8]),
+                    )
                     setattr(self, _ATTR, text)
-                    return text
+                    return ""
                 cut = matches[best].start()
                 stripped = text[cut:].lstrip(" ,.;:!?-–—")
             except Exception:
@@ -106390,7 +106573,6 @@ class DragonWhispererGUI:
             logger.exception(f"[{call_id}] Fehler beim Normalisieren: {e}")
             return
 
-        # ▼ NEU — Extended Debug S14: R2-Detector (Whisper-Intra-Repetition)
         try:
             _r2_w = cleaned.lower().split()
             _r2_hit = False
@@ -106450,11 +106632,7 @@ class DragonWhispererGUI:
 
         if _dedup_ttl > 0:
             try:
-                _dedup_key = (
-                    cleaned,
-                    round(start, 2) if start is not None else None,
-                    round(end, 2) if end is not None else None,
-                )
+                _dedup_key = (cleaned,)
 
                 if not hasattr(self, "_tx_text_dedup_cache"):
                     self._tx_text_dedup_cache: dict = {}
@@ -106497,7 +106675,6 @@ class DragonWhispererGUI:
                         f"({type(_de).__name__}: {_de}) – fahre fort"
                     )
 
-        # ▼ NEU — Fix P: Overlap-Praefix an Chunk-Grenzen entfernen
         try:
             cleaned = self._strip_chunk_overlap_prefix(
                 cleaned, slot="transcript",
@@ -107487,7 +107664,6 @@ class DragonWhispererGUI:
                 def _force_exit_after_timeout() -> None:
                     """Notausgang: beendet den Prozess, wenn der Shutdown hängt."""
                     time.sleep(_wd_timeout)
-                    # S16-W3: letzte Chance für SESSION-END vor Hard-Exit.
                     with contextlib.suppress(Exception):
                         log_ai("SESSION-END", reason="watchdog_hard")
                     with contextlib.suppress(Exception):
@@ -108888,11 +109064,6 @@ class DragonWhispererGUI:
                 ap._translation_semaphore = threading.Semaphore(1)
                 logger.info("⚙️ CPU‑Modus: Übersetzungs‑Semaphor auf 1 begrenzt")
 
-        # CPU-Mode überschreibt fallback_source_language NICHT. Die Fallback-
-        # Sprache ist eine semantische Nutzer-Einstellung, kein Performance-
-        # Parameter. Ein erzwungener 'en'-Fallback produziert Whisper-
-        # Halluzinationen auf CJK/Telugu-Streams (siehe Patch 5: Fix für
-        # _get_language_candidates, Zeile 28148).
         if DEBUG_LEVEL >= 3 and hasattr(adv, "fallback_source_language"):
             logger.debug(
                 "⚙️ CPU‑Modus: Fallback‑Sprache bleibt '%s' (kein Override)",
@@ -111004,7 +111175,7 @@ class DragonWhispererGUI:
             return f"{h:d}:{m:02d}:{sec:06.3f}"
         return f"{m:02d}:{sec:06.3f}"
 
-    _LANG_FLAG_MAP: dict[str, str] = {
+    _LANG_FLAG_MAP: ClassVar[dict[str, str]] = {
         "de": "🇩🇪",
         "en": "🇬🇧",
         "fr": "🇫🇷",
@@ -111163,8 +111334,7 @@ class DragonWhispererGUI:
             elif (
                 start_f is not None
                 and end_f is not None
-                and end_f > start_f
-                and start_f >= 0.0
+                and end_f > start_f >= 0.0
             ):
                 prefix = (
                     f"[{self._format_timestamp(start_f)}"
@@ -112658,11 +112828,11 @@ class DragonWhispererGUI:
         target_lang: str,
     ) -> tuple[bool, str | None]:
         """🧠 AUDIOPROCESSOR-START – optimierte Version ohne toten Code."""
+        import contextlib
         import logging
         import os
         import threading
         import time
-        import contextlib
         from collections import deque
 
         logger = logging.getLogger("dragon")
@@ -113011,10 +113181,10 @@ class DragonWhispererGUI:
 
     def start_processing(self, url: str | None = None) -> None:
         """Startet die Audio-Verarbeitung mit der neuen AudioProcessor-Startlogik."""
+        import contextlib
         import logging
         import threading
         import time
-        import contextlib
 
         logger = logging.getLogger("dragon")
         debug_level = getattr(self, "debug_level", 0)
@@ -113310,12 +113480,15 @@ class DragonWhispererGUI:
         with self._blacklist_cache_lock:
             regex = self._blacklist_regex_cache.get(cache_key)
             if regex is None:
+                _sorted_bl = sorted(
+                    (p for p in blacklist if p), key=len, reverse=True
+                )
                 if effective_mode == "word":
                     pattern = (
-                        r"\b(" + "|".join(re.escape(p) for p in blacklist if p) + r")\b"
+                        r"\b(" + "|".join(re.escape(p) for p in _sorted_bl) + r")\b"
                     )
                 else:
-                    pattern = "(" + "|".join(re.escape(p) for p in blacklist if p) + ")"
+                    pattern = "(" + "|".join(re.escape(p) for p in _sorted_bl) + ")"
                 try:
                     regex = re.compile(pattern, re.IGNORECASE)
                 except re.error as e:
@@ -113329,6 +113502,28 @@ class DragonWhispererGUI:
                 if len(self._blacklist_regex_cache) > 10:
                     oldest_key = next(iter(self._blacklist_regex_cache))
                     del self._blacklist_regex_cache[oldest_key]
+
+        text = re.sub(r"\s+", " ", text)
+        # NEU: Credit-Prefix-Match — wenn der Text mit einem bekannten
+        # Credit-Marker beginnt, ist der Rest ein Name/Vereinsname und
+        # die GESAMTE Zeile ist ein Credit.
+        _CREDIT_PREFIXES = (
+            "字幕志愿者", "翻译志愿者", "校对志愿者", "时间轴志愿者",
+            "字幕组", "字幕by", "字幕 by",
+            "Субтитры создавал", "Субтитры сделал", "Субтитры сделала",
+            "Untertitel von", "Untertitelung von",
+            "Subtitle Volunteer", "Subtitles by", "Subtitle by",
+            "Transcription by",
+            "请不吝点赞", "打赏支持", "Mingjing",
+        )
+        _text_stripped = text.strip()
+        if any(_text_stripped.startswith(_p) for _p in _CREDIT_PREFIXES):
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "blacklist",
+                    f"Credit-Prefix verworfen: '{_text_stripped[:60]}'",
+                )
+            return None
 
         cleaned = regex.sub("", text)
         cleaned = re.sub(r"\s+", " ", cleaned)
@@ -114780,8 +114975,7 @@ class DragonWhispererGUI:
                             try:
                                 _cur = _title_label.cget("text") or ""
                                 for _sfx in (_SUFFIX_TITLE, "   ⏹"):
-                                    if _cur.endswith(_sfx):
-                                        _cur = _cur[: -len(_sfx)]
+                                    _cur = _cur.removesuffix(_sfx)
                                 _title_label.config(
                                     text=_cur + _SUFFIX_TITLE,
                                     foreground="#808080",
@@ -114802,8 +114996,7 @@ class DragonWhispererGUI:
                             try:
                                 _cur = _details_label.cget("text") or ""
                                 for _sfx in (_SUFFIX_DETAILS, "   •"):
-                                    if _cur.endswith(_sfx):
-                                        _cur = _cur[: -len(_sfx)]
+                                    _cur = _cur.removesuffix(_sfx)
                                 _details_label.config(
                                     text=_cur + _SUFFIX_DETAILS,
                                     foreground="#808080",
@@ -117159,9 +117352,97 @@ class DragonWhispererGUI:
         self._last_translation_text = ""
         self.update_status("🗑️ Cleared & optimizations reset")
 
+    def _prepare_subtitle_data(
+        self, segments: list[Any], mode: str = "individual",
+    ) -> list[Any]:
+        """Filtert Segment-Listen für den Export.
+
+        mode='individual':  Nur granulare Einzelsegmente (für SRT/VTT)
+        mode='aggregated':  Aggregate + freistehende Segmente (für TXT)
+        """
+        if not segments:
+            return []
+        try:
+            sorted_segs = sorted(
+                segments,
+                key=lambda s: (
+                    getattr(s, "start", 0.0) or 0.0,
+                    -(getattr(s, "end", 0.0) or 0.0),
+                ),
+            )
+        except Exception:
+            return segments
+
+        containers: set[int] = set()
+        contained: set[int] = set()
+        for i, seg_a in enumerate(sorted_segs):
+            a_start = getattr(seg_a, "start", None)
+            a_end = getattr(seg_a, "end", None)
+            a_text = getattr(seg_a, "text", "") or ""
+            if a_start is None or a_end is None:
+                continue
+            count = 0
+            for j, seg_b in enumerate(sorted_segs):
+                if i == j:
+                    continue
+                b_start = getattr(seg_b, "start", None)
+                b_end = getattr(seg_b, "end", None)
+                b_text = getattr(seg_b, "text", "") or ""
+                if b_start is None or b_end is None:
+                    continue
+                if (
+                    a_start <= b_start
+                    and a_end >= b_end
+                    and len(a_text) > len(b_text) + 5
+                ):
+                    count += 1
+                    contained.add(id(seg_b))
+            if count >= 2:
+                containers.add(id(seg_a))
+
+        if mode == "individual":
+            return [s for s in sorted_segs if id(s) not in containers]
+        if mode == "aggregated":
+            return [
+                s for s in sorted_segs
+                if id(s) in containers or id(s) not in contained
+            ]
+        return sorted_segs
+
+    def _save_as_text(self, filename: str, segments: list[Any]) -> bool:
+        """Schreibt eine TXT-Datei aus Segmenten (nicht GUI-Widgets)."""
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                if self.current_stream_info:
+                    f.write("=== STREAM INFORMATION ===\n")
+                    f.write(f"Title: {self.current_stream_info.title}\n")
+                    f.write(f"Uploader: {self.current_stream_info.uploader}\n")
+                    f.write(f"Duration: {self.current_stream_info.duration}\n")
+                    f.write(f"Platform: {self.current_stream_info.platform}\n")
+                    f.write(
+                        f"Saved at: {
+                            datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')
+                        }\n\n",
+                    )
+                f.write("=== TRANSCRIPT ===\n")
+                for seg in segments:
+                    start = getattr(seg, "start", None)
+                    end = getattr(seg, "end", None)
+                    text = getattr(seg, "text", "") or ""
+                    if start is not None and end is not None:
+                        s = self.export_manager._format_timestamp_srt(start)
+                        e = self.export_manager._format_timestamp_srt(end)
+                        f.write(f"[{s} → {e}] {text}\n")
+                    else:
+                        f.write(f"{text}\n")
+            return True
+        except Exception:
+            return False
+
+
     @gui_operation_decorator
     def save_transcript(self) -> None:
-        """Speichert Transkription (und optional Übersetzung) in gewähltem Format."""
+        """Speichert Transkription/Übersetzung mit vorheriger Auswahl."""
         import logging
 
         _log = logging.getLogger("dragon")
@@ -117183,37 +117464,30 @@ class DragonWhispererGUI:
                     _timed_t = list(getattr(_ap, "_timed_transcriptions", []) or [])
                     _timed_tr = list(getattr(_ap, "_timed_translations", []) or [])
 
-        _log.info(
-            "[SAVE] save_transcript aufgerufen | "
-            "history_t=%d history_tr=%d timed_t=%d timed_tr=%d "
-            "subtitle_mode=%s",
-            len(_hist_t),
-            len(_hist_tr),
-            len(_timed_t),
-            len(_timed_tr),
-            getattr(self, "subtitle_mode", "?"),
-        )
-
         _src_t: list[Any] = _hist_t
         _src_tr: list[Any] = _hist_tr
         _src_origin = "history"
         if not _src_t and _timed_t:
             _src_t = _timed_t
             _src_origin = "timed"
-            _log.info(
-                "[SAVE] transcript_history leer – "
-                "Fallback auf _timed_transcriptions (%d Einträge)",
-                len(_timed_t),
-            )
         if not _src_tr and _timed_tr:
             _src_tr = _timed_tr
+        if not _src_t and _ap is not None:
+            _snap_t = list(getattr(_ap, "_last_session_transcriptions", []) or [])
+            _snap_tr = list(getattr(_ap, "_last_session_translations", []) or [])
+            if _snap_t:
+                _src_t = _snap_t
+                _src_tr = _snap_tr
+                _src_origin = "session_snapshot"
+
+        _log.info(
+            "[SAVE] save_transcript | history_t=%d history_tr=%d "
+            "timed_t=%d timed_tr=%d src_t=%d src_tr=%d quelle=%s",
+            len(_hist_t), len(_hist_tr), len(_timed_t), len(_timed_tr),
+            len(_src_t), len(_src_tr), _src_origin,
+        )
 
         if not _src_t:
-            _log.warning(
-                "[SAVE] Keine Transkription verfügbar "
-                "(history=0, timed=%d) – zeige Warnung",
-                len(_timed_t),
-            )
             DarkMessageBox.showinfo(
                 "WARNING",
                 "No transcriptions available to save.",
@@ -117221,82 +117495,128 @@ class DragonWhispererGUI:
             )
             return
 
+        has_original = len(_src_t) > 0
+        has_translation = len(_src_tr) > 0
+        opts = SaveOptionsDialog.show(
+            parent=self.root,
+            title="Transkription speichern",
+            mode=SaveOptionsDialog.MODE_TRANSCRIPT,
+            has_original=has_original,
+            has_translation=has_translation,
+        )
+        if not opts:
+            _log.info("[SAVE] Dialog abgebrochen")
+            return
+
+        content = opts.get("content", "original")
+        fmt = opts.get("format", "txt")
+
         base_name = self._get_safe_filename()
-        suggested = f"{base_name}_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.txt"
-        _log.info(
-            "[SAVE] Datei-Dialog öffnet (suggested=%s, quelle=%s)",
-            suggested,
-            _src_origin,
+        suggested = (
+            f"{base_name}_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.{fmt}"
         )
-
+        filter_map = {
+            "txt": [("Text files", "*.txt")],
+            "json": [("JSON files", "*.json")],
+            "docx": [("Word document", "*.docx")],
+        }
         filename = filedialog.asksaveasfilename(
-            defaultextension=".txt",
+            defaultextension=f".{fmt}",
             initialfile=suggested,
-            filetypes=[
-                ("Text files", "*.txt"),
-                ("SRT subtitles", "*.srt"),
-                ("WebVTT", "*.vtt"),
-                ("JSON", "*.json"),
-                ("Word document", "*.docx"),
-            ],
+            filetypes=filter_map.get(fmt, [("Alle Dateien", "*.*")]),
         )
-
         if not filename:
             _log.info("[SAVE] Datei-Dialog abgebrochen")
             return
 
-        ext = Path(filename).suffix.lower()
-        _log.info(
-            "[SAVE] Datei gewählt: %s | ext=%s, trans=%d, transl=%d",
-            filename,
-            ext or "(keine)",
-            len(_src_t),
-            len(_src_tr),
-        )
+        # Inhalte aufbereiten
+        _t_use = self._prepare_subtitle_data(_src_t, mode="aggregated")
+        _tr_use = self._prepare_subtitle_data(_src_tr, mode="aggregated")
+
+        # Bei "translation" nur: Original-Text durch Übersetzung ersetzen
+        if content == "translation":
+            _t_use = [
+                type(s)(
+                    text=getattr(s, "text", ""),
+                    translated=None,
+                    start=getattr(s, "start", None),
+                    end=getattr(s, "end", None),
+                    source_lang=getattr(s, "source_lang", ""),
+                    target_lang=getattr(s, "target_lang", ""),
+                ) if False else s
+                for s in _t_use
+            ]
+            # Einfacher: schreibe Übersetzung in eigenem Pfad
+            _write_transl_only = True
+        else:
+            _write_transl_only = False
 
         success = False
         try:
-            if ext == ".srt":
-                success = self.export_manager.export_subtitles(
-                    _src_t,
-                    _src_tr or None,
-                    "srt",
-                    filename,
-                )
-            elif ext == ".vtt":
-                success = self.export_manager.export_subtitles(
-                    _src_t,
-                    _src_tr or None,
-                    "vtt",
-                    filename,
-                )
-            elif ext == ".json":
-                success = self.export_manager.export_json(
-                    _src_t,
-                    _src_tr,
-                    filename,
-                )
-            elif ext == ".docx":
-                success = self.export_manager.export_docx(
-                    _src_t,
-                    filename,
-                )
-            else:
-                success = self._save_as_text(filename)
+            if fmt == "json":
+                if _write_transl_only:
+                    data = self.export_manager._build_json_data(
+                        [], _tr_use,
+                    )
+                elif content == "both":
+                    data = self.export_manager._build_json_data(
+                        _t_use, _tr_use,
+                    )
+                else:
+                    data = self.export_manager._build_json_data(_t_use, None)
+                with open(filename, "w", encoding="utf-8") as f:
+                    import json as _json
+                    _json.dump(data, f, ensure_ascii=False, indent=2)
+                success = True
+            elif fmt == "docx":
+                if _write_transl_only:
+                    success = self.export_manager.export_docx(_tr_use, filename)
+                else:
+                    success = self.export_manager.export_docx(_t_use, filename)
+            else:  # txt
+                if _write_transl_only:
+                    with open(filename, "w", encoding="utf-8") as f:
+                        f.write("=== TRANSLATION ===\n")
+                        for seg in _tr_use:
+                            start = getattr(seg, "start", None)
+                            end = getattr(seg, "end", None)
+                            text = getattr(seg, "translated", "") or getattr(seg, "text", "")
+                            if start is not None and end is not None:
+                                s = self.export_manager._format_timestamp_srt(start)
+                                e = self.export_manager._format_timestamp_srt(end)
+                                f.write(f"[{s} → {e}] [Deu] {text}\n")
+                            else:
+                                f.write(f"[Deu] {text}\n")
+                    success = True
+                elif content == "both":
+                    with open(filename, "w", encoding="utf-8") as f:
+                        if self.current_stream_info:
+                            f.write("=== STREAM INFORMATION ===\n")
+                            f.write(f"Title: {self.current_stream_info.title}\n")
+                            f.write(f"Uploader: {self.current_stream_info.uploader}\n")
+                            f.write(f"Duration: {self.current_stream_info.duration}\n\n")
+                        f.write("=== TRANSCRIPT + TRANSLATION ===\n")
+                        for i, seg in enumerate(_t_use):
+                            start = getattr(seg, "start", None)
+                            end = getattr(seg, "end", None)
+                            text = getattr(seg, "text", "") or ""
+                            if start is not None and end is not None:
+                                s = self.export_manager._format_timestamp_srt(start)
+                                e = self.export_manager._format_timestamp_srt(end)
+                                f.write(f"[{s} → {e}] {text}\n")
+                            else:
+                                f.write(f"{text}\n")
+                            if i < len(_tr_use):
+                                tr_text = getattr(_tr_use[i], "translated", "") or ""
+                                if tr_text:
+                                    f.write(f"           [Deu] {tr_text}\n")
+                            f.write("\n")
+                    success = True
+                else:  # nur Original
+                    success = self._save_as_text(filename, _t_use)
         except Exception as _exc:
-            _log.exception(
-                "[SAVE] Export-Exception (%s): %s",
-                type(_exc).__name__,
-                _exc,
-            )
+            _log.exception("[SAVE] Export-Exception: %s", _exc)
             success = False
-
-        _log.info(
-            "[SAVE] Ergebnis: success=%s, file=%s, bytes_written=%s",
-            success,
-            os.path.basename(filename),
-            Path(filename).stat().st_size if Path(filename).exists() else "–",
-        )
 
         if success:
             self.update_status(f"💾 Saved: {os.path.basename(filename)}")
@@ -117305,37 +117625,20 @@ class DragonWhispererGUI:
             with contextlib.suppress(Exception):
                 DarkMessageBox.showinfo(
                     "ERROR",
-                    f"Export failed for {os.path.basename(filename)}.\n"
-                    "See log for details.",
+                    f"Export failed for {os.path.basename(filename)}.",
                     self.root,
                 )
-
         with contextlib.suppress(Exception):
             log_ai(
                 "SAVE-TRANSCRIPT",
                 source=_src_origin,
-                fmt=ext or "txt",
-                trans=len(_src_t),
-                transl=len(_src_tr),
+                fmt=fmt,
+                content=content,
+                trans=len(_t_use),
+                transl=len(_tr_use),
                 ok=int(success),
             )
 
-        if _dbg >= 2:
-            _log.debug(
-                "[SAVE] Detail: history_t=%d history_tr=%d "
-                "timed_t=%d timed_tr=%d src_t=%d src_tr=%d "
-                "ap_id=%s lock=%s",
-                len(_hist_t),
-                len(_hist_tr),
-                len(_timed_t),
-                len(_timed_tr),
-                len(_src_t),
-                len(_src_tr),
-                id(_ap) if _ap is not None else "None",
-                type(getattr(_ap, "_subtitle_lock", None)).__name__
-                if _ap is not None
-                else "–",
-            )
 
     def _get_safe_filename(self) -> str:
         if self.current_stream_info and self.current_stream_info.title:
@@ -117368,46 +117671,451 @@ class DragonWhispererGUI:
         except Exception:
             return False
 
+    def _write_subtitle_file(
+        self,
+        filename: str,
+        transcript_segments: list,
+        translation_segments: list,
+        fmt: str,
+        content_mode: str,
+        *,
+        max_chars_per_line: int = 42,
+        min_duration_ms: int = 500,
+        max_duration_ms: int = 10000,
+        gap_ms: int = 40,
+        trim_overlaps: bool = True,
+        enforce_min_duration: bool = True,
+        wrap_lines: bool = True,
+        atomic_write: bool = True,
+        encoding: str = "utf-8-sig",
+    ) -> bool:
+        """Schreibt eine Untertiteldatei (srt/vtt/ass) mit optimierter Ausgabe.
+
+        content_mode:
+            "original"    → nur Transkription
+            "translation" → nur Übersetzung (bevorzugt deren Timestamps)
+            "both"        → beide (Original + Übersetzung)
+        """
+        import logging as _lg
+        import os as _os
+        import tempfile as _tempfile
+        _log = _lg.getLogger("dragon")
+
+        if fmt not in ("srt", "vtt", "ass"):
+            _log.error("[SUBTITLE] Unbekanntes Format: %s", fmt)
+            return False
+        if content_mode not in ("original", "translation", "both"):
+            _log.error("[SUBTITLE] Unbekannter content_mode: %s", content_mode)
+            return False
+
+        # ── Hilfsfunktionen ────────────────────────────────────────────
+        def _seg_sec(seg, attr):
+            if seg is None:
+                return None
+            v = getattr(seg, attr, None)
+            try:
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        def _seg_text(seg, attr):
+            if seg is None:
+                return ""
+            v = getattr(seg, attr, "") or ""
+            return str(v).strip()
+
+        # ── 1. Kandidaten sammeln ──────────────────────────────────────
+        n = max(len(transcript_segments or []), len(translation_segments or []))
+        candidates: list[dict] = []
+        for i in range(n):
+            t = transcript_segments[i] if i < len(transcript_segments or []) else None
+            tr = translation_segments[i] if i < len(translation_segments or []) else None
+
+            # Timestamps: bei "translation" bevorzugt Übersetzung
+            if content_mode == "translation":
+                start = _seg_sec(tr, "start")
+                end = _seg_sec(tr, "end")
+                if start is None:
+                    start = _seg_sec(t, "start")
+                    end = _seg_sec(t, "end") if end is None else end
+            else:
+                start = _seg_sec(t, "start")
+                end = _seg_sec(t, "end")
+                if start is None:
+                    start = _seg_sec(tr, "start")
+                    end = _seg_sec(tr, "end") if end is None else end
+
+            if start is None:
+                continue
+            if end is None or end <= start:
+                end = start + 0.5
+
+            orig_text = _seg_text(t, "text") if t is not None else ""
+            tr_text = _seg_text(tr, "translated") if tr is not None else ""
+            if not tr_text and tr is not None:
+                tr_text = _seg_text(tr, "text")
+
+            parts: list[str] = []
+            if content_mode in ("original", "both") and orig_text:
+                parts.append(orig_text)
+            if content_mode in ("translation", "both") and tr_text:
+                parts.append(tr_text)
+            if not parts:
+                continue
+
+            candidates.append({
+                "start": max(0.0, start),
+                "end": max(0.0, end),
+                "text_parts": parts,
+            })
+
+        if not candidates:
+            _log.warning("[SUBTITLE] Keine nicht-leeren Segmente zum Schreiben")
+            return False
+
+        # ── 2. Sortieren ───────────────────────────────────────────────
+        candidates.sort(key=lambda c: (c["start"], c["end"]))
+
+        # ── 3. Überlappungen entzerren ─────────────────────────────────
+        if trim_overlaps:
+            gap_s = max(0.001, gap_ms / 1000.0)
+            for i in range(len(candidates) - 1):
+                a = candidates[i]
+                b = candidates[i + 1]
+                if a["end"] > b["start"] - gap_s:
+                    new_end = max(a["start"] + 0.05, b["start"] - gap_s)
+                    if new_end < a["end"]:
+                        a["end"] = new_end
+
+        # ── 4. Mindest-/Maximaldauer ───────────────────────────────────
+        min_s = max(0.0, min_duration_ms / 1000.0)
+        max_s = max(0.0, max_duration_ms / 1000.0)
+        for i, c in enumerate(candidates):
+            if enforce_min_duration and (c["end"] - c["start"]) < min_s:
+                target = c["start"] + min_s
+                if i + 1 < len(candidates):
+                    target = min(target, candidates[i + 1]["start"] - 0.001)
+                if target > c["end"]:
+                    c["end"] = target
+            if max_s > 0 and (c["end"] - c["start"]) > max_s:
+                c["end"] = c["start"] + max_s
+
+        # ── 5. Text-Wrapping ───────────────────────────────────────────
+        def _wrap(text: str) -> str:
+            if not wrap_lines or max_chars_per_line <= 0 or not text:
+                return text
+            import textwrap as _tw
+            out: list[str] = []
+            for raw in text.split("\n"):
+                if len(raw) <= max_chars_per_line:
+                    out.append(raw)
+                else:
+                    wrapped = _tw.wrap(
+                        raw, width=max_chars_per_line,
+                        break_long_words=True, break_on_hyphens=False,
+                    )
+                    out.extend(wrapped or [raw])
+            return "\n".join(out)
+
+        for c in candidates:
+            c["text_final"] = "\n".join(_wrap(p) for p in c["text_parts"])
+
+        # ── 6. Zeitstempel-Formatter ───────────────────────────────────
+        def _carry(h, m, s, ms):
+            if ms >= 1000:
+                ms = 999
+            return h, m, s, ms
+
+        def _fmt_srt(sec: float) -> str:
+            if sec < 0:
+                sec = 0.0
+            h = int(sec // 3600)
+            m = int((sec % 3600) // 60)
+            s = int(sec % 60)
+            ms = int(round((sec - int(sec)) * 1000))
+            h, m, s, ms = _carry(h, m, s, ms)
+            return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+        def _fmt_vtt(sec: float) -> str:
+            return _fmt_srt(sec).replace(",", ".")
+
+        def _fmt_ass(sec: float) -> str:
+            if sec < 0:
+                sec = 0.0
+            h = int(sec // 3600)
+            m = int((sec % 3600) // 60)
+            s = int(sec % 60)
+            cs = int(round((sec - int(sec)) * 100))
+            if cs >= 100:
+                cs = 99
+            return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
+
+        # ── 7. Body erzeugen ───────────────────────────────────────────
+        if fmt == "srt":
+            body = "\n".join(
+                f"{i}\n{_fmt_srt(c['start'])} --> {_fmt_srt(c['end'])}\n"
+                f"{c['text_final']}\n"
+                for i, c in enumerate(candidates, start=1)
+            )
+        elif fmt == "vtt":
+            body = "WEBVTT\n\n" + "\n".join(
+                f"{_fmt_vtt(c['start'])} --> {_fmt_vtt(c['end'])}\n"
+                f"{c['text_final']}\n"
+                for c in candidates
+            )
+        else:  # ass
+            header = (
+                "[Script Info]\n"
+                "ScriptType: v4.00+\n"
+                "PlayResX: 1920\n"
+                "PlayResY: 1080\n"
+                "WrapStyle: 0\n"
+                "ScaledBorderAndShadow: yes\n"
+                "YCbCr Matrix: TV.709\n"
+                "\n"
+                "[V4+ Styles]\n"
+                "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+                "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+                "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+                "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+                "Style: Default,Arial,54,&H00FFFFFF,&H000000FF,&H00000000,"
+                "&H80000000,-1,0,0,0,100,100,0,0,1,2,1,2,40,40,40,1\n"
+                "\n"
+                "[Events]\n"
+                "Format: Layer, Start, End, Style, Name, MarginL, MarginR, "
+                "MarginV, Effect, Text\n"
+            )
+            lines: list[str] = []
+            for c in candidates:
+                txt = c["text_final"].replace("{", "\\{").replace("}", "\\}")
+                txt = txt.replace("\n", "\\N")
+                lines.append(
+                    f"Dialogue: 0,{_fmt_ass(c['start'])},{_fmt_ass(c['end'])},"
+                    f"Default,,0,0,0,,{txt}"
+                )
+            body = header + "\n".join(lines) + "\n"
+
+        if atomic_write:
+            d = _os.path.dirname(_os.path.abspath(filename)) or "."
+            fd = None
+            tmp = None
+            try:
+                fd, tmp = _tempfile.mkstemp(
+                    prefix=_os.path.basename(filename) + ".",
+                    suffix=".tmp", dir=d,
+                )
+                with _os.fdopen(fd, "w", encoding=encoding, newline="\n") as f:
+                    f.write(body)
+                _os.replace(tmp, filename)
+                fd = None
+                tmp = None
+            except Exception as exc:
+                _log.exception("[SUBTITLE] Atomares Schreiben fehlgeschlagen: %s", exc)
+                if tmp:
+                    with contextlib.suppress(Exception):
+                        _os.unlink(tmp)
+                try:
+                    with open(filename, "w", encoding=encoding, newline="\n") as f:
+                        f.write(body)
+                except Exception as exc2:
+                    _log.exception("[SUBTITLE] Direktes Schreiben fehlgeschlagen: %s", exc2)
+                    return False
+        else:
+            try:
+                with open(filename, "w", encoding=encoding, newline="\n") as f:
+                    f.write(body)
+            except Exception as exc:
+                _log.exception("[SUBTITLE] Schreiben fehlgeschlagen: %s", exc)
+                return False
+
+        _log.info(
+            "[SUBTITLE] ✅ %s geschrieben: %s | %d Einträge, content=%s, "
+            "bytes=%d, encoding=%s",
+            fmt.upper(), _os.path.basename(filename),
+            len(candidates), content_mode, len(body.encode(encoding)), encoding,
+        )
+        return True
+
+
+    @gui_operation_decorator
     def export_subtitles(self) -> None:
-        if (
-            not hasattr(self, "audio_processor")
-            or not self.audio_processor._timed_transcriptions
-        ):
+        """Exportiert Untertitel mit vorheriger Auswahl (Inhalt + Format)."""
+        import logging as _lg
+        _log = _lg.getLogger("dragon")
+
+        _ap = getattr(self, "audio_processor", None)
+        if _ap is None:
+            DarkMessageBox.showinfo(
+                "WARNING",
+                "Kein AudioProcessor aktiv.",
+                self.root,
+            )
+            return
+
+        with contextlib.suppress(Exception):
+            with _ap._subtitle_lock:
+                _timed_t = list(_ap._timed_transcriptions)
+                _timed_tr = list(_ap._timed_translations)
+        if not _timed_t and not _timed_tr:
+            _timed_t = list(getattr(_ap, "_last_session_transcriptions", []) or [])
+            _timed_tr = list(getattr(_ap, "_last_session_translations", []) or [])
+
+        if not _timed_t and not _timed_tr:
             DarkMessageBox.showinfo(
                 "WARNING",
                 "No subtitle data available.\nActivate '🎬 Subtitle mode' first.",
                 self.root,
             )
             return
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".srt",
-            filetypes=[("SRT subtitles", "*.srt"), ("VTT subtitles", "*.vtt")],
+
+        has_original = len(_timed_t) > 0
+        has_translation = len(_timed_tr) > 0
+
+        opts = SaveOptionsDialog.show(
+            parent=self.root,
+            title="Untertitel exportieren",
+            mode=SaveOptionsDialog.MODE_SUBTITLE,
+            has_original=has_original,
+            has_translation=has_translation,
         )
-        if not filename:
+        if not opts:
+            _log.info("[SUBTITLE] Dialog abgebrochen")
             return
-        ext = Path(filename).suffix.lower()
-        fmt = "srt" if ext == ".srt" else "vtt"
-        with self.audio_processor._subtitle_lock:
-            timed_trans = list(self.audio_processor._timed_transcriptions)
-            timed_transl = list(self.audio_processor._timed_translations)
-        if self.export_manager.export_subtitles(
-            timed_trans,
-            timed_transl,
-            format=fmt,
-            filename=filename,
-        ):
-            self.update_status(
-                f"📝 {fmt.upper()} exported: {os.path.basename(filename)}",
+
+        content = opts.get("content", "original")
+        fmt = opts.get("format", "srt")
+        _log.info("[SUBTITLE] Auswahl: content=%s, fmt=%s", content, fmt)
+
+        def _filter_export_segs(_segs, _lang_hint):
+            try:
+                return _filter_export_segs_inner(_segs, _lang_hint)
+            except Exception as _e:
+                try:
+                    logger.warning(
+                        "[SUBTITLE] Filter-Fehler, Export ohne Filter: %s", _e,
+                    )
+                except Exception:
+                    pass
+                return _segs
+
+        def _filter_export_segs_inner(_segs, _lang_hint):
+            if not _segs:
+                return _segs
+            _ff = getattr(self, "_filter_blacklist_text", None)
+            _out = []
+            _dropped = 0
+            for _s in _segs:
+                _t = getattr(_s, "text", "") or ""
+                if not _t.strip():
+                    _out.append(_s)
+                    continue
+                _norm = (
+                    _t.lower()
+                    .replace("\u2019", "'").replace("\u2018", "'")
+                    .rstrip(".!?,;:…").strip()
+                )
+                if _norm in _WHISPER_HALLUCINATION_PHRASES:
+                    _dropped += 1
+                    continue
+                if callable(_ff):
+                    try:
+                        _r = _ff(_t, _lang_hint)
+                    except Exception:
+                        _out.append(_s)
+                        continue
+                    if _r is None or not str(_r).strip():
+                        _dropped += 1
+                        continue
+                _out.append(_s)
+            if _dropped:
+                try:
+                    logger.info(
+                        "[SUBTITLE] %d Segmente durch Blacklist/Hallu "
+                        "gefiltert (lang=%s)",
+                        _dropped, _lang_hint,
+                    )
+                except Exception:
+                    pass
+            return _out
+
+        t_use = self._prepare_subtitle_data(
+            _filter_export_segs(_timed_t, "zh"), mode="individual",
+        )
+        tr_use = self._prepare_subtitle_data(
+            _filter_export_segs(_timed_tr, "de"), mode="individual",
+        )
+
+        base_name = self._get_safe_filename()
+        suggested = (
+            f"{base_name}_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.{fmt}"
+        )
+        filter_map = {
+            "srt": [("SRT subtitles", "*.srt")],
+            "vtt": [("WebVTT subtitles", "*.vtt")],
+            "ass": [("ASS subtitles", "*.ass")],
+        }
+
+        if content == "both" and has_original and has_translation:
+            base = filedialog.asksaveasfilename(
+                defaultextension=f".{fmt}",
+                initialfile=suggested,
+                filetypes=filter_map.get(fmt, [("Alle Dateien", "*.*")]),
+                title=(
+                    f"Basisname (schreibt *.original.{fmt} "
+                    f"+ *.deutsch.{fmt})"
+                ),
             )
-            DarkMessageBox.showinfo(
-                "Success",
-                f"Subtitles exported!\nSegments: {len(timed_trans)}\nTranslations: {
-                    len(timed_transl)
-                }",
-                self.root,
+            if not base:
+                _log.info("[SUBTITLE] Datei-Dialog abgebrochen")
+                return
+            base_p = Path(base)
+            stem = base_p.stem
+            dir_ = base_p.parent
+            f_orig = dir_ / f"{stem}.original.{fmt}"
+            f_trans = dir_ / f"{stem}.deutsch.{fmt}"
+
+            ok1 = self._write_subtitle_file(
+                str(f_orig), t_use, [], fmt, "original",
             )
+            ok2 = self._write_subtitle_file(
+                str(f_trans), [], tr_use, fmt, "translation",
+            )
+            success = ok1 and ok2
+            if success:
+                self.update_status(
+                    f"📝 Exportiert: {f_orig.name} + {f_trans.name}",
+                )
+            else:
+                self.update_status("❌ Subtitle export failed")
         else:
-            self.update_status("❌ Subtitle export failed")
+            filename = filedialog.asksaveasfilename(
+                defaultextension=f".{fmt}",
+                initialfile=suggested,
+                filetypes=filter_map.get(fmt, [("Alle Dateien", "*.*")]),
+            )
+            if not filename:
+                _log.info("[SUBTITLE] Datei-Dialog abgebrochen")
+                return
+            success = self._write_subtitle_file(
+                filename, t_use, tr_use, fmt, content,
+            )
+            if success:
+                self.update_status(
+                    f"📝 {fmt.upper()} exported: {os.path.basename(filename)}",
+                )
+            else:
+                self.update_status("❌ Subtitle export failed")
+
+        with contextlib.suppress(Exception):
+            log_ai(
+                "EXPORT-SUBTITLE",
+                content=content,
+                fmt=fmt,
+                trans=len(t_use),
+                transl=len(tr_use),
+                ok=int(success),
+            )
+
 
     @gui_operation_decorator
     def show_simple_stats(self) -> None:
@@ -120600,9 +121308,6 @@ class DragonWhispererGUI:
                                     len(line),
                                     line[:80],
                                 )
-                            # Session 8 - Bug Z7: chronologischer Insert.
-                            # Late-Items werden an der richtigen Stelle
-                            # eingefuegt statt ans Ende angehaengt.
                             _insert_pos = self._find_translation_insert_pos(
                                 translation_widget, line,
                             )
@@ -121554,10 +122259,6 @@ class DragonWhispererGUI:
             global _EXIT_IN_PROGRESS_EVENT
             _EXIT_IN_PROGRESS_EVENT.set()
 
-        # S16-W2: SESSION-END am Body-Anfang, damit es auch bei
-        # stty-Hänger, Rekursion oder Hard-Exit im Log landet.
-        # Der Aufruf weiter unten (kurz vor os._exit) bleibt bestehen;
-        # doppelter Log-Eintrag bei sauberem Exit ist akzeptiert.
         with contextlib.suppress(Exception):
             sys.stderr.flush()
             log_ai("SESSION-END", reason="shutdown_entry", depth=_depth)
@@ -121750,7 +122451,6 @@ class DragonWhispererGUI:
                     "_direct_shutdown: finale Beendigung mit os._exit(0)...",
                 )
 
-            # S16-W: [AI-SESSION-END] VOR Hard-Exit, sonst gekappt.
             with contextlib.suppress(Exception):
                 sys.stderr.flush()
                 log_ai("SESSION-END", reason="shutdown_hard")
@@ -132823,12 +133523,6 @@ class StreamHandler:
         1) Event-Loop mit Health-Checks, Inactivity-Detection, Read.
         2) Cleanup (Timeout-Timer, Cleanup-After-Loop, Metriken).
 
-        v2.1 – Erweitertes Debug + Chunk-Audit:
-          ``[STREAM-LOOP] 🔍 chunks-audit:`` zeigt Werte aus
-          6 Quellen (result, state, AP._chunk_counter,
-          AP._dispatcher_chunk_counter, pinfo, reader).
-          ``[AI-SESSION-END]`` enthält alle Audit-Werte.
-
         Rückgabe
         --------
         ``dict`` mit Feldern:
@@ -132909,9 +133603,6 @@ class StreamHandler:
         }
 
         normal_ending_event.clear()
-        # Session 7 (Bug O): konfigurierbar via DW_STREAM_TIMEOUT_S.
-        # Default: 3600s im Debug-Modus, 0 (unbegrenzt) sonst.
-        # Fuer 24/7-Livestreams mit Debug-Logging: DW_STREAM_TIMEOUT_S=0
         _env_t = os.environ.get("DW_STREAM_TIMEOUT_S", "")
         if _env_t.isdigit():
             STREAM_TIMEOUT_SECONDS = int(_env_t)
@@ -133314,9 +134005,6 @@ class StreamHandler:
 
             result["stream_duration"] = time.time() - start_time
 
-            # ▼ NEU — Fix J2: start_time liegt NACH der Setup-Phase,
-            #          daher ist stream_duration zu klein. Reader-Dauer
-            #          als Fallback, wenn sie größer ist.
             with contextlib.suppress(Exception):
                 _dur_ap = None
                 if state is not None:
@@ -133334,8 +134022,7 @@ class StreamHandler:
                             _reader_dur = float(
                                 _dur_stat.get("duration", 0.0),
                             )
-                            if _reader_dur > result["stream_duration"]:
-                                result["stream_duration"] = _reader_dur
+                            result["stream_duration"] = max(result["stream_duration"], _reader_dur)
 
             result["end_time"] = datetime.now().isoformat()
 
@@ -133415,7 +134102,6 @@ class StreamHandler:
                             if _pinfo_obj is not None:
                                 break
                 if _pinfo_obj is None and _ap_ref is not None:
-                    # ▼ NEU — Fallback: ap.ffmpeg_manager._processes
                     _fm_ref_h = getattr(_ap_ref, "ffmpeg_manager", None)
                     if _fm_ref_h is not None:
                         _proc_map_h = getattr(_fm_ref_h, "_processes", None) or {}
@@ -133441,7 +134127,6 @@ class StreamHandler:
                     if _rstat:
                         _chunks_reader = int(_rstat.get("flushed_chunks", -1))
                 if _chunks_reader < 0 and _ap_ref is not None:
-                    # ▼ NEU — Fallback: ap.ffmpeg_manager._reader_stats
                     _fm_ref = getattr(_ap_ref, "ffmpeg_manager", None)
                     if _fm_ref is not None:
                         _rstat_fm = (
@@ -133454,13 +134139,9 @@ class StreamHandler:
             except Exception:
                 pass
 
-            # ▼ NEU — Fix I: pinfo.chunks_processed wird im Pipe-Mode
-            #          nicht inkrementiert – Reader-Wert als Fallback
             if _chunks_pinfo <= 0 and _chunks_reader > 0:
                 _chunks_pinfo = _chunks_reader
 
-            # ▼ NEU — Fix J1: state.total_chunks_processed bleibt im
-            #          Pipe-Mode auf 0 – Reader-Wert als Fallback
             if _chunks_state <= 0 and _chunks_reader > 0:
                 _chunks_state = _chunks_reader
 
@@ -133510,11 +134191,9 @@ class StreamHandler:
                 user_stopped=result["user_stopped"],
                 error=result["error"],
             )
-            # Session 8 - Patch 7C: AI-SUMMARY mit Endbilanz
             with contextlib.suppress(Exception):
                 _ai_sum_req = int(getattr(self, "_translation_requests", 0))
                 if _ai_sum_req == 0:
-                    # ▼ NEU — Fix N2: Fallback auf AP-Zaehler
                     try:
                         _ap_ref = None
                         _ap_getter = getattr(self, "_get_ap", None)
@@ -133542,7 +134221,7 @@ class StreamHandler:
                 ))
                 log_ai(
                     "SUMMARY",
-                    chunks_total=(_chunks_ap if _chunks_ap > 0 else (_chunks_result if _chunks_result > 0 else 0)),
+                    chunks_total=(_chunks_ap if _chunks_ap > 0 else (max(0, _chunks_result))),
                     chunks_ap=_chunks_ap,
                     chunks_reader=_chunks_reader,
                     translation_requests=_ai_sum_req,
@@ -133727,10 +134406,6 @@ class StreamHandler:
                     exception_container = [None]
                     done = threading.Event()
 
-                    # V8-Fix 2026-09-21: Loop-Variablen explizit
-                    # binden (B023). Sonst greift der noch laufende
-                    # Thread auf die NEUEN Container der naechsten
-                    # Iteration zu, wenn done.wait() timeoutet.
                     def reader_thread(
                         _data_container=data_container,
                         _exception_container=exception_container,
@@ -135186,12 +135861,7 @@ class StreamHandler:
                     )
                 return
 
-            # Session 7 (Bug B): Wenn der Dispatcher tot ist und keine
-            # pending-Tasks mehr laufen, holt niemand mehr die Queue ab.
-            # Der Rest ist Sentinel oder verwaister Chunk. Ohne diesen
-            # Check wartet die Schleife bis zum vollen Timeout
-            # (30-600s) und blockiert den Shutdown bei Shorts/VODs.
-            _disp_alive = True  # konservativ: bei Fehler weiter warten
+            _disp_alive = True 
             try:
                 _dt = getattr(ap, "_dispatcher_thread", None)
                 _disp_alive = _dt is not None and _dt.is_alive()
@@ -135874,9 +136544,6 @@ class StreamHandler:
         _bps = getattr(state, "bytes_per_sec", 32000) or 32000
         _expected_s = (bytes_read / _bps) if _bps > 0 else 10.0
         _slow_default = max(5.0, _expected_s * 1.15)
-        # S17-A3: Default 3.0 statt 1.50 – 1.7× ist noch normal
-        # bei Netzwerk-Jitter; erst >3× ist ein echter Warnfall.
-        # Konfigurierbar via DW_SLOW_READ_FACTOR.
         try:
             _extreme_factor = float(os.getenv("DW_SLOW_READ_FACTOR", "3.0"))
         except (TypeError, ValueError):
@@ -138607,6 +139274,8 @@ class AudioProcessor:
         self._translation_queue = deque(maxlen=int(100 * cache_factor))
         self._timed_transcriptions = deque(maxlen=int(500 * cache_factor))
         self._timed_translations = deque(maxlen=int(200 * cache_factor))
+        self._last_session_transcriptions: list = []  
+        self._last_session_translations: list = []         
         self._already_flushed_texts: set[str] = set()
         self._flushed_combined_texts: set[str] = set()
         self._segment_buffer = OrderedDict()
@@ -138708,9 +139377,6 @@ class AudioProcessor:
             _override_debug = 0
 
         self.debug_level = max(_global_debug, _settings_debug, _override_debug, 0)
-
-        # S17-A6: zu debug degradiert (reine Diagnose-Info,
-        # erscheint sonst bei jedem Start als Warnung).
         logger.debug(
             "[INIT-DIAG] AudioProcessor.debug_level=%d "
             "(global=%d, settings=%d, override=%d)",
@@ -138798,7 +139464,6 @@ class AudioProcessor:
         _p = time.perf_counter()
         self._total_file_size: int | None = None
         self._expected_duration: float | None = None
-        # Session 8 - Bug W: unveraenderliche Obergrenze fuer Segment-Timestamps
         self._hard_cap: float | None = None
         self._current_stream_id: str | None = None
         self._processing_thread: threading.Thread | None = None
@@ -139295,8 +139960,8 @@ class AudioProcessor:
             "length_penalty": 0.0,
             "transcription_workers": 2,
             "transcription_queue_size": 2000,
-            "translation_workers": 2,
-            "duplicate_similarity_threshold": 0.95,
+            "translation_workers": 1,
+            "duplicate_similarity_threshold": 0.93,
             "min_confidence": 0.1,
             "min_language_confidence": 0.2,
             "sentence_flush_interval": 2.5,
@@ -139345,11 +140010,6 @@ class AudioProcessor:
 
         PROTECTED_ATTRS = {"config", "_adaptive_bytes_per_sec"}
 
-        # Session 6 (Bug M): User-Setting beam_size respektieren.
-        # Die GPU/CPU-Profile setzen beam_size hart auf 3 bzw. 1. Wenn
-        # der User in der GUI einen anderen Wert als DEFAULT_BEAM_SIZE
-        # gewaehlt hat, darf das Profil ihn nicht ueberschreiben - sonst
-        # faellt der Wert nach _save_settings dauerhaft auf 3 zurueck.
         _DEFAULT_BEAM = getattr(
             getattr(adv, "config", None), "DEFAULT_BEAM_SIZE", 10,
         )
@@ -140536,9 +141196,6 @@ class AudioProcessor:
         logger = logging.getLogger("dragon")
         debug_level = getattr(self, "debug_level", DEBUG_LEVEL)
         _total_t0 = time.perf_counter()
-
-        # Session 6 (Bug E.2): Dispose-Snapshot VOR _init_state_machines,
-        # weil das die _disposed/_dispose_in_progress-Flags zuruecksetzt.
         _was_disposing = (
             getattr(self, "_disposed", False)
             or getattr(self, "_dispose_in_progress", False)
@@ -140678,9 +141335,6 @@ class AudioProcessor:
 
         if reset_executors:
             if _was_disposing:
-                # Session 6 (Bug E.2): Dispose laeuft parallel zur cleanup-Kette.
-                # Snapshot _was_disposing wurde VOR _init_state_machines gesetzt,
-                # weil das die Flags zuruecksetzt.
                 log_debug(
                     "processor",
                     "_reset_internal_state: dispose laeuft - "
@@ -145089,7 +145743,6 @@ class AudioProcessor:
                 except Exception as e:
                     log_debug(f"Fehler beim Prüfen von FFmpeg: {e}")
 
-            # Session 8 - Bug O2 Fix: Queue-Referenz beim Start dokumentieren.
             _o2_initial_queue = raw_audio_queue
             _o2_queue_switch_count = 0
             if debug_level >= 3:
@@ -145106,10 +145759,6 @@ class AudioProcessor:
                 and not stop_event.is_set()
                 and not dispatcher_stop_event.is_set()
             ):
-                # Session 8 - Bug O2 Fix: Queue-Referenz dynamisch nachziehen.
-                # Wenn die Pipe eine neue Queue registriert hat, muessen wir
-                # sie uebernehmen, sonst hoeren wir fuer immer auf eine tote
-                # (leere) Queue.
                 _o2_current_q = getattr(self, "_raw_audio_queue", None)
                 if _o2_current_q is not None and _o2_current_q is not raw_audio_queue:
                     _o2_queue_switch_count += 1
@@ -145223,7 +145872,6 @@ class AudioProcessor:
                                 pass
 
                         if ffmpeg_alive:
-                            # Session 8 - Bug O2 Diag: Inaktivitaets-Resets zaehlen
                             _o2_reset_n = getattr(
                                 self, "_dispatcher_inactivity_resets", 0,
                             ) + 1
@@ -145240,10 +145888,6 @@ class AudioProcessor:
                                     f"Inaktivität ({INACTIVITY_TIMEOUT:.1f}s), aber FFmpeg läuft – warte weiter",
                                     extra={"component": "dispatcher"},
                                 )
-                            # Session 8 - Patch 6E: Wenn der Reader-Thread aktiv
-                            # laeuft, ist der Dispatcher-Timeout harmlos (ein
-                            # zweiter Consumer-Pfad verarbeitet die Chunks).
-                            # Dann auf INFO-Level loggen statt WARNING.
                             _o2_alt_path_active = bool(_o2_reader_alive)
                             _o2_log_fn = (
                                 log_debug if _o2_alt_path_active else log_warning
@@ -146705,9 +147349,6 @@ class AudioProcessor:
             except Exception as e:
                 logger.debug("Ignored exception: %s", e, exc_info=True)
 
-        # Session 6 (Debug): pynvml-Werte (echte GPU-Belegung).
-        # torch.cuda.memory_*() zeigt nur den Prozess-Allocator - bei
-        # GPU-Arbeit in loky-Workern bleibt der Hauptprozess bei 0.0G.
         try:
             if not hasattr(self, "_pynvml_init_done"):
                 try:
@@ -147018,7 +147659,6 @@ class AudioProcessor:
                     extra={"component": "chunk", "chunk_id": chunk_id},
                 )
 
-            # Session 7 (Debug): [AUDIO-STATS] vor Audio-Enhancement
             try:
                 import numpy as _np_dbg
                 _arr_dbg = (
@@ -147926,10 +148566,6 @@ class AudioProcessor:
         _debug_verbose = DEBUG_LEVEL >= 4
         _reason_primary: str = "n/a"
         _reason_fallback: str = "n/a"
-        # Persistenter Failure-Reason fuer Caller (Session 3, Patch D2D,
-        # korrigiert S15/Bug R4): differenzierte Lost-Chunk-Dateinamen wie
-        # 'returned_empty_list_chunk_132' statt pauschal
-        # 'transcription_failed_chunk_132'. Format: '<primary>|<fallback>'.
         self._last_failure_reason: str | None = None
         _audio_len = len(audio_data) if audio_data else 0
 
@@ -148226,8 +148862,6 @@ class AudioProcessor:
                     return segments, False
 
                 _reason_fallback = "list"
-                # S17-A4: zu info degradiert (Whisper-Leerlauf ist
-                # normal bei Stille/Musik, kein Warnfall).
                 logger.info(
                     f"Chunk #{chunk_id}: Fallback returned empty list",
                 )
@@ -148280,12 +148914,6 @@ class AudioProcessor:
         chunk_id: int,
     ) -> dict[str, Any]:
         """Zentraler Einstiegspunkt für Transkriptions- UND Übersetzungs-Ausgabe.
-
-        Fix (2026-09-17): Im Subtitle-Mode wird die aggregierte Übersetzung
-        übersprungen, weil die Segment-Übersetzung bereits in
-        ``_output_segment_guaranteed`` pro Segment erfolgt. Ohne diesen
-        Guard würden dieselben Inhalte zweimal an die Translate-Queue gehen
-        (einmal aggregiert pro Chunk, einmal pro Segment).
         """
         import logging
         import threading
@@ -148387,13 +149015,10 @@ class AudioProcessor:
         else:
             with contextlib.suppress(Exception):
                 log_dbg("GUI", event="callback_unbound", chunk_id=chunk_id, cb_type=type(self._transcription_callback).__name__)
-            # S17-P2: Im Headless-Mode nur einmal pro Prozess warnen.
             _hl_run = globals().get("_DW_HEADLESS_RUN", False)
             if _hl_run:
                 if not getattr(self, "_headless_cb_warned", False):
                     self._headless_cb_warned = True
-                    # S17-A4.1: zu info degradiert – ist im Headless
-                    # normal und kein Warnfall, nur Erst-Info.
                     logger.info(
                         "[CALLBACK] Headless-Mode: Transcription-Callback "
                         "nicht an GUI gebunden – weitere Meldungen unterdrückt.",
@@ -148440,10 +149065,6 @@ class AudioProcessor:
                 if extracted and isinstance(extracted, str):
                     stripped = extracted.strip()
                     if len(stripped) >= MIN_TEXT_LENGTH:
-                        # ▼ NEU — S15 / Bug T+V final: Phrasen-Filter zentral.
-                        #   Läuft VOR Transkript-Callback UND Übersetzungs-Trigger.
-                        #   Fängt Halluzinationen ab, die durch frühere Filter
-                        #   gerutscht sind ("I'll", "Bye", "You", "Oh, oh, oh").
                         _stripped_norm = (
                             stripped.lower().rstrip(".!?,;:…").strip()
                         )
@@ -148991,11 +149612,9 @@ class AudioProcessor:
         if not success:
             with contextlib.suppress(Exception):
                 log_dbg("GUI", event="callback_emergency", chunk_id=chunk_id)
-            # S17-P2b: Im Headless-Mode nur einmal warnen.
             if globals().get("_DW_HEADLESS_RUN", False):
                 if not getattr(self, "_headless_emg_warned", False):
                     self._headless_emg_warned = True
-                    # S17-A4.2: zu info degradiert (siehe A4.1).
                     logger.info(
                         "[CALLBACK] Headless-Mode: direkter Notfall-Aufruf "
                         "(GUI-Stufen erwartungsgemäß nicht verfügbar) – "
@@ -149211,9 +149830,6 @@ class AudioProcessor:
                     error_cb(f"Callback-Fehler in Chunk {chunk_id}: {e}")
 
     def _find_gui_root(self) -> Any:
-        # S17-P2: Im CLI-Headless-Mode gibt es nie eine GUI.
-        # Ohne diese Bremse durchläuft der Lookup bei JEDEM Chunk
-        # die volle Strategie-Kette (97×/90s im S17-Test).
         if globals().get("_DW_HEADLESS_RUN", False):
             return None
         """🚀
@@ -149889,11 +150505,6 @@ class AudioProcessor:
                     discarded_count += 1
                     continue
 
-            # ▼ NEU — Session 15 / Bug T: Phrasen- und Kurz-Wort-Filter.
-            #   Whisper halluziniert bei stillem Audio Einzelwoerter und
-            #   kurze Phrasen ("You", "Bye", "Wir sehen uns beim naechsten
-            #   Mal"). Zwei Trigger: (a) no_speech hoch bei 1 Wort,
-            #   (b) Text ist in _WHISPER_HALLUCINATION_PHRASES.
             _text_norm_t = clean_text.strip().lower().rstrip(".!?,;:…")
             _is_phrase_hallu_t = _text_norm_t in _WHISPER_HALLUCINATION_PHRASES
             _is_short_no_speech_t = (
@@ -150047,7 +150658,6 @@ class AudioProcessor:
             else:
                 with contextlib.suppress(Exception):
                     log_dbg("GUI", event="gui_queue_none", chunk_id=chunk_id)
-                # S17-P2: Im Headless-Mode nur einmal warnen.
                 if globals().get("_DW_HEADLESS_RUN", False):
                     if not getattr(self, "_headless_disp_warned", False):
                         self._headless_disp_warned = True
@@ -150839,7 +151449,7 @@ class AudioProcessor:
                 if len(candidates) == 1:
                     language = candidates[0]
                 else:
-                    language = max(candidates, key=lambda l: lang_counts.get(l, 0))
+                    language = max(candidates, key=lambda lang: lang_counts.get(lang, 0))
             elif lang_counts:
                 language = max(lang_counts, key=lang_counts.get)
 
@@ -151355,7 +151965,6 @@ class AudioProcessor:
                     )
 
             queue = self._translation_queue
-            # Session 8 - Patch 5B-Diag: Queue-Rein beobachten
             if DEBUG_LEVEL >= 3:
                 _q_pairs = []
                 for _e in queue:
@@ -151479,8 +152088,6 @@ class AudioProcessor:
 
             future_emit: list[TranslationResult] = []
             remaining_filtered: list[TranslationResult] = []
-            # Session 8 - Bug Z: Future-Emit markieren, damit wir sie
-            # in der Update-Schleife mit start statt end referenzieren.
             _future_emit_ids: set[int] = set()
             for entry in remaining:
                 if (
@@ -151522,10 +152129,6 @@ class AudioProcessor:
 
             if to_emit:
                 for entry in to_emit:
-                    # Session 8 - Bug Z: Future-Emit-Items duerfen expected
-                    # nur auf ihren start heben, nicht auf ihr end. Sonst
-                    # werden spaetere Items mit kleinerem start als
-                    # 'late' durchgewunken und erscheinen zu frueh.
                     if id(entry) in _future_emit_ids and entry.start is not None:
                         ref_val = entry.start
                     else:
@@ -151623,9 +152226,6 @@ class AudioProcessor:
                 )
             _safe_invoke_callback(entry)
 
-        # Session 8 - Bug Z: to_emit IMMER sortieren, nicht nur bei force_flush.
-        # Sonst landen future_emit-Items (via .extend) am Ende der Liste und
-        # verletzen die chronologische Reihenfolge im Widget.
         to_emit.sort(key=lambda r: r.start if r.start is not None else float("inf"))
 
         for entry in to_emit:
@@ -151888,7 +152488,7 @@ class AudioProcessor:
         else:
             gap_tolerance = _gap_base
 
-        max_backward_time = getattr(self, "_subtitle_max_backward_time", 30.0)
+        max_backward_time = getattr(self, "_subtitle_max_backward_time", 5.0)
         max_segment_age = getattr(self, "_subtitle_max_segment_age", 30.0)
         watchdog_seconds = getattr(self, "_subtitle_watchdog_seconds", 5.0)
         drift_warning_threshold = getattr(self, "_subtitle_drift_threshold", 5.0)
@@ -152082,13 +152682,47 @@ class AudioProcessor:
 
         flushed_this_call = 0
         flush_reasons: dict[str, int] = {
+            "watermark": 0,
+            "soft_timeout": 0,
+            "hard_cap": 0,
+            "hallu_drop": 0,
+            "overflow": 0,
             "normal": 0,
             "Alter": 0,
             "global": 0,
             "zu alt": 0,
-            "overflow": 0,
             "watchdog_bulk": 0,
         }
+
+        # ══════════════════════════════════════════════════════════════
+        # ADVANCED SLIDING-WINDOW FLUSH  (v5.0)
+        # ══════════════════════════════════════════════════════════════
+        # Statt eines fragilen _next_expected_start-Cursors (der durch
+        # Whisper-Bogus-Werte wie start=484 dauerhaft aus dem Tritt
+        # gerät) verwenden wir ein Watermark-Prinzip:
+        #
+        #   1) WATERMARK-FLUSH
+        #      newest = max(start). Alles mit start <= newest - retain_s
+        #      ist garantiert fertig (spätere Chunks können keine
+        #      früheren Segmente mehr liefern). Chronologische Ausgabe.
+        #   2) SOFT-TIMEOUT (Wallclock)
+        #      >N Sekunden kein Flush → älteste 25% zwangsweise raus.
+        #   3) HARD-CAP
+        #      Buffer > 90% von max_size → älteste 25% zwangsweise raus.
+        #   4) HALLU-GUARD
+        #      Segment > 300s nach letzter Ausgabe → verwerfen.
+        #
+        # Kein Verwerfen wegen "zu alt". Kein gap_tolerance. Kein
+        # next_exp-Cursor. Chronologie = sortierte Ausgabe. Retention
+        # = Dedup für Chunk-Overlap.
+        # ══════════════════════════════════════════════════════════════
+
+        _base_retain_s = 3.0
+        _soft_timeout_s = 15.0
+        _hard_cap_ratio = 0.9
+        _hallu_jump_s = 300.0
+        _check_drift_every_n = 20
+
         max_iterations = 1000
         iteration = 0
 
@@ -152096,146 +152730,168 @@ class AudioProcessor:
             iteration += 1
 
             with lock:
-                if not self._segment_buffer or not self._sorted_keys_cache:
+                if not self._segment_buffer:
                     break
 
-                next_start = self._sorted_keys_cache[0]
-                seg = self._segment_buffer.get(next_start)
-                if seg is None:
-                    self._sorted_keys_cache.pop(0)
-                    continue
+                if (not self._sorted_keys_cache
+                        or len(self._sorted_keys_cache) != len(self._segment_buffer)):
+                    self._sorted_keys_cache = sorted(self._segment_buffer.keys())
 
-                now = time.monotonic()
-                seg_start = seg.start
+                sorted_keys = self._sorted_keys_cache
+                if not sorted_keys:
+                    break
 
-                if not self._next_expected_start_initialized:
-                    self._next_expected_start = max(
-                        0.0,
-                        min(self._segment_buffer.keys()),
-                    )
-                    self._next_expected_start_initialized = True
+                oldest_start = sorted_keys[0]
+                newest_start = sorted_keys[-1]
+                _buf_n = len(sorted_keys)
 
-                if seg_start < self._next_expected_start - max_backward_time:
+                # Adaptive Retention: bei großem Buffer schneller ausgeben
+                if _buf_n > max_size * 0.5:
+                    _retain_s = 0.5
+                elif _buf_n > max_size * 0.2:
+                    _retain_s = 1.5
+                else:
+                    _retain_s = _base_retain_s
+
+                last_emit = float(
+                    getattr(self, "_last_emitted_start", 0.0) or 0.0
+                )
+
+                # ── Hallu-Guard ────────────────────────────────────────
+                if last_emit > 0.0 and oldest_start > last_emit + _hallu_jump_s:
+                    _seg_h = self._segment_buffer.get(oldest_start)
                     logger.warning(
-                        "Verwerfe zu altes Segment: start=%.2f, expected=%.2f",
-                        seg_start,
-                        self._next_expected_start,
+                        "[BUFFER] Hallu-Guard: Segment %.2fs liegt %.0fs "
+                        "nach letzter Ausgabe (%.2fs) — verworfen: '%.40s'",
+                        oldest_start,
+                        oldest_start - last_emit,
+                        last_emit,
+                        (_seg_h.text or "")[:40] if _seg_h else "?",
                     )
-                    self._remove_and_output_segment(
-                        seg,
-                        next_start,
-                        transcription_callback,
-                        translation_callback,
-                        disable_duplicate_check=True,
-                        _log_reason="zu alt",
-                    )
+                    _fp_h = self._segment_fingerprints.pop(oldest_start, None)
+                    if _fp_h is not None:
+                        self._segment_keys.discard(_fp_h)
+                    self._segment_buffer.pop(oldest_start, None)
+                    self._sorted_keys_cache = sorted(self._segment_buffer.keys())
                     flushed_this_call += 1
-                    flush_reasons["zu alt"] += 1
+                    flush_reasons["hallu_drop"] += 1
                     continue
 
-                age_since_last_flush = now - self._subtitle_watchdog_time
-                if age_since_last_flush > max_segment_age:
-                    if debug_subtitle:
-                        log_debug(
-                            "subtitle",
-                            f"Watchdog (Alter): erzwinge Ausgabe von "
-                            f"start={seg_start:.2f}",
-                        )
+                # ── Watermark-Flush ────────────────────────────────────
+                watermark = newest_start - _retain_s
+                _emitted = 0
+                for _sk in list(sorted_keys):
+                    if _sk > watermark:
+                        break
+                    _seg = self._segment_buffer.get(_sk)
+                    if _seg is None:
+                        continue
                     self._remove_and_output_segment(
-                        seg,
-                        next_start,
+                        _seg,
+                        _sk,
                         transcription_callback,
                         translation_callback,
                         disable_duplicate_check=True,
-                        _log_reason="Alter",
+                        _log_reason="watermark",
                     )
+                    _fp = self._segment_fingerprints.pop(_sk, None)
+                    if _fp is not None:
+                        self._segment_keys.discard(_fp)
+                    self._segment_buffer.pop(_sk, None)
                     flushed_this_call += 1
-                    flush_reasons["Alter"] += 1
-                    self._subtitle_watchdog_time = now
-                    continue
-
-                if seg_start <= self._next_expected_start + gap_tolerance:
-                    self._remove_and_output_segment(
-                        seg,
-                        next_start,
-                        transcription_callback,
-                        translation_callback,
-                        disable_duplicate_check=True,
-                        _log_reason="normal",
-                    )
-                    flushed_this_call += 1
+                    flush_reasons["watermark"] += 1
                     flush_reasons["normal"] += 1
-                    self._subtitle_watchdog_time = now
+                    _emitted += 1
+                    self._last_emitted_start = float(_sk)
 
-                    if flushed_this_call % 10 == 0 and len(self._segment_buffer) > 1:
-                        self._check_subtitle_drift(drift_warning_threshold)
+                if _emitted > 0:
+                    self._sorted_keys_cache = sorted(self._segment_buffer.keys())
+                    self._subtitle_watchdog_time = time.monotonic()
+                    self._next_expected_start = self._last_emitted_start
+                    if (flushed_this_call % _check_drift_every_n) == 0:
+                        with contextlib.suppress(Exception):
+                            self._check_subtitle_drift(drift_warning_threshold)
                     continue
 
-                if now - self._subtitle_watchdog_time > watchdog_seconds:
-                    if debug_subtitle:
-                        log_debug(
-                            "subtitle",
-                            f"Watchdog (global/bulk): "
-                            f"next_expected {self._next_expected_start:.2f} "
-                            f"→ {seg_start:.2f}, "
-                            f"Buffer wird freigegeben",
-                        )
+                now_mono = time.monotonic()
+                age_since_last = now_mono - getattr(
+                    self, "_subtitle_watchdog_time", now_mono
+                )
 
-                    _old_next = self._next_expected_start
-                    self._next_expected_start = seg_start
-                    self._subtitle_watchdog_time = now
-
-                    flush_reasons["watchdog_bulk"] += 1
-
-                    if debug_subtitle:
-                        log_debug(
-                            "subtitle",
-                            f"Watchdog: next_expected "
-                            f"{_old_next:.2f} → {seg_start:.2f}",
-                        )
-                    continue
-
-                if debug_flush:
-                    log_debug(
-                        "subtitle",
-                        f"[BUFFER] warte: seg_start={seg_start:.3f} "
-                        f"next_expected={self._next_expected_start:.3f} "
-                        f"gap_tol={gap_tolerance:.3f} "
-                        f"age={age_since_last_flush:.2f}s "
-                        f"watchdog={watchdog_seconds:.1f}s",
-                    )
-                break
-
-            with lock:
-                if self._segment_buffer and len(self._segment_buffer) > max_size * 0.9:
+                # ── Soft-Timeout ───────────────────────────────────────
+                if age_since_last > _soft_timeout_s:
+                    _emit_n = max(1, _buf_n // 4)
                     logger.warning(
-                        "Puffer fast voll (%d/%d) – erzwinge Ausgabe aller Segmente",
-                        len(self._segment_buffer),
-                        max_size,
+                        "[BUFFER] Soft-Timeout: %.1fs ohne Flush, "
+                        "%d Segmente — erzwinge %d älteste Ausgaben",
+                        age_since_last, _buf_n, _emit_n,
                     )
-                    items = list(self._segment_buffer.items())
-                    for start_key, seg in items:
+                    for _sk in sorted_keys[:_emit_n]:
+                        _seg = self._segment_buffer.get(_sk)
+                        if _seg is None:
+                            continue
                         self._remove_and_output_segment(
-                            seg,
-                            start_key,
+                            _seg,
+                            _sk,
                             transcription_callback,
                             translation_callback,
                             disable_duplicate_check=True,
-                            _log_reason="overflow",
+                            _log_reason="soft_timeout",
                         )
+                        _fp = self._segment_fingerprints.pop(_sk, None)
+                        if _fp is not None:
+                            self._segment_keys.discard(_fp)
+                        self._segment_buffer.pop(_sk, None)
                         flushed_this_call += 1
-                        flush_reasons["overflow"] += 1
-                    self._segment_buffer.clear()
-                    self._segment_keys.clear()
-                    self._segment_fingerprints.clear()
-                    self._sorted_keys_cache = []
-                    if items:
-                        self._next_expected_start = max(
-                            self._next_expected_start,
-                            items[-1][1].end or 0.0,
-                        )
+                        flush_reasons["soft_timeout"] += 1
+                        self._last_emitted_start = float(_sk)
+                    self._sorted_keys_cache = sorted(self._segment_buffer.keys())
                     self._subtitle_watchdog_time = time.monotonic()
-                    break
+                    self._next_expected_start = self._last_emitted_start
+                    continue
+
+                # ── Hard-Cap ───────────────────────────────────────────
+                if _buf_n > max_size * _hard_cap_ratio:
+                    _emit_n = max(1, _buf_n // 4)
+                    logger.warning(
+                        "[BUFFER] Hard-Cap: %d Segmente > %.0f%% von %d — "
+                        "erzwinge %d älteste Ausgaben",
+                        _buf_n, _hard_cap_ratio * 100.0, max_size, _emit_n,
+                    )
+                    for _sk in sorted_keys[:_emit_n]:
+                        _seg = self._segment_buffer.get(_sk)
+                        if _seg is None:
+                            continue
+                        self._remove_and_output_segment(
+                            _seg,
+                            _sk,
+                            transcription_callback,
+                            translation_callback,
+                            disable_duplicate_check=True,
+                            _log_reason="hard_cap",
+                        )
+                        _fp = self._segment_fingerprints.pop(_sk, None)
+                        if _fp is not None:
+                            self._segment_keys.discard(_fp)
+                        self._segment_buffer.pop(_sk, None)
+                        flushed_this_call += 1
+                        flush_reasons["hard_cap"] += 1
+                        self._last_emitted_start = float(_sk)
+                    self._sorted_keys_cache = sorted(self._segment_buffer.keys())
+                    self._subtitle_watchdog_time = time.monotonic()
+                    self._next_expected_start = self._last_emitted_start
+                    continue
+
+                # ── Nichts zu tun (Warten) ────────────────────────────
+                if debug_flush:
+                    log_debug(
+                        "subtitle",
+                        f"[BUFFER] warte: oldest={oldest_start:.3f} "
+                        f"newest={newest_start:.3f} watermark={watermark:.3f} "
+                        f"retain={_retain_s:.1f}s age={age_since_last:.2f}s "
+                        f"buf={_buf_n}",
+                    )
+                break
 
         if debug_flush or flushed_this_call > 0:
             with lock:
@@ -154201,7 +154857,6 @@ class AudioProcessor:
             if seg.end is not None:
                 seg.end += offset
 
-            # Session 8 - Bug W: _hard_cap ueberlagert max_end (nur wenn gesetzt).
             _hc = getattr(self, "_hard_cap", None)
             _eff_max = max_end
             if _hc is not None:
@@ -155842,9 +156497,6 @@ class AudioProcessor:
 
             AudioProcessor._lost_chunk_tokens -= 1.0
 
-        # ▼ NEU — Session 15 / Bug R3: Kontext-Snapshot VOR Thread-Spawn.
-        #   Werte werden im LostChunkSaver-Thread nur gelesen und via
-        #   log_ai("R3-LOST", ...) mit ausgegeben. Additiv, kein Fix.
         _r3_caller = "unknown"
         _r3_caller_ln = -1
         _r3_chunk_id = 0
@@ -155854,7 +156506,6 @@ class AudioProcessor:
         _r3_queue = -1
         _r3_drops = -1
         _r3_stop = 0
-        # RMS immer berechnen — fuer Bug-T-Filter UND R3-Skip-Entscheidung.
         with contextlib.suppress(Exception):
             _rms_val_r3 = self._compute_rms(audio_data)
             if _rms_val_r3 is not None:
@@ -155892,8 +156543,6 @@ class AudioProcessor:
                 if _se_r3 is not None:
                     _r3_stop = int(bool(_se_r3.is_set()))
 
-        # ▼ NEU — S15 / Bug R3-Konzept B: returned_empty_* mit RMS < 0.15
-        #   als Silent-Skip markieren — kein WAV/JSON speichern.
         _reason_str = reason if isinstance(reason, str) else ""
         _reason_is_empty = (
             _reason_str.startswith("returned_empty")
@@ -155966,13 +156615,6 @@ class AudioProcessor:
         if hasattr(self, "_chunk_counter"):
             metadata["chunk_counter"] = self._chunk_counter
 
-        # Plattformkonformer Lost-Chunks-Pfad (Session 3, Patch D4):
-        #   Windows: %LOCALAPPDATA%\DragonWhisperer\lost_chunks
-        #   macOS:   ~/Library/Application Support/DragonWhisperer/lost_chunks
-        #   Linux:   $XDG_DATA_HOME/dragonwhisperer/lost_chunks
-        #            oder Fallback ~/.local/share/dragonwhisperer/lost_chunks
-        # Linux-Verhalten unveraendert; Windows/macOS nutzen jetzt die
-        # jeweilige Konvention.
         import os as _os
         if IS_WINDOWS:
             _local_appdata = _os.environ.get("LOCALAPPDATA")
@@ -156097,8 +156739,6 @@ class AudioProcessor:
                     stream_id,
                 )
 
-                # ▼ NEU — Extended Debug S14: R3-Marker
-                # ▼ S15 / R3-Debug: Kontext aus Pre-Thread-Snapshot ergänzt
                 try:  # noqa: SIM105
                     log_ai(
                         "R3-LOST",
@@ -156722,8 +157362,7 @@ class AudioProcessor:
                 f"[{call_id}] start_seconds={original_start!r} ungültig – verwende 0"
             )
             start_seconds = 0
-        if start_seconds < 0:
-            start_seconds = 0
+        start_seconds = max(start_seconds, 0)
 
         if cookies_browser is not None and not isinstance(cookies_browser, str):
             if debug_enabled:
@@ -159865,7 +160504,6 @@ class AudioProcessor:
 
     def set_expected_duration(self, duration: float | None) -> None:
         self._expected_duration = duration
-        # Session 8 - Bug W: Hard Cap aus echter Video-Dauer. Waechst nie mit.
         if duration is None or duration <= 0:
             self._hard_cap = None
         else:
@@ -159914,16 +160552,6 @@ class AudioProcessor:
         fallback_translation_engine: BaseTranslationEngine | None = None,
     ) -> None:
         """Setzt alle drei Engines atomar und entsorgt alte Engines asynchron.
-        Optimiert: keine doppelten Funktionalitätsprüfungen, robuste Fehlerbehandlung.
-
-        ★ v2.4: Reicht die Fallback-Engine zusätzlich an die Haupt-Engine
-        weiter, damit `GoogleTranslationEngine._call_argos_fallback` sie
-        findet (sonst ist Argos-Fallback faktisch tot).
-
-        ★ v2.6: Respektiert die Nutzer-Präferenz über
-        ``_apply_user_translation_preference()``. Wenn der Nutzer die
-        Übersetzung über den GUI-Toggle explizit deaktiviert hat, bleibt
-        ``_translation_enabled`` auch bei funktionsfähiger Engine False.
         """
         if (
             fallback_translation_engine is not None
@@ -161244,11 +161872,6 @@ class AudioProcessor:
         else:
             workers = optimal_workers
 
-        # Session 8 - Bug Z6: Single-Worker im Subtitle-Mode fuer
-        # deterministische Ausgabereihenfolge. Parallele Worker liefern
-        # Ergebnisse in Ankunfts- statt Video-Reihenfolge; im Subtitle-
-        # Mode mit VOD-Laeufen kostet Single-Worker kaum Performance,
-        # garantiert aber monotone Timestamps im Widget.
         if getattr(self, "subtitle_mode", False) and workers > 1:
             logger.info(
                 "[TRANS-WORKER] Subtitle-Mode aktiv - reduziere "
@@ -161774,13 +162397,8 @@ class AudioProcessor:
                 is_direct=is_direct_url,
                 live=kwargs.get("is_live", False),
             )
-            # Session 8 - Patch 7B: AI-Startup-Bundle
-            # Dokumentiert Architektur, Config, Flags, Capabilities und
-            # bekannte Bugs einmalig beim Session-Start.
             with contextlib.suppress(Exception):
                 _ai_plat = platform.node()
-                # Session 8 - Patch 7B-Fix: torch ueber sys.modules holen,
-                # nicht ueber self._torch (existiert nicht auf jedem AP).
                 _ai_torch = None
                 with contextlib.suppress(Exception):
                     import sys as _ai_sys
@@ -162107,7 +162725,6 @@ class AudioProcessor:
             self._init_transcribe_timeout_executor()
             self._synchronize_tasks_done_event()
 
-            # Session 8 - Bug O2 Diag: Queue-Identitaet dokumentieren
             _o2_ap_dbg = getattr(self, "debug_level", 0)
             if _o2_ap_dbg >= 3:
                 _o2_oq_id = id(output_queue) if output_queue is not None else None
@@ -162387,13 +163004,6 @@ class AudioProcessor:
                     and not self._stop_event.is_set()
                 ):
                     try:
-                        # Session 8 - Bug Z4: Timer mit force_flush=False.
-                        # force_flush=True umging die Sortierung und emittierte
-                        # Items in Ankunfts- statt Video-Reihenfolge. Mit False
-                        # greifen FORWARD_TOLERANCE / MAX_FUTURE_WAIT und die
-                        # chronologische Reihenfolge bleibt erhalten. Der
-                        # Timer ist weiterhin ein Safety-Net: wenn der Guard
-                        # laenger blockiert, greift MAX_FUTURE_WAIT (5s).
                         self._process_translation_queue(
                             self._translation_callback, force_flush=False
                         )
@@ -163198,10 +163808,6 @@ class AudioProcessor:
                 "condition_on_previous_text": False,
             }
 
-        # Session 6 (Bug M): User-Setting beam_size respektieren.
-        # Siehe _apply_performance_profile fuer die ausfuehrliche
-        # Begruendung. Kurz: der User-Wunsch (Wert != DEFAULT) hat
-        # Vorrang vor dem Auto-Tune fuer GPU/CPU.
         _DEFAULT_BEAM = getattr(
             getattr(settings, "config", None), "DEFAULT_BEAM_SIZE", 10,
         )
@@ -166026,11 +166632,6 @@ class AudioProcessor:
                 with self._set_state_lock:
                     self._set_state_in_progress = False
 
-    # ────────────────────────────────────────────────────────────────
-    # S17-B6: DEPRECATED – kein Aufrufer im gesamten Code (Stand S17).
-    # Methode bleibt vorerst erhalten, wird in S18 entfernt.
-    # Nicht reaktivieren – aktive Alternative in den aktiven Pfaden.
-    # ────────────────────────────────────────────────────────────────
     def _try_start_process(
         self,
         prefer_pipe: bool,
@@ -166907,15 +167508,7 @@ class AudioProcessor:
         original_url = kwargs.get("original_url", url)
         is_live = kwargs.get("is_live", False)
 
-        # S16-Kick: is_live-Nachkorrektur. Der Aufrufer übergibt oft
-        # is_live=False (Default), obwohl _detect_stream_type die
-        # Plattform korrekt als always-live erkennt (Kick-Kanal-URLs).
-        # Ohne diese Korrektur läuft Kick über den Direct-Pfad (VOD-Logik)
-        # und stirbt nach ~2 min, weil die HLS-URL abläuft.
         if not is_live:
-            # _detect_stream_type lebt auf FFmpegManager, nicht AudioProcessor.
-            # Kick-Kanal-URLs sind immer live (Stream oder off-air).
-            # Wir prüfen das direkt, ohne Klassen-übergreifenden Aufruf.
             _url_lower = url.lower()
             if "kick.com" in _url_lower:
                 is_live = True
@@ -166995,9 +167588,6 @@ class AudioProcessor:
         def _set_state_if_active(new_state, reason: str) -> bool:
             """Setzt State nur, wenn wir noch der aktive Thread sind."""
             if not _is_active_thread(f"set_state:{reason}"):
-                # S17-B2: Race-Condition beim Shutdown ist normal – Token
-                # wird extern genullt, während der Loop noch läuft. Das ist
-                # kein Warnfall, sondern erwartetes Verhalten. → debug.
                 if debug_level >= 3:
                     logger.debug(
                         "[PROCESS-LOOP] ℹ️ State-Update '%s' verworfen "
@@ -167027,9 +167617,6 @@ class AudioProcessor:
             if debug_level >= 3:
                 logger.debug("[PROCESS-LOOP] Could not get language from engine: %s", e)
 
-        # Session 7 (Bug O): konfigurierbar via DW_STREAM_TIMEOUT_S.
-        # Default: 3600s im Debug-Modus, 0 (unbegrenzt) sonst.
-        # Fuer 24/7-Livestreams mit Debug-Logging: DW_STREAM_TIMEOUT_S=0
         _env_t = os.environ.get("DW_STREAM_TIMEOUT_S", "")
         if _env_t.isdigit():
             STREAM_TIMEOUT_SECONDS = int(_env_t)
@@ -167078,8 +167665,6 @@ class AudioProcessor:
                         )
             _mark("metadata", _p)
 
-            # Session 8 - Bug W: Hard Cap aus yt-dlp-Metadaten setzen.
-            # Greift nur bei VOD (is_live=False) und gueltiger Dauer.
             if metadata and not is_live:
                 _cap_raw = metadata.get("duration")
                 _cap_val = 0.0
@@ -167799,8 +168384,6 @@ class AudioProcessor:
         error_message = None
         used_mode = None
 
-        # S17-B8b: Wenn URL bereits als permanent tot markiert ist,
-        # Attempt-Loop komplett überspringen.
         if _is_permanent_fail(url):
             logger.warning(
                 "[FFMPEG] ⛔ URL bekannt als dauerhaft nicht verfügbar "
@@ -167829,10 +168412,6 @@ class AudioProcessor:
                     max_attempts,
                 )
 
-            # S16-Kick: Live-Streams auf Pipe-preferred-Plattformen
-            # brauchen den Pipe-Modus für HLS-Refresh. Der Direct-Pfad
-            # reicht nur bei VODs oder Plattformen mit statischen URLs
-            # (BitChute, Facebook-VOD, Twitter-VOD).
             _live_pipe_required = is_live and any(
                 _d in url_lower
                 for _d in (
@@ -168328,10 +168907,6 @@ class AudioProcessor:
         output_queue = kwargs.get("output_queue")
         video_url = kwargs.get("video_url", "") or kwargs.get("url", "")
         is_live = kwargs.get("is_live", False)
-        # S16-A1: alle Keys aus kwargs entfernen, die im Fallback-Aufruf
-        # _start_pipe_mode(..., **kwargs) explizit übergeben werden – sonst
-        # "got multiple values for keyword argument '<key>'".
-        # Gilt für: video_url, url, output_queue, is_live.
         for _collision_key in ("video_url", "url", "output_queue", "is_live"):
             kwargs.pop(_collision_key, None)
 
@@ -168537,13 +169112,6 @@ class AudioProcessor:
             ready, _, _ = select.select([ff_proc.stderr], [], [], 0.5)
             if ready:
                 with contextlib.suppress(Exception):
-                    # S17-B4c: read1 statt read, sonst blockiert der
-                    # Read bis 500 Bytes vorliegen oder EOF (Prozess-
-                    # ende). Bei ffmpeg, der nur eine kurze Warnung
-                    # schreibt ("No trailing CRLF found in HTTP header",
-                    # ~65 Bytes), hängt der Aufruf bis zum Ende des
-                    # Streams. read1 liefert, was gerade im Pipe-
-                    # Puffer ist, und blockiert nicht.
                     stderr_data = ff_proc.stderr.read1(500).decode(
                         "utf-8",
                         errors="replace",
@@ -168965,11 +169533,6 @@ class AudioProcessor:
 
         return platform
 
-    # ────────────────────────────────────────────────────────────────
-    # S17-B6: DEPRECATED – kein Aufrufer im gesamten Code (Stand S17).
-    # Methode bleibt vorerst erhalten, wird in S18 entfernt.
-    # Nicht reaktivieren – aktive Alternative in den aktiven Pfaden.
-    # ────────────────────────────────────────────────────────────────
     def _should_prefer_pipe(
         self,
         platform: str,
@@ -170878,6 +171441,17 @@ class AudioProcessor:
 
         _run_step("clear_and_sync_raw_queue", self._clear_and_sync_queue)
 
+        with contextlib.suppress(Exception):
+            with self._subtitle_lock:
+                self._last_session_transcriptions = list(self._timed_transcriptions)
+                self._last_session_translations = list(self._timed_translations)
+            log_debug(
+                "cleanup",
+                "Session-Snapshot: %d Transkriptionen, %d Übersetzungen",
+                len(self._last_session_transcriptions),
+                len(self._last_session_translations),
+            )
+
         _run_step(
             "reset_internal_state",
             lambda: self._reset_internal_state(
@@ -172120,10 +172694,6 @@ class AudioProcessor:
             _err = getattr(self, "_translation_errors", 0)
             _cached = getattr(self, "_translation_cached", 0)
             _skipped = getattr(self, "_translation_skipped", 0)
-            # S17-B3: dedup_skipped abziehen – das sind Requests, die
-            # _translation_requests erhöht haben, aber bewusst verworfen
-            # wurden (Double-Trigger innerhalb 3s). Ohne Abzug entsteht
-            # ein Phantom-Pending (S16: 104 statt 0).
             _dedup_skipped = getattr(
                 self, "_translation_requests_dedup_skipped", 0
             )
@@ -172618,10 +173188,11 @@ class AudioProcessor:
         if regex is None:
             import re
 
+            _sorted_bl = sorted((w for w in blacklist), key=len, reverse=True)
             if mode == "word":
-                pattern = r"\b(" + "|".join(re.escape(w) for w in blacklist) + r")\b"
+                pattern = r"\b(" + "|".join(re.escape(w) for w in _sorted_bl) + r")\b"
             else:
-                pattern = "(" + "|".join(re.escape(w) for w in blacklist) + ")"
+                pattern = "(" + "|".join(re.escape(w) for w in _sorted_bl) + ")"
             try:
                 regex = re.compile(pattern, re.IGNORECASE)
                 self._blacklist_regex_cache[cache_key] = regex
@@ -176307,11 +176878,6 @@ class AudioProcessor:
                 self._translation_skipped = getattr(self, "_translation_skipped", 0) + 1
             return
 
-        # ▼ NEU — S15 / Bug V: Bekannte Whisper-Halluzinations-Phrasen
-        #   nicht übersetzen. Verhindert, dass Ein-Wort- und Kurzphrasen-
-        #   Artefakte ("You", "I'll", "Bye", "Wir sehen uns beim nächsten
-        #   Mal") über den Translation-Pfad in die GUI gelangen.
-        #   Gleiche Phrasen-Liste wie im Transcription-Filter (Bug T).
         _text_norm_v = clean_text.strip().lower().rstrip(".!?,;:…")
         if _text_norm_v in _WHISPER_HALLUCINATION_PHRASES:
             if debug_level >= 2:
@@ -176573,7 +177139,6 @@ class AudioProcessor:
             timeout=timeout,
         )
 
-        # ▼ NEU — Fix M (S14): Enqueue-Dedup gegen Doppel-Trigger
         try:
             import time as _t_dd  # noqa: PLC0415
             _dd_key = (
@@ -176598,10 +177163,6 @@ class AudioProcessor:
                             if self._enq_dedup[_k] < _cutoff:
                                 del self._enq_dedup[_k]
             if _dd_skip:
-                # S17-B3: Dedup-Skip als eigenen Zähler erfassen.
-                # _translation_requests wurde bereits inkrementiert;
-                # ohne diesen Counter zeigt die Shutdown-Drain-Formel
-                # fälschlich "pending" (S16: 104 Phantom-Requests).
                 with stats_lock:
                     self._translation_requests_dedup_skipped = (
                         getattr(self, "_translation_requests_dedup_skipped", 0) + 1
@@ -177077,10 +177638,6 @@ class AudioProcessor:
                 )
                 continue
 
-            # Session 7 (Bug L): Cache-Write im aktiven Batch-Pfad.
-            # Der tote Cache-Write bei ~175515 wurde nie erreicht,
-            # weil _run_translation_task im Live-Betrieb nicht laeuft.
-            # Hier liegt der echte Punkt: result_obj ist fertig.
             if item.text and result_obj.translated:
                 with contextlib.suppress(Exception):
                     self._cache_translation(
@@ -177330,19 +177887,6 @@ class AudioProcessor:
         2) Task-Vorbereitung (Events, Timeout-Berechnung).
         3) Task an Executor submitten – **ohne** Watchdog-Start.
         4) Fehlerbehandlung (Silent-Skip).
-
-        Änderung V3.0
-        -------------
-        * Der Watchdog wird **nicht mehr hier** gestartet, sondern in
-          ``_run_translation_task`` – erst wenn der Worker den Task
-          tatsächlich beginnt. Dadurch wird die Wartezeit in der
-          Executor-Queue nicht mitgemessen. Ohne diesen Fix feuerte
-          der Watchdog bei Backlog fälschlich und löste 60-s-Sperren
-          aus, wodurch die Übersetzung de facto tot war.
-        * ``watchdog_timeout`` (float) statt ``watchdog_timer`` wird
-          an ``_run_translation_task`` weitergereicht.
-        * Alle Fallback-Sends laufen mit ``silent=True``, damit kein
-          englischer Quelltext als Fake-Übersetzung erscheint.
         """
         import logging
 
@@ -177821,11 +178365,6 @@ class AudioProcessor:
                     )
                     translation = None
 
-                # Session 6 (Cache-Fix): Auch identische Uebersetzungen
-                # cachen (Ziel=Quelle, z.B. deutscher Stream mit de als
-                # Ziel). Ohne diesen Write bleibt der Cache leer und die
-                # Hitrate ist mathematisch 0%. Identitaets-Zaehler fuer
-                # Diagnose: zeigt verschwendete Google-Requests.
                 if translation and translation.translated:
                     if translation.translated == text:
                         self._cache_stats_identical = (
@@ -179773,13 +180312,7 @@ class AudioProcessor:
         source_lang: str,
     ) -> TranslationResult | None:
         """Holt eine Übersetzung aus dem Cache.
-
-        ★ v2.0: Poison-Check auf der Lese-Seite. Alte Cache-Einträge aus der
-        Zeit vor dem Write-Filter (bzw. von anderen Aufrufern) werden
-        erkannt und verworfen, statt sie als gültige Übersetzung an die GUI
-        oder den Subtitle-Export weiterzureichen.
         """
-        # Session 6 (Debug): Cache-Statistik-Zaehler
         self._cache_stats_calls = getattr(self, "_cache_stats_calls", 0) + 1
 
         if self._cache_manager is None:
@@ -179841,7 +180374,6 @@ class AudioProcessor:
                         f"✅ Cache-Hit für '{_preview}' "
                         f"(src={source_lang}, tgt={target_lang})",
                     )
-                # Session 6 (Debug): Cache-Hit-Zaehler
                 self._cache_stats_hits = (
                     getattr(self, "_cache_stats_hits", 0) + 1
                 )
@@ -179876,11 +180408,6 @@ class AudioProcessor:
         source_lang: str,
     ) -> None:
         """Speichert eine Übersetzung im Cache.
-
-        ★ v2.0: Poison-Filter auf der Schreib-Seite. HTTP-Fehlertexte und
-        HTML-Antworten (z. B. "Error 500 (Server Error)!!1500...") werden
-        NIEMALS in den Cache geschrieben – sonst würde der Müll bei
-        jedem weiteren Request aus dem Cache zurückkommen.
         """
         if self._cache_manager is None:
             if DEBUG_LEVEL >= 4:
@@ -179942,7 +180469,6 @@ class AudioProcessor:
 
         try:
             set_method(translation, key=cache_key)
-            # Session 6 (Debug): Write-Zaehler + Statistik alle 25 Writes
             self._cache_stats_writes = (
                 getattr(self, "_cache_stats_writes", 0) + 1
             )
@@ -180229,23 +180755,10 @@ class AudioProcessor:
                 )
                 if not _already_scheduled:
                     self._translation_drain_scheduled = True
-            # Session 8 - Bug Z1: Debounce. Parallele Worker liefern ihre
-            # Ergebnisse in Ankunfts- nicht Video-Reihenfolge. Wir warten
-            # kurz, damit die Queue sich fuellt, und sortieren dann.
             if not _already_scheduled:
                 _parent_self = self
                 _cb = callback
-                # Session 8 - Bug Z5: 1.5s Debounce. Bei parallelen
-                # Translation-Workern treffen fruehe Items teils 300-500ms
-                # nach spaeteren ein. Mit 0.5s lief der Emit zu frueh los
-                # und Item 2 wurde zum 'late' Item.
                 _DEBOUNCE_S = 1.5
-
-                # Session 8 - Bug Z3: Erst-Emit-Guard. Solange die Queue
-                # noch klein ist und expected noch nicht initialisiert,
-                # warten wir lieber, bis mehr Items angekommen sind -
-                # sonst emittieren wir die ersten 2 Eintraege zu frueh
-                # und spaetere Items mit kleinerem start wirken als 'late'.
                 _MIN_QUEUE_FOR_FIRST_EMIT = 15
 
                 def _do_drain() -> None:
@@ -180266,7 +180779,6 @@ class AudioProcessor:
                             and _q_now < _MIN_QUEUE_FOR_FIRST_EMIT
                             and _wait_rounds < _max_wait_rounds
                         ):
-                            # Noch nicht genug Items fuer erste Sortierung.
                             _wait_rounds += 1
                             import time as _t
                             _t.sleep(0.5)
@@ -180289,7 +180801,6 @@ class AudioProcessor:
                             if _seq_after == _seq_before:
                                 _parent_self._translation_drain_scheduled = False
                                 return
-                        # Neue Items waehrend Drain angekommen - nochmal.
 
                 _t = threading.Timer(_DEBOUNCE_S, _do_drain)
                 _t.daemon = True
@@ -184312,9 +184823,6 @@ else:
             pass
 
 
-# ▼ NEU — Session 15 / Bug T: Bekannte Whisper-Halluzinations-Phrasen.
-#   Filtert Ein-Wort- und Kurzphrasen, die Whisper bei stillem Audio
-#   produziert — unabhängig von no_speech_prob (die oft niedrig bleibt).
 _WHISPER_HALLUCINATION_PHRASES: frozenset[str] = frozenset({
     # Englisch
     "you", "bye", "i'll", "i will", "thank you", "thanks",
@@ -184325,6 +184833,14 @@ _WHISPER_HALLUCINATION_PHRASES: frozenset[str] = frozenset({
     "thanks for watching", "please subscribe", "subscribe",
     "subtitles by", "amara.org", "thanks for watching!",
     "we'll be right back", "see you next time",
+    "bye-bye", "bye bye", "byebye", "bye bye bye",
+    "let's see how many pieces are done",
+    "let's see how many pieces are done.",
+    "let's see how many",
+    "拜拜", "拜拜", "再見", "再见",
+    "bye bye bye bye",
+    "let's see how many pieces",
+    "bye bye!", "bye-bye!",
     # Deutsch
     "du", "tschüss", "danke", "untertitel", "vielen dank",
     "danke fürs zuschauen", "danke für das zuschauen",
@@ -184332,6 +184848,24 @@ _WHISPER_HALLUCINATION_PHRASES: frozenset[str] = frozenset({
     "wir sehen uns beim nächsten mal",
     "wir sehen uns das nächste mal",
     "wir sind gleich wieder da",
+    # NEU — Chinesische Untertitel-Credits (Mingjing/Diandian & Co.)
+    # Normalisierung: lower() + rstrip(".!?,;:…") + strip()
+    "请不吝点赞",
+    "请不吝点赞 订阅 转发 打赏支持明镜与点点栏目",
+    "请不吝点赞 订阅 转发 打赏支持明镜与点点",
+    "请不吝点赞 订阅 转发 打赏支持明镜",
+    "订阅 转发 打赏支持明镜与点点栏目",
+    "打赏支持明镜与点点栏目",
+    "明镜与点点",
+    "明镜与点点栏目",
+    "优优独播剧场",
+    "yoyo television series exclusive",
+    "中文字幕志愿者",
+    "字幕志愿者",
+    # NEU — Deutsche Übersetzungs-Fragmente des Credits (falls Whisper/Google sie liefern)
+    "bitte zögern sie nicht, die kolumnen „der spiegel“ und „diandian“ zu liken, zu abonnieren, weiterzuleiten und zu belohnen, um sie zu unterstützen",
+    "bitte zögern sie nicht, die kolumnen der spiegel und diandian zu liken",
+    "spiegel und diandian zu liken",
 })
 
 _DEFAULT_BLACKLIST: tuple[str, ...] = (
@@ -184375,6 +184909,16 @@ _DEFAULT_BLACKLIST: tuple[str, ...] = (
     "We'll be right back",
     "We'll see you next time.",
     "Stay tuned.",
+    "请不吝点赞",
+    "打赏支持明镜",
+    "明镜与点点",
+    "订阅 转发 打赏",
+    "优优独播剧场",
+    "字幕志愿者",
+    "中文字幕志愿者",
+    "Transcription by",
+    "Subtitles by",
+    "明镜与点点",
 )
 
 
@@ -187747,7 +188291,27 @@ class AdvancedSettings:
             _changed = True
             self.blacklist = []
 
-        if not self.blacklist:
+        # Builtin-Einträge IMMER mergen – sonst verdrängt die User-JSON
+        # die Builtin-Liste komplett und zukünftige Erweiterungen
+        # bleiben wirkungslos. Vergleich case-insensitive.
+        if self.blacklist:
+            _existing = {p.lower() for p in self.blacklist}
+            _added_builtin = 0
+            for _p in _DEFAULT_BLACKLIST:
+                if _p.lower() not in _existing:
+                    self.blacklist.append(_p)
+                    _existing.add(_p.lower())
+                    _added_builtin += 1
+            if _added_builtin:
+                _changed = True
+                logger.info(
+                    "🔧 %d Builtin-Blacklist-Einträge ergänzt "
+                    "(User: %d → gesamt: %d)",
+                    _added_builtin,
+                    len(self.blacklist) - _added_builtin,
+                    len(self.blacklist),
+                )
+        else:
             self.blacklist = list(_DEFAULT_BLACKLIST)
             _changed = True
             logger.info(
@@ -193367,8 +193931,8 @@ def main() -> int:
     import signal
     import sys
     import threading
-    import tkinter as tk
     import time
+    import tkinter as tk
     from contextlib import suppress
 
     import urllib3
