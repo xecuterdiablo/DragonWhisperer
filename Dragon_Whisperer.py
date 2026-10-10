@@ -3423,7 +3423,7 @@ class EventBus:
         with self._lock:
             self._queue_manager = qm
 
-    def set_scheduler(self, scheduler: Callable[[Callable, int], None]) -> None:
+    def set_scheduler(self, scheduler: Callable[[int, Callable], None]) -> None:
         """Setzt einen externen Scheduler (z.B. für GUI-Threads)."""
         with self._lock:
             self._scheduler = scheduler
@@ -3638,7 +3638,18 @@ class EventBus:
         else:
             for cb in all_callbacks:
                 if is_main_thread and self._scheduler is not None:
-                    self._scheduler(lambda _cb=cb: _invoke(_cb), 0)
+                    # PATCH TB1: root.after(delay, callback) - Argumente waren vertauscht
+                    try:
+                        self._scheduler(0, lambda _cb=cb: _invoke(_cb))
+                    except TypeError:
+                        # Fallback: alter (falscher) Aufruf, falls Scheduler anders signiert
+                        logger.debug(
+                            "TB1: Scheduler-Signatur unerwartet, nutze Fallback"
+                        )
+                        try:
+                            self._scheduler(lambda _cb=cb: _invoke(_cb), 0)
+                        except Exception:
+                            _invoke(cb)
                 else:
                     _invoke(cb)
 
@@ -20377,12 +20388,20 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
         "please try again later",
     )
 
-    _GOOGLE_CIRCUIT_THRESHOLD = 1
-    _GOOGLE_CIRCUIT_COOLDOWN_S = 1800.0
-    _GOOGLE_RATE_START = 0.3
-    _GOOGLE_RATE_MAX = 0.5
-    _GOOGLE_RATE_MIN = 0.5
-    _GOOGLE_RATE_CAPACITY = 2.0
+    # === PATCH F17: circuit breaker tuning ===
+    # Vorher: threshold=1, cooldown=1800s (30 Minuten). Eine einzige
+    # Netzwerkstoerung sperrte Google fuer 30 Minuten. Neue Werte:
+    #   threshold=3    -> erst nach 3 Fehlern in Folge oeffnen
+    #   cooldown=120s  -> 2 Minuten Recovery statt 30
+    _GOOGLE_CIRCUIT_THRESHOLD = 3
+    _GOOGLE_CIRCUIT_COOLDOWN_S = 120.0
+    # === END PATCH F17 ===
+    # # === PATCH J: google rate constants fixed ===
+    _GOOGLE_RATE_START = 1.5   # war 0.3 (zu niedrig)
+    _GOOGLE_RATE_MAX = 3.0     # war 0.5 (Google kann viel mehr)
+    _GOOGLE_RATE_MIN = 0.5     # OK, jetzt < START
+    _GOOGLE_RATE_CAPACITY = 4.0  # war 2.0
+    # === END PATCH J ===
 
     _HEALTH_FAIL_THRESHOLD: ClassVar[int] = 2
     _HEALTH_SKIP_AFTER_SUCCESS_S: ClassVar[float] = 120.0
@@ -21870,7 +21889,8 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
             self._google_success_streak += 1
             streak_snapshot = self._google_success_streak
 
-            if self._google_success_streak >= 5:
+            # === PATCH J2: Recovery-Schwelle 5 -> 2 ===
+            if self._google_success_streak >= 2:
                 new_rate = min(
                     self._GOOGLE_RATE_MAX,
                     previous_rate * 1.2,
@@ -22028,16 +22048,24 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
 
         if google_available:
             try:
-                if not self._google_rate_limiter.consume(1.0):
+                # === PATCH H1: rate-limiter retry ===
+                _rl_ok = self._google_rate_limiter.consume(1.0)
+                _rl_tries = 0
+                while not _rl_ok and _rl_tries < 3:
+                    _rl_tries += 1
                     available = self._google_rate_limiter.available_tokens()
                     rate = max(self._google_rate_limiter.rate, 0.1)
-                    wait_time = min(5.0, max(0.05, (1.0 - available) / rate))
+                    wait_time = min(
+                        8.0,
+                        max(0.05, (1.0 - available) / rate * 1.15 + 0.05),
+                    )
                     logger.debug(
                         "[TRANSLATE] Rate-Limit erschöpft "
-                        "(%.1f/s, %.2f Token) – warte %.2fs",
+                        "(%.1f/s, %.2f Token) – warte %.2fs (Versuch %d/3)",
                         rate,
                         available,
                         wait_time,
+                        _rl_tries,
                     )
                     if cancel_event is not None:
                         if cancel_event.wait(timeout=wait_time):
@@ -22047,19 +22075,19 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
                             return None
                     else:
                         time.sleep(wait_time)
-                    if not self._google_rate_limiter.consume(1.0):
-                        logger.info(
-                            "[TRANSLATE] Rate-Limit nach %.2fs weiter "
-                            "erschöpft – Argos-Fallback",
-                            wait_time,
+                    _rl_ok = self._google_rate_limiter.consume(1.0)
+                if not _rl_ok:
+                    logger.info(
+                        "[TRANSLATE] Rate-Limit nach 3 Versuchen weiter "
+                        "erschöpft – Argos-Fallback",
+                    )
+                    google_available = False
+                    _rate_limit_hit = True
+                    with contextlib.suppress(Exception), self._lock:
+                        self._metrics["rate_limited_count"] = (
+                            self._metrics.get("rate_limited_count", 0) + 1
                         )
-                        google_available = False
-                        _rate_limit_hit = True
-
-                        with contextlib.suppress(Exception), self._lock:
-                            self._metrics["rate_limited_count"] = (
-                                self._metrics.get("rate_limited_count", 0) + 1
-                            )
+                # === END PATCH H1 ===
             except Exception as e:
                 logger.debug("[TRANSLATE] Rate-Limiter-Check fehlgeschlagen: %s", e)
                 google_available = False
@@ -23926,6 +23954,54 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                 self.timeout,
             )
 
+    # === PATCH G2a: _has_target_script helper ===
+    # Unicode-Bereiche pro Zielsprache (Basiscodes ohne Region).
+    _SCRIPT_RANGES = {
+        "ko": ((0xAC00, 0xD7AF), (0x1100, 0x11FF), (0x3130, 0x318F)),
+        "ja": ((0x3040, 0x309F), (0x30A0, 0x30FF), (0x4E00, 0x9FFF)),
+        "zh": ((0x4E00, 0x9FFF), (0x3400, 0x4DBF)),
+        "ru": ((0x0400, 0x04FF),),
+        "uk": ((0x0400, 0x04FF),),
+        "bg": ((0x0400, 0x04FF),),
+        "ar": ((0x0600, 0x06FF), (0x0750, 0x077F)),
+        "fa": ((0x0600, 0x06FF),),
+        "ur": ((0x0600, 0x06FF),),
+        "he": ((0x0590, 0x05FF),),
+        "th": ((0x0E00, 0x0E7F),),
+        "hi": ((0x0900, 0x097F),),
+        "el": ((0x0370, 0x03FF),),
+    }
+
+    def _has_target_script(self, text: str, target_lang: str) -> bool:
+        """Heuristik: Enthaelt der Text Schriftzeichen der Zielsprache?
+
+        Fuer Latein/Basissprachen (de, en, fr, ...) wird immer True
+        zurueckgegeben - dort ist eine Unicode-Heuristik unzuverlaessig.
+        """
+        if not text or not target_lang:
+            return True
+        _lang = (target_lang or "").split("-")[0].lower()
+        ranges = self._SCRIPT_RANGES.get(_lang)
+        if ranges is None:
+            return True
+        total_alpha = 0
+        in_script = 0
+        for ch in text:
+            if not ch.isalpha():
+                continue
+            total_alpha += 1
+            cp = ord(ch)
+            for lo, hi in ranges:
+                if lo <= cp <= hi:
+                    in_script += 1
+                    break
+        if total_alpha == 0:
+            return True
+        # # === PATCH G3b: threshold 0.55 ===
+        return (in_script / total_alpha) >= 0.55
+        # === END PATCH G3b ===
+    # === END PATCH G2a ===
+
     def _validate_and_normalize_host(self, host: str) -> str:
         """Überprüft und normalisiert die Host-URL."""
         if not host:
@@ -24119,6 +24195,15 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                 flags=re.IGNORECASE | re.DOTALL,
             )
 
+        # # === PATCH G3c: strip inner (Note:) ===
+        # Innere (Note: ...) entfernen (nicht nur am Rand)
+        translated = re.sub(
+            r"\s*\(Note:[^)]*\)\s*",
+            " ",
+            translated,
+            flags=re.IGNORECASE,
+        )
+        # === END PATCH G3c ===
         trailing_patterns = [
             r"\s*\(Note:.*?\)\s*$",
             r"\s*\(Please keep in mind.*?\)\s*$",
@@ -24142,12 +24227,20 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         source_lang: str,
         target_lang: str,
     ) -> str:
-        source_name = (
-            SUPPORTED_LANGUAGES.get(source_lang, source_lang)
-            if source_lang != "auto"
-            else "the detected language"
+        # # === PATCH G1: prompt uses LLM names ===
+        _llm_names = self._LLM_LANG_NAMES
+        if source_lang == "auto" or not source_lang:
+            source_name = _llm_names["auto"]
+        else:
+            source_name = _llm_names.get(
+                source_lang,
+                SUPPORTED_LANGUAGES.get(source_lang, source_lang),
+            )
+        target_name = _llm_names.get(
+            target_lang,
+            SUPPORTED_LANGUAGES.get(target_lang, target_lang),
         )
-        target_name = SUPPORTED_LANGUAGES.get(target_lang, target_lang)
+        # === END PATCH G1 ===
         safe_text = self._sanitize_text(text)
 
         prompt = (
@@ -24686,12 +24779,31 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                 if translated:
                     post = self._postprocess_translation(translated, "")
                     if post:
-                        return post, None
-                    last_exception = ValueError("Leere Antwort nach Bereinigung")
-                    self._log(
-                        logging.DEBUG,
-                        f"Leere Antwort nach Bereinigung (Versuch {attempt})",
-                    )
+                        # === PATCH G2b: reject wrong-language response ===
+                        _tgt_lang = getattr(self, "default_target_lang", "") or ""
+                        if not self._has_target_script(post, _tgt_lang):
+                            self._log(
+                                logging.WARNING,
+                                "Ollama-Antwort nicht in Zielsprache %r - "
+                                "Strategie '%s' verworfen (erste 80 Zeichen: %r)",
+                                _tgt_lang, strategy_name, post[:80],
+                            )
+                            last_exception = ValueError(
+                                f"Antwort nicht in Zielsprache {_tgt_lang}"
+                            )
+                            # === PATCH G3a: early break on lang mismatch ===
+                            # Retry bringt bei gleicher Strategie nichts
+                            return None, last_exception
+                            # === END PATCH G3a ===
+                        else:
+                            return post, None
+                        # === END PATCH G2b ===
+                    else:
+                        last_exception = ValueError("Leere Antwort nach Bereinigung")
+                        self._log(
+                            logging.DEBUG,
+                            f"Leere Antwort nach Bereinigung (Versuch {attempt})",
+                        )
                 else:
                     last_exception = ValueError("Keine Übersetzung erhalten")
                     self._log(logging.DEBUG, f"Keine Übersetzung (Versuch {attempt})")
@@ -25229,6 +25341,32 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
     MAX_PROMPT_LENGTH: int = 4000
     MAX_RESPONSE_TOKENS: int = 1024
     HEALTH_ENDPOINTS: tuple = ("/api/tags", "/api/version")
+
+    # === PATCH G0: _LLM_LANG_NAMES dict ===
+    _LLM_LANG_NAMES: dict[str, str] = {
+        "auto": "the source language",
+        "de": "German", "en": "English", "ko": "Korean",
+        "zh": "Chinese", "zh-CN": "Chinese (Simplified)",
+        "zh-TW": "Chinese (Traditional)", "ja": "Japanese",
+        "fr": "French", "es": "Spanish", "it": "Italian",
+        "pt": "Portuguese", "nl": "Dutch", "ru": "Russian",
+        "ar": "Arabic", "hi": "Hindi", "tr": "Turkish",
+        "pl": "Polish", "sv": "Swedish", "da": "Danish",
+        "no": "Norwegian", "fi": "Finnish", "cs": "Czech",
+        "el": "Greek", "he": "Hebrew", "th": "Thai",
+        "vi": "Vietnamese", "id": "Indonesian", "ms": "Malay",
+        "uk": "Ukrainian", "ro": "Romanian", "hu": "Hungarian",
+        "bg": "Bulgarian", "hr": "Croatian", "sk": "Slovak",
+        "sl": "Slovenian", "lt": "Lithuanian", "lv": "Latvian",
+        "et": "Estonian", "fa": "Persian", "ur": "Urdu",
+        "bn": "Bengali", "ta": "Tamil", "te": "Telugu",
+        "mr": "Marathi", "sw": "Swahili", "af": "Afrikaans",
+        "sq": "Albanian", "sr": "Serbian", "mk": "Macedonian",
+        "be": "Belarusian", "is": "Icelandic", "ga": "Irish",
+        "cy": "Welsh", "gl": "Galician", "eu": "Basque",
+        "ca": "Catalan", "mt": "Maltese", "la": "Latin",
+    }
+    # === END PATCH G0 ===
 
 
 class ReflectionTranslationEngine(BaseCachedTranslationEngine):
@@ -26624,6 +26762,118 @@ _HALLUCINATION_WHITELIST = frozenset(
 )
 
 
+# === PATCH W1a: language-agnostic whisper hint extractor ===
+def _extract_whisper_hint(raw_context: str, target_lang: str) -> str:
+    """Extrahiert aus dem Nutzer-Kontext eine Whisper-taugliche
+    Token-Liste (initial_prompt) – sprach-agnostisch.
+
+    Regeln:
+      1. Alles nach '=', ':', ' - ' verwerfen (Nutzer-Erklaerungen).
+      2. Split an Kommas/Semikolons/Zeilenumbruechen.
+      3. Behalten werden Tokens, die Zeichen der Zielschrift
+         enthalten ODER Latin-Eigennamen (Grossbuchstabe).
+      4. Bei Latin-Zielsprachen zusaetzlich Funktionswoerter filtern.
+      5. Max. 60 Zeichen Gesamtlaenge.
+    """
+    if not raw_context or not isinstance(raw_context, str):
+        return ""
+    import re as _re_w1
+    # Schriftbereiche pro Sprache (Basiscode)
+    _SCRIPT_RANGES = {
+        "ko": ((0xAC00, 0xD7AF), (0x1100, 0x11FF), (0x3130, 0x318F)),
+        "ja": ((0x3040, 0x309F), (0x30A0, 0x30FF), (0x4E00, 0x9FFF)),
+        "zh": ((0x4E00, 0x9FFF), (0x3400, 0x4DBF)),
+        "ru": ((0x0400, 0x04FF),),
+        "uk": ((0x0400, 0x04FF),),
+        "bg": ((0x0400, 0x04FF),),
+        "ar": ((0x0600, 0x06FF), (0x0750, 0x077F)),
+        "fa": ((0x0600, 0x06FF),),
+        "he": ((0x0590, 0x05FF),),
+        "th": ((0x0E00, 0x0E7F),),
+        "hi": ((0x0900, 0x097F),),
+        "el": ((0x0370, 0x03FF),),
+    }
+    # Latin-Sprachen: hier ist Schrift-Erkennung unzuverlaessig,
+    # wir nutzen stattdessen Stop-Wort-Filter.
+    _LATIN_LANGS = frozenset({
+        "de", "en", "fr", "es", "it", "pt", "nl", "sv", "da",
+        "no", "fi", "pl", "cs", "sk", "hu", "ro", "hr", "sl",
+        "tr", "id", "ms", "vi", "tl", "ca", "gl", "eu",
+    })
+    # Sehr kurze Stop-Wort-Liste (dt/en/fr) fuer Latin-Filter
+    _STOP = frozenset({
+        "ein", "eine", "einer", "eines", "einem", "einen",
+        "der", "die", "das", "den", "dem", "des",
+        "und", "oder", "aber", "mit", "ohne", "fuer", "für",
+        "ist", "sind", "war", "waren", "wird", "werden",
+        "the", "a", "an", "and", "or", "of", "in", "on", "at",
+        "to", "for", "with", "without", "is", "are", "was",
+        "le", "la", "les", "un", "une", "des", "et", "ou",
+        "de", "du", "dans", "sur", "est", "sont",
+    })
+    _lang = (target_lang or "").split("-")[0].lower()
+    _ranges = _SCRIPT_RANGES.get(_lang)
+    _is_latin_target = _lang in _LATIN_LANGS
+
+    def _has_target_script(_tok: str) -> bool:
+        if not _ranges:
+            return False
+        for _ch in _tok:
+            _cp = ord(_ch)
+            for _lo, _hi in _ranges:
+                if _lo <= _cp <= _hi:
+                    return True
+        return False
+
+    def _is_latin_name(_tok: str) -> bool:
+        if not _tok or not _tok[0].isupper():
+            return False
+        if not all(c.isalpha() or c in "-'." for c in _tok):
+            return False
+        # Kein Umlaut-only, kein Wort < 3 Zeichen
+        return len(_tok) >= 3
+
+    _clean = raw_context.strip()
+    # 1. Erklaerungen abschneiden (nach =, :, -)
+    _clean = _re_w1.sub(r"\s*[=:].*", "", _clean)
+    _clean = _re_w1.sub(r"\s+-\s+.*", "", _clean)
+    # 2. In Tokens aufteilen
+    _tokens = []
+    for _raw in _re_w1.split(r"[,;\n]+", _clean):
+        _t = _raw.strip()
+        if not _t:
+            continue
+        # Einzelne Woerter innerhalb (falls "A B C" mit Leerzeichen)
+        for _w in _t.split():
+            _w = _w.strip()
+            if not _w:
+                continue
+            if _has_target_script(_w):
+                _tokens.append(_w)
+                continue
+            if _is_latin_name(_w):
+                _tokens.append(_w)
+                continue
+            if _is_latin_target and _w.lower() not in _STOP:
+                if len(_w) >= 3 and _w.isalpha():
+                    _tokens.append(_w)
+    if not _tokens:
+        return ""
+    # Dedupe unter Beibehaltung der Reihenfolge
+    _seen = set()
+    _uniq = []
+    for _t in _tokens:
+        _key = _t.lower()
+        if _key in _seen:
+            continue
+        _seen.add(_key)
+        _uniq.append(_t)
+    _result = " ".join(_uniq)
+    if len(_result) > 60:
+        _result = _result[:60].rsplit(" ", 1)[0]
+    return _result
+
+
 class TranscriptionEngine:
     """Optimierte Transkriptions-Engine mit automatischer Hardware-Erkennung,
     intelligenter Fallback-Strategie und maximaler Kompatibilität.
@@ -26912,6 +27162,26 @@ class TranscriptionEngine:
                 "Falling back to CPU. You can disable GPU acceleration in "
                 "advanced settings to suppress this warning.",
             )
+
+        # === PATCH F15c: warn when setting=False but GPU available ===
+        # F15c: Warnung wenn Setting False, aber GPU offensichtlich verfuegbar
+        if (
+            not self.settings.gpu_acceleration
+            and self.device == "cpu"
+        ):
+            try:
+                if torch.cuda.is_available():
+                    _f15c_free = self._get_free_gpu_memory(device="cuda")
+                    if _f15c_free is not None and _f15c_free >= 4.0:
+                        _logger.warning(
+                            "[F15c] gpu_acceleration=False in Settings, aber "
+                            "%.1f GB VRAM frei. Pruefe erneut in "
+                            "Erweiterte Einstellungen, wenn Self-Heal nicht griff.",
+                            _f15c_free,
+                        )
+            except Exception:
+                pass
+        # === END PATCH F15c ===
 
         self.event_bus = event_bus
         if self.event_bus is None and DEBUG_LEVEL >= 2:
@@ -29488,12 +29758,73 @@ class TranscriptionEngine:
         torch = self._torch
 
         if self.settings is not None and not self.settings.gpu_acceleration:
-            logger.info("GPU‑Beschleunigung durch Benutzer deaktiviert – verwende CPU")
-
-            torch.set_num_threads(1)
-            torch.set_num_interop_threads(1)
-            logger.info("🧵 CPU‑Threads auf 1 gesetzt (CPU‑Modus)")
-            return "cpu", self._best_cpu_compute_type()
+            # # === PATCH F15a+b: GPU self-heal + smart CPU threads ===
+            # Prüfe zuerst, ob die GPU überhaupt verfügbar wäre.
+            _f15_gpu_ok = False
+            _f15_free_vram = None
+            try:
+                if torch.cuda.is_available():
+                    _f15_gpu_ok = True
+                    try:
+                        _f15_free_vram = self._get_free_gpu_memory(device="cuda")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            _f15_heal = (
+                _f15_gpu_ok
+                and _f15_free_vram is not None
+                and _f15_free_vram >= 4.0
+            )
+            if _f15_heal:
+                logger.warning(
+                    "[F15a-SELFHEAL] gpu_acceleration=False, aber %.1f GB "
+                    "VRAM frei -> aktiviere GPU automatisch",
+                    _f15_free_vram,
+                )
+                try:
+                    self.settings.gpu_acceleration = True
+                    if hasattr(self.settings, "save_to_file"):
+                        self.settings.save_to_file()
+                        logger.info(
+                            "[F15a-SELFHEAL] Setting persistiert"
+                        )
+                except Exception as _f15_save_exc:
+                    logger.debug(
+                        "F15a Persistierung fehlgeschlagen: %s", _f15_save_exc
+                    )
+                # Fallthrough: laeuft weiter zum GPU-Pfad
+            else:
+                # Echter CPU-Wunsch oder kein VRAM
+                logger.info(
+                    "[F15] GPU deaktiviert (gpu_acceleration=False). "
+                    "cuda=%s, free_vram=%s -> CPU-Modus",
+                    _f15_gpu_ok,
+                    f"{_f15_free_vram:.1f} GB" if _f15_free_vram is not None else "n/a",
+                )
+                _f15_n_threads = 1
+                try:
+                    import os as _f15_os
+                    _f15_cpu = _f15_os.cpu_count() or 1
+                    _f15_n_threads = max(1, min(4, _f15_cpu // 2))
+                except Exception:
+                    _f15_n_threads = 1
+                try:
+                    torch.set_num_threads(_f15_n_threads)
+                    logger.info(
+                        "[F15b] CPU-Threads auf %d gesetzt (CPU-Modus)",
+                        _f15_n_threads,
+                    )
+                except Exception as _f15_threads_exc:
+                    logger.debug(
+                        "set_num_threads fehlgeschlagen: %s", _f15_threads_exc
+                    )
+                try:
+                    torch.set_num_interop_threads(1)
+                except Exception:
+                    pass
+                return "cpu", self._best_cpu_compute_type()
+            # === END PATCH F15a+b ===
 
         device_priority: list[tuple[str, str, Callable[[], bool] | None]] = []
 
@@ -32588,6 +32919,23 @@ class TranscriptionEngine:
         except Exception:
             pass
 
+        # === PATCH F18: force condition_on_previous_text=False for streams ===
+        # Safety-Guard: Bei Live-Streams fuehrt True zu
+        # Endlos-Halluzinationen (Chunk N halluziniert, Chunk N+1
+        # nutzt es als Kontext). Fuer Streams IMMER False.
+        # === PATCH F18b: unconditional copt=False ===
+        # IMMER False fuer Streams. True fuehrt zu Endlos-Halluzinationen
+        # (Chunk N halluziniert, Chunk N+1 nutzt es als Kontext).
+        # Override moeglich via DW_WHISPER_NO_CONDITION=0 (siehe oben).
+        if condition_on_previous_text:
+            logger.warning(
+                "[F18b] condition_on_previous_text=True -> auf False "
+                "erzwungen (Halluzinations-Schutz)"
+            )
+            condition_on_previous_text = False
+        # === END PATCH F18b ===
+        # === END PATCH F18 ===
+
         kwargs: dict[str, Any] = {
             "language": effective_language,
             "task": "transcribe",
@@ -32603,6 +32951,39 @@ class TranscriptionEngine:
             "without_timestamps": not include_timestamps,
             "word_timestamps": include_timestamps,
         }
+
+        # === PATCH W1b: initial_prompt into transcribe kwargs ===
+        # Whisper initial_prompt aus Nutzer-Kontext (sprach-agnostisch)
+        # Nur wenn Zielsprache eindeutig (nicht auto)
+        try:
+            _w1_raw = getattr(
+                self.settings, "summary_context", ""
+            ) or ""
+            _w1_lang = effective_language or ""
+            if _w1_raw and _w1_lang:
+                _w1_hint = _extract_whisper_hint(_w1_raw, _w1_lang)
+                if _w1_hint and len(_w1_hint) >= 3:
+                    kwargs["initial_prompt"] = _w1_hint
+                    if DEBUG_LEVEL >= 3:
+                        log_debug(
+                            "transcribe",
+                            "[W1] initial_prompt aktiv (lang=%s): %r",
+                            _w1_lang, _w1_hint,
+                        )
+                elif DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "transcribe",
+                        "[W1] Hint zu kurz/leer aus Kontext (lang=%s)",
+                        _w1_lang,
+                    )
+            elif DEBUG_LEVEL >= 3 and _w1_raw:
+                log_debug(
+                    "transcribe",
+                    "[W1] Hint uebersprungen: Sprache nicht erkannt (auto)",
+                )
+        except Exception as _w1_exc:
+            logger.debug("[W1] Fehler: %s", _w1_exc)
+        # === END PATCH W1b ===
 
         if self.settings.vad_filter:
             kwargs["vad_filter"] = True
@@ -62357,6 +62738,75 @@ class FFmpegManager:
             self.READ_BLOCK_SIZE = DEFAULT_BLOCK_SIZE
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# SICHERE JSON-PERSISTENZ  (Selbstheilung + atomares Schreiben + Rotation)
+# ═══════════════════════════════════════════════════════════════════════════
+_JSON_BACKUP_KEEP = 5
+
+
+def _backup_rotate(path: Path, *, keep: int = _JSON_BACKUP_KEEP):
+    """Rotierendes Backup — nur Timestamps rotieren, manuelle Backups bleiben."""
+    if not path.exists():
+        return None
+    try:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        bak = path.with_suffix(path.suffix + f".bak_{ts}")
+        shutil.copy2(path, bak)
+        backups = sorted(path.parent.glob(path.name + ".bak_*"))
+        for old in backups[:-keep]:
+            with contextlib.suppress(Exception):
+                old.unlink()
+        return bak
+    except Exception as exc:
+        logger.warning("Backup von %s fehlgeschlagen: %s", path, exc)
+        return None
+
+
+def _atomic_write_json(path: Path, data: dict, *, backup: bool = True,
+                       keep_backups: int = _JSON_BACKUP_KEEP):
+    """Schreibt *data* atomar (tmp + os.replace). Fehler → alte Datei intakt."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if backup:
+            _backup_rotate(path, keep=keep_backups)
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+        return True, None
+    except Exception as exc:
+        logger.error("Schreiben von %s fehlgeschlagen: %s", path, exc)
+        with contextlib.suppress(Exception):
+            if tmp.exists():
+                tmp.unlink()
+        return False, str(exc)
+
+
+def _load_json_with_repair(path: Path, *, label: str = "settings"):
+    """Lädt JSON mit Selbstheilung. Rückgabe: (data, was_repaired)."""
+    if not path.exists():
+        return None, False
+    try:
+        raw = path.read_text(encoding="utf-8")
+        if not raw.strip():
+            raise ValueError("Datei ist leer")
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError(f"Top-Level ist {type(data).__name__}, nicht dict")
+        return data, False
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError, OSError) as exc:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        corrupt = path.with_suffix(path.suffix + f".corrupted_{ts}")
+        with contextlib.suppress(Exception):
+            path.rename(corrupt)
+        logger.warning(
+            "⚠️  %s: defekte JSON (%s: %s) → umbenannt nach %s. "
+            "Standardwerte werden neu geschrieben.",
+            label, type(exc).__name__, exc, corrupt.name,
+        )
+        return None, True
+
+
 @dataclass
 class AppSettings:
     """Einfache Anwendungseinstellungen für Dragon Whisperer (GUI, letzte URL, Theme, Cookies).
@@ -62429,23 +62879,15 @@ class AppSettings:
             with open(file_path, encoding="utf-8") as f:
                 data = json.load(f)
         except json.JSONDecodeError as e:
-            logger.error(
-                "JSONDecodeError in %s (Zeile %d, Spalte %d): %s",
-                file_path,
-                e.lineno,
-                e.colno,
-                e.msg,
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            corrupt = file_path.with_suffix(file_path.suffix + f".corrupted_{ts}")
+            with contextlib.suppress(Exception):
+                file_path.rename(corrupt)
+            logger.warning(
+                "⚠️  %s: defekte JSON (Zeile %d, Spalte %d: %s) → "
+                "umbenannt nach %s. Standardwerte werden neu geschrieben.",
+                file_path.name, e.lineno, e.colno, e.msg, corrupt.name,
             )
-            backup_path = file_path.with_suffix(".json.bak")
-            if not backup_path.exists():
-                try:
-                    shutil.copy2(file_path, backup_path)
-                    logger.warning(
-                        "Korrupte Einstellungen gesichert als: %s",
-                        backup_path,
-                    )
-                except Exception as be:
-                    logger.warning("Konnte kein Backup erstellen: %s", be)
             return None
         except UnicodeDecodeError as e:
             logger.error("UnicodeDecodeError in %s: %s", file_path, e)
@@ -62476,6 +62918,8 @@ class AppSettings:
         try:
             file_path.parent.mkdir(parents=True, exist_ok=True)
             temp_path = file_path.with_suffix(".tmp")
+            if file_path.exists():
+                _backup_rotate(file_path)
             with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             os.replace(temp_path, file_path)
@@ -62503,6 +62947,8 @@ class AppSettings:
             logger.debug("Keine gültige Konfiguration – verwende Standard-AppSettings")
             instance = cls()
             instance._repair_if_needed()
+            with contextlib.suppress(Exception):
+                instance.save_to_file(filename)
             return instance
         valid_fields = cls._get_valid_fields()
         filtered = {k: v for k, v in data.items() if k in valid_fields}
@@ -67283,6 +67729,131 @@ class LanguageDetector:
         logger.debug("LanguageDetector disposed (force=%s)", force)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# OLLAMA-MODEL-RESOLVER  (Stufe C: Auto-Auswahl + Verfügbarkeits-Check)
+# ═══════════════════════════════════════════════════════════════════════════
+def _fetch_ollama_model_names(host: str, timeout: float = 2.0):
+    """Holt die Liste verfügbarer Ollama-Modelle via /api/tags.
+
+    Returns:
+        Liste der Modellnamen oder ``None`` wenn Ollama offline ist.
+    """
+    import urllib.request
+    try:
+        url = f"{host.rstrip('/')}/api/tags"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        models = data.get("models") or []
+        return [m.get("name", "") for m in models if m.get("name")]
+    except Exception:
+        return None
+
+
+_SUMMARIZE_MODEL_PRIORITY = (
+    "qwen2.5:14b-instruct-q3_K_M",  # PATCH A0: q3_K_M in Priority
+    "llama3.1:8b",
+    "llama3.1:latest",
+    "qwen2.5:14b",
+    "qwen2.5:7b",
+    "mistral:latest",
+    "gemma2:9b",
+    "llama3.2:3b",
+    "llama3.2:latest",
+)
+
+_SUMMARIZE_EXCLUDE_HINTS = (
+    "coder", "embed", "vision", "llava", "bakllava",
+)
+
+
+def _looks_like_loop(
+    new_text: str,
+    prev_text: str | None = None,
+    *,
+    max_len: int = 2500,
+    growth_factor: float = 2.5,
+    repetition_threshold: int = 3,
+) -> tuple[bool, str]:
+    """Erkennt, ob ein Refine-Output ein Loop-Artefakt ist.
+
+    Rückgabe: ``(is_loop, grund)``.
+
+    Heuristiken:
+      1. Größenexplosion gegenüber der Vorversion (> growth_factor).
+      2. Absolutlänge > max_len (Ziel sind 3–6 Sätze ≈ 600–1000 Zeichen).
+      3. Wiederholte Sätze (>= repetition_threshold mal derselbe Satz).
+    """
+    if not new_text or not new_text.strip():
+        return False, ""
+    _new = new_text.strip()
+
+    if prev_text:
+        _prev_len = max(1, len(prev_text.strip()))
+        if len(_new) > _prev_len * growth_factor and len(_new) > 800:
+            return True, (
+                f"Größenexplosion: {len(_new)} Zeichen vs. "
+                f"{_prev_len} (Faktor {len(_new)/_prev_len:.1f})"
+            )
+
+    if len(_new) > max_len:
+        return True, f"Absolutlänge {len(_new)} > {max_len} Zeichen"
+
+    _sents = [
+        s.strip()
+        for s in _new.replace("!", ".").replace("?", ".").split(".")
+        if len(s.strip()) > 20
+    ]
+    if len(_sents) >= 5:
+        from collections import Counter as _Counter
+        _mc = _Counter(_sents).most_common(1)
+        if _mc and _mc[0][1] >= repetition_threshold:
+            _repeated = _mc[0][0][:60]
+            return True, (
+                f"Satz {_mc[0][1]}× wiederholt: '{_repeated}…'"
+            )
+
+    return False, ""
+
+
+def _resolve_summarize_model(preferred, available):
+    """Wählt ein geeignetes Ollama-Modell für Zusammenfassungen.
+
+    Regeln:
+      1. ``preferred`` gesetzt und verfügbar → nimm es.
+      2. Sonst Prioritätsliste (llama3.1:8b bevorzugt).
+      3. Sonst erstes Modell ohne Ausschluss-Keywords.
+
+    Returns:
+        ``(modell, begruendung)`` oder ``(None, fehlertext)``.
+    """
+    if not available:
+        return None, "Keine Modelle verfügbar"
+    _explicit = bool(preferred) and preferred != "auto"
+    if _explicit and preferred in available:
+        return preferred, f"User-Wahl '{preferred}' verfügbar"
+    for candidate in _SUMMARIZE_MODEL_PRIORITY:
+        if candidate in available:
+            if _explicit:
+                return candidate, (
+                    f"Auto-Fallback → '{candidate}' "
+                    f"(User-Wahl '{preferred}' nicht verfügbar)"
+                )
+            return candidate, f"Auto-Auswahl → '{candidate}' (Prioritätsliste)"
+    for candidate in available:
+        if any(h in candidate.lower() for h in _SUMMARIZE_EXCLUDE_HINTS):
+            continue
+        return candidate, f"Auto-Fallback → '{candidate}' (kein PRIORITY-Treffer)"
+    return None, "Kein geeignetes Modell gefunden"
+
+
+# === PATCH A1: _resolve_translation_model ===
+def _resolve_translation_model(preferred, available):
+    """Waehlt ein Ollama-Modell fuer Uebersetzungen."""
+    return _resolve_summarize_model(preferred, available)
+# === END PATCH A1 ===
+
+
 class OllamaSummarizer:
     """ULTIMATIVE, VOLLSTÄNDIGE UND HOCHPERFORMANTE OLLAMA-SCHNITTSTELLE."""
 
@@ -69038,6 +69609,15 @@ class OllamaSummarizer:
                 if aborted_by_user:
                     self._log_debug("Abbruch durch Benutzer – kehre mit None zurück.")
                     return None
+
+                # FIX (Stufe A): ModelNotFoundError und RateLimitError direkt
+                # durchreichen, statt sie als "ServerUnreachable" zu maskieren.
+                # Vorher sah es aus, als wäre Ollama offline, obwohl nur das
+                # Modell fehlte.
+                if isinstance(last_exception, self.ModelNotFoundError):
+                    raise last_exception
+                if isinstance(last_exception, self.RateLimitError):
+                    raise last_exception
 
                 raise self.ServerUnreachableError(
                     f"Alle Hosts fehlgeschlagen: {hosts}",
@@ -77714,259 +78294,155 @@ class SummarizeDialog(BaseDialog):
     """🐉 ULTIMATIVER DIALOG FÜR KI-GESTÜTZTE ZUSAMMENFASSUNGEN MIT OLLAMA"""
 
     SUMMARY_LANGUAGE_PROMPTS: ClassVar[dict[str, str]] = {
+        # Diese Prompts enthalten NUR Sprache + Minimal-Regeln.
+        # Laenge, Struktur, Ton und Formatierung kommen ausschliesslich
+        # aus dem Style-Template (TEMPLATES[style]) — der Style hat
+        # ausdruecklich Vorrang. Vorher hatten diese Prompts eigene
+        # Laengen- und Meta-Anweisungen, die den Style ausgehebelt haben.
         "Deutsch": (
-            "Du bist ein hilfreicher Assistent, der Video-Transkriptionen analysiert.\n"
-            "Fasse den Inhalt des folgenden Video-Clips in 3‑5 präzisen, vollständigen Sätzen auf Deutsch zusammen.\n"
-            "Schreibe so, als würdest du einem Freund das Video beschreiben.\n"
-            "Verwende Formulierungen wie 'Das Video zeigt...', 'Der Sprecher erklärt...', 'In diesem Clip wird gezeigt...'.\n"
-            "Vermeide Begriffe wie 'Text', 'dieser Text' oder 'Zusammenfassung des Textes'.\n"
-            "STRENGE REGELN:\n"
-            "• Die Antwort MUSS auf Deutsch sein.\n"
-            "• Keine Zeichen aus anderen Schriftsystemen.\n"
-            "• Verwende nur Deutsch.\n"
-            "• Keine Einleitungen wie 'Hier ist eine Zusammenfassung:' – gib direkt die Sätze aus."
+            # # === PATCH F13c: deutsch lock ===
+            "Antworte AUSSCHLIESSLICH auf Deutsch. Keine Zeichen "
+            "aus anderen Schriftsystemen (kein Chinesisch, "
+            "Koreanisch, Japanisch, Englisch, Kyrillisch). "
+            "Keine Meta-Kommentare, keine Sprachanalysen, keine "
+            "Hinweise auf Sprachprobleme. Bei Unsicherheit: "
+            "lieber kuerzer auf Deutsch als mit fremden Zeichen.\n"
+            # === END PATCH F13c ===
+            "Keine Einleitungen wie 'Hier ist eine Zusammenfassung:' — "
+            "direkt die Antwort.\n"
+            "Die folgende Stil-Anweisung hat Vorrang und bestimmt Laenge, "
+            "Struktur, Ton und Formatierung. Befolge sie exakt."
         ),
         "Englisch": (
-            "You are a helpful assistant who understands video transcriptions.\n"
-            "Summarize the following video clip in 3‑5 precise, complete sentences in English.\n"
-            "Write as if you were describing the video to a friend.\n"
-            "Use phrases like 'The video shows...', 'The speaker explains...', 'This clip demonstrates...'.\n"
-            "Avoid references to 'text', 'this text', or 'summary of the text'.\n"
-            "STRICT RULES:\n"
-            "• Response MUST be in English only.\n"
-            "• No characters from other writing systems.\n"
-            "• Do not add any introductory phrases like 'Here is a summary:' – output only the sentences."
+            "Respond in English. No characters from other writing systems.\n"
+            "No preamble like 'Here is a summary:' — output the content directly.\n"
+            "The style instruction below takes precedence and defines length, "
+            "structure, tone and formatting. Follow it exactly."
         ),
         "Koreanisch": (
-            "당신은 비디오 대본을 이해하는 유용한 도우미입니다.\n"
-            "다음 비디오 클립의 내용을 한국어로 3‑5개의 정확하고 완전한 문장으로 요약하세요.\n"
-            "친구에게 비디오를 설명하듯이 작성하세요.\n"
-            "'비디오는 다음을 보여줍니다...', '발표자는 다음과 같이 설명합니다...', '이 클립에서는 다음을 보여줍니다...'와 같은 표현을 사용하세요.\n"
-            "'텍스트' 또는 '이 텍스트'와 같은 언급은 피하세요.\n"
-            "엄격한 규칙:\n"
-            "• 응답은 반드시 한국어로만 작성하세요.\n"
-            "• 다른 문자 체계를 사용하지 마세요.\n"
-            "'다음은 요약입니다'와 같은 도입문을 추가하지 말고 바로 문장을 출력하세요."
+            "한국어로 답하세요. 다른 문자 체계를 사용하지 마세요.\n"
+            "'다음은 요약입니다'와 같은 도입문 없이 바로 답하세요.\n"
+            "아래 스타일 지시가 우선하며 길이, 구조, 어조, 형식을 결정합니다. "
+            "정확히 따르세요."
         ),
         "Französisch": (
-            "Vous êtes un assistant utile qui comprend les transcriptions vidéo.\n"
-            "Résumez le contenu du clip vidéo suivant en 3‑5 phrases précises et complètes en français.\n"
-            "Écrivez comme si vous décriviez la vidéo à un ami.\n"
-            "Utilisez des expressions comme 'La vidéo montre...', 'L'orateur explique...', 'Ce clip démontre...'.\n"
-            "Évitez les références à 'texte', 'ce texte' ou 'résumé du texte'.\n"
-            "RÈGLES STRICTES:\n"
-            "• La réponse doit être uniquement en français.\n"
-            "• Pas de caractères d'autres systèmes d'écriture.\n"
-            "• Ne commencez pas par des phrases comme 'Voici un résumé' – donnez directement les phrases."
+            "Répondez en français. Pas de caractères d'autres systèmes d'écriture.\n"
+            "Pas de préambule comme 'Voici un résumé :' — directement le contenu.\n"
+            "L'instruction de style ci-dessous a la priorité et définit la longueur, "
+            "la structure, le ton et le format. Suivez-la exactement."
         ),
         "Spanisch": (
-            "Eres un asistente útil que entiende las transcripciones de vídeo.\n"
-            "Resume el contenido del siguiente clip de vídeo en 3‑5 frases precisas y completas en español.\n"
-            "Escribe como si estuvieras describiendo el vídeo a un amigo.\n"
-            "Usa frases como 'El vídeo muestra...', 'El orador explica...', 'Este clip demuestra...'.\n"
-            "Evita referencias a 'texto', 'este texto' o 'resumen del texto'.\n"
-            "REGLAS ESTRICTAS:\n"
-            "• La respuesta debe ser solo en español.\n"
-            "• No uses caracteres de otros sistemas de escritura.\n"
-            "• No añadas frases introductorias como 'Aquí hay un resumen' – solo escribe las oraciones."
+            "Responde en español. Sin caracteres de otros sistemas de escritura.\n"
+            "Sin preámbulo como 'Aquí hay un resumen:' — directamente el contenido.\n"
+            "La instrucción de estilo a continuación tiene prioridad y define "
+            "longitud, estructura, tono y formato. Síguela exactamente."
         ),
         "Japanisch": (
-            "あなたはビデオの書き起こしを理解する役立つアシスタントです。\n"
-            "次のビデオクリップの内容を、日本語で3〜5の正確で完全な文に要約してください。\n"
-            "友達にビデオを説明するように書いてください。\n"
-            "'ビデオは…を示しています'、'話し手は…と説明しています'、'このクリップは…を示しています'などの表現を使ってください。\n"
-            "'テキスト'や'このテキスト'への言及は避けてください。\n"
-            "厳格なルール:\n"
-            "• 回答は日本語のみでお願いします。\n"
-            "• 他の文字体系の文字を一切使用しないでください。\n"
-            "• '以下は要約です'のような前置きは入れず、文を直接出力してください。"
+            "日本語で回答してください。他の文字体系の文字を使用しないでください。\n"
+            "「以下は要約です」のような前置きは入れず、直接回答を出力してください。\n"
+            "以下のスタイル指示が優先され、長さ、構造、トーン、書式を決定します。"
+            "正確に従ってください。"
         ),
         "Italienisch": (
-            "Sei un assistente utile che comprende le trascrizioni video.\n"
-            "Riassumi il contenuto del seguente clip video in 3‑5 frasi precise e complete in italiano.\n"
-            "Scrivi come se stessi descrivendo il video a un amico.\n"
-            "Usa frasi come 'Il video mostra...', 'Il relatore spiega...', 'Questo clip dimostra...'.\n"
-            "Evita riferimenti a 'testo', 'questo testo' o 'riassunto del testo'.\n"
-            "REGOLE RIGOROSE:\n"
-            "• Rispondi SOLO in italiano.\n"
-            "• Nessun carattere di altri sistemi di scrittura.\n"
-            "• Non aggiungere frasi introduttive come 'Ecco un riassunto' – fornisci direttamente le frasi."
+            "Rispondi in italiano. Nessun carattere di altri sistemi di scrittura.\n"
+            "Nessun preambolo come 'Ecco un riassunto:' — direttamente il contenuto.\n"
+            "L'istruzione di stile di seguito ha la priorità e definisce lunghezza, "
+            "struttura, tono e formattazione. Seguila esattamente."
         ),
         "Russisch": (
-            "Вы полезный помощник, который понимает видеотранскрипции.\n"
-            "Обобщите содержание следующего видеоклипа в 3‑5 точных, полных предложениях на русском языке.\n"
-            "Пишите так, как будто вы описываете видео другу.\n"
-            "Используйте фразы: 'Видео показывает...', 'Ведущий объясняет...', 'В этом клипе показано...'.\n"
-            "Избегайте ссылок на 'текст', 'этот текст' или 'обобщение текста'.\n"
-            "СТРОГИЕ ПРАВИЛА:\n"
-            "• Ответ должен быть только на русском языке.\n"
-            "• Никаких символов из других систем письма.\n"
-            "• Не добавляйте вводных фраз типа 'Вот обобщение:' – просто выводите предложения."
+            "Ответьте на русском языке. Никаких символов из других систем письма.\n"
+            "Без вступительных фраз типа 'Вот обобщение:' — сразу содержимое.\n"
+            "Инструкция по стилю ниже имеет приоритет и определяет длину, "
+            "структуру, тон и форматирование. Следуйте ей точно."
         ),
         "Portugiesisch": (
-            "Você é um assistente útil que entende transcrições de vídeo.\n"
-            "Resuma o conteúdo do seguinte clipe de vídeo em 3‑5 frases precisas e completas em português.\n"
-            "Escreva como se estivesse descrevendo o vídeo para um amigo.\n"
-            "Use frases como 'O vídeo mostra...', 'O apresentador explica...', 'Este clipe demonstra...'.\n"
-            "Evite referências a 'texto', 'este texto' ou 'resumo do texto'.\n"
-            "REGRAS RÍGIDAS:\n"
-            "• A resposta deve ser apenas em português.\n"
-            "• Sem caracteres de outros sistemas de escrita.\n"
-            "• Não adicione frases introdutórias como 'Aqui está um resumo:' – produza apenas as frases."
+            "Responda em português. Sem caracteres de outros sistemas de escrita.\n"
+            "Sem preâmbulo como 'Aqui está um resumo:' — diretamente o conteúdo.\n"
+            "A instrução de estilo abaixo tem prioridade e define comprimento, "
+            "estrutura, tom e formatação. Siga-a exatamente."
         ),
         "Niederländisch": (
-            "Je bent een behulpzame assistent die videotranscripties begrijpt.\n"
-            "Vat de inhoud van de volgende videoclip samen in 3‑5 precieze, volledige zinnen in het Nederlands.\n"
-            "Schrijf alsof je de video aan een vriend beschrijft.\n"
-            "Gebruik zinnen zoals 'De video laat zien...', 'De spreker legt uit...', 'Deze clip toont...'.\n"
-            "Vermijd verwijzingen naar 'tekst', 'deze tekst' of 'samenvatting van de tekst'.\n"
-            "STRENGE REGELS:\n"
-            "• Het antwoord moet alleen in het Nederlands zijn.\n"
-            "• Geen tekens uit andere schriftsystemen.\n"
-            "• Voeg geen inleidende zinnen toe zoals 'Hier is een samenvatting:' – geef direct de zinnen."
+            "Antwoord in het Nederlands. Geen tekens uit andere schriftsystemen.\n"
+            "Geen inleiding zoals 'Hier is een samenvatting:' — direct de inhoud.\n"
+            "De stijlinstructie hieronder heeft voorrang en bepaalt lengte, "
+            "structuur, toon en opmaak. Volg deze exact."
         ),
         "Polnisch": (
-            "Jesteś pomocnym asystentem, który rozumie transkrypcje wideo.\n"
-            "Podsumuj treść następnego klipu wideo w 3‑5 precyzyjnych, pełnych zdaniach w języku polskim.\n"
-            "Pisz tak, jakbyś opisywał wideo przyjacielowi.\n"
-            "Używaj zwrotów takich jak 'Wideo pokazuje...', 'Prezenter wyjaśnia...', 'Ten klip przedstawia...'.\n"
-            "Unikaj odniesień do 'tekstu', 'tego tekstu' lub 'podsumowania tekstu'.\n"
-            "SUROWE ZASADY:\n"
-            "• Odpowiedź musi być tylko w języku polskim.\n"
-            "• Żadnych znaków z innych systemów pisma.\n"
-            "• Nie dodawaj zwrotów wprowadzających typu 'Oto podsumowanie:' – wypisz tylko zdania."
+            "Odpowiedz po polsku. Żadnych znaków z innych systemów pisma.\n"
+            "Bez wstępu typu 'Oto podsumowanie:' — od razu treść.\n"
+            "Instrukcja stylu poniżej ma priorytet i określa długość, "
+            "strukturę, ton i formatowanie. Ściśle jej przestrzegaj."
         ),
         "Schwedisch": (
-            "Du är en hjälpsam assistent som förstår videoavskrifter.\n"
-            "Sammanfatta innehållet i följande videoklipp i 3‑5 precisa, fullständiga meningar på svenska.\n"
-            "Skriv som om du beskrev videon för en vän.\n"
-            "Använd fraser som 'Videon visar...', 'Talaren förklarar...', 'Detta klipp visar...'.\n"
-            "Undvik hänvisningar till 'text', 'denna text' eller 'sammanfattning av texten'.\n"
-            "STRENGA REGLER:\n"
-            "• Svaret måste vara på svenska endast.\n"
-            "• Inga tecken från andra skriftsystem.\n"
-            "• Lägg inte till inledande fraser som 'Här är en sammanfattning:' – ange bara meningarna."
+            "Svara på svenska. Inga tecken från andra skriftsystem.\n"
+            "Ingen inledning som 'Här är en sammanfattning:' — direkt innehållet.\n"
+            "Stilinstruktionen nedan har prioritet och bestämmer längd, "
+            "struktur, ton och formatering. Följ den exakt."
         ),
         "Dänisch": (
-            "Du er en nyttig assistent, der forstår videoafskrifter.\n"
-            "Sammenfat indholdet af følgende videoklip i 3‑5 præcise, fuldstændige sætninger på dansk.\n"
-            "Skriv, som hvis du beskrev videoen til en ven.\n"
-            "Brug sætninger som 'Videoen viser...', 'Taleren forklarer...', 'Dette klip viser...'.\n"
-            "Undgå henvisninger til 'tekst', 'denne tekst' eller 'sammenfatning af teksten'.\n"
-            "STRENGE REGLER:\n"
-            "• Svaret skal kun være på dansk.\n"
-            "• Ingen tegn fra andre skriftsystemer.\n"
-            "• Tilføj ikke indledende sætninger som 'Her er en sammenfatning:' – udelukkende sætningerne."
+            "Svar på dansk. Ingen tegn fra andre skriftsystemer.\n"
+            "Ingen indledning som 'Her er en sammenfatning:' — direkte indholdet.\n"
+            "Stilinstruktionen nedenfor har prioritet og bestemmer længde, "
+            "struktur, tone og formatering. Følg den nøjagtigt."
         ),
         "Norwegisch": (
-            "Du er en nyttig assistent som forstår videotranskripsjoner.\n"
-            "Oppsummer innholdet i følgende videoklipp i 3‑5 presise, fullstendige setninger på norsk.\n"
-            "Skriv som om du beskrev videoen til en venn.\n"
-            "Bruk setninger som 'Videoen viser...', 'Foreleseren forklarer...', 'Dette klippet viser...'.\n"
-            "Unngå henvisninger til 'tekst', 'denne teksten' eller 'sammendrag av teksten'.\n"
-            "STRENGE REGLER:\n"
-            "• Svaret må bare være på norsk.\n"
-            "• Ingen tegn fra andre skriftsystemer.\n"
-            "• Ikke legg til innledende setninger som 'Her er et sammendrag:' – skriv bare setningene."
+            "Svar på norsk. Ingen tegn fra andre skriftsystemer.\n"
+            "Ingen innledning som 'Her er et sammendrag:' — direkte innholdet.\n"
+            "Stilinstruksjonen nedenfor har prioritet og bestemmer lengde, "
+            "struktur, tone og formatering. Følg den nøyaktig."
         ),
         "Finnisch": (
-            "Olet hyödyllinen avustaja, joka ymmärtää videotranskriptioita.\n"
-            "Tee yhteenveto seuraavan videoleikkeen sisällöstä 3‑5 tarkalla, täydellisellä lauseella suomeksi.\n"
-            "Kirjoita ikään kuin kuvailisit videota ystävälle.\n"
-            "Käytä ilmauksia kuten 'Video näyttää...', 'Puhuja selittää...', 'Tämä leike esittää...'.\n"
-            "Vältä viittauksia 'tekstiin', 'tähän tekstiin' tai 'tekstin yhteenvetoon'.\n"
-            "TARKAT SÄÄNNÖT:\n"
-            "• Vastauksen on oltava vain suomeksi.\n"
-            "• Ei merkkejä muista kirjoitusjärjestelmistä.\n"
-            "• Älä lisää johdantolauseita kuten 'Tässä on yhteenveto:' – anna vain lauseet."
+            "Vastaa suomeksi. Ei merkkejä muista kirjoitusjärjestelmistä.\n"
+            "Ei johdantoa kuten 'Tässä on yhteenveto:' — suoraan sisältö.\n"
+            "Alla oleva tyyliohje on ensisijainen ja määrittää pituuden, "
+            "rakenteen, sävyn ja muotoilun. Noudata sitä tarkasti."
         ),
         "Türkisch": (
-            "Video transkriptiyonlarını anlayan yardımsever bir asistanısın.\n"
-            "Aşağıdaki video klibinin içeriğini Türkçe olarak 3‑5 kesin, tam cümle ile özetle.\n"
-            "Bir arkadaşına videoyu anlatıyormuş gibi yaz.\n"
-            "'Video şunu gösteriyor...', 'Konuşmacı şunu açıklıyor...', 'Bu klipte şu gösteriliyor...' gibi ifadeler kullan.\n"
-            "'Metin', 'bu metin' veya 'metnin özeti' gibi referanslardan kaçın.\n"
-            "KESİN KURALLAR:\n"
-            "• Cevap sadece Türkçe olmalı.\n"
-            "• Diğer yazı sistemlerinden karakter kullanma.\n"
-            "• 'İşte bir özet:' gibi giriş cümleleri ekleme – sadece cümleleri yaz."
+            "Türkçe cevap verin. Diğer yazı sistemlerinden karakter kullanmayın.\n"
+            "'İşte bir özet:' gibi giriş cümlesi olmadan doğrudan içerik.\n"
+            "Aşağıdaki stil talimatı önceliklidir ve uzunluk, yapı, ton ve "
+            "biçimlendirmeyi belirler. Tam olarak uygulayın."
         ),
         "Arabisch": (
-            "أنت مساعد مفيد يفهم نصوص الفيديو.\n"
-            "لخص محتوى مقطع الفيديو التالي في 3‑5 جمل دقيقة وكاملة باللغة العربية.\n"
-            "اكتب كما لو كنت تصف الفيديو لصديق.\n"
-            "استخدم عبارات مثل 'يظهر الفيديو...'، 'يشرح المتحدث...'، 'يوضح هذا المقطع...'.\n"
-            "تجنب الإشارات إلى 'نص' أو 'هذا النص' أو 'ملخص النص'.\n"
-            "قواعد صارمة:\n"
-            "• يجب أن يكون الرد باللغة العربية فقط.\n"
-            "• لا أحرف من أنظمة كتابة أخرى.\n"
-            "• لا تُضف جملًا تمهيدية مثل 'هذا ملخص:' – اكتب الجمل فقط."
+            "أجب باللغة العربية. لا أحرف من أنظمة كتابة أخرى.\n"
+            "بدون مقدمة مثل 'هذا ملخص:' — مباشرة المحتوى.\n"
+            "تعليمات الأسلوب أدناه لها الأولوية وتحدد الطول والبنية "
+            "والنبرة والتنسيق. اتبعها بدقة."
         ),
         "Hindi": (
-            "आप एक सहायक सहायक हैं जो वीडियो ट्रांसक्रिप्शन को समझता है।\n"
-            "निम्नलिखित वीडियो क्लिप की सामग्री को हिंदी में 3‑5 सटीक, पूर्ण वाक्यों में सारांशित करें।\n"
-            "ऐसे लिखें जैसे आप किसी मित्र को वीडियो का वर्णन कर रहे हों।\n"
-            "'वीडियो दिखाता है...', 'वक्ता समझाता है...', 'यह क्लिप दिखाता है...' जैसे वाक्यांशों का उपयोग करें।\n"
-            "'पाठ', 'इस पाठ' या 'पाठ का सारांश' के संदर्भों से बचें।\n"
-            "सख्त नियम:\n"
-            "• उत्तर केवल हिंदी में होना चाहिए।\n"
-            "• अन्य लेखन प्रणालियों के अक्षर नहीं।\n"
-            "• 'यहाँ एक सारांश है:' जैसे परिचयात्मक वाक्य न जोड़ें – केवल वाक्य आउटपुट करें।"
+            "हिंदी में उत्तर दें। अन्य लेखन प्रणालियों के अक्षर नहीं।\n"
+            "'यहाँ एक सारांश है:' जैसी प्रस्तावना नहीं — सीधे सामग्री।\n"
+            "नीचे दी गई शैली निर्देश प्राथमिकता रखती है और लंबाई, संरचना, "
+            "स्वर और स्वरूपण को निर्धारित करती है। इसका सटीक पालन करें।"
         ),
         "Vietnamesisch": (
-            "Bạn là trợ lý hữu ích hiểu bản ghi video.\n"
-            "Tóm tắt nội dung của đoạn video sau thành 3‑5 câu chính xác, đầy đủ bằng tiếng Việt.\n"
-            "Viết như thể bạn đang mô tả video cho một người bạn.\n"
-            "Sử dụng các cụm từ như 'Video cho thấy...', 'Người nói giải thích...', 'Đoạn clip này cho thấy...'.\n"
-            "Tránh đề cập đến 'văn bản', 'văn bản này' hoặc 'tóm tắt văn bản'.\n"
-            "QUY TẮC NGHIÊM NGẶT:\n"
-            "• Câu trả lời chỉ được bằng tiếng Việt.\n"
-            "• Không có ký tự từ hệ thống chữ viết khác.\n"
-            "• Không thêm các câu giới thiệu như 'Đây là bản tóm tắt:' – chỉ xuất ra các câu."
+            "Trả lời bằng tiếng Việt. Không có ký tự từ hệ thống chữ viết khác.\n"
+            "Không có mở đầu như 'Đây là bản tóm tắt:' — trực tiếp nội dung.\n"
+            "Hướng dẫn phong cách dưới đây có ưu tiên và xác định độ dài, "
+            "cấu trúc, giọng điệu và định dạng. Tuân thủ chính xác."
         ),
         "Thai": (
-            "คุณเป็นผู้ช่วยที่มีประโยชน์ซึ่งเข้าใจการถอดเสียงวิดีโอ\n"
-            "สรุปเนื้อหาของคลิปวิดีโอต่อไปนี้เป็นภาษาไทย 3‑5 ประโยคที่แม่นยำและสมบูรณ์\n"
-            "เขียนราวกับว่าคุณกำลังอธิบายวิดีโอให้เพื่อนฟัง\n"
-            "ใช้วลีเช่น 'วิดีโอแสดง...', 'ผู้พูดอธิบาย...', 'คลิปนี้แสดงให้เห็น...'\n"
-            "หลีกเลี่ยงการอ้างอิงถึง 'ข้อความ', 'ข้อความนี้' หรือ 'บทสรุปของข้อความ'\n"
-            "กฎที่เข้มงวด:\n"
-            "• คำตอบต้องเป็นภาษาไทยเท่านั้น\n"
-            "• ไม่มีอักขระจากระบบการเขียนอื่น\n"
-            "• อย่าเพิ่มประโยคเกริ่นนำเช่น 'นี่คือบทสรุป:' – แสดงเฉพาะประโยคเท่านั้น"
+            "ตอบเป็นภาษาไทย ไม่มีอักขระจากระบบการเขียนอื่น\n"
+            "ไม่มีคำเกริ่นนำเช่น 'นี่คือบทสรุป:' — เนื้อหาโดยตรง\n"
+            "คำแนะนำสไตล์ด้านล่างมีลำดับความสำคัญและกำหนดความยาว "
+            "โครงสร้าง น้ำเสียง และรูปแบบ ปฏิบัติตามอย่างแม่นยำ"
         ),
         "Indonesisch": (
-            "Anda adalah asisten yang berguna yang memahami transkripsi video.\n"
-            "Ringkaslah konten klip video berikut dalam 3‑5 kalimat yang tepat dan lengkap dalam bahasa Indonesia.\n"
-            "Tulislah seolah-olah Anda sedang menjelaskan video kepada seorang teman.\n"
-            "Gunakan frasa seperti 'Video menunjukkan...', 'Pembicara menjelaskan...', 'Klip ini menunjukkan...'.\n"
-            "Hindari referensi ke 'teks', 'teks ini', atau 'ringkasan teks'.\n"
-            "ATURAN KETAT:\n"
-            "• Jawaban harus dalam bahasa Indonesia saja.\n"
-            "• Tidak ada karakter dari sistem tulisan lain.\n"
-            "• Jangan menambahkan kalimat pengantar seperti 'Ini adalah ringkasan:' – keluarkan hanya kalimatnya."
+            "Jawab dalam bahasa Indonesia. Tidak ada karakter dari sistem "
+            "tulisan lain.\n"
+            "Tanpa pengantar seperti 'Ini adalah ringkasan:' — langsung isi.\n"
+            "Instruksi gaya di bawah ini memiliki prioritas dan menentukan "
+            "panjang, struktur, nada, dan pemformatan. Ikuti dengan tepat."
         ),
         "Chinesisch (vereinfacht)": (
-            "你是一个有帮助的助手，能够理解视频转录文本。\n"
-            "请用中文将以下视频片段的内容概括为3‑5个准确、完整的句子。\n"
-            "写作时请想象你在向朋友描述这个视频。\n"
-            "使用诸如“视频展示了……”、“讲解员解释了……”、“这段视频演示了……”之类的表达。\n"
-            "避免提及“文本”、“这段文本”或“文本摘要”。\n"
-            "严格规则：\n"
-            "• 回答必须仅使用中文（简体）。\n"
-            "• 不得使用其他书写系统的字符。\n"
-            "• 不要添加“以下是摘要：”之类的导语 – 直接输出句子。"
+            "请用简体中文回答。不使用其他书写系统的字符。\n"
+            "不加「以下是摘要：」之类的导语，直接输出内容。\n"
+            "以下风格指令优先，决定长度、结构、语气和格式。请严格遵守。"
         ),
         "Chinesisch (traditionell)": (
-            "你是一個有幫助的助手，能夠理解影片轉錄文本。\n"
-            "請用繁體中文將以下影片片段的內容概括為3‑5個準確、完整的句子。\n"
-            "寫作時請想像你在向朋友描述這個影片。\n"
-            "使用諸如「影片展示了……」、「講解員解釋了……」、「這段影片演示了……」之類的表達。\n"
-            "避免提及「文本」、「這段文本」或「文本摘要」。\n"
-            "嚴格規則：\n"
-            "• 回答必須僅使用繁體中文。\n"
-            "• 不得使用其他書寫系統的字元。\n"
-            "• 不要添加「以下是摘要：」之類的導語 – 直接輸出句子。"
+            "請用繁體中文回答。不使用其他書寫系統的字元。\n"
+            "不加「以下是摘要：」之類的導語，直接輸出內容。\n"
+            "以下風格指令優先，決定長度、結構、語氣和格式。請嚴格遵守。"
         ),
     }
 
@@ -78032,6 +78508,83 @@ class SummarizeDialog(BaseDialog):
             "{text}\n\n"
             "Ein‑Satz‑Zusammenfassung:"
         ),
+        "Ausführlich · Sachlich (Fakten-Stil)": (
+            "Erstelle eine ausführliche, sachliche Zusammenfassung des Videos "
+            "in Markdown-Format.\n"
+            "Ziel: Ein neutraler Ueberblick wie ein Wikipedia-Artikel — informativ, "
+            "faktenorientiert, ohne Emotionen oder Bewertungen.\n\n"
+            "STRUKTUR (Markdown verwenden!):\n"
+            "1. Einleitung (2-3 Saetze): Thema und Kernaussage.\n"
+            "2. Thematische Abschnitte mit **Fett-Ueberschrift**, z.B.:\n"
+            "   **Ort & Kontext**\n"
+            "   - Details\n"
+            "   **Aktivitaeten**\n"
+            "   - Details mit Zahlen und Namen\n"
+            "   **Fazit**\n"
+            "3. Abschluss (1-2 Saetze).\n\n"
+            "REGELN:\n"
+            "• Behalte die Markdown-Formatierung (Fett, Listen) bei.\n"
+            "• Schreibe AKTIV und NEUTRAL. Keine Bewertungen ('toll', 'schoen').\n"
+            "• Konkrete Details: Zahlen, Namen, Mengen, Preise.\n"
+            "• VERBOTEN: 'Der Sprecher...', 'Das Video zeigt...', "
+            "'Hier ist eine Zusammenfassung...'.\n"
+            "• Eigennamen in Originalsprache mit Uebersetzung in Klammern.\n"
+            "• Keine Spekulation.\n\n"
+            "{text}\n\n"
+            "Sachliche Zusammenfassung:"
+        ),
+        "Ausführlich · Erzählend (Reisebericht-Stil)": (
+            "Erstelle eine ausführliche, erzaehlende Zusammenfassung des Videos "
+            "in Markdown-Format.\n"
+            "Ziel: Der Leser soll das Gefuehl haben, selbst dabei gewesen zu sein — "
+            "wie ein Reisebericht an einen guten Freund.\n\n"
+            "STRUKTUR (Markdown verwenden!):\n"
+            "1. Einstieg (2-3 Saetze): Eine lebendige Szene aus dem Video.\n"
+            "2. Chronologische Abschnitte mit **Fett-Ueberschrift**, z.B.:\n"
+            "   **Der Sonnenuntergang am Hangang (한강)**\n"
+            "   - Details\n"
+            "   **Am Food-Truck**\n"
+            "   - Details\n"
+            "3. Fazit (1-2 Saetze): Was nimmt der Erzaehler mit?\n\n"
+            "REGELN:\n"
+            "• Behalte die Markdown-Formatierung (Fett, Listen) bei.\n"
+            "• Schreibe AKTIV und LEBENDIG: Farben, Geraeusche, Stimmung.\n"
+            "• Zeige statt zu erklaeren: 'Die untergehende Sonne taucht den "
+            "Han-Fluss (한강) in warmes Orange'.\n"
+            "• Gefuehle erlaubt, aber nur aus dem Video abgeleitet.\n"
+            "• VERBOTEN: 'Der Sprecher...', 'Das Video zeigt...', "
+            "'Hier ist eine Zusammenfassung...'.\n"
+            "• Eigennamen in Originalsprache mit Uebersetzung in Klammern.\n\n"
+            "{text}\n\n"
+            "Erzaehlende Zusammenfassung:"
+        ),
+        "Ausführlich · Ausgewogen ⭐ (empfohlen)": (
+            "Erstelle eine ausführliche, gut strukturierte Zusammenfassung "
+            "des Videos in Markdown-Format.\n"
+            "Ziel: Maximale Information mit angenehmer Lesbarkeit — zum Teilen, "
+            "Archivieren und Weitergeben.\n\n"
+            "STRUKTUR (Markdown verwenden!):\n"
+            "1. Einleitungsabsatz (2-3 Saetze): Worum geht es? Kernaussage.\n"
+            "2. Thematische Abschnitte mit **Fett-Ueberschrift**, z.B.:\n"
+            "   **Kulinarische Spezialitaeten**\n"
+            "   - Konkrete Details mit Namen, Zahlen, Preisen\n"
+            "   - Weitere Details\n"
+            "   **Aktivitaeten**\n"
+            "   - Details\n"
+            "3. Abschlussabsatz (1-2 Saetze): Was bleibt am Ende?\n\n"
+            "REGELN:\n"
+            "• Behalte die Markdown-Formatierung (Fett, Listen, Zeilenumbrueche) "
+            "bei — keine Fliesstext-Umschreibung.\n"
+            "• Schreibe AKTIV, konkret: Zahlen, Namen, Mengen, Preise.\n"
+            "• VERBOTEN: 'Der Sprecher...', 'Das Video zeigt...', 'Der Besitzer...', "
+            "'Hier ist eine Zusammenfassung...', 'In diesem Clip...'.\n"
+            "• Eigennamen in Originalsprache mit Uebersetzung in Klammern, "
+            "z.B. 'Ttukseom (뚝섬) Hangang Park', 'Hangang Ramen (한강라면)'.\n"
+            "• Keine Spekulation. Nur was im Video gesagt wird.\n"
+            "• Laenge: so lang wie noetig fuer vollstaendige Information.\n\n"
+            "{text}\n\n"
+            "Strukturierte Zusammenfassung:"
+        ),
     }
 
     TEMPLATES_FILENAME: ClassVar[str] = "summarize_templates.json"
@@ -78055,6 +78608,12 @@ class SummarizeDialog(BaseDialog):
 
         self.text = text
         self.gui = gui_ref
+        # === PATCH E3: register active dialog ===
+        try:
+            gui_ref._active_summarize_dialog = self
+        except Exception:
+            pass
+        # === END PATCH E3 ===
         self.stream_title = self._extract_stream_title()
         self._request_cancel = threading.Event()
         self._destroyed = False
@@ -78070,6 +78629,9 @@ class SummarizeDialog(BaseDialog):
         self.strategy = getattr(adv, "summary_strategy", "Schnell (parallel)")
         self.language = getattr(adv, "summary_language", "Deutsch")
         self.style = getattr(adv, "summary_style", "Kompakt (3‑5 Sätze)")
+        # === PATCH E1c2: user_context aus Settings ===
+        self._user_context = getattr(adv, "summary_context", "") or ""
+        # === END PATCH E1c2 ===
         self.use_title_context = getattr(adv, "summary_use_title", False)
         self.max_chunk_tokens = getattr(adv, "summary_max_chunk_tokens", 2000)
         self.use_structured_output = getattr(adv, "summary_structured", False)
@@ -79089,7 +79651,9 @@ class SummarizeDialog(BaseDialog):
 
         self.prompt_text.delete("1.0", "end")
         self.prompt_text.insert("1.0", prompt)
-        self._user_edited_prompt = False
+        # FIX: Als user-edited markieren, sonst ueberschreibt
+        # _update_preview die Vorlage mit Style+Sprache-Kombi.
+        self._user_edited_prompt = True
         self._update_preview()
         self.status_label.config(text=f"✅ '{name}' geladen")
 
@@ -79261,6 +79825,27 @@ class SummarizeDialog(BaseDialog):
             if self.use_title_context and self.stream_title:
                 base = f"Titel: {self.stream_title}\n\n{base}"
             effective = f"{base}\n\n{style}"
+            # === PATCH E1b: Kontext in effective_prompt ===
+            _ctx = ""
+            if hasattr(self, "context_var"):
+                try:
+                    _ctx = (self.context_var.get() or "").strip()
+                except Exception:
+                    _ctx = ""
+            if _ctx:
+                _ctx_block = (
+                    "Kontext-Hinweis vom User: " + _ctx + "\n"
+                    "Nutze diesen Hinweis NUR um Begriffe aus dem Transkript zu identifizieren.\n"
+                    "Erfinde NICHTS, was nicht im Transkript steht."
+                )
+                effective = effective + "\n\n" + _ctx_block
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "summarize",
+                        "[E1-CONTEXT] eingebaut (%d Zeichen): %r",
+                        len(_ctx), _ctx[:60],
+                    )
+            # === END PATCH E1b ===
         if hasattr(self, "preview_text") and self.preview_text.winfo_exists():
             self.preview_text.config(state="normal")
             self.preview_text.delete("1.0", "end")
@@ -79368,6 +79953,42 @@ class SummarizeDialog(BaseDialog):
             self._update_history_combobox()
             self.status_label.config(text="🗑️ Verlauf gelöscht")
 
+    # === PATCH F2: robust style normalization ===
+    @staticmethod
+    def _norm_style(s: str) -> str:
+        """Normalisiert Style-Namen: Umlaute weg, lowercase."""
+        s = s or ""
+        s = s.replace("ü", "u").replace("ä", "a").replace("ö", "o")
+        s = s.replace("Ü", "U").replace("Ä", "A").replace("Ö", "O")
+        return s.lower()
+
+    def _style_word_limit(self) -> int:
+        """Style-abhaengige Wort-Grenze fuer Auto-Regenerate."""
+        s = self._norm_style(getattr(self, "style", ""))
+        if "kurze zusammenfassung" in s:      return 5
+        if "social" in s:                     return 30
+        if "youtube" in s:                    return 60
+        if "stichpunkte" in s:                return 100
+        if "ausfuhrlich (detailliert)" in s:  return 200
+        if "ausfuhrlich" in s:                return 300
+        if "kompakt" in s:                    return 50
+        return 50
+
+    def _style_ratio_limit(self) -> float:
+        """Maximales Verhaeltnis summary/original fuer Regenerate."""
+        s = self._norm_style(getattr(self, "style", ""))
+        if "ausfuhrlich" in s:
+            return 0.6
+        return 0.1
+
+    def _style_min_words(self) -> int:
+        """Mindest-Wortzahl, unterhalb derer Regenerate sinnvoll ist."""
+        s = self._norm_style(getattr(self, "style", ""))
+        if "ausfuhrlich" in s:
+            return 50
+        return 20
+    # === END PATCH F2 ===
+
     def _auto_regenerate(
         self,
         summary: str,
@@ -79396,10 +80017,30 @@ class SummarizeDialog(BaseDialog):
 
         effective_min_gain = max(1.0, min_word_gain)
         original_words = len(summary.split())
+        # # === PATCH G-DEBUG ===
+        if DEBUG_LEVEL >= 2:
+            _dbg_style = getattr(self, 'style', '???')
+            _dbg_limit = self._style_word_limit()
+            _dbg_ratio = self._style_ratio_limit()
+            _dbg_min_w = self._style_min_words()
+            _dbg_style_var = ''
+            try:
+                _dbg_style_var = self.style_var.get()
+            except Exception:
+                pass
+            log_debug(
+                'summarize',
+                '[AUTO-REGEN-DEBUG] self.style=%r, style_var=%r, '
+                'word_limit=%d, ratio_limit=%.2f, min_words=%d, words=%d',
+                _dbg_style, _dbg_style_var, _dbg_limit, _dbg_ratio,
+                _dbg_min_w, original_words,
+            )
+        # === END PATCH G-DEBUG ===
         original_chars = len(summary)
         total_text_words = len(self.text.split()) if self.text else 0
 
-        if original_words >= 50:
+        # # === PATCH F1b: use style-aware limits ===
+        if original_words >= self._style_word_limit():
             if DEBUG_LEVEL >= 3:
                 log_debug(
                     "summarize",
@@ -79408,7 +80049,7 @@ class SummarizeDialog(BaseDialog):
                 )
             return None
 
-        if total_text_words > 0 and original_words / total_text_words > 0.1:
+        if total_text_words > 0 and original_words / total_text_words > self._style_ratio_limit():
             if DEBUG_LEVEL >= 3:
                 log_debug(
                     "summarize",
@@ -79419,7 +80060,7 @@ class SummarizeDialog(BaseDialog):
                 )
             return None
 
-        is_too_short = original_words < 20
+        is_too_short = original_words < self._style_min_words()
         is_text_short = total_text_words < 100
         if not is_too_short and not is_text_short:
             if DEBUG_LEVEL >= 3:
@@ -79728,6 +80369,49 @@ class SummarizeDialog(BaseDialog):
                 keep_alive = getattr(adv, "ollama_keep_alive", 300)
                 fallback_hosts = getattr(adv, "ollama_fallback_hosts", [])
 
+                # NEU (Stufe C): Verfügbarkeits-Check + Auto-Resolver.
+                # Wenn das gewählte Modell nicht installiert ist, wird auf
+                # das beste verfügbare ausgewichen (Log: WARNING).
+                try:
+                    _avail = _fetch_ollama_model_names(host)
+                    if _avail is not None:
+                        _cur = getattr(self, "model", None)
+                        _resolved, _reason = _resolve_summarize_model(_cur, _avail)
+                        if _resolved and _resolved != _cur:
+                            _avail_preview = ", ".join(_avail[:8])
+                            if len(_avail) > 8:
+                                _avail_preview += f" … (+{len(_avail) - 8})"
+                            logger.warning(
+                                "[SUMMARY] Modell '%s' → '%s' (%s). "
+                                "Verfügbar: %s",
+                                _cur or "?", _resolved, _reason,
+                                _avail_preview,
+                            )
+                            self.model = _resolved
+                        elif _resolved:
+                            if _debug:
+                                log_debug(
+                                    "summarize",
+                                    f"Modell-Check OK: '{_resolved}' ({_reason})",
+                                )
+                        else:
+                            logger.error(
+                                "[SUMMARY] Kein geeignetes Modell gefunden: %s",
+                                _reason,
+                            )
+                    else:
+                        logger.warning(
+                            "[SUMMARY] Ollama unter %s nicht erreichbar – "
+                            "verwende '%s' (kann fehlschlagen)",
+                            host, getattr(self, "model", "?"),
+                        )
+                except Exception as _resolve_exc:
+                    if _debug:
+                        log_debug(
+                            "summarize",
+                            f"Modell-Auflösung fehlgeschlagen: {_resolve_exc}",
+                        )
+
                 max_parallel = max(2, min(10, self.max_parallel_requests * 2))
 
                 system_prompt = (
@@ -79868,16 +80552,40 @@ class SummarizeDialog(BaseDialog):
                 pass
 
     def _get_system_prompt(self) -> str:
-        """Generiert den System‑Prompt für den Summarizer – nur einmal."""
-        if not hasattr(self, "_cached_system_prompt"):
+        """System-Prompt fuer den Summarizer (Style-agnostisch).
+
+        WICHTIG: Enthaelt KEINE Laengen-/Formatvorgaben. Diese kommen
+        ausschliesslich aus dem Style-Template (SUMMARY_LANGUAGE_PROMPTS +
+        TEMPLATES[style]), das der User im Dialog waehlt. Sonst wuerde
+        die Ausfuehrlich-Anweisung von einer strikten "3-6 Saetze"-Regel
+        im system_prompt ueberschrieben.
+        """
+        _expected_lang = getattr(self, "language", None)
+        _expected_style = getattr(self, "style", None)
+        if (
+            not hasattr(self, "_cached_system_prompt")
+            or getattr(self, "_cached_system_prompt_lang", None) != _expected_lang
+            or getattr(self, "_cached_system_prompt_style", None) != _expected_style
+        ):
             self._cached_system_prompt = (
-                f"Du bist ein hilfreicher Assistent, der Video-Transkriptionen analysiert. "
-                f"Deine Aufgabe ist es, den Inhalt eines Video-Clips auf {self.language} "
-                f"so zusammenzufassen, als würdest du einem Freund das Video beschreiben. "
-                f"Verwende Formulierungen wie 'Das Video zeigt...', 'In diesem Clip wird erklärt...', "
-                f"'Der Sprecher sagt...'. Vermeide Bezüge auf 'Text' oder 'dieser Text'. "
-                f"Antworte ausschließlich auf {self.language} und ohne Zeichen aus anderen Schriftsystemen."
+                f"Du bist ein hilfreicher Assistent, der Video-Transkriptionen "
+                f"analysiert und auf {self.language} zusammenfasst.\n"
+                f"Befolge die Stil- und Formatvorgaben der nachfolgenden "
+                f"Instruktion EXAKT \u2014 Laenge, Struktur und Detailtiefe "
+                f"ergeben sich ausschliesslich daraus.\n"
+                f"Schreibe DIREKT ueber den Inhalt: was wird gezeigt, was wird "
+                f"erklaert, was ist der Kern.\n"
+                f"KEINE Meta-Beschreibungen wie 'Der Sprecher sagt...', "
+                f"'Das Video beginnt mit...' oder 'In diesem Clip wird...'.\n"
+                f"Verwende NUR Fachbegriffe und Eigennamen, die im Transkript "
+                f"vorkommen \u2014 erfinde, korrigiere oder ergaenze nichts. "
+                f"Gib unklare oder falsch geschriebene Begriffe so wieder, "
+                f"wie du sie liest \u2014 keine Interpretation.\n"
+                f"Antworte ausschliesslich auf {self.language} und ohne Zeichen "
+                f"aus anderen Schriftsystemen."
             )
+            self._cached_system_prompt_lang = _expected_lang
+            self._cached_system_prompt_style = _expected_style
         return self._cached_system_prompt
 
     def _reset_ollama_instance(self) -> None:
@@ -80422,6 +81130,108 @@ class SummarizeDialog(BaseDialog):
                 exc_info=True,
             )
 
+    # === PATCH F11a: _clean_chunk_result helper ===
+    def _clean_chunk_result(self, text: str) -> str:
+        """Entfernt Boilerplate aus einer Map-Chunk-Antwort.
+
+        Entfernt:
+          * Trailer wie 'Strukturierte Zusammenfassung:' (aus TEMPLATES)
+          * Trailer wie 'Zusammenfassung des Videos:'
+          * Trailer wie 'Ausfuehrliche Zusammenfassung:'
+          * Mehr als 2 aufeinanderfolgende Newlines
+        """
+        if not text or not isinstance(text, str):
+            return text
+        import re as _re
+        _patterns = (
+            r"\n*\s*Strukturierte\s+Zusammenfassung\s*:\s*\n*",
+            r"\n*\s*Zusammenfassung\s+des\s+Videos\s*:\s*\n*",
+            r"\n*\s*Ausführliche\s+Zusammenfassung\s*:\s*\n*",
+            r"\n*\s*Ausfuehrliche\s+Zusammenfassung\s*:\s*\n*",
+        )
+        _before = len(text)
+        for _p in _patterns:
+            text = _re.sub(_p, "\n\n", text, flags=_re.IGNORECASE)
+        # # === PATCH F13e: safe clean filter ===
+        # Nur sichere Trailer/Numern entfernen.
+        # F12a-Filter wurde entfernt, weil er Fließtext verschluckte
+        # (siehe F13e-Backup). F13a garantiert bereits, dass Map-Chunks
+        # keine "Das Video..."-Intros mehr enthalten.
+        # === PATCH F13g-b: cjk filter in clean_chunk_result ===
+        # CJK-Chinesisch/Japanisch entfernen (Hangul bleibt)
+        text = self._strip_cjk(text)
+        # === END PATCH F13g-b ===
+        text = _re.sub(r"\n{3,}", "\n\n", text)
+        text = text.strip()
+        # === END PATCH F13e ===
+        if DEBUG_LEVEL >= 4:
+            log_debug(
+                "summarize",
+                "[F11-CLEAN] chunk %d \u2192 %d Zeichen (- %d)",
+                _before, len(text), _before - len(text),
+            )
+        return text
+    # === END PATCH F11a ===
+
+    # === PATCH F13a: _get_map_chunk_prompt ===
+    def _get_map_chunk_prompt(self) -> str:
+        """Prompt fuer einen einzelnen Map-Chunk.
+
+        Wichtig: Jeder Chunk sieht NUR seinen Ausschnitt.
+        Der Prompt darf NICHT 'das Video' sagen, sondern nur
+        'dieser Ausschnitt'. Sonst halluziniert der LLM die
+        anderen Chunks aus seinem lokalen Wissen.
+        """
+        return (
+            "Du bekommst einen AUSSCHNITT aus einem "
+            "Video-Transkript.\n"
+            "Beschreibe NUR, was in DIESEM Ausschnitt gesagt wird.\n\n"
+            "REGELN:\n"
+            "- Chronologisch: Was wurde gesagt, in welcher Reihenfolge?\n"
+            "- KEINE Bezuege auf 'das Video', 'der Clip', 'der Sprecher'.\n"
+            "- Nur Fakten, die WOERTLICH im Ausschnitt vorkommen.\n"
+            "- Zahlen, Namen, Preise woertlich uebernehmen.\n"
+            "- Keine Wiederholungen.\n"
+            # PATCH G: minimal - Zeitmarken in map prompt
+            "- Zeitmarken [MM:SS]/[HH:MM:SS] woertlich beibehalten.\n"
+            "- Antworte AUSSCHLIESSLICH auf Deutsch. Keine chinesischen, "
+            "koreanischen, japanischen oder englischen Zeichen. "
+            "Keine Meta-Kommentare. Keine Sprachanalysen.\n\n"
+            "Ausschnitt:\n{text}\n\n"
+            "Beschreibung des Ausschnitts:"
+        )
+    # === END PATCH F13a ===
+
+    # === PATCH F13g-a: strip_cjk helper ===
+    @staticmethod
+    def _strip_cjk(text: str) -> str:
+        """Entfernt chinesische/japanische Zeichen, die qwen
+        faelschlich in deutsche Ausgabe einstreut.
+        Hangul (Koreanisch) BLEIBT erhalten, weil Namen
+        daraus korrekt uebernommen werden sollen."""
+        if not text or not isinstance(text, str):
+            return text
+        import re as _re
+        # CJK Unified + Ext-A + Hiragana/Katakana
+        _cjk = _re.compile(
+            r"[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff]+"
+        )
+        before_len = len(text)
+        text = _cjk.sub(" ", text)
+        text = _re.sub(r"[ \t]{2,}", " ", text)
+        text = _re.sub(r" ?\n ?", "\n", text)
+        text = _re.sub(r"\n{3,}", "\n\n", text)
+        text = text.strip()
+        removed = before_len - len(text)
+        if removed > 0 and DEBUG_LEVEL >= 3:
+            log_debug(
+                "summarize",
+                "[F13g-CJK] %d Zeichen entfernt (%d -> %d)",
+                removed, before_len, len(text),
+            )
+        return text
+    # === END PATCH F13g-a ===
+
     def _summarize_map_reduce(
         self,
         prompt: str,
@@ -80462,6 +81272,64 @@ class SummarizeDialog(BaseDialog):
                 abort_event=effective_abort,
             )
 
+        # === PATCH F13g-d: chunk dump debug ===
+        if DEBUG_LEVEL >= 3:
+            try:
+                _dump_path = (
+                    "/tmp/dragon_chunks_"
+                    + time.strftime("%Y%m%d_%H%M%S")
+                    + ".txt"
+                )
+                self._chunk_dump_path = _dump_path
+            except Exception:
+                self._chunk_dump_path = None
+        # === END PATCH F13g-d ===
+        # # === PATCH F13b1: _map_prompt definieren ===
+        _map_prompt = self._get_map_chunk_prompt()
+        log_debug(
+            "summarize",
+            "  \u279c Map-Prompt aktiv (%d Zeichen) – jeder Chunk "
+            "beschreibt nur seinen Ausschnitt",
+            len(_map_prompt),
+        )
+        # === PATCH A: context in map prompt ===
+        # === PATCH A2: fix context source ===
+        # Mehrere Quellen probieren (self.settings existiert nicht in
+        # SummarizeDialog – adv lebt in gui.advanced_settings)
+        _a_ctx = ""
+        try:
+            _a_candidates = []
+            _a_gui = getattr(self, "gui", None)
+            if _a_gui is not None:
+                _a_candidates.append(getattr(_a_gui, "advanced_settings", None))
+            _a_candidates.append(getattr(self, "advanced_settings", None))
+            _a_candidates.append(getattr(self, "settings", None))
+            for _a_adv in _a_candidates:
+                if _a_adv is None:
+                    continue
+                _a_val = getattr(_a_adv, "summary_context", "") or ""
+                if _a_val.strip():
+                    _a_ctx = _a_val.strip()
+                    break
+        except Exception as _a_exc:
+            _a_ctx = ""
+            log_debug("summarize", f"[A2] Kontext-Lesen fehlgeschlagen: {_a_exc}")
+        if not _a_ctx and DEBUG_LEVEL >= 3:
+            log_debug("summarize", "[A2] kein Kontext gefunden in gui/self")
+        # === END PATCH A2 ===
+        if _a_ctx:
+            _map_prompt = _map_prompt + (
+                "\n\nKontext-Hinweis vom User (nutze diesen NUR, "
+                "um Begriffe korrekt zu schreiben; erfinde NICHTS, "
+                "was nicht im Transkript steht):\n" + _a_ctx
+            )
+            log_debug(
+                "summarize",
+                "[A] Kontext in Map-Prompt: %d Zeichen (total %d)",
+                len(_a_ctx), len(_map_prompt),
+            )
+        # === END PATCH A ===
+        # === END PATCH F13b1 ===
         self._chunks_total = len(chunks)
         self._chunk_results = [None] * len(chunks)
         self._chunks_processed = 0
@@ -80511,13 +81379,15 @@ class SummarizeDialog(BaseDialog):
                     len(chunks),
                     len(chunk),
                 )
+                # # === PATCH F13b2: submit mit _map_prompt ===
                 future = executor.submit(
                     self._process_chunk_with_retry,
                     idx,
                     chunk,
-                    prompt,
+                    _map_prompt,
                     temp,
                     effective_abort,
+                    # === END PATCH F13b2 ===
                     max_retries=MAX_RETRIES,
                     retry_delay=RETRY_DELAY_BASE,
                 )
@@ -80603,13 +81473,51 @@ class SummarizeDialog(BaseDialog):
                 log_debug("summarize", "  ❌ Keine validen Ergebnisse")
                 return None
 
-            combined = "\n\n".join(valid)
+            # === PATCH F11b: apply cleaner to combined ===
+            _cleaned_valid = [
+                self._clean_chunk_result(r) for r in valid if r
+            ]
+            # # === PATCH F12c: F12 debug log ===
+            _style_low = (getattr(self, "style", "") or "").lower()
+            _is_verbose = (
+                "ausführlich" in _style_low
+                or "ausfuhrlich" in _style_low
+            )
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "summarize",
+                    "[F12-DEBUG] style=%r, verbose_mode=%s, chunks=%d, "
+                    "laengen=%s",
+                    self.style, _is_verbose, len(_cleaned_valid),
+                    [len(r) for r in _cleaned_valid],
+                )
+            # # === PATCH F13d: F12b disabled ===
+            # F12b (Direktausgabe der Chunks) wurde deaktiviert.
+            # Grund: Die Chunks sind chronologisch, aber die Synthese
+            # fuehrt sie zu einer kohaerenten Gesamtausgabe zusammen.
+            if False and _is_verbose and _cleaned_valid:
+            # === END PATCH F13d ===
+                _direct = "\n\n---\n\n".join(_cleaned_valid)
+                _direct_len = len(_direct)
+                _sum_before = sum(len(r) for r in _cleaned_valid)
+                log_debug(
+                    "summarize",
+                    "  ➜ AUSFUEHRLICH-DIREKT-MODUS: %d Chunks, "
+                    "%d Zeichen (vor Filter %d)",
+                    len(_cleaned_valid), _direct_len, _sum_before,
+                )
+                return _direct
+            # === END PATCH F12b ===
+            combined = "\n\n".join(_cleaned_valid)
+            _before_len = sum(len(r) for r in valid)
             log_debug(
                 "summarize",
-                "  ➜ Synthese aus %d Teilen (Länge=%d)",
+                "  ➜ Synthese aus %d Teilen (Länge=%d, vor Filter=%d)",
                 len(valid),
                 len(combined),
+                _before_len,
             )
+            # === END PATCH F11b ===
 
             synthesis_prompt = self._get_synthesis_prompt()
             max_synthesis_tokens = limit - self._estimate_tokens(synthesis_prompt) - 500
@@ -80633,6 +81541,49 @@ class SummarizeDialog(BaseDialog):
                 len(truncated_combined),
             )
 
+            # # === PATCH F6-DEBUG: synth prompt snapshot ===
+            if DEBUG_LEVEL >= 3:
+                try:
+                    _dbg_first = synthesis_prompt.split("\n", 1)[0][:120]
+                    _dbg_low = synthesis_prompt.lower()
+                    _dbg_has_style = ("ausf" in _dbg_low and "hrlich" in _dbg_low)
+                    _dbg_has_md = "markdown" in _dbg_low
+                    _dbg_has_verbot = ("verboten" in _dbg_low or "forbidden" in _dbg_low)
+                    log_debug(
+                        "summarize",
+                        "[SYNTH-DEBUG] input_len=%d chars, prompt_len=%d chars, "
+                        "has_style_block=%s, has_markdown=%s, has_verbot=%s, "
+                        "first_line=%r",
+                        len(truncated_combined),
+                        len(synthesis_prompt),
+                        _dbg_has_style,
+                        _dbg_has_md,
+                        _dbg_has_verbot,
+                        _dbg_first,
+                    )
+                except Exception as _dbg_exc:
+                    log_debug("summarize", f"[SYNTH-DEBUG] snapshot error: {_dbg_exc}")
+            # === END PATCH F6-DEBUG ===
+            # # === PATCH F8: dump synthesis input/output to /tmp ===
+            if DEBUG_LEVEL >= 3:
+                try:
+                    # # === PATCH F9b: datetime dump fix ===
+                    import time as _time_mod
+                    _ts = _time_mod.strftime('%Y%m%d_%H%M%S')
+                    _dump = f"/tmp/dragon_synth_dump_{_ts}.txt"
+                    with open(_dump, 'w', encoding='utf-8') as _f:
+                        _f.write("=== PROMPT (len=" + str(len(synthesis_prompt)) + ") ===\n")
+                        _f.write(synthesis_prompt)
+                        _f.write("\n\n=== INPUT (len=" + str(len(truncated_combined)) + ") ===\n")
+                        _f.write(truncated_combined)
+                    log_debug(
+                        "summarize",
+                        "[F8-DUMP] PROMPT+INPUT geschrieben nach %s",
+                        _dump,
+                    )
+                except Exception as _dump_exc:
+                    log_debug("summarize", f"[F8-DUMP] Fehler: {_dump_exc}")
+            # === END PATCH F8 ===
             try:
                 result = self._summarize_chunk(
                     truncated_combined,
@@ -80646,6 +81597,28 @@ class SummarizeDialog(BaseDialog):
                 self._set_status(f"❌ Synthesefehler: {str(synth_exc)[:100]}")
                 return None
 
+            # === PATCH F8b: Output-Dump ===
+            if DEBUG_LEVEL >= 3:
+                try:
+                    import time as _time_mod2
+                    _ts2 = _time_mod2.strftime('%Y%m%d_%H%M%S')
+                    _dump2 = f"/tmp/dragon_synth_output_{_ts2}.txt"
+                    with open(_dump2, 'w', encoding='utf-8') as _f2:
+                        _f2.write("=== SYNTHESE-OUTPUT (len=" + str(len(result) if result else 0) + ") ===\n")
+                        _f2.write(result if result else '')
+                    log_debug(
+                        "summarize",
+                        "[F8-DUMP] OUTPUT geschrieben nach %s",
+                        _dump2,
+                    )
+                except Exception as _dump2_exc:
+                    log_debug("summarize", f"[F8-DUMP] Output-Fehler: {_dump2_exc}")
+            # === END PATCH F8b ===
+            # === PATCH F13g-c: cjk filter auf finalen Output ===
+            # Sicherheitsnetz: auch im Synthese-Output CJK filtern
+            if result:
+                result = self._strip_cjk(result)
+            # === END PATCH F13g-c ===
             elapsed = time.perf_counter() - start_total
             log_debug(
                 "summarize",
@@ -80733,27 +81706,180 @@ class SummarizeDialog(BaseDialog):
 
         self._safe_after(0, _update_gui)
 
+    # === PATCH F3a: _get_style_instructions ===
+    # === PATCH F6a: style_instructions for_synthesis param ===
+    def _get_style_instructions(self, for_synthesis: bool = False) -> str:
+        """Liefert die Style-Anweisungen aus TEMPLATES, aber ohne
+        {text}-Platzhalter und ohne Trailer wie 'Zusammenfassung:'.
+        Wird fuer die Synthese benoetigt, damit der Ausfuehrlich-
+        Style (Markdown, Laenge) auch dort ankommt.
+        """
+        try:
+            raw = self.TEMPLATES.get(self.style, "") or ""
+        except Exception:
+            return ""
+        if "{text}" in raw:
+            head, _, _ = raw.partition("{text}")
+            raw = head.rstrip()
+        else:
+            raw = raw.strip()
+        if for_synthesis:
+            # Schneide ab dem ersten 'REGELN:'-Block (Style hat
+            # eigene Regeln — die Synthese nutzt ihre eigenen).
+            import re as _re
+            _m = _re.search(r"\nREGELN:\s*\n", raw)
+            if _m:
+                raw = raw[:_m.start()].rstrip()
+        return raw
+    # === END PATCH F6a ===
+    # === END PATCH F3a ===
+
+    # === PATCH F6b: consolidated synthesis prompt ===
+    def _read_chapters_enabled(self) -> bool:
+        """Liest chapters_enabled. Fuer G-min: hartkodiert True.
+        PATCH G: minimal
+        """
+        candidates = []
+        gui = getattr(self, "gui", None)
+        if gui is not None:
+            candidates.append(getattr(gui, "advanced_settings", None))
+        candidates.append(getattr(self, "advanced_settings", None))
+        candidates.append(getattr(self, "settings", None))
+        for cand in candidates:
+            if cand is None:
+                continue
+            val = getattr(cand, "chapters_enabled", None)
+            if val is not None:
+                return bool(val)
+        return True  # Default
+
     def _get_synthesis_prompt(self) -> str:
-        """Liefert einen sprachabhängigen Synthese‑Prompt."""
+        """Konsolidierter Synthese-Prompt (eine REGELN-Sektion)."""
+        # PATCH G: minimal - Kapitel-Block
+        import re as _re
         lang = self.language
+        _chapters_enabled = self._read_chapters_enabled()
+        _txt = getattr(self, "text", "") or ""
+        try:
+            logger.info(
+                "[G] chapters_enabled=%s text_len=%d zeitmarken=%s",
+                _chapters_enabled, len(_txt),
+                bool(_re.search(r"\d{1,2}:\d{2}", _txt)),
+            )
+        except Exception:
+            pass
+        _chapters_de = (
+            "KAPITEL-STRUKTUR:\n"
+            "\u2022 Gliedere in 3\u20136 Kapitel.\n"
+            "\u2022 Format pro Kapitel: **MM:SS \u2013 MM:SS | Titel**\n"
+            "\u2022 Nutze Zeitmarken [MM:SS] aus dem Material.\n"
+            "\u2022 Falls keine Zeitmarken: nur **Titel**.\n\n"
+        ) if _chapters_enabled else ""
+        _task_de = (
+            "Kombiniere die folgenden Teilzusammenfassungen zu EINER "
+            "vollstaendigen Gesamtzusammenfassung auf Deutsch.\n"
+            "WICHTIG: Komprimiere NICHT. Behalte alle Details, Zahlen, "
+            "Namen und Preise aus ALLEN Teilen. Die Ausgabe soll mindestens "
+            "75% der Eingabelaenge haben."
+        )
+        _task_en = (
+            "Combine the following partial summaries into ONE complete "
+            "overall summary in English.\n"
+            "IMPORTANT: Do NOT compress. Keep all details, numbers, names, "
+            "and prices from ALL parts. The output should be at least 75% "
+            "of the input length."
+        )
+        _rules_de = (
+            "REGELN:\n"
+            "\u2022 Aktive, konkrete Saetze. Markdown-Formatierung beibehalten "
+            "(Fett, Listen, Zeilenumbrueche).\n"
+            "\u2022 VERBOTEN: 'Der Sprecher...', 'Das Video zeigt...', "
+            "'Der Autor...', 'Es wird...', 'Man kann...', "
+            "'In diesem Clip...', 'wie bereits erwaehnt', 'wie in Teil X'.\n"
+            "\u2022 Mindestlaenge: 75% der Eingabe. Kuerzen nur bei echter "
+            "Redundanz \u2014 nicht bei Detail-Tiefe.\n"
+            "\u2022 Bei Detail-Ueberschneidungen zwischen Teilen: fuehre die "
+            "Erklaerung EINMAL in der vollstaendigsten Form zusammen. "
+            "Kein Meta-Verweis.\n"
+            "\u2022 Eigennamen in Originalsprache mit Uebersetzung in Klammern, "
+            "z.B. 'Ttukseom (ttukseom)'.\n"
+            "\u2022 Keine Spekulationswoerter ('vermutlich', 'koennte', "
+            "'moeglicherweise'). Nur was in den Teilzusammenfassungen steht.\n"
+            "\u2022 Keine Vorrede \u2014 direkt die Saetze.\n\n"
+        )
+        _rules_en = (
+            "RULES:\n"
+            "\u2022 Active, concrete sentences. Keep Markdown formatting "
+            "(bold, lists, line breaks).\n"
+            "\u2022 FORBIDDEN: 'The speaker...', 'The video shows...', "
+            "'The author...', 'It is...', 'One can...', "
+            "'In this clip...', 'as mentioned earlier', 'as in part X'.\n"
+            "\u2022 Minimum length: 75% of the input. Shorten only for real "
+            "redundancy \u2014 not for detail depth.\n"
+            "\u2022 For overlapping details between parts: merge them ONCE in "
+            "the most complete form. No meta-reference.\n"
+            "\u2022 Proper names in original language with translation in "
+            "parentheses.\n"
+            "\u2022 No speculation. Only what is in the partial summaries.\n"
+            "\u2022 No preamble \u2014 output only the sentences.\n\n"
+        )
         if lang == "Deutsch":
+            _style_block = self._get_style_instructions(for_synthesis=True)
+            _style_prefix = (_style_block + "\n\n") if _style_block else ""
+            # PATCH G-min-v2: Kapitel-Block nach vorne + Wiederholung
+            _warn_de = (
+                "\u26a0\ufe0f Der Kapitel-Aufbau hat VORRANG "
+                "vor allen Style-Vorgaben zur Gliederung.\n\n"
+            ) if _chapters_enabled else ""
+            _remind_de = (
+                "\u26a0\ufe0f ERINNERUNG: Beginne jeden Kapitelabschnitt mit "
+                "**MM:SS \u2013 MM:SS | Titel**.\n\n"
+            ) if _chapters_enabled else ""
             return (
-                "Fasse die folgenden Teilzusammenfassungen zu einer einzigen, "
-                "kohärenten Gesamtzusammenfassung auf Deutsch zusammen.\n\n"
-                "Die Zusammenfassung sollte flüssig lesbar sein und die wichtigsten "
-                "Punkte aller Teile enthalten.\n\n"
+                _task_de + "\n\n"
+                + _chapters_de + _warn_de
+                + _style_prefix
+                + _remind_de
+                + _rules_de
             )
         if lang == "Englisch":
+            _style_block = self._get_style_instructions(for_synthesis=True)
+            _style_prefix = (_style_block + "\n\n") if _style_block else ""
+            # PATCH G-min-v2: Kapitel-Block nach vorne + Wiederholung
+            _warn_en = (
+                "\u26a0\ufe0f Chapter structure has PRIORITY over all "
+                "style instructions.\n\n"
+            ) if _chapters_enabled else ""
+            _remind_en = (
+                "\u26a0\ufe0f REMINDER: Begin each chapter with "
+                "**MM:SS \u2013 MM:SS | Title**.\n\n"
+            ) if _chapters_enabled else ""
             return (
-                "Combine the following partial summaries into a single, "
-                "coherent overall summary in English.\n\n"
-                "The summary should be fluent and include the most important "
-                "points from all parts.\n\n"
+                _task_en + "\n\n"
+                + _chapter_en + _warn_en
+                + _style_prefix
+                + _remind_en
+                + _rules_en
             )
+        _style_block = self._get_style_instructions(for_synthesis=True)
+        _style_prefix = (_style_block + "\n\n") if _style_block else ""
+        # PATCH G-min-v2: Kapitel-Block nach vorne + Wiederholung
+        _warn_def = (
+            "\u26a0\ufe0f Der Kapitel-Aufbau hat VORRANG vor allen "
+            "Style-Vorgaben zur Gliederung.\n\n"
+        ) if _chapters_enabled else ""
+        _remind_def = (
+            "\u26a0\ufe0f ERINNERUNG: Beginne jeden Kapitelabschnitt mit "
+            "**MM:SS \u2013 MM:SS | Titel**.\n\n"
+        ) if _chapters_enabled else ""
         return (
-            "Fasse die folgenden Teilzusammenfassungen zu einer einzigen, "
-            "kohärenten Gesamtzusammenfassung zusammen.\n\n"
+            _task_de + "\n\n"
+            + _chapters_de + _warn_def
+            + _style_prefix
+            + _remind_def
+            + _rules_de
         )
+    # === END PATCH F6b ===
 
     def _process_chunk_with_retry(
         self,
@@ -80875,9 +82001,18 @@ class SummarizeDialog(BaseDialog):
                     current = cur_summary or " (bisher keine Zusammenfassung)"
                     chunk_prompt = (
                         f"Bisherige Zusammenfassung:\n{current}\n\n"
-                        f"Erweitere sie mit den folgenden Informationen, ohne bereits Gesagtes zu wiederholen:\n"
-                        f"{chunk}\n\n"
-                        f"Gib NUR die aktualisierte, vollständige Zusammenfassung zurück."
+                        f"Neue Informationen aus dem nächsten Abschnitt:\n{chunk}\n\n"
+                        f"Erweitere die Zusammenfassung. STRENGE REGELN:\n"
+                        f"• Schreibe DIREKT über den Inhalt. NICHT über den Autor "
+                        f"('Der Autor...', 'Der Sprecher...', 'Das Video...' sind verboten).\n"
+                        f"• Wiederhole NICHT, was schon in der bisherigen Zusammenfassung steht.\n"
+                        f"• Keine Wiederholungen. Umfang nach Stil-Vorgabe.\n"
+                        f"• KEINE Spekulation ('vermutet', 'möglicherweise', 'ist sich nicht sicher'). "
+                        f"Nur was im Text steht.\n"
+                        f"• Verwende NUR Fachbegriffe, die im Text vorkommen. "
+                        f"Erfinde oder korrigiere nichts.\n"
+                        f"• Antworte auf {self.language}. Gib NUR die aktualisierte, "
+                        f"vollständige Zusammenfassung zurück."
                     )
 
                 step_start = time.perf_counter()
@@ -80914,7 +82049,53 @@ class SummarizeDialog(BaseDialog):
                 continue
 
             if step_result.strip():
-                cur_summary = step_result
+                # Loop-Erkennung — Style-aware. Ausführliche Styles dürfen
+                # länger werden; Kompakt/Stichpunkte bleiben knapp.
+                _style_now = str(getattr(self, "style", "") or "")
+                _style_lower = _style_now.lower()
+                _max_len = 2500
+                _growth = 2.5
+                if "ausführlich" in _style_lower or "detailliert" in _style_lower:
+                    _max_len = 12000
+                    _growth = 4.0
+                elif "stichpunkt" in _style_lower or "liste" in _style_lower:
+                    _max_len = 4000
+                elif "1 satz" in _style_lower or "280" in _style_lower:
+                    _max_len = 500
+                    _growth = 2.0
+                _is_loop, _loop_reason = _looks_like_loop(
+                    step_result, cur_summary,
+                    max_len=_max_len, growth_factor=_growth,
+                )
+                if _is_loop:
+                    log_debug(
+                        "summarize",
+                        f"⚠️ Loop-Artefakt in Schritt {i + 1} erkannt "
+                        f"({_loop_reason}) – verwerfe Output, behalte vorige Version",
+                    )
+                    logger.warning(
+                        "[SUMMARY] Refine-Schritt %d/%d: Loop erkannt (%s) – "
+                        "behalte vorige Zusammenfassung",
+                        i + 1, total, _loop_reason,
+                    )
+                    # _truncated-Fallback: kürze den neuen Text auf die
+                    # ersten 2–3 Sätze, falls noch keine cur_summary da ist.
+                    if not cur_summary:
+                        _trimmed = step_result.strip()
+                        for _sep in (". ", "! ", "? "):
+                            _parts = _trimmed.split(_sep)
+                            if len(_parts) >= 3:
+                                _trimmed = _sep.join(_parts[:3]) + "."
+                                break
+                        cur_summary = _trimmed
+                        log_debug(
+                            "summarize",
+                            f"Schritt {i + 1}: keine Vorversion – nutze "
+                            f"gekürzte Fassung ({len(_trimmed)} Zeichen)",
+                        )
+                    # Sonst: cur_summary bleibt unverändert
+                else:
+                    cur_summary = step_result
             else:
                 log_debug(
                     "summarize",
@@ -81011,12 +82192,47 @@ class SummarizeDialog(BaseDialog):
         except tk.TclError:
             pass
 
+    # PATCH U3: sanfter Progress-Pump (verhindert Hänger-Eindruck)
+    def _progress_pump_start(self) -> None:
+        """PATCH U3: Startet einen Timer, der progress_var langsam bis 90% hochzieht."""
+        if getattr(self, "_progress_pump_id", None) is not None:
+            return
+        def _tick():
+            try:
+                cur = float(self.progress_var.get())
+            except Exception:
+                self._progress_pump_id = None
+                return
+            if cur < 90.0:
+                nxt = min(90.0, cur + 0.3)  # 3%/s
+                try:
+                    self.progress_var.set(nxt)
+                except Exception:
+                    pass
+            self._progress_pump_id = self.root.after(100, _tick)
+        self._progress_pump_id = self.root.after(100, _tick)
+
+    def _progress_pump_stop(self) -> None:
+        """PATCH U3: Stoppt den Progress-Pump."""
+        pid = getattr(self, "_progress_pump_id", None)
+        if pid is not None:
+            try:
+                self.root.after_cancel(pid)
+            except Exception:
+                pass
+            self._progress_pump_id = None
+
     def _set_progress_gui(self, value: int, label: str) -> None:
         """Setzt Fortschrittsbalken und Label (wird im Hauptthread aufgerufen)."""
         if hasattr(self, "progress_var") and self.progress_var is not None:
             try:
                 current = self.progress_var.get()
-                if current != value:
+                # PATCH U3: Pump-Steuerung
+                if value <= 0 or value >= 100:
+                    self._progress_pump_stop()
+                else:
+                    self._progress_pump_start()
+                if current != value and value > current:
                     self.progress_var.set(value)
             except tk.TclError:
                 pass
@@ -82145,12 +83361,94 @@ class SummarizeDialog(BaseDialog):
         if not hasattr(self, "model_combo"):
             return
         self.model_combo["values"] = models
-        if self.model in models:
+        # FIX: User-Wahl NICHT still überschreiben. Wenn `self.model`
+        # nicht in der Liste steht, bleibt die Combobox trotzdem bei
+        # diesem Wert — und Stufe B zeigt die Warnung darunter an.
+        # Früher:  self.model_var.set(models[0]) → schrieb beim close()
+        #          den falschen Wert zurück in die Config.
+        if self.model:
             self.model_var.set(self.model)
         elif models:
             self.model_var.set(models[0])
         if hasattr(self, "model_status_label") and self.model_status_label is not None:
             self.model_status_label.config(text="✅")
+        # Verfügbarkeit prüfen und bei fehlendem Modell warnen.
+        try:
+            self._refresh_model_availability_warning(models)
+        except Exception as _warn_exc:
+            log_debug("summarize", f"Modell-Warnung fehlgeschlagen: {_warn_exc}")
+
+    def _show_model_warn(self, text: str, severity: str = "warning") -> None:
+        """Zeigt eine Warnung im Model-Warn-Label (thread-safe via after)."""
+        def _do():
+            if not hasattr(self, "model_warn_label") or self.model_warn_label is None:
+                return
+            _warning_fg = getattr(CURRENT_THEME, "WARNING", "#f0a500")
+            _colors = {
+                "warning": _warning_fg,
+                "error": CURRENT_THEME.ERROR,
+                "info": CURRENT_THEME.TEXT_SECONDARY,
+            }
+            _fg = _colors.get(severity, CURRENT_THEME.TEXT_PRIMARY)
+            try:
+                self.model_warn_label.config(text=text, fg=_fg)
+                self.model_warn_label.pack(fill="x", pady=(2, 0))
+            except tk.TclError:
+                pass
+        self._safe_after(0, _do)
+
+    def _clear_model_warn(self) -> None:
+        """Blendet das Modell-Warn-Label aus."""
+        def _do():
+            if hasattr(self, "model_warn_label") and self.model_warn_label is not None:
+                try:
+                    self.model_warn_label.config(text="")
+                    self.model_warn_label.pack_forget()
+                except tk.TclError:
+                    pass
+        self._safe_after(0, _do)
+
+    def _refresh_model_availability_warning(self, models: list[str]) -> None:
+        """Prüft, ob das konfigurierte Modell verfügbar ist, und zeigt Warnung.
+
+        Prüft ``self.model`` (Nutzer-Konfig), NICHT ``self.model_var.get()`` —
+        denn die Combobox zeigt bei fehlendem Modell bereits den ersten
+        verfügbaren Eintrag. Die Original-Wahl ist in ``self.model`` erhalten.
+        """
+        if not models:
+            return
+        original = (self.model or "").strip()
+        if not original:
+            return
+        if original == "auto":
+            self._show_model_warn(
+                "\u2139\ufe0f Auto-Auswahl aktiv \u2013 beim Start wird "
+                "automatisch ein geeignetes Modell gew\u00e4hlt.",
+                severity="info",
+            )
+            return
+        if original in models:
+            self._clear_model_warn()
+            return
+        resolved, _reason = _resolve_summarize_model(original, models)
+        if resolved:
+            self._show_model_warn(
+                f"\u26a0\ufe0f Modell '{original}' ist nicht installiert. "
+                f"Fallback beim Start: '{resolved}'. "
+                f"Installiere mit: ollama pull {original}",
+                severity="warning",
+            )
+            logger.warning(
+                "[SUMMARY-DIALOG] Modell '%s' fehlt lokal. Vorschlag: '%s'",
+                original, resolved,
+            )
+        else:
+            self._show_model_warn(
+                f"\u274c Modell '{original}' ist nicht installiert und kein "
+                f"passender Ersatz gefunden. Installiere mit: "
+                f"ollama pull {original}",
+                severity="error",
+            )
 
     def _safe_after(
         self,
@@ -82375,8 +83673,26 @@ class SummarizeDialog(BaseDialog):
                 self._token_cache.clear(),
                 setattr(self, "_model_context_limit", None),
                 self._update_preview(),
+                self._refresh_model_availability_warning(
+                    getattr(self, "_available_models", None) or [],
+                ),
             ),
         )
+
+        # NEU (Stufe B): Warn-Label für fehlende Modelle. Wird eingeblendet,
+        # wenn das konfigurierte Modell nicht verfügbar ist.
+        self.model_warn_label = tk.Label(
+            left_lf,
+            text="",
+            bg=CURRENT_THEME.BG_SECONDARY,
+            fg=CURRENT_THEME.ERROR,
+            font=Fonts.SMALL,
+            anchor="w",
+            justify="left",
+            wraplength=380,
+        )
+        self.model_warn_label.pack(fill="x", pady=(2, 0))
+        self.model_warn_label.pack_forget()
 
         temp_row = tk.Frame(left_lf, bg=CURRENT_THEME.BG_SECONDARY)
         temp_row.pack(fill="x", pady=1)
@@ -82502,7 +83818,7 @@ class SummarizeDialog(BaseDialog):
             opt_grid,
             textvariable=self.style_var,
             values=list(self.TEMPLATES.keys()),
-            width=18,
+            width=48,
             style="Dark.TCombobox",
         )
         self.style_combo.grid(row=1, column=1, padx=4, pady=1, sticky="w")
@@ -82526,10 +83842,13 @@ class SummarizeDialog(BaseDialog):
         self.structured_cb.pack(anchor="w", pady=1)
 
         templ_row = tk.Frame(right_lf, bg=CURRENT_THEME.BG_SECONDARY)
-        templ_row.pack(fill="x", pady=1)
+        # Variante 1: Prompt-Vorlage ausgeblendet, da sie die Stil-Auswahl
+        # ueberschreibt und die UX verwirrt. Der Prompt-Editor und das
+        # Stil-Dropdown decken alle Beduerfnisse ab.
+        # templ_row.pack(fill="x", pady=1)
         tk.Label(
             templ_row,
-            text="📂 Vorlage:",
+            text="📂 Prompt-Vorlage:",
             bg=CURRENT_THEME.BG_SECONDARY,
             fg=CURRENT_THEME.TEXT_PRIMARY,
             font=Fonts.SMALL,
@@ -82539,7 +83858,7 @@ class SummarizeDialog(BaseDialog):
             templ_row,
             textvariable=self.template_var,
             values=self._template_names,
-            width=18,
+            width=48,
             style="Dark.TCombobox",
         )
         self.template_combo.pack(side="left", padx=2)
@@ -82681,6 +84000,39 @@ class SummarizeDialog(BaseDialog):
             state="disabled",
         )
         self.preview_text.pack(fill="x", pady=(0, 2))
+
+        # === PATCH E1a: Kontext-Feld UI ===
+        ctx_row = tk.Frame(prompt_frame, bg=CURRENT_THEME.BG_SECONDARY)
+        ctx_row.pack(fill="x", pady=(1, 0))
+        tk.Label(
+            ctx_row,
+            text="\U0001f50e Eigene Begriffe:",
+            bg=CURRENT_THEME.BG_SECONDARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.SMALL,
+        ).pack(side="left", padx=2)
+        self.context_var = tk.StringVar(value=getattr(self, "_user_context", ""))
+        self.context_entry = tk.Entry(
+            ctx_row,
+            textvariable=self.context_var,
+            bg=CURRENT_THEME.BG_TERTIARY,
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            insertbackground=CURRENT_THEME.TEXT_PRIMARY,
+            font=Fonts.SMALL,
+            relief="flat",
+        )
+        self.context_entry.pack(side="left", fill="x", expand=True, padx=4)
+        try:
+            ToolTip(
+                self.context_entry,
+                "z. B. Koreanische Lehrerin, Hangang, Ttukseom Park, Marakochi.\n"
+                "Der LLM nutzt diese Begriffe zur Identifikation,\n"
+                "erfindet aber NICHTS, was nicht im Transkript steht.",
+            )
+        except Exception:
+            pass
+        self.context_entry.bind("<KeyRelease>", self._on_context_changed)
+        # === END PATCH E1a ===
 
         bar_row = tk.Frame(prompt_frame, bg=CURRENT_THEME.BG_SECONDARY)
         bar_row.pack(fill="x", pady=(1, 0))
@@ -82966,6 +84318,39 @@ class SummarizeDialog(BaseDialog):
         if hasattr(self, "reset_prompt_btn"):
             self.reset_prompt_btn.config(state="disabled", bg=CURRENT_THEME.BG_TERTIARY)
 
+    # === PATCH E1d: _on_context_changed ===
+    def _on_context_changed(self, event=None) -> None:
+        """Reagiert auf Kontext-Feld-Aenderung: Caches leeren + Prompt neu bauen."""
+        try:
+            if hasattr(self, "_response_cache"):
+                self._response_cache.clear()
+            if hasattr(self, "_token_cache"):
+                self._token_cache.clear()
+            self._user_edited_prompt = False
+            self._update_preview()
+            # === PATCH E2: sync dialog -> main ===
+            try:
+                _val = self.context_var.get() or ""
+                _mgui = getattr(self, "gui", None)
+                if _mgui is not None:
+                    _mvar = getattr(_mgui, "main_context_var", None)
+                    if _mvar is not None and (_mvar.get() or "") != _val:
+                        _mvar.set(_val)
+                        if DEBUG_LEVEL >= 3:
+                            log_debug("summarize", "[E2-SYNC] Main-GUI aktualisiert")
+            except Exception as _sync_exc:
+                log_debug("summarize", f"[E2-SYNC] Fehler: {_sync_exc}")
+            # === END PATCH E2 ===
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "summarize",
+                    "[E1-CONTEXT] geaendert: %r",
+                    (self.context_var.get() or "")[:60] if hasattr(self, "context_var") else "",
+                )
+        except Exception as _e:
+            log_debug("summarize", f"[E1-CONTEXT] Fehler: {_e}")
+    # === END PATCH E1d ===
+
     def _on_setting_changed(self, event=None) -> None:
         """Wird aufgerufen, wenn eine Einstellung (Sprache, Stil, etc.) geändert wird.
         Bei relevanten Änderungen wird der Prompt zurückgesetzt und der Cache geleert.
@@ -83170,6 +84555,14 @@ class SummarizeDialog(BaseDialog):
         adv.summary_strategy = self.strategy_var.get()
         adv.summary_language = self.lang_var.get()
         adv.summary_style = self.style_var.get()
+        # === PATCH E1c3: summary_context speichern ===
+        try:
+            adv.summary_context = (
+                self.context_var.get() if hasattr(self, "context_var") else ""
+            )
+        except Exception:
+            pass
+        # === END PATCH E1c3 ===
         adv.summary_use_title = self.title_var.get()
         adv.summary_structured = self.structured_var.get()
         adv.save_to_file()
@@ -83697,48 +85090,94 @@ class TranslationDialog(BaseDialog):
         close_btn.pack(pady=10)
         self.source_text.focus_set()
 
+    # === PATCH B1: hardened _split_sentences ===
+    _SPLIT_ABBREVIATIONS = (
+        "ca.", "bzw.", "z.b.", "z. b.", "d.h.", "d. h.", "u.a.", "u. a.",
+        "etc.", "evtl.", "ggf.", "inkl.", "exkl.", "max.", "min.",
+        "std.", "nr.", "dr.", "prof.", "hr.", "fr.", "bzgl.", "vgl.",
+        "sog.", "bspw.", "mind.", "abb.", "tab.", "kap.", "usw.",
+    )
+
+    # # === PATCH B2: _looks_like_fragment helper ===
+    def _looks_like_fragment(self, prev: str) -> bool:
+        """True, wenn prev ein Fragment ist und mit dem Folgesatz
+        gemergt werden soll. Markdown-Header nie mergen.
+        """
+        if not prev:
+            return False
+        p = prev.rstrip()
+        if not p:
+            return False
+        if p.lstrip().startswith("#"):
+            return False
+        if p.count("(") > p.count(")"):
+            return True
+        low = p.lower()
+        for abbr in self._SPLIT_ABBREVIATIONS:
+            if low.endswith(abbr):
+                before = len(p) - len(abbr)
+                if before == 0 or not p[before - 1].isalnum():
+                    return True
+        if len(p) < 15 and not p.endswith((".", "!", "?", "。", "！", "？", ":")):
+            return True
+        return False
+
     def _split_sentences(self, text: str) -> list[str]:
-        """Teilt einen Text in eine Liste von Sätzen auf."""
+        """Teilt Text in Sätze – NLTK + Merge-Post-Processing."""
         if not text or not isinstance(text, str):
             return []
         clean = text.strip()
         if not clean:
             return []
 
+        raw: list[str] = []
         try:
             import nltk
-
             try:
                 nltk.data.find("tokenizers/punkt_tab")
             except LookupError:
                 nltk.download("punkt_tab", quiet=True)
             sentences = nltk.sent_tokenize(clean)
             if sentences:
-                return sentences
+                raw = sentences
         except ImportError:
             pass
         except Exception as exc:
-            log_debug("split", f"NLTK sentence splitting failed: {exc} – falling back")
+            log_debug("split", f"NLTK sentence splitting failed: {exc}")
 
-        split_func = globals().get("split_sentences")
-        if split_func is None:
-            module = sys.modules.get(__name__)
-            if module is not None:
-                split_func = getattr(module, "split_sentences", None)
-        if split_func is not None:
-            try:
-                result = split_func(clean)
-                if result:
-                    return result
-            except Exception as exc:
-                log_debug(
-                    "split",
-                    f"Global split_sentences failed: {exc} – falling back to regex",
-                )
+        if not raw:
+            split_func = globals().get("split_sentences")
+            if split_func is None:
+                module = sys.modules.get(__name__)
+                if module is not None:
+                    split_func = getattr(module, "split_sentences", None)
+            if split_func is not None:
+                try:
+                    result = split_func(clean)
+                    if result:
+                        raw = result
+                except Exception as exc:
+                    log_debug("split", f"Global split_sentences failed: {exc}")
 
-        parts = re.split(r"(?<=[.!?。！？])[ \n]+", clean)
-        sentences = [s.strip() for s in parts if s.strip()]
-        return sentences
+        if not raw:
+            parts = re.split(r"(?<=[.!?。！？])[ \n]+", clean)
+            raw = [s.strip() for s in parts if s.strip()]
+
+        if not raw:
+            return []
+
+        merged: list[str] = []
+        for frag in raw:
+            frag = frag.strip()
+            if not frag:
+                continue
+            if merged and self._looks_like_fragment(merged[-1]):
+                merged[-1] = merged[-1] + " " + frag
+            else:
+                merged.append(frag)
+
+        return [s for s in merged if s]
+    # === END PATCH B1 ===
 
     def _translate_one(
         self,
@@ -84094,7 +85533,13 @@ class TranslationDialog(BaseDialog):
         for i, t in enumerate(translated_sentences):
             if t is None:
                 untranslated_count += 1
-                parts.append(f"[UNÜBERSETZT] {original_sentences[i]}")
+                # # === PATCH B3: no [UNUEBERSETZT] marker ===
+                parts.append(original_sentences[i])
+                logger.warning(
+                    "Uebersetzung fehlgeschlagen - Original belassen: %r",
+                    original_sentences[i][:80],
+                )
+                # === END PATCH B3 ===
             else:
                 parts.append(t)
         full_translation = " ".join(parts)
@@ -93671,6 +95116,8 @@ class AdvancedSettingsDialog:
         self.hotwords_var = tk.StringVar()
         self.engine_var = tk.StringVar(value="google")
         self.ollama_model_var = tk.StringVar(value="llama3.1:8b")
+        # PATCH U1c: correction_model Tk-Variable
+        self.correction_model_var = tk.StringVar(value="")
         self.ollama_host_var = tk.StringVar(value="http://localhost:11434")
         self.reflection_var = tk.BooleanVar(value=False)
         self.tts_engine_var = tk.StringVar(value="piper")
@@ -95210,6 +96657,48 @@ class AdvancedSettingsDialog:
             "threads",
             "gpu",
         ]
+        # PATCH F-CORR-4b: Korrektur-Modell-Widget (aus Translation-Tab hierher)
+        _corr_sep = tk.Frame(frame, height=1, bd=0)
+        _corr_sep.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(10, 5))
+        _lbl_corr = tk.Label(
+            frame,
+            text="Korrektur-Modell:",
+            anchor="w",
+            bg=self.gui.current_theme.BG_SECONDARY,
+            fg=self.gui.current_theme.TEXT_PRIMARY,
+            font=Fonts.PRIMARY,
+        )
+        _lbl_corr.grid(row=7, column=0, sticky="w", pady=5)
+        self.correction_combo = ttk.Combobox(
+            frame,
+            textvariable=self.correction_model_var,
+            values=[],
+            width=self.COMBO_WIDTH_SMALL,
+            state="normal",
+            style="Dark.TCombobox",
+        )
+        self.correction_combo.grid(row=7, column=1, sticky="w", pady=5, padx=5)
+        ToolTip(
+            self.correction_combo,
+            "Modell fuer die Transkript-Korrektur (Whisper-Verbesserung).\n"
+            "Leer = Fallback auf das Ollama-Modell (Tab Uebersetzung).\n\n"
+            "Empfohlen (Instruct-Modelle):\n"
+            "  qwen2.5:7b-instruct-q5_K_M\n"
+            "  qwen2.5:14b-instruct-q3_K_M\n\n"
+            "NICHT empfohlen: Modelle mit coder im Namen.",
+        )
+        # PATCH F-CORR-4c: initial Modelle laden + Sync anstossen
+        try:
+            self.dialog.after(300, self._refresh_ollama_models)
+        except Exception:
+            pass
+        # PATCH F-CORR-5: Sync-Retry (Fetch ist async)
+        try:
+            for _delay in (800, 1800, 3500):
+                self.dialog.after(_delay, self._sync_correction_models)
+        except Exception:
+            pass
+
         self._add_to_search_index("model", search_texts)
 
         if DEBUG_LEVEL >= 3:
@@ -95315,6 +96804,7 @@ class AdvancedSettingsDialog:
             "🔄 klickt, um verfügbare Modelle vom Server zu laden.",
         )
 
+
         refresh_btn = safe_create(
             tk.Button,
             ollama_frame,
@@ -95386,7 +96876,8 @@ class AdvancedSettingsDialog:
             activebackground=self.gui.current_theme.BG_SECONDARY,
             font=Fonts.PRIMARY,
         )
-        self.reflection_cb.grid(row=3, column=0, columnspan=3, sticky="w", pady=5)
+        # PATCH UI-FIX-1: row=3 -> row=4 (Platz fuer Korrektur-Modell)
+        self.reflection_cb.grid(row=4, column=0, columnspan=3, sticky="w", pady=5)
         ToolTip(
             self.reflection_cb,
             "Zweistufige Übersetzung mit Selbstreflexion.\n"
@@ -95668,6 +97159,7 @@ class AdvancedSettingsDialog:
                 logger.debug("Ignored exception: %s", e, exc_info=True)
 
         self._fetch_ollama_models()
+        # PATCH F-CORR-6: Sync jetzt via Retry-Schedule + Direkt-Fetch-Fallback
         if self.dialog and self.dialog.winfo_exists():
             self.dialog.after(
                 3000,
@@ -95679,6 +97171,57 @@ class AdvancedSettingsDialog:
                     else None
                 ),
             )
+
+    # PATCH F-CORR-3a: Sync-Helper
+    def _sync_correction_models(self) -> None:
+        """Kopiert Ollama-Modelle in correction_combo.
+
+        PATCH F-CORR-6: Wenn ollama_combo noch leer ist (async fetch
+        nicht fertig), holt diese Methode die Liste direkt vom Server.
+        """
+        if not hasattr(self, "correction_combo") or self.correction_combo is None:
+            return
+        values = ()
+        try:
+            if hasattr(self, "ollama_combo") and self.ollama_combo is not None:
+                values = tuple(self.ollama_combo["values"])
+        except Exception:
+            values = ()
+        if not values:
+            # PATCH F-CORR-6: Direkt-Fetch-Fallback
+            try:
+                import requests as _req6
+                host = "http://localhost:11434"
+                hv = getattr(self, "ollama_host_var", None)
+                if hv is not None:
+                    try:
+                        host = (hv.get() or host).strip().rstrip("/")
+                    except Exception:
+                        pass
+                r = _req6.get(f"{host}/api/tags", timeout=2)
+                if r.status_code == 200:
+                    data = r.json()
+                    values = tuple(
+                        m.get("name", "") for m in data.get("models", [])
+                        if m.get("name")
+                    )
+                    if DEBUG_LEVEL >= 3:
+                        logger.debug(
+                            "[F-CORR-6] Direkt-Fetch: %d Modelle",
+                            len(values),
+                        )
+            except Exception as _ex6:
+                logger.debug("[F-CORR-6] Direkt-Fetch-Fehler: %s", _ex6)
+        try:
+            self.correction_combo["values"] = values
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "settings",
+                    "[F-CORR-3] correction_combo aktualisiert: %d Modelle",
+                    len(values),
+                )
+        except Exception as e:
+            logger.debug("[F-CORR-3] Sync-Fehler: %s", e)
 
     def _create_advanced_system_tab(self) -> None:
         """Erstellt den Inhalt des Tabs „Erweitert & System“ (Lazy Loading)."""
@@ -98452,6 +99995,10 @@ class AdvancedSettingsDialog:
 
         self.engine_var.set(self._get_safe(adv, "translation_engine", "google"))
         self.ollama_model_var.set(self._get_safe(adv, "ollama_model", "llama3.1:8b"))
+        # PATCH U1d: correction_model Laden
+        self.correction_model_var.set(
+            self._get_safe(adv, "correction_model", "") or ""
+        )
         self.ollama_host_var.set(
             self._get_safe(adv, "ollama_host", "http://localhost:11434"),
         )
@@ -98846,6 +100393,8 @@ class AdvancedSettingsDialog:
             ("hotwords", (_safe_var("hotwords_var", "") or "").strip()),
             ("translation_engine", _safe_var("engine_var", "google")),
             ("ollama_model", (_safe_var("ollama_model_var", "") or "").strip()),
+            # PATCH U1e: correction_model Speichern
+            ("correction_model", (_safe_var("correction_model_var", "") or "").strip()),
             ("ollama_host", (_safe_var("ollama_host_var", "") or "").strip()),
             ("enable_reflection", _safe_var("reflection_var", False)),
             ("tts_engine", _safe_var("tts_engine_var", "piper")),
@@ -100533,6 +102082,190 @@ class AdvancedSettingsDialog:
             except Exception:
                 pass
             traceback.print_exc()
+
+
+class SaveOptionsDialog(BaseDialog):
+    """Dialog zur Auswahl von Inhalt + Format vor dem Speichern.
+
+    Wird von save_transcript (TXT/JSON/DOCX) und export_subtitles
+    (SRT/VTT/ASS) verwendet. Ergebnis nach close():
+      - result = {"content": "original"|"translation"|"both",
+                  "format": "txt"|"srt"|...}
+      - result = None  → Benutzer hat abgebrochen
+    """
+
+    MODE_TRANSCRIPT = "transcript"
+    MODE_SUBTITLE = "subtitle"
+
+    # Ergebnis nach close() – None = abgebrochen
+    result: dict | None = None
+
+    def __init__(
+        self,
+        parent: tk.Widget | tk.Tk,
+        title: str,
+        mode: str = "transcript",
+        has_original: bool = True,
+        has_translation: bool = True,
+    ) -> None:
+        self._mode = mode
+        self._has_original = has_original
+        self._has_translation = has_translation
+        self._content_var: tk.StringVar | None = None
+        self._format_var: tk.StringVar | None = None
+        self.result = None
+        super().__init__(parent, title, width=480, height=340, modal=True)
+
+    def build_ui(self) -> None:
+        theme = self._theme
+        bg = theme.BG_PRIMARY
+        fg = theme.TEXT_PRIMARY
+        fg_dim = theme.TEXT_SECONDARY
+        accent = theme.DRAGON_BLUE
+        border = theme.BORDER
+        card = theme.BG_CARD
+
+        main = tk.Frame(self.main, bg=bg)
+        main.pack(fill="both", expand=True, padx=20, pady=15)
+
+        # Titel
+        tk.Label(
+            main, text=self.title, bg=bg, fg=fg,
+            font=("Helvetica", 13, "bold"),
+        ).pack(anchor="w", pady=(0, 12))
+
+        # Inhalt-Sektion
+        tk.Label(
+            main, text="Inhalt:", bg=bg, fg=fg_dim,
+            font=("Helvetica", 10),
+        ).pack(anchor="w", pady=(0, 4))
+
+        content_frame = tk.Frame(
+            main, bg=card,
+            highlightthickness=1, highlightbackground=border,
+        )
+        content_frame.pack(fill="x", pady=(0, 14))
+
+        self._content_var = tk.StringVar(
+            value="original" if self._has_original else "translation"
+        )
+
+        self._add_radio(
+            content_frame, "Original", "original",
+            state=("normal" if self._has_original else "disabled"),
+            bg=card, fg=fg,
+        )
+        self._add_radio(
+            content_frame, "Übersetzung", "translation",
+            state=("normal" if self._has_translation else "disabled"),
+            bg=card, fg=fg,
+        )
+
+        both_ok = self._has_original and self._has_translation
+        if self._mode == self.MODE_TRANSCRIPT:
+            both_label = "Beide (in einer Datei)"
+        else:
+            both_label = "Beide (in zwei Dateien)"
+
+        self._add_radio(
+            content_frame, both_label, "both",
+            state=("normal" if both_ok else "disabled"),
+            bg=card, fg=fg,
+        )
+
+        # Format-Sektion
+        tk.Label(
+            main, text="Format:", bg=bg, fg=fg_dim,
+            font=("Helvetica", 10),
+        ).pack(anchor="w", pady=(0, 4))
+
+        if self._mode == self.MODE_TRANSCRIPT:
+            formats = ["TXT", "JSON", "DOCX"]
+        else:
+            formats = ["SRT", "VTT", "ASS"]
+
+        self._format_var = tk.StringVar(value=formats[0])
+        combo = ttk.Combobox(
+            main, textvariable=self._format_var,
+            values=formats, state="readonly",
+            font=("Helvetica", 10),
+        )
+        combo.pack(fill="x", pady=(0, 20))
+
+        # Buttons unten
+        btn_frame = tk.Frame(main, bg=bg)
+        btn_frame.pack(fill="x", side="bottom")
+
+        tk.Button(
+            btn_frame, text="Weiter",
+            command=self._on_accept,
+            bg=accent, fg="white",
+            activebackground=accent, activeforeground="white",
+            relief="flat", bd=0, padx=22, pady=8, cursor="hand2",
+            font=("Helvetica", 10, "bold"),
+        ).pack(side="right")
+
+        tk.Button(
+            btn_frame, text="Abbrechen",
+            command=self._on_cancel,
+            bg=card, fg=fg,
+            activebackground=theme.BG_HOVER, activeforeground=fg,
+            relief="flat", bd=0, padx=22, pady=8, cursor="hand2",
+            font=("Helvetica", 10),
+        ).pack(side="right", padx=(0, 8))
+
+        # Tastatur
+        self.dialog.bind("<Escape>", lambda _e: self._on_cancel())
+        self.dialog.bind("<Return>", lambda _e: self._on_accept())
+
+    def _add_radio(
+        self, parent, text: str, value: str,
+        state: str, bg: str, fg: str,
+    ) -> None:
+        rb = tk.Radiobutton(
+            parent, text=text, value=value,
+            variable=self._content_var,
+            bg=bg, fg=fg,
+            activebackground=bg, activeforeground=fg,
+            selectcolor=bg, font=("Helvetica", 10),
+            anchor="w", padx=10, pady=6,
+            state=state, cursor="hand2",
+        )
+        rb.pack(fill="x")
+
+    def _on_accept(self) -> None:
+        try:
+            self.result = {
+                "content": self._content_var.get() if self._content_var else "original",
+                "format": (self._format_var.get().lower() if self._format_var else ""),
+            }
+        except Exception:
+            self.result = None
+        self.close()
+
+    def _on_cancel(self) -> None:
+        self.result = None
+        self.close()
+
+    @classmethod
+    def show(
+        cls,
+        parent: tk.Widget | tk.Tk,
+        title: str,
+        mode: str,
+        has_original: bool,
+        has_translation: bool,
+    ) -> dict | None:
+        """Zeigt den Dialog modal und gibt das Ergebnis zurück oder None."""
+        try:
+            dlg = cls(parent, title, mode, has_original, has_translation)
+        except Exception:
+            return None
+        try:
+            parent.wait_window(dlg.dialog)
+        except Exception:
+            pass
+        return dlg.result
 
 
 DRAGON_QUOTES = [
@@ -112137,6 +113870,67 @@ class DragonWhispererGUI:
                 if current_model != model_name:
                     _log_info(f"🔄 Lade Modell '{model_name}' für AudioProcessor...")
                     load_start = time.perf_counter()
+                    # === PATCH C: VRAM warning before whisper load ===
+                    # VRAM-Check vor Whisper-Load
+                    try:
+                        _c_free_gb = None
+                        try:
+                            _c_free_gb = self._get_free_vram_gb()
+                        except Exception:
+                            pass
+                        _c_ollama_active = False
+                        if _c_free_gb is not None and _c_free_gb < 2.0:
+                            try:
+                                import subprocess as _c_sub
+                                _c_ps = _c_sub.run(
+                                    ["ollama", "ps"],
+                                    capture_output=True, text=True, timeout=2,
+                                    check=False,
+                                )
+                                _c_lines = [
+                                    l for l in (_c_ps.stdout or "").splitlines()
+                                    if l.strip()
+                                ]
+                                _c_ollama_active = len(_c_lines) > 1
+                            except Exception:
+                                _c_ollama_active = False
+                        if _c_ollama_active:
+                            logger.warning(
+                                "[C] VRAM niedrig (%.2f GB) + Ollama aktiv -> Dialog",
+                                _c_free_gb,
+                            )
+                            _c_resp = DarkMessageBox.askyesno(
+                                "VRAM-Konflikt",
+                                f"Nur {_c_free_gb:.2f} GB VRAM frei.\n"
+                                f"Ollama belegt aktuell GPU-Speicher.\n\n"
+                                "Ollama entladen, um Whisper (GPU) "
+                                "zu beschleunigen?",
+                                parent=self.root,
+                            )
+                            if _c_resp:
+                                try:
+                                    import subprocess as _c_sub2
+                                    _c_ps2 = _c_sub2.run(
+                                        ["ollama", "ps"],
+                                        capture_output=True, text=True,
+                                        timeout=2, check=False,
+                                    )
+                                    for _c_line in (_c_ps2.stdout or "").splitlines()[1:]:
+                                        _c_parts = _c_line.split()
+                                        if _c_parts:
+                                            _c_sub2.run(
+                                                ["ollama", "stop", _c_parts[0]],
+                                                timeout=5, check=False,
+                                            )
+                                    logger.info("[C] Ollama entladen")
+                                except Exception as _c_stop_exc:
+                                    logger.warning(
+                                        "[C] Ollama-Stop fehlgeschlagen: %s",
+                                        _c_stop_exc,
+                                    )
+                    except Exception as _c_exc:
+                        logger.debug("[C] VRAM-Check Fehler: %s", _c_exc)
+                    # === END PATCH C ===
                     engine.load_model(model_name, set_active=True)
                     step_times["load_model"] = (time.perf_counter() - load_start) * 1000
                     _log_step(
@@ -112378,19 +114172,24 @@ class DragonWhispererGUI:
 
         try:
             _pref_value: bool | None = None
-            _settings_ref = getattr(self, "settings", None)
-            if _settings_ref is not None:
-                _persisted = getattr(
-                    _settings_ref,
-                    "translate_active",
-                    None,
-                )
-                if isinstance(_persisted, bool):
-                    _pref_value = _persisted
+            # FIX: GUI-Praeferenz zuerst (aktuelle User-Absicht), dann Settings.
+            # Vorher war die Reihenfolge umgekehrt — ein veralteter
+            # Config-Wert (translate_active=False) hat den aktuellen
+            # GUI-Zustand (True) ueberschrieben. Ergebnis: AP startete
+            # mit translation_enabled=False, keine Uebersetzung.
+            _gui_pref = getattr(self, "translate_active", None)
+            if isinstance(_gui_pref, bool):
+                _pref_value = _gui_pref
             if _pref_value is None:
-                _gui_pref = getattr(self, "translate_active", None)
-                if isinstance(_gui_pref, bool):
-                    _pref_value = _gui_pref
+                _settings_ref = getattr(self, "settings", None)
+                if _settings_ref is not None:
+                    _persisted = getattr(
+                        _settings_ref,
+                        "translate_active",
+                        None,
+                    )
+                    if isinstance(_persisted, bool):
+                        _pref_value = _persisted
 
             if _pref_value is not None:
                 try:
@@ -113090,6 +114889,98 @@ class DragonWhispererGUI:
                 self.stop_button.config(state=tk.NORMAL)
         self.update_status("🔄 Starte Audio-Verarbeitung...")
 
+        # NEU: Subtitle-Modus VOR dem Start synchronisieren.
+        # Race-Condition-Fix: Ohne diesen Schritt kann es passieren, dass
+        # der AudioProcessor mit subtitle_mode=False startet, obwohl die
+        # GUI True anzeigt. Dann würden die ersten Segmente NICHT in
+        # _timed_transcriptions landen — die SRT-Ausgabe beginnt zu spät.
+        # Der nachgelagerte Resync aus _format_transcript_line bleibt als
+        # Fallback erhalten, sollte der AP später nochmal driften.
+        try:
+            _ap_pre = getattr(self, "audio_processor", None)
+            _gui_sm = bool(getattr(self, "subtitle_mode", False))
+
+            # 1) settings.subtitle_mode angleichen. Der AudioProcessor
+            #    liest seinen Modus beim Stream-Start aus den Settings —
+            #    der GUI-Toggle schreibt aber nur self.subtitle_mode.
+            #    Ohne diesen Write würde der AP beim Reinit auf False
+            #    zurückfallen und die ersten Segmente verlieren.
+            _settings_ref = (
+                getattr(self, "advanced_settings", None)
+                or getattr(self, "settings", None)
+            )
+            if _settings_ref is not None:
+                _prev_setting = getattr(_settings_ref, "subtitle_mode", None)
+                if _prev_setting != _gui_sm:
+                    _settings_ref.subtitle_mode = _gui_sm
+                    logger.info(
+                        "[START-PROC] settings.subtitle_mode angeglichen: "
+                        "%s → %s", _prev_setting, _gui_sm,
+                    )
+
+            # 2) AP angleichen (bestehende Logik).
+            if _ap_pre is not None:
+                _ap_sm = bool(getattr(_ap_pre, "subtitle_mode", False))
+                if _ap_sm != _gui_sm:
+                    _enable_fn = getattr(_ap_pre, "enable_subtitle_mode", None)
+                    if callable(_enable_fn):
+                        _enable_fn(_gui_sm)
+                        logger.info(
+                            "[START-PROC] Subtitle-Mode-Presync: ap=%s → gui=%s",
+                            _ap_sm, _gui_sm,
+                        )
+                    else:
+                        _ap_pre.subtitle_mode = _gui_sm
+                        logger.info(
+                            "[START-PROC] Subtitle-Mode direkt gesetzt (kein "
+                            "enable_subtitle_mode): ap=%s → gui=%s",
+                            _ap_sm, _gui_sm,
+                        )
+                else:
+                    _debug(
+                        f"Subtitle-Mode bereits synchron "
+                        f"(ap=gui={_gui_sm})",
+                    )
+
+            # 3) Translation-Modus angleichen (gleicher Race wie Subtitle).
+            #    Ohne diesen Sync kann die GUI "Übersetzung ON" zeigen,
+            #    während die AP-interne Pipeline keine Übersetzungen
+            #    anfordert — bis ein manueller Toggle sie zwingt.
+            if _ap_pre is not None:
+                _gui_tr = bool(getattr(self, "translate_active", False))
+                _tr_event = getattr(_ap_pre, "_translation_enabled", None)
+                _ap_tr = bool(
+                    _tr_event.is_set()
+                ) if _tr_event is not None and hasattr(_tr_event, "is_set") else False
+                if _ap_tr != _gui_tr:
+                    if _tr_event is not None and hasattr(_tr_event, "set"):
+                        if _gui_tr:
+                            _tr_event.set()
+                        else:
+                            _tr_event.clear()
+                    with contextlib.suppress(Exception):
+                        _ap_pre._user_translation_preference = _gui_tr
+                    logger.info(
+                        "[START-PROC] Translation-Mode-Presync: ap=%s → gui=%s",
+                        _ap_tr, _gui_tr,
+                    )
+                else:
+                    _debug(
+                        f"Translation-Mode bereits synchron "
+                        f"(ap=gui={_gui_tr})",
+                    )
+        except Exception as _sm_exc:
+            logger.warning(
+                "[START-PROC] Subtitle/Translation-Presync fehlgeschlagen: %s",
+                _sm_exc,
+            )
+
+        # PATCH C5: Smart VRAM-Check (Main-Thread, VOR Thread-Start)
+        try:
+            self._c5_check_vram_before_start(model_name)
+        except Exception as _c5_exc:
+            logger.debug("[C5] Check-Exception: %s", _c5_exc, exc_info=True)
+
         def _reset_gui_after_failure():
             """Setzt die GUI nach einem Fehler zurück."""
             try:
@@ -113296,12 +115187,15 @@ class DragonWhispererGUI:
         with self._blacklist_cache_lock:
             regex = self._blacklist_regex_cache.get(cache_key)
             if regex is None:
+                _sorted_bl = sorted(
+                    (p for p in blacklist if p), key=len, reverse=True
+                )
                 if effective_mode == "word":
                     pattern = (
-                        r"\b(" + "|".join(re.escape(p) for p in blacklist if p) + r")\b"
+                        r"\b(" + "|".join(re.escape(p) for p in _sorted_bl) + r")\b"
                     )
                 else:
-                    pattern = "(" + "|".join(re.escape(p) for p in blacklist if p) + ")"
+                    pattern = "(" + "|".join(re.escape(p) for p in _sorted_bl) + ")"
                 try:
                     regex = re.compile(pattern, re.IGNORECASE)
                 except re.error as e:
@@ -113316,10 +115210,46 @@ class DragonWhispererGUI:
                     oldest_key = next(iter(self._blacklist_regex_cache))
                     del self._blacklist_regex_cache[oldest_key]
 
+        # # === PATCH F5: preserve newlines in blacklist filter ===
+        _nl_before = text.count("\n")
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n[ \t]+", "\n", text)
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        if DEBUG_LEVEL >= 4:
+            log_debug(
+                "blacklist",
+                f"Newlines preserved: {_nl_before} → {text.count(chr(10))}",
+            )
+        # === END PATCH F5 ===
+        # NEU: Credit-Prefix-Match — wenn der Text mit einem bekannten
+        # Credit-Marker beginnt, ist der Rest ein Name/Vereinsname und
+        # die GESAMTE Zeile ist ein Credit.
+        _CREDIT_PREFIXES = (
+            "字幕志愿者", "翻译志愿者", "校对志愿者", "时间轴志愿者",
+            "字幕组", "字幕by", "字幕 by",
+            "Субтитры создавал", "Субтитры сделал", "Субтитры сделала",
+            "Untertitel von", "Untertitelung von",
+            "Subtitle Volunteer", "Subtitles by", "Subtitle by",
+            "Transcription by",
+            "请不吝点赞", "打赏支持", "Mingjing",
+        )
+        _text_stripped = text.strip()
+        if any(_text_stripped.startswith(_p) for _p in _CREDIT_PREFIXES):
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "blacklist",
+                    f"Credit-Prefix verworfen: '{_text_stripped[:60]}'",
+                )
+            return None
+
         cleaned = regex.sub("", text)
-        cleaned = re.sub(r"\s+", " ", cleaned)
-        cleaned = re.sub(r"\s([.,!?;:])", r"\1", cleaned)
+        # # === PATCH F9a: second newline-collapse fix ===
+        cleaned = re.sub(r"[ \t]+", " ", cleaned)
+        cleaned = re.sub(r"[ \t]+([.,!?;:])", r"\1", cleaned)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
         cleaned = cleaned.strip()
+        # === END PATCH F9a ===
 
         if cleaned and re.fullmatch(r"[\s.,;:!?\-–—()\[\]{}0-9]+", cleaned):
             if DEBUG_LEVEL >= 3:
@@ -116235,9 +118165,22 @@ class DragonWhispererGUI:
         retries: int = 0,
     ) -> None:
         """Überprüft asynchron, ob das Modell geladen ist.
-        retries: Zähler für die Anzahl der Versuche (max. 30 = 6 Sekunden).
+        retries: Zähler fuer die Anzahl der Versuche.
+
+        PATCH LT1: Timeout ist modellabhaengig. 200 ms pro Retry:
+        large-v3/distil-large: 30 s, large/medium: 20 s,
+        small: 15 s, base/tiny: 10 s.
         """
-        MAX_RETRIES = 30
+        # PATCH LT1: modellabhaengiger Timeout
+        _m_lower = (target_model or "").lower()
+        if "large-v3" in _m_lower or "distil-large" in _m_lower:
+            MAX_RETRIES = 150  # 30 s
+        elif "large" in _m_lower or "medium" in _m_lower:
+            MAX_RETRIES = 100  # 20 s
+        elif "small" in _m_lower:
+            MAX_RETRIES = 75   # 15 s
+        else:
+            MAX_RETRIES = 50   # 10 s
 
         if self.is_shutting_down():
             return
@@ -116259,7 +118202,8 @@ class DragonWhispererGUI:
                 f"❌ Modellwechsel zu {target_model} fehlgeschlagen (Timeout)",
             )
             logger.error(
-                f"Modell-Laden für {target_model} überschritt {MAX_RETRIES * 0.2}s",
+                f"Modell-Laden für {target_model} überschritt "
+                f"{MAX_RETRIES * 0.2:.0f}s (LT1-Timeout)",
             )
 
             current = engine.get_current_model()
@@ -116269,6 +118213,15 @@ class DragonWhispererGUI:
             return
 
         if engine.is_model_loading():
+            # PATCH LT1: Progress-Update alle 5 s (25 Retries * 0.2 s)
+            if retries > 0 and retries % 25 == 0:
+                _elapsed = retries * 0.2
+                try:
+                    self.update_status(
+                        f"⏳ Lade {target_model} … ({_elapsed:.0f}s)"
+                    )
+                except Exception:
+                    pass
             self.root.after(
                 200,
                 lambda: self._check_model_loading_complete(target_model, retries + 1),
@@ -117141,11 +119094,109 @@ class DragonWhispererGUI:
             self.memory_manager.clear_component("translation")
         self._last_transcription_text = ""
         self._last_translation_text = ""
+        # NEU: AudioProcessor-interne Subtitle-Pipeline zuruecksetzen.
+        # Sonst kann nach dem Loeschen eine neue Transkription im
+        # Subtitle-Modus nicht sauber fuellen (SRT-Export findet keine
+        # Daten, obwohl die GUI die Transkription angezeigt hat).
+        _ap = getattr(self, "audio_processor", None)
+        if _ap is not None and hasattr(_ap, "reset_subtitle_state"):
+            try:
+                _ap.reset_subtitle_state()
+            except Exception as _e:
+                logger.warning("🗑️ AudioProcessor-Reset fehlgeschlagen: %s", _e)
         self.update_status("🗑️ Cleared & optimizations reset")
+
+    def _prepare_subtitle_data(
+        self, segments: list[Any], mode: str = "individual",
+    ) -> list[Any]:
+        """Filtert Segment-Listen für den Export.
+
+        mode='individual':  Nur granulare Einzelsegmente (für SRT/VTT)
+        mode='aggregated':  Aggregate + freistehende Segmente (für TXT)
+        """
+        if not segments:
+            return []
+        try:
+            sorted_segs = sorted(
+                segments,
+                key=lambda s: (
+                    getattr(s, "start", 0.0) or 0.0,
+                    -(getattr(s, "end", 0.0) or 0.0),
+                ),
+            )
+        except Exception:
+            return segments
+
+        containers: set[int] = set()
+        contained: set[int] = set()
+        for i, seg_a in enumerate(sorted_segs):
+            a_start = getattr(seg_a, "start", None)
+            a_end = getattr(seg_a, "end", None)
+            a_text = getattr(seg_a, "text", "") or ""
+            if a_start is None or a_end is None:
+                continue
+            count = 0
+            for j, seg_b in enumerate(sorted_segs):
+                if i == j:
+                    continue
+                b_start = getattr(seg_b, "start", None)
+                b_end = getattr(seg_b, "end", None)
+                b_text = getattr(seg_b, "text", "") or ""
+                if b_start is None or b_end is None:
+                    continue
+                if (
+                    a_start <= b_start
+                    and a_end >= b_end
+                    and len(a_text) > len(b_text) + 5
+                ):
+                    count += 1
+                    contained.add(id(seg_b))
+            if count >= 2:
+                containers.add(id(seg_a))
+
+        if mode == "individual":
+            return [s for s in sorted_segs if id(s) not in containers]
+        if mode == "aggregated":
+            return [
+                s for s in sorted_segs
+                if id(s) in containers or id(s) not in contained
+            ]
+        return sorted_segs
+
+    def _save_as_text(self, filename: str, segments: list[Any]) -> bool:
+        """Schreibt eine TXT-Datei aus Segmenten (nicht GUI-Widgets)."""
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                if self.current_stream_info:
+                    f.write("=== STREAM INFORMATION ===\n")
+                    f.write(f"Title: {self.current_stream_info.title}\n")
+                    f.write(f"Uploader: {self.current_stream_info.uploader}\n")
+                    f.write(f"Duration: {self.current_stream_info.duration}\n")
+                    f.write(f"Platform: {self.current_stream_info.platform}\n")
+                    f.write(
+                        f"Saved at: {
+                            datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')
+                        }\n\n",
+                    )
+                f.write("=== TRANSCRIPT ===\n")
+                for seg in segments:
+                    start = getattr(seg, "start", None)
+                    end = getattr(seg, "end", None)
+                    text = getattr(seg, "text", "") or ""
+                    if start is not None and end is not None:
+                        s = self.export_manager._format_timestamp_srt(start)
+                        e = self.export_manager._format_timestamp_srt(end)
+                        f.write(f"[{s} → {e}] {text}\n")
+                    else:
+                        f.write(f"{text}\n")
+            return True
+        except Exception:
+            return False
+
 
     @gui_operation_decorator
     def save_transcript(self) -> None:
-        """Speichert Transkription (und optional Übersetzung) in gewähltem Format."""
+        """Speichert Transkription/Übersetzung mit vorheriger Auswahl."""
         import logging
 
         _log = logging.getLogger("dragon")
@@ -117167,37 +119218,57 @@ class DragonWhispererGUI:
                     _timed_t = list(getattr(_ap, "_timed_transcriptions", []) or [])
                     _timed_tr = list(getattr(_ap, "_timed_translations", []) or [])
 
-        _log.info(
-            "[SAVE] save_transcript aufgerufen | "
-            "history_t=%d history_tr=%d timed_t=%d timed_tr=%d "
-            "subtitle_mode=%s",
-            len(_hist_t),
-            len(_hist_tr),
-            len(_timed_t),
-            len(_timed_tr),
-            getattr(self, "subtitle_mode", "?"),
-        )
-
         _src_t: list[Any] = _hist_t
         _src_tr: list[Any] = _hist_tr
         _src_origin = "history"
         if not _src_t and _timed_t:
             _src_t = _timed_t
             _src_origin = "timed"
-            _log.info(
-                "[SAVE] transcript_history leer – "
-                "Fallback auf _timed_transcriptions (%d Einträge)",
-                len(_timed_t),
-            )
         if not _src_tr and _timed_tr:
             _src_tr = _timed_tr
+        if not _src_t and _ap is not None:
+            _snap_t = list(getattr(_ap, "_last_session_transcriptions", []) or [])
+            _snap_tr = list(getattr(_ap, "_last_session_translations", []) or [])
+            if _snap_t:
+                _src_t = _snap_t
+                _src_tr = _snap_tr
+                _src_origin = "session_snapshot"
+
+        _log.info(
+            "[SAVE] save_transcript | history_t=%d history_tr=%d "
+            "timed_t=%d timed_tr=%d src_t=%d src_tr=%d quelle=%s",
+            len(_hist_t), len(_hist_tr), len(_timed_t), len(_timed_tr),
+            len(_src_t), len(_src_tr), _src_origin,
+        )
+
+        # PATCH SAVE-FIX: Widget-Text als Fallback nutzen,
+        # wenn History und _timed_* leer sind, aber der User
+        # Transkription im GUI sieht.
+        if not _src_t:
+            _w_txt = self._get_text_widget_content("transcript_text")
+            _w_tr = self._get_text_widget_content("translation_text")
+            if _w_txt and _w_txt.strip():
+                from types import SimpleNamespace as _SNS
+                _src_t = [
+                    _SNS(text=ln.strip(), translated=None, start=None,
+                         end=None, source_lang="", target_lang="")
+                    for ln in _w_txt.splitlines() if ln.strip()
+                ]
+                if _w_tr and _w_tr.strip():
+                    _src_tr = [
+                        _SNS(text=ln.strip(), translated=None,
+                             start=None, end=None,
+                             source_lang="", target_lang="")
+                        for ln in _w_tr.splitlines() if ln.strip()
+                    ]
+                _src_origin = "widget_fallback"
+                _log.info(
+                    "[SAVE-FIX] Widget-Fallback: %d Zeilen "
+                    "(transcript), %d (translation)",
+                    len(_src_t), len(_src_tr),
+                )
 
         if not _src_t:
-            _log.warning(
-                "[SAVE] Keine Transkription verfügbar "
-                "(history=0, timed=%d) – zeige Warnung",
-                len(_timed_t),
-            )
             DarkMessageBox.showinfo(
                 "WARNING",
                 "No transcriptions available to save.",
@@ -117205,82 +119276,129 @@ class DragonWhispererGUI:
             )
             return
 
+        has_original = len(_src_t) > 0
+        has_translation = len(_src_tr) > 0
+        opts = SaveOptionsDialog.show(
+            parent=self.root,
+            title="Transkription speichern",
+            mode=SaveOptionsDialog.MODE_TRANSCRIPT,
+            has_original=has_original,
+            has_translation=has_translation,
+        )
+        if not opts:
+            _log.info("[SAVE] Dialog abgebrochen")
+            return
+
+        content = opts.get("content", "original")
+        fmt = opts.get("format", "txt")
+
         base_name = self._get_safe_filename()
-        suggested = f"{base_name}_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.txt"
-        _log.info(
-            "[SAVE] Datei-Dialog öffnet (suggested=%s, quelle=%s)",
-            suggested,
-            _src_origin,
+        suggested = (
+            f"{base_name}_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.{fmt}"
         )
-
+        filter_map = {
+            "txt": [("Text files", "*.txt")],
+            "json": [("JSON files", "*.json")],
+            "docx": [("Word document", "*.docx")],
+        }
         filename = filedialog.asksaveasfilename(
-            defaultextension=".txt",
+            defaultextension=f".{fmt}",
             initialfile=suggested,
-            filetypes=[
-                ("Text files", "*.txt"),
-                ("SRT subtitles", "*.srt"),
-                ("WebVTT", "*.vtt"),
-                ("JSON", "*.json"),
-                ("Word document", "*.docx"),
-            ],
+            filetypes=filter_map.get(fmt, [("Alle Dateien", "*.*")]),
         )
-
         if not filename:
             _log.info("[SAVE] Datei-Dialog abgebrochen")
             return
 
-        ext = Path(filename).suffix.lower()
-        _log.info(
-            "[SAVE] Datei gewählt: %s | ext=%s, trans=%d, transl=%d",
-            filename,
-            ext or "(keine)",
-            len(_src_t),
-            len(_src_tr),
-        )
+        # Inhalte aufbereiten
+        _t_use = self._prepare_subtitle_data(_src_t, mode="aggregated")
+        _tr_use = self._prepare_subtitle_data(_src_tr, mode="aggregated")
+
+        # Bei "translation" nur: Original-Text durch Übersetzung ersetzen
+        if content == "translation":
+            _t_use = [
+                type(s)(
+                    text=getattr(s, "text", ""),
+                    translated=None,
+                    start=getattr(s, "start", None),
+                    end=getattr(s, "end", None),
+                    source_lang=getattr(s, "source_lang", ""),
+                    target_lang=getattr(s, "target_lang", ""),
+                ) if False else s
+                for s in _t_use
+            ]
+            # Einfacher: schreibe Übersetzung in eigenem Pfad
+            _write_transl_only = True
+        else:
+            _write_transl_only = False
 
         success = False
         try:
-            if ext == ".srt":
-                success = self.export_manager.export_subtitles(
-                    _src_t,
-                    _src_tr or None,
-                    "srt",
-                    filename,
-                )
-            elif ext == ".vtt":
-                success = self.export_manager.export_subtitles(
-                    _src_t,
-                    _src_tr or None,
-                    "vtt",
-                    filename,
-                )
-            elif ext == ".json":
-                success = self.export_manager.export_json(
-                    _src_t,
-                    _src_tr,
-                    filename,
-                )
-            elif ext == ".docx":
-                success = self.export_manager.export_docx(
-                    _src_t,
-                    filename,
-                )
-            else:
-                success = self._save_as_text(filename)
+            if fmt == "json":
+                if _write_transl_only:
+                    data = self.export_manager._build_json_data(
+                        [], _tr_use,
+                    )
+                elif content == "both":
+                    data = self.export_manager._build_json_data(
+                        _t_use, _tr_use,
+                    )
+                else:
+                    data = self.export_manager._build_json_data(_t_use, None)
+                with open(filename, "w", encoding="utf-8") as f:
+                    import json as _json
+                    _json.dump(data, f, ensure_ascii=False, indent=2)
+                success = True
+            elif fmt == "docx":
+                if _write_transl_only:
+                    success = self.export_manager.export_docx(_tr_use, filename)
+                else:
+                    success = self.export_manager.export_docx(_t_use, filename)
+            else:  # txt
+                if _write_transl_only:
+                    with open(filename, "w", encoding="utf-8") as f:
+                        f.write("=== TRANSLATION ===\n")
+                        for seg in _tr_use:
+                            start = getattr(seg, "start", None)
+                            end = getattr(seg, "end", None)
+                            text = getattr(seg, "translated", "") or getattr(seg, "text", "")
+                            if start is not None and end is not None:
+                                s = self.export_manager._format_timestamp_srt(start)
+                                e = self.export_manager._format_timestamp_srt(end)
+                                f.write(f"[{s} → {e}] [Deu] {text}\n")
+                            else:
+                                f.write(f"[Deu] {text}\n")
+                    success = True
+                elif content == "both":
+                    with open(filename, "w", encoding="utf-8") as f:
+                        if self.current_stream_info:
+                            f.write("=== STREAM INFORMATION ===\n")
+                            f.write(f"Title: {self.current_stream_info.title}\n")
+                            f.write(f"Uploader: {self.current_stream_info.uploader}\n")
+                            f.write(f"Duration: {self.current_stream_info.duration}\n\n")
+                        f.write("=== TRANSCRIPT + TRANSLATION ===\n")
+                        for i, seg in enumerate(_t_use):
+                            start = getattr(seg, "start", None)
+                            end = getattr(seg, "end", None)
+                            text = getattr(seg, "text", "") or ""
+                            if start is not None and end is not None:
+                                s = self.export_manager._format_timestamp_srt(start)
+                                e = self.export_manager._format_timestamp_srt(end)
+                                f.write(f"[{s} → {e}] {text}\n")
+                            else:
+                                f.write(f"{text}\n")
+                            if i < len(_tr_use):
+                                tr_text = getattr(_tr_use[i], "translated", "") or ""
+                                if tr_text:
+                                    f.write(f"           [Deu] {tr_text}\n")
+                            f.write("\n")
+                    success = True
+                else:  # nur Original
+                    # PATCH SAVE-CLEANUP: direkter Aufruf (nur 1 Signatur)
+                    success = self._save_as_text(filename, _t_use)
         except Exception as _exc:
-            _log.exception(
-                "[SAVE] Export-Exception (%s): %s",
-                type(_exc).__name__,
-                _exc,
-            )
+            _log.exception("[SAVE] Export-Exception: %s", _exc)
             success = False
-
-        _log.info(
-            "[SAVE] Ergebnis: success=%s, file=%s, bytes_written=%s",
-            success,
-            os.path.basename(filename),
-            Path(filename).stat().st_size if Path(filename).exists() else "–",
-        )
 
         if success:
             self.update_status(f"💾 Saved: {os.path.basename(filename)}")
@@ -117289,37 +119407,20 @@ class DragonWhispererGUI:
             with contextlib.suppress(Exception):
                 DarkMessageBox.showinfo(
                     "ERROR",
-                    f"Export failed for {os.path.basename(filename)}.\n"
-                    "See log for details.",
+                    f"Export failed for {os.path.basename(filename)}.",
                     self.root,
                 )
-
         with contextlib.suppress(Exception):
             log_ai(
                 "SAVE-TRANSCRIPT",
                 source=_src_origin,
-                fmt=ext or "txt",
-                trans=len(_src_t),
-                transl=len(_src_tr),
+                fmt=fmt,
+                content=content,
+                trans=len(_t_use),
+                transl=len(_tr_use),
                 ok=int(success),
             )
 
-        if _dbg >= 2:
-            _log.debug(
-                "[SAVE] Detail: history_t=%d history_tr=%d "
-                "timed_t=%d timed_tr=%d src_t=%d src_tr=%d "
-                "ap_id=%s lock=%s",
-                len(_hist_t),
-                len(_hist_tr),
-                len(_timed_t),
-                len(_timed_tr),
-                len(_src_t),
-                len(_src_tr),
-                id(_ap) if _ap is not None else "None",
-                type(getattr(_ap, "_subtitle_lock", None)).__name__
-                if _ap is not None
-                else "–",
-            )
 
     def _get_safe_filename(self) -> str:
         if self.current_stream_info and self.current_stream_info.title:
@@ -117330,7 +119431,8 @@ class DragonWhispererGUI:
             )
         return "transcript"
 
-    def _save_as_text(self, filename: str) -> bool:
+    # PATCH SAVE-CLEANUP: ALT umbenannt (Widget-Fallback)
+    def _save_as_text_from_widgets(self, filename: str) -> bool:
         try:
             with open(filename, "w", encoding="utf-8") as f:
                 if self.current_stream_info:
@@ -117352,46 +119454,523 @@ class DragonWhispererGUI:
         except Exception:
             return False
 
-    def export_subtitles(self) -> None:
-        if (
-            not hasattr(self, "audio_processor")
-            or not self.audio_processor._timed_transcriptions
+    def _write_subtitle_file(
+        self,
+        filename: str,
+        transcript_segments: list,
+        translation_segments: list,
+        fmt: str,
+        content_mode: str,
+        *,
+        max_chars_per_line: int = 42,
+        min_duration_ms: int = 500,
+        max_duration_ms: int = 10000,
+        gap_ms: int = 40,
+        trim_overlaps: bool = True,
+        enforce_min_duration: bool = True,
+        wrap_lines: bool = True,
+        atomic_write: bool = True,
+        encoding: str = "utf-8-sig",
+    ) -> bool:
+        """Schreibt eine Untertiteldatei (srt/vtt/ass) mit optimierter Ausgabe.
+
+        content_mode:
+            "original"    → nur Transkription
+            "translation" → nur Übersetzung (bevorzugt deren Timestamps)
+            "both"        → beide (Original + Übersetzung)
+        """
+        import logging as _lg
+        import os as _os
+        import tempfile as _tempfile
+        _log = _lg.getLogger("dragon")
+
+        if fmt not in ("srt", "vtt", "ass"):
+            _log.error("[SUBTITLE] Unbekanntes Format: %s", fmt)
+            return False
+        if content_mode not in ("original", "translation", "both"):
+            _log.error("[SUBTITLE] Unbekannter content_mode: %s", content_mode)
+            return False
+
+        # ── Hilfsfunktionen ────────────────────────────────────────────
+        def _seg_sec(seg, attr):
+            if seg is None:
+                return None
+            v = getattr(seg, attr, None)
+            try:
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        def _seg_text(seg, attr):
+            if seg is None:
+                return ""
+            v = getattr(seg, attr, "") or ""
+            return str(v).strip()
+
+        # ── 1. Kandidaten sammeln ──────────────────────────────────────
+        n = max(len(transcript_segments or []), len(translation_segments or []))
+        candidates: list[dict] = []
+        for i in range(n):
+            t = transcript_segments[i] if i < len(transcript_segments or []) else None
+            tr = translation_segments[i] if i < len(translation_segments or []) else None
+
+            # Timestamps: bei "translation" bevorzugt Übersetzung
+            if content_mode == "translation":
+                start = _seg_sec(tr, "start")
+                end = _seg_sec(tr, "end")
+                if start is None:
+                    start = _seg_sec(t, "start")
+                    end = _seg_sec(t, "end") if end is None else end
+            else:
+                start = _seg_sec(t, "start")
+                end = _seg_sec(t, "end")
+                if start is None:
+                    start = _seg_sec(tr, "start")
+                    end = _seg_sec(tr, "end") if end is None else end
+
+            if start is None:
+                continue
+            if end is None or end <= start:
+                end = start + 0.5
+
+            orig_text = _seg_text(t, "text") if t is not None else ""
+            tr_text = _seg_text(tr, "translated") if tr is not None else ""
+            if not tr_text and tr is not None:
+                tr_text = _seg_text(tr, "text")
+
+            parts: list[str] = []
+            if content_mode in ("original", "both") and orig_text:
+                parts.append(orig_text)
+            if content_mode in ("translation", "both") and tr_text:
+                parts.append(tr_text)
+            if not parts:
+                continue
+
+            candidates.append({
+                "start": max(0.0, start),
+                "end": max(0.0, end),
+                "text_parts": parts,
+            })
+
+        if not candidates:
+            _log.warning("[SUBTITLE] Keine nicht-leeren Segmente zum Schreiben")
+            return False
+
+        # ── 2. Sortieren ───────────────────────────────────────────────
+        candidates.sort(key=lambda c: (c["start"], c["end"]))
+
+        # ── 3. Überlappungen entzerren ─────────────────────────────────
+        if trim_overlaps:
+            gap_s = max(0.001, gap_ms / 1000.0)
+            for i in range(len(candidates) - 1):
+                a = candidates[i]
+                b = candidates[i + 1]
+                if a["end"] > b["start"] - gap_s:
+                    new_end = max(a["start"] + 0.05, b["start"] - gap_s)
+                    if new_end < a["end"]:
+                        a["end"] = new_end
+
+        # ── 4. Mindest-/Maximaldauer ───────────────────────────────────
+        min_s = max(0.0, min_duration_ms / 1000.0)
+        max_s = max(0.0, max_duration_ms / 1000.0)
+        for i, c in enumerate(candidates):
+            if enforce_min_duration and (c["end"] - c["start"]) < min_s:
+                target = c["start"] + min_s
+                if i + 1 < len(candidates):
+                    target = min(target, candidates[i + 1]["start"] - 0.001)
+                if target > c["end"]:
+                    c["end"] = target
+            if max_s > 0 and (c["end"] - c["start"]) > max_s:
+                c["end"] = c["start"] + max_s
+
+        # ── 5. Text-Wrapping ───────────────────────────────────────────
+        def _wrap(text: str) -> str:
+            if not wrap_lines or max_chars_per_line <= 0 or not text:
+                return text
+            import textwrap as _tw
+            out: list[str] = []
+            for raw in text.split("\n"):
+                if len(raw) <= max_chars_per_line:
+                    out.append(raw)
+                else:
+                    wrapped = _tw.wrap(
+                        raw, width=max_chars_per_line,
+                        break_long_words=True, break_on_hyphens=False,
+                    )
+                    out.extend(wrapped or [raw])
+            return "\n".join(out)
+
+        for c in candidates:
+            c["text_final"] = "\n".join(_wrap(p) for p in c["text_parts"])
+
+        # ── 6. Zeitstempel-Formatter ───────────────────────────────────
+        def _carry(h, m, s, ms):
+            if ms >= 1000:
+                ms = 999
+            return h, m, s, ms
+
+        def _fmt_srt(sec: float) -> str:
+            if sec < 0:
+                sec = 0.0
+            h = int(sec // 3600)
+            m = int((sec % 3600) // 60)
+            s = int(sec % 60)
+            ms = int(round((sec - int(sec)) * 1000))
+            h, m, s, ms = _carry(h, m, s, ms)
+            return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+        def _fmt_vtt(sec: float) -> str:
+            return _fmt_srt(sec).replace(",", ".")
+
+        def _fmt_ass(sec: float) -> str:
+            if sec < 0:
+                sec = 0.0
+            h = int(sec // 3600)
+            m = int((sec % 3600) // 60)
+            s = int(sec % 60)
+            cs = int(round((sec - int(sec)) * 100))
+            if cs >= 100:
+                cs = 99
+            return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
+
+        # ── 7. Body erzeugen ───────────────────────────────────────────
+        if fmt == "srt":
+            body = "\n".join(
+                f"{i}\n{_fmt_srt(c['start'])} --> {_fmt_srt(c['end'])}\n"
+                f"{c['text_final']}\n"
+                for i, c in enumerate(candidates, start=1)
+            )
+        elif fmt == "vtt":
+            body = "WEBVTT\n\n" + "\n".join(
+                f"{_fmt_vtt(c['start'])} --> {_fmt_vtt(c['end'])}\n"
+                f"{c['text_final']}\n"
+                for c in candidates
+            )
+        else:  # ass
+            header = (
+                "[Script Info]\n"
+                "ScriptType: v4.00+\n"
+                "PlayResX: 1920\n"
+                "PlayResY: 1080\n"
+                "WrapStyle: 0\n"
+                "ScaledBorderAndShadow: yes\n"
+                "YCbCr Matrix: TV.709\n"
+                "\n"
+                "[V4+ Styles]\n"
+                "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+                "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+                "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+                "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+                "Style: Default,Arial,54,&H00FFFFFF,&H000000FF,&H00000000,"
+                "&H80000000,-1,0,0,0,100,100,0,0,1,2,1,2,40,40,40,1\n"
+                "\n"
+                "[Events]\n"
+                "Format: Layer, Start, End, Style, Name, MarginL, MarginR, "
+                "MarginV, Effect, Text\n"
+            )
+            lines: list[str] = []
+            for c in candidates:
+                txt = c["text_final"].replace("{", "\\{").replace("}", "\\}")
+                txt = txt.replace("\n", "\\N")
+                lines.append(
+                    f"Dialogue: 0,{_fmt_ass(c['start'])},{_fmt_ass(c['end'])},"
+                    f"Default,,0,0,0,,{txt}"
+                )
+            body = header + "\n".join(lines) + "\n"
+
+        if atomic_write:
+            d = _os.path.dirname(_os.path.abspath(filename)) or "."
+            fd = None
+            tmp = None
+            try:
+                fd, tmp = _tempfile.mkstemp(
+                    prefix=_os.path.basename(filename) + ".",
+                    suffix=".tmp", dir=d,
+                )
+                with _os.fdopen(fd, "w", encoding=encoding, newline="\n") as f:
+                    f.write(body)
+                _os.replace(tmp, filename)
+                fd = None
+                tmp = None
+            except Exception as exc:
+                _log.exception("[SUBTITLE] Atomares Schreiben fehlgeschlagen: %s", exc)
+                if tmp:
+                    with contextlib.suppress(Exception):
+                        _os.unlink(tmp)
+                try:
+                    with open(filename, "w", encoding=encoding, newline="\n") as f:
+                        f.write(body)
+                except Exception as exc2:
+                    _log.exception("[SUBTITLE] Direktes Schreiben fehlgeschlagen: %s", exc2)
+                    return False
+        else:
+            try:
+                with open(filename, "w", encoding=encoding, newline="\n") as f:
+                    f.write(body)
+            except Exception as exc:
+                _log.exception("[SUBTITLE] Schreiben fehlgeschlagen: %s", exc)
+                return False
+
+        _log.info(
+            "[SUBTITLE] ✅ %s geschrieben: %s | %d Einträge, content=%s, "
+            "bytes=%d, encoding=%s",
+            fmt.upper(), _os.path.basename(filename),
+            len(candidates), content_mode, len(body.encode(encoding)), encoding,
+        )
+        return True
+
+
+    _EXPORT_LANG_NAME_TO_ISO = {
+        "deutsch": "de", "german": "de",
+        "englisch": "en", "english": "en",
+        "französisch": "fr", "french": "fr",
+        "spanisch": "es", "spanish": "es",
+        "italienisch": "it", "italian": "it",
+        "portugiesisch": "pt", "portuguese": "pt",
+        "niederländisch": "nl", "dutch": "nl",
+        "polnisch": "pl", "polish": "pl",
+        "russisch": "ru", "russian": "ru",
+        "japanisch": "ja", "japanese": "ja",
+        "koreanisch": "ko", "korean": "ko",
+        "chinesisch": "zh", "chinese": "zh",
+        "türkisch": "tr", "turkish": "tr",
+        "arabisch": "ar", "arabic": "ar",
+        "hindi": "hi",
+        "schwedisch": "sv", "swedish": "sv",
+        "dänisch": "da", "danish": "da",
+        "norwegisch": "no", "norwegian": "no",
+        "finnisch": "fi", "finnish": "fi",
+    }
+
+    def _resolve_export_lang_code(self) -> str:
+        """ISO-Code der Zielsprache fuer Dateinamen."""
+        _raw = None
+        for _ref in (
+            getattr(self, "advanced_settings", None),
+            getattr(self, "settings", None),
         ):
+            if _ref is None:
+                continue
+            _val = getattr(_ref, "target_language", None)
+            if _val:
+                _raw = str(_val).strip()
+                break
+        if not _raw:
+            return "de"
+        if 2 <= len(_raw) <= 3 and _raw.isalpha():
+            return _raw.lower()
+        return self._EXPORT_LANG_NAME_TO_ISO.get(_raw.lower(), "de")
+
+    @gui_operation_decorator
+    def export_subtitles(self) -> None:
+        """Exportiert Untertitel mit vorheriger Auswahl (Inhalt + Format)."""
+        import logging as _lg
+        _log = _lg.getLogger("dragon")
+
+        _ap = getattr(self, "audio_processor", None)
+        if _ap is None:
             DarkMessageBox.showinfo(
                 "WARNING",
-                "No subtitle data available.\nActivate '🎬 Subtitle mode' first.",
+                "Kein AudioProcessor aktiv.",
                 self.root,
             )
             return
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".srt",
-            filetypes=[("SRT subtitles", "*.srt"), ("VTT subtitles", "*.vtt")],
-        )
-        if not filename:
-            return
-        ext = Path(filename).suffix.lower()
-        fmt = "srt" if ext == ".srt" else "vtt"
-        with self.audio_processor._subtitle_lock:
-            timed_trans = list(self.audio_processor._timed_transcriptions)
-            timed_transl = list(self.audio_processor._timed_translations)
-        if self.export_manager.export_subtitles(
-            timed_trans,
-            timed_transl,
-            format=fmt,
-            filename=filename,
-        ):
-            self.update_status(
-                f"📝 {fmt.upper()} exported: {os.path.basename(filename)}",
+
+        with contextlib.suppress(Exception):
+            with _ap._subtitle_lock:
+                _timed_t = list(_ap._timed_transcriptions)
+                _timed_tr = list(_ap._timed_translations)
+
+        # Fallback PRO Liste — nicht nur wenn beide leer sind.
+        # Sonst kann has_original faelschlich False werden, obwohl der
+        # Snapshot Transkriptionen enthaelt (z. B. wenn timed_t leer ist,
+        # timed_tr aber 2 Eintraege hat).
+        if not _timed_t:
+            _timed_t = list(getattr(_ap, "_last_session_transcriptions", []) or [])
+        if not _timed_tr:
+            _timed_tr = list(getattr(_ap, "_last_session_translations", []) or [])
+
+        if not _timed_t and not _timed_tr:
+            _sm = getattr(_ap, "subtitle_mode", None)
+            _hint = (
+                "Der Subtitle-Modus war beim Start der Transkription NICHT aktiv.\n\n"
+                "Aktiviere '🎬 Subtitle mode' VOR dem Start der Transkription.\n"
+                "Nach einem 🗑️-Clear reicht es, den Modus einzuschalten und neu "
+                "zu transkribieren — ein DW-Neustart ist nicht noetig."
+            ) if _sm is False else (
+                "Es wurden keine Untertitel-Segmente aufgezeichnet.\n\n"
+                "Moegliche Ursachen:\n"
+                "• Subtitle-Modus war waehrend der Transkription nicht aktiv.\n"
+                "• Nach einem 🗑️-Clear muss der Subtitle-Modus neu aktiviert "
+                "werden, bevor die Transkription startet."
             )
             DarkMessageBox.showinfo(
-                "Success",
-                f"Subtitles exported!\nSegments: {len(timed_trans)}\nTranslations: {
-                    len(timed_transl)
-                }",
+                "Keine Untertitel-Daten",
+                "No subtitle data available.\n\n" + _hint,
                 self.root,
             )
+            return
+
+        has_original = len(_timed_t) > 0
+        # Praeziser: Uebersetzung zaehlt nur, wenn mindestens ein
+        # Segment einen NICHT-leeren "translated"-Text hat.
+        has_translation = any(
+            (getattr(t, "translated", "") or "").strip()
+            for t in _timed_tr
+        )
+        _log.info(
+            "[SUBTITLE] Export-Kandidaten: timed_t=%d (ok=%s), "
+            "timed_tr=%d (ok=%s)",
+            len(_timed_t), has_original, len(_timed_tr), has_translation,
+        )
+
+        # Dialog IMMER zeigen (Auto-Skip war zu aggressiv).
+        # Nicht verfuegbare Optionen werden im Dialog ausgegraut.
+        opts = SaveOptionsDialog.show(
+            parent=self.root,
+            title="Untertitel exportieren",
+            mode=SaveOptionsDialog.MODE_SUBTITLE,
+            has_original=has_original,
+            has_translation=has_translation,
+        )
+        if not opts:
+            _log.info("[SUBTITLE] Dialog abgebrochen")
+            return
+
+        content = opts.get("content", "original")
+        fmt = opts.get("format", "srt")
+        _log.info("[SUBTITLE] Auswahl: content=%s, fmt=%s", content, fmt)
+
+        def _filter_export_segs(_segs, _lang_hint):
+            try:
+                return _filter_export_segs_inner(_segs, _lang_hint)
+            except Exception as _e:
+                try:
+                    logger.warning(
+                        "[SUBTITLE] Filter-Fehler, Export ohne Filter: %s", _e,
+                    )
+                except Exception:
+                    pass
+                return _segs
+
+        def _filter_export_segs_inner(_segs, _lang_hint):
+            if not _segs:
+                return _segs
+            _ff = getattr(self, "_filter_blacklist_text", None)
+            _out = []
+            _dropped = 0
+            for _s in _segs:
+                _t = getattr(_s, "text", "") or ""
+                if not _t.strip():
+                    _out.append(_s)
+                    continue
+                _norm = (
+                    _t.lower()
+                    .replace("\u2019", "'").replace("\u2018", "'")
+                    .rstrip(".!?,;:…").strip()
+                )
+                if _norm in _WHISPER_HALLUCINATION_PHRASES:
+                    _dropped += 1
+                    continue
+                if callable(_ff):
+                    try:
+                        _r = _ff(_t, _lang_hint)
+                    except Exception:
+                        _out.append(_s)
+                        continue
+                    if _r is None or not str(_r).strip():
+                        _dropped += 1
+                        continue
+                _out.append(_s)
+            if _dropped:
+                try:
+                    logger.info(
+                        "[SUBTITLE] %d Segmente durch Blacklist/Hallu "
+                        "gefiltert (lang=%s)",
+                        _dropped, _lang_hint,
+                    )
+                except Exception:
+                    pass
+            return _out
+
+        t_use = self._prepare_subtitle_data(
+            _filter_export_segs(_timed_t, "zh"), mode="individual",
+        )
+        tr_use = self._prepare_subtitle_data(
+            _filter_export_segs(_timed_tr, "de"), mode="individual",
+        )
+
+        base_name = self._get_safe_filename()
+        suggested = (
+            f"{base_name}_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.{fmt}"
+        )
+        filter_map = {
+            "srt": [("SRT subtitles", "*.srt")],
+            "vtt": [("WebVTT subtitles", "*.vtt")],
+            "ass": [("ASS subtitles", "*.ass")],
+        }
+
+        if content == "both" and has_original and has_translation:
+            base = filedialog.asksaveasfilename(
+                defaultextension=f".{fmt}",
+                initialfile=suggested,
+                filetypes=filter_map.get(fmt, [("Alle Dateien", "*.*")]),
+                title=(
+                    f"Basisname (schreibt *.original.{fmt} "
+                    f"+ *.{self._resolve_export_lang_code()}.{fmt})"
+                ),
+            )
+            if not base:
+                _log.info("[SUBTITLE] Datei-Dialog abgebrochen")
+                return
+            base_p = Path(base)
+            stem = base_p.stem
+            dir_ = base_p.parent
+            f_orig = dir_ / f"{stem}.original.{fmt}"
+            f_trans = dir_ / f"{stem}.{self._resolve_export_lang_code()}.{fmt}"
+
+            ok1 = self._write_subtitle_file(
+                str(f_orig), t_use, [], fmt, "original",
+            )
+            ok2 = self._write_subtitle_file(
+                str(f_trans), [], tr_use, fmt, "translation",
+            )
+            success = ok1 and ok2
+            if success:
+                self.update_status(
+                    f"📝 Exportiert: {f_orig.name} + {f_trans.name}",
+                )
+            else:
+                self.update_status("❌ Subtitle export failed")
         else:
-            self.update_status("❌ Subtitle export failed")
+            filename = filedialog.asksaveasfilename(
+                defaultextension=f".{fmt}",
+                initialfile=suggested,
+                filetypes=filter_map.get(fmt, [("Alle Dateien", "*.*")]),
+            )
+            if not filename:
+                _log.info("[SUBTITLE] Datei-Dialog abgebrochen")
+                return
+            success = self._write_subtitle_file(
+                filename, t_use, tr_use, fmt, content,
+            )
+            if success:
+                self.update_status(
+                    f"📝 {fmt.upper()} exported: {os.path.basename(filename)}",
+                )
+            else:
+                self.update_status("❌ Subtitle export failed")
+
+        with contextlib.suppress(Exception):
+            log_ai(
+                "EXPORT-SUBTITLE",
+                content=content,
+                fmt=fmt,
+                trans=len(t_use),
+                transl=len(tr_use),
+                ok=int(success),
+            )
+
 
     @gui_operation_decorator
     def show_simple_stats(self) -> None:
@@ -118812,9 +121391,57 @@ class DragonWhispererGUI:
                 self.root,
             )
             return
+
+        # FIX 1: Auto-Resolver fuers Korrektur-Modell (kein Settings-Write).
+        # PATCH U1g: correction_model bevorzugen, Fallback ollama_model
+        _corr_m = (
+            getattr(self.advanced_settings, "correction_model", "") or ""
+        ).strip()
+        if _corr_m:
+            _model_effective = _corr_m
+            logger.info(
+                "[CORRECT] Modell=%r (Quelle: correction_model)",
+                _model_effective,
+            )
+        else:
+            _model_effective = getattr(
+                self.advanced_settings, "ollama_model", None,
+            )
+            logger.info(
+                "[CORRECT] Modell=%r (Quelle: ollama_model, "
+                "Korrektur-Modell leer)",
+                _model_effective,
+            )
+        try:
+            _host_for_check = getattr(
+                self.advanced_settings, "ollama_host",
+                "http://localhost:11434",
+            )
+            _avail_for_check = _fetch_ollama_model_names(_host_for_check)
+            if _avail_for_check is not None:
+                _resolved, _reason = _resolve_summarize_model(
+                    _model_effective, _avail_for_check,
+                )
+                if _resolved and _resolved != _model_effective:
+                    logger.warning(
+                        "[CORRECT] Modell '%s' -> '%s' (%s). Verfuegbar: %s",
+                        _model_effective or "?", _resolved, _reason,
+                        ", ".join(_avail_for_check[:6]),
+                    )
+                    _model_effective = _resolved
+                elif _resolved:
+                    logger.debug(
+                        "[CORRECT] Modell-Check OK: '%s' (%s)",
+                        _resolved, _reason,
+                    )
+        except Exception as _resolve_exc:
+            logger.debug(
+                "[CORRECT] Modell-Aufloesung fehlgeschlagen: %s", _resolve_exc,
+            )
+
         test_summarizer = OllamaSummarizer(
             self,
-            model=self.advanced_settings.ollama_model,
+            model=_model_effective,
             host=self.advanced_settings.ollama_host,
             timeout=10,
         )
@@ -118839,7 +121466,9 @@ class DragonWhispererGUI:
         ):
             stream_title = self.last_completed_stream_info.title or ""
             uploader = self.last_completed_stream_info.uploader or ""
-        MAX_CHARS_PER_CHUNK = 3000
+        # PATCH F-CORR-9: kleinere Chunks (3000 -> 1500)
+        # LLMs tendieren bei >2000 Zeichen zum Zusammenfassen.
+        MAX_CHARS_PER_CHUNK = 1500
         paragraphs = text.split("\n")
         chunks: list[str] = []
         current = ""
@@ -118873,27 +121502,120 @@ class DragonWhispererGUI:
             total_chunks,
             MAX_CHARS_PER_CHUNK,
         )
+        # === PATCH E1x: user context in transcript correction ===
+        # User-Kontext aus Settings lesen (UI1-Kontext-Feld)
+        _user_ctx = ""
+        try:
+            _user_ctx = (
+                getattr(self.advanced_settings, "summary_context", "") or ""
+            ).strip()
+        except Exception:
+            _user_ctx = ""
+
         context_lines = []
         if stream_title:
             context_lines.append(f"Videotitel: '{stream_title}'")
         if uploader:
             context_lines.append(f"Kanal/Uploader: '{uploader}'")
+        if _user_ctx:
+            context_lines.append(
+                f"Bekannte Begriffe/Kontext (vom User): {_user_ctx}"
+            )
+            context_lines.append(
+                "Nutze diesen Kontext NUR um Verhoerer zu korrigieren. "
+                "Erfinde NICHTS, was nicht im Transkript steht. "
+                "Bei Unsicherheit: lass das Original."
+            )
+            if DEBUG_LEVEL >= 3:
+                log_debug(
+                    "ollama",
+                    "[E1x] User-Kontext in Korrektur-Prompt: %d Zeichen",
+                    len(_user_ctx),
+                )
         context_block = "\n".join(context_lines) if context_lines else ""
+        # === END PATCH E1x ===
+        if DEBUG_LEVEL >= 3:
+            log_debug(
+                "ollama",
+                "[E1x] Korrektur-Kontext gesamt: %d Zeichen",
+                len(context_block),
+            )
+        # PATCH F-CORR-8: sprachneutraler System-Prompt
         system_prompt = (
-            "Du bist ein professioneller Transkript‑Editor für Deutsch. "
-            "Deine Aufgabe ist es, ein automatisch erstelltes Transkript zu bereinigen.\n"
-            "Korrigiere:\n"
-            "- Eigennamen (Personen, Orte, Produkte), besonders wenn der Kontext darauf hinweist.\n"
-            "- Satzzeichen, Groß‑/Kleinschreibung.\n"
-            "- Typische Fehler der Spracherkennung (fehlende Wörter, falsche Wortgrenzen).\n"
-            "Verändere NICHT den Sinn oder die Fakten. "
-            "Gib NUR das korrigierte Transkript zurück, ohne Erklärungen."
+            "Du bist ein praeziser Transkript-Editor.\n"
+            "Deine Aufgabe: korrigiere NUR offensichtliche Fehler "
+            "der Spracherkennung (falsch erkannte Woerter, "
+            "Eigennamen, fehlende Wortgrenzen).\n"
+            "Behalte die Sprache, den Stil und die LAENGE des "
+            "Originals exakt bei.\n"
+            "Fasse NICHT zusammen. Kuerze NICHT. Ordne NICHT um.\n"
+            "Gib NUR den korrigierten Text zurueck - keine "
+            "Erklaerungen, keine Einleitungen."
         )
+
+        # === PATCH F19a: strict rules appended to system_prompt ===
+        # PATCH F-CORR-7: Sprachregel input-abhaengig (nicht mehr hart Deutsch)
+        _fc7_lang = "de"
+        try:
+            import langdetect as _fc7_ld
+            _fc7_sample = (text or "")[:500].strip()
+            if _fc7_sample:
+                _fc7_lang = _fc7_ld.detect(_fc7_sample) or "de"
+        except Exception as _fc7_ex:
+            logger.debug("[F-CORR-7] langdetect: %s", _fc7_ex)
+        _fc7_display = {
+            "de": "Deutsch", "en": "Englisch", "ko": "Koreanisch",
+            "ja": "Japanisch", "zh-cn": "Chinesisch",
+            "zh-tw": "Chinesisch", "zh": "Chinesisch",
+            "fr": "Franzoesisch", "es": "Spanisch",
+            "it": "Italienisch", "ru": "Russisch",
+            "pt": "Portugiesisch", "ar": "Arabisch",
+            "tr": "Tuerkisch", "vi": "Vietnamesisch",
+            "th": "Thai", "hi": "Hindi",
+        }.get(_fc7_lang)
+        if _fc7_lang == "de" or not _fc7_display:
+            _fc7_lang_rule = (
+                "- Antworte AUSSCHLIESSLICH auf Deutsch. "
+                "Keine chinesischen, koreanischen, japanischen "
+                "oder kyrillischen Zeichen.\n"
+            )
+        else:
+            _fc7_lang_rule = (
+                f"- Behalte die Originalsprache ({_fc7_display}) bei. "
+                "UEBERSETZE NICHT. Fuege KEINE Zeichen aus anderen "
+                "Schriftsystemen ein, die nicht im Original stehen.\n"
+            )
+        logger.info(
+            "[F-CORR-7] Sprache=%s, Regel=%s",
+            _fc7_lang,
+            "Deutsch" if _fc7_lang == "de" else "beibehalten",
+        )
+        system_prompt = system_prompt + (
+            "\n\nSTRIKTE REGELN:\n"
+            + _fc7_lang_rule
+            + "- Fasse NICHT zusammen. Analysiere NICHT. "
+            "Du bist ein Editor, kein Summarizer.\n"
+            "- Keine Meta-Kommentare. Keine Einleitungen wie "
+            "\"Hier ist das korrigierte Transkript:\".\n"
+            "- Bei Unsicherheit: Aendere NICHTS, gib den "
+            "Originaltext zurueck."
+        )
+        # === END PATCH F19a ===
 
         def make_prompt(chunk_text: str) -> str:
             parts = [system_prompt]
             if context_block:
                 parts.append(f"\n\n{context_block}")
+            # PATCH F-CORR-9: expliziter Laengen-Zwang pro Chunk
+            _fc9_len = len(chunk_text)
+            _fc9_min = int(_fc9_len * 0.8)
+            parts.append(
+                f"\n\nPFLICHT-LAENGE: Der Originaltext hat "
+                f"{_fc9_len} Zeichen. Deine Antwort muss MINDESTENS "
+                f"{_fc9_min} Zeichen lang sein (80%).\n"
+                "Wenn du kuerzer als das antwortest, hast du zu stark "
+                "gekuerzt und die Antwort wird verworfen."
+            )
             parts.append(f"\n\nOriginaltext:\n{chunk_text}")
             return "\n".join(parts)
 
@@ -118915,6 +121637,9 @@ class DragonWhispererGUI:
 
         def worker() -> None:
             nonlocal errors_count
+            # PATCH F-CORR-1: corrected_chunks wird in worker neu zugewiesen (F19b)
+            # -> ohne nonlocal wuerde Python es als lokal betrachten
+            nonlocal corrected_chunks
             try:
                 for idx, chunk in enumerate(chunks):
                     if progress_ctrl.is_closed():
@@ -118926,12 +121651,61 @@ class DragonWhispererGUI:
                         host=self.advanced_settings.ollama_host,
                         timeout=120,
                     )
-                    result = summarizer.summarize_sync(
-                        text=chunk,
-                        prompt=prompt,
-                        temperature=0.1,
+                    # PATCH F-CORR-2: Logging + Timeout-Kontrolle
+                    _cp = (chunk[:60] + "...") if len(chunk) > 60 else chunk
+                    logger.info(
+                        "[CORRECT] Chunk %d/%d START (len=%d): %r",
+                        idx + 1, total_chunks, len(chunk), _cp,
                     )
-                    summarizer.dispose()
+                    self.root.after(
+                        0,
+                        lambda i=idx + 1, t=total_chunks: progress_ctrl.update_message(
+                            f"Abschnitt {i}/{t} – Ollama arbeitet...",
+                        ),
+                    )
+                    import time as _t_fcorr2
+                    _t0 = _t_fcorr2.monotonic()
+                    try:
+                        result = summarizer.summarize_sync(
+                            text=chunk,
+                            prompt=prompt,
+                            temperature=0.1,
+                        )
+                        _el = _t_fcorr2.monotonic() - _t0
+                        logger.info(
+                            "[CORRECT] Chunk %d/%d DONE in %.1fs "
+                            "(result_len=%s)",
+                            idx + 1, total_chunks, _el,
+                            len(result) if result else 0,
+                        )
+                    except Exception as _sum_exc:
+                        _el = _t_fcorr2.monotonic() - _t0
+                        logger.error(
+                            "[CORRECT] Chunk %d/%d FAIL nach %.1fs: %s",
+                            idx + 1, total_chunks, _el, _sum_exc,
+                        )
+                        result = None
+                    finally:
+                        try:
+                            summarizer.dispose()
+                        except Exception as _d_exc:
+                            logger.debug(
+                                "[CORRECT] dispose-Fehler: %s", _d_exc,
+                            )
+                    # PATCH F-CORR-8: Laengen-Guard gegen Content-Loss
+                    if result and isinstance(result, str):
+                        _fc8_in_len = max(1, len(chunk))
+                        _fc8_out_len = len(result.strip())
+                        _fc8_ratio = _fc8_out_len / _fc8_in_len
+                        if _fc8_ratio < 0.7:
+                            logger.warning(
+                                "[F-CORR-8] Chunk %d/%d: Korrektur "
+                                "kuerzt zu stark (%.0f%% von %d auf %d "
+                                "Zeichen) - verwerfe, behalte Original",
+                                idx + 1, total_chunks,
+                                _fc8_ratio * 100, _fc8_in_len, _fc8_out_len,
+                            )
+                            result = None
                     if result and result.strip():
                         corrected_chunks.append(result.strip())
                     else:
@@ -118954,6 +121728,43 @@ class DragonWhispererGUI:
                             f"Abschnitt {i}/{t} korrigiert",
                         ),
                     )
+                # === PATCH F19b: correction output validation ===
+                # Sprachwechsel- und Summary-Detektor
+                import re as _re_f19
+                _cjk_pat = _re_f19.compile(
+                    r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u0400-\u04ff]"
+                )
+                _meta_words = (
+                    "Zusammenfassung", "Summary",
+                    "Hier ist", "korrigierte Transkript",
+                )
+                _f19b_ok = []
+                _f19b_rejected = 0
+                for _idx, _c in enumerate(corrected_chunks):
+                    if not _c or not isinstance(_c, str):
+                        continue
+                    if _cjk_pat.search(_c):
+                        logger.warning(
+                            "[F19b] Chunk %d verworfen: fremde Schriftzeichen",
+                            _idx + 1,
+                        )
+                        _f19b_rejected += 1
+                        continue
+                    if any(_m in _c for _m in _meta_words):
+                        logger.warning(
+                            "[F19b] Chunk %d verworfen: Meta-Phrase",
+                            _idx + 1,
+                        )
+                        _f19b_rejected += 1
+                        continue
+                    _f19b_ok.append(_c)
+                if _f19b_rejected:
+                    logger.warning(
+                        "[F19b] %d von %d Chunks verworfen",
+                        _f19b_rejected, len(corrected_chunks),
+                    )
+                    corrected_chunks = _f19b_ok
+                # === END PATCH F19b ===
                 if corrected_chunks:
                     final_text = "\n\n".join(corrected_chunks)
                     self.root.after(
@@ -119033,6 +121844,59 @@ class DragonWhispererGUI:
             return
         TranslationDialog(self.root, engine, self)
 
+    def _build_summary_input_with_video_time(self) -> str:
+        """PATCH G4: Baut Summary-Input mit Video-Zeit-Markern.
+
+        Verwendet _timed_transcriptions (Video-Zeit, Sekunden) statt
+        Widget-Text (Wall-Clock). Ergebnis: [MM:SS] text pro Segment.
+        """
+        ap = getattr(self, "audio_processor", None)
+        if ap is None:
+            return ""
+        timed = []
+        try:
+            _lock = getattr(ap, "_subtitle_lock", None)
+            if _lock is not None:
+                with _lock:
+                    timed = list(
+                        getattr(ap, "_timed_transcriptions", []) or []
+                    )
+            else:
+                timed = list(
+                    getattr(ap, "_timed_transcriptions", []) or []
+                )
+        except Exception as _e:
+            logger.debug("[G4] _timed_transcriptions lesen: %s", _e)
+            return ""
+        if not timed:
+            return ""
+        try:
+            segments = self._prepare_subtitle_data(timed, mode="aggregated")
+        except Exception as _e:
+            logger.debug("[G4] _prepare_subtitle_data: %s", _e)
+            segments = timed
+        lines = []
+        for seg in segments:
+            try:
+                start = getattr(seg, "start", None)
+                end = getattr(seg, "end", None)
+                text = (getattr(seg, "text", "") or "").strip()
+                if not text:
+                    continue
+                if start is not None and end is not None and end > start >= 0:
+                    prefix = (
+                        f"[{self._format_timestamp(start)} "
+                        f"\u2192 {self._format_timestamp(end)}] "
+                    )
+                elif start is not None and start >= 0:
+                    prefix = f"[{self._format_timestamp(start)}] "
+                else:
+                    prefix = ""
+                lines.append(f"{prefix}{text}")
+            except Exception:
+                continue
+        return "\n".join(lines)
+
     @gui_operation_decorator
     def show_summarize_dialog(self) -> None:
         """Öffnet den Zusammenfassungs-Dialog mit dem aktuellen Transkriptionstext."""
@@ -119061,8 +121925,20 @@ class DragonWhispererGUI:
             except Exception as e:
                 logger.debug("Ignored exception: %s", e, exc_info=True)
 
+        # PATCH G4: Video-Zeit-Text bevorzugen, wenn keine Auswahl
         if not text or not text.strip():
-            text = self._get_text_widget_content("transcript_text")
+            _g4_text = self._build_summary_input_with_video_time()
+            if _g4_text:
+                logger.info(
+                    "[G4] Summary-Input mit Video-Zeit: %d Zeichen",
+                    len(_g4_text),
+                )
+                text = _g4_text
+            else:
+                logger.debug(
+                    "[G4] Kein Video-Zeit-Text verfuegbar, nutze Widget-Inhalt"
+                )
+                text = self._get_text_widget_content("transcript_text")
 
         try:
             SummarizeDialog(self.root, text, self)
@@ -119909,8 +122785,52 @@ class DragonWhispererGUI:
                 if for_dialog
                 else getattr(self.advanced_settings, "ollama_timeout", 45)
             )
+# === PATCH A2: Ollama-Translation-Resolver ===
+            _preferred_model = (
+                getattr(self.advanced_settings, "ollama_model", None)
+                or "llama3.2"
+            )
+            _ollama_host = getattr(
+                self.advanced_settings,
+                "ollama_host",
+                "http://localhost:11434",
+            )
+            try:
+                _available = _fetch_ollama_model_names(
+                    _ollama_host, timeout=2
+                )
+            except Exception as _exc:
+                logger.warning(
+                    "Ollama-Translation: Modell-Liste nicht abrufbar (%s) - "
+                    "verwende %r ungeprueft",
+                    _exc, _preferred_model,
+                )
+                _available = None
+            if _available:
+                _resolved, _reason = _resolve_translation_model(
+                    _preferred_model, _available
+                )
+                if _resolved and _resolved != _preferred_model:
+                    logger.warning(
+                        "Ollama-Translation: %r nicht verfuegbar -> "
+                        "verwende %r (%s)",
+                        _preferred_model, _resolved, _reason,
+                    )
+                    _preferred_model = _resolved
+                elif _resolved:
+                    logger.debug(
+                        "Ollama-Translation: Modell %r bestaetigt (%s)",
+                        _preferred_model, _reason,
+                    )
+                else:
+                    logger.error(
+                        "Ollama-Translation: Kein geeignetes Modell - "
+                        "Engine wird degradieren (%s)",
+                        _reason,
+                    )
+            # === END PATCH A2 ===
             config = OllamaConfig(
-                model=getattr(self.advanced_settings, "ollama_model", "llama3.2"),
+                model=_preferred_model,
                 host=getattr(
                     self.advanced_settings,
                     "ollama_host",
@@ -120584,9 +123504,6 @@ class DragonWhispererGUI:
                                     len(line),
                                     line[:80],
                                 )
-                            # Session 8 - Bug Z7: chronologischer Insert.
-                            # Late-Items werden an der richtigen Stelle
-                            # eingefuegt statt ans Ende angehaengt.
                             _insert_pos = self._find_translation_insert_pos(
                                 translation_widget, line,
                             )
@@ -121077,6 +123994,11 @@ class DragonWhispererGUI:
 
     def _safe_exit_dialog(self) -> None:
         """Öffnet den modalen Exit-Dialog und leitet bei Bestätigung den Shutdown ein.
+        # PATCH U3: Progress-Pump stoppen (verhindert Timer-Leak)
+        try:
+            self._progress_pump_stop()
+        except Exception:
+            pass
         OPTIMIERTE VERSION: Bricht den Auto-Exit-Timer ab, robustere Fehlerbehandlung,
         stellt sicher, dass der Dialog nur einmal geöffnet wird, und setzt Flags zurück.
         """
@@ -121538,10 +124460,6 @@ class DragonWhispererGUI:
             global _EXIT_IN_PROGRESS_EVENT
             _EXIT_IN_PROGRESS_EVENT.set()
 
-        # S16-W2: SESSION-END am Body-Anfang, damit es auch bei
-        # stty-Hänger, Rekursion oder Hard-Exit im Log landet.
-        # Der Aufruf weiter unten (kurz vor os._exit) bleibt bestehen;
-        # doppelter Log-Eintrag bei sauberem Exit ist akzeptiert.
         with contextlib.suppress(Exception):
             sys.stderr.flush()
             log_ai("SESSION-END", reason="shutdown_entry", depth=_depth)
@@ -121734,7 +124652,6 @@ class DragonWhispererGUI:
                     "_direct_shutdown: finale Beendigung mit os._exit(0)...",
                 )
 
-            # S16-W: [AI-SESSION-END] VOR Hard-Exit, sonst gekappt.
             with contextlib.suppress(Exception):
                 sys.stderr.flush()
                 log_ai("SESSION-END", reason="shutdown_hard")
@@ -124383,10 +127300,16 @@ class DragonWhispererGUI:
 
     def _get_free_vram_gb(self) -> float | None:
         """Misst den aktuell freien VRAM in Gigabyte."""
+        # PATCH C5: nvmlInit nur einmal (Singleton; verhindert Leak/Race)
         try:
             import pynvml
 
-            pynvml.nvmlInit()
+            if not getattr(self, "_nvml_initialized", False):
+                try:
+                    pynvml.nvmlInit()
+                    self._nvml_initialized = True
+                except Exception:
+                    pass
             handle = pynvml.nvmlDeviceGetHandleByIndex(0)
             info = pynvml.nvmlDeviceGetMemoryInfo(handle)
             return info.free / (1024**3)
@@ -124399,7 +127322,362 @@ class DragonWhispererGUI:
                     return free_bytes / (1024**3)
             except Exception as e:
                 logger.debug("Ignored exception: %s", e, exc_info=True)
+        except Exception as e:
+            logger.debug("Ignored exception: %s", e, exc_info=True)
         return None
+
+    # PATCH C5: Smart VRAM-Check - Helper-Methoden
+    def _estimate_vram_for_model(self, model_name: str) -> float:
+        """C5: Grobe VRAM-Schaetzung (GB, float16) fuer ein Whisper-Modell."""
+        # PATCH C5: VRAM-Schaetztabelle
+        table = {
+            "tiny": 0.4, "tiny.en": 0.4,
+            "base": 0.7, "base.en": 0.7,
+            "small": 1.0, "small.en": 1.0,
+            "medium": 1.7, "medium.en": 1.7,
+            "large-v3-turbo": 2.8,
+            "large-v3": 3.6,
+            "distil-large-v3": 3.0,
+            "distil-medium.en": 1.5,
+            "distil-small.en": 0.9,
+        }
+        key = (model_name or "").lower().strip()
+        if key in table:
+            return table[key]
+        for k in sorted(table, key=len, reverse=True):
+            if k in key:
+                return table[k]
+        return 3.6
+
+    def _get_ollama_vram_gb(self) -> float:
+        """C5: Summiert belegten VRAM (GB) aller geladenen Ollama-Modelle."""
+        # PATCH C5: Ollama-VRAM-Parser
+        import re
+        import subprocess as _sp
+
+        try:
+            res = _sp.run(
+                ["ollama", "ps"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if res.returncode != 0:
+                return 0.0
+            out = res.stdout or ""
+        except Exception as e:
+            logger.debug("[C5] 'ollama ps' fehlgeschlagen: %s", e)
+            return 0.0
+
+        total = 0.0
+        for line in out.splitlines()[1:]:
+            if not line.strip():
+                continue
+            m = re.search(
+                r"(\d+(?:[.,]\d+)?)\s*(GB|MB|GiB|MiB)\b",
+                line, re.IGNORECASE,
+            )
+            if not m:
+                continue
+            try:
+                val = float(m.group(1).replace(",", "."))
+            except ValueError:
+                continue
+            if m.group(2).upper() in ("MB", "MIB"):
+                val /= 1024.0
+            total += val
+        return total
+
+    def _get_ollama_running_models(self) -> list:
+        """C5.1: Listet aktuell geladene Ollama-Modellnamen (NAME-Spalte)."""
+        # PATCH C5.1: Modellnamen-Parser
+        import subprocess as _sp
+        try:
+            res = _sp.run(
+                ["ollama", "ps"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if res.returncode != 0:
+                return []
+            out = res.stdout or ""
+        except Exception as e:
+            logger.debug("[C5.1] 'ollama ps' fehlgeschlagen: %s", e)
+            return []
+
+        models = []
+        for line in out.splitlines()[1:]:
+            parts = line.split()
+            if not parts:
+                continue
+            name = parts[0]
+            if name and name.lower() != "name":
+                models.append(name)
+        return models
+
+    def _unload_ollama_and_wait(
+        self, target_free_gb: float, max_wait: float = 15.0,
+    ) -> bool:
+        """C5.1: Stoppt Ollama-Modelle und pollt bis target_free_gb frei sind."""
+        # PATCH C5.1: ollama stop <model> + stabiler Poll
+        import subprocess as _sp
+        import time as _time
+
+        models = self._get_ollama_running_models()
+        if not models:
+            logger.debug(
+                "[C5.1] Keine Ollama-Modelle via 'ollama ps' gefunden",
+            )
+        else:
+            for name in models:
+                try:
+                    res = _sp.run(
+                        ["ollama", "stop", name],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if res.returncode != 0:
+                        logger.warning(
+                            "[C5.1] 'ollama stop %s' rc=%d: %s",
+                            name, res.returncode,
+                            (res.stderr or "").strip()[:200],
+                        )
+                    else:
+                        logger.info("[C5.1] 'ollama stop %s' OK", name)
+                except Exception as e:
+                    logger.warning(
+                        "[C5.1] 'ollama stop %s' Exception: %s", name, e,
+                    )
+
+        deadline = _time.monotonic() + max_wait
+        start = _time.monotonic()
+        stable_count = 0
+        while _time.monotonic() < deadline:
+            free = self._get_free_vram_gb()
+            if free is not None:
+                logger.debug(
+                    "[C5.1-poll] t=%.1fs free=%.2f GB (need %.2f)",
+                    _time.monotonic() - start, free, target_free_gb,
+                )
+                if free >= target_free_gb:
+                    stable_count += 1
+                    if stable_count >= 3:
+                        logger.info(
+                            "[C5.1] VRAM stabil frei: %.2f GB (>= %.2f) "
+                            "nach %.1fs",
+                            free, target_free_gb,
+                            _time.monotonic() - start,
+                        )
+                        return True
+                else:
+                    stable_count = 0
+            _time.sleep(0.5)
+
+        free = self._get_free_vram_gb()
+        logger.warning(
+            "[C5.1] Timeout nach %.1fs - free=%s GB < need=%.2f GB",
+            max_wait,
+            f"{free:.2f}" if free is not None else "n/a",
+            target_free_gb,
+        )
+        return False
+
+    def _c5_check_vram_before_start(self, model_name: str) -> None:
+        """C5: Einmalige VRAM-Warnung + optionales Ollama-Unload pro Session.
+
+        Laeuft im Main-Thread (Aufruf aus start_processing).
+        """
+        # PATCH C5: Haupt-Check
+        # PATCH C5.4: Debug-Logging an allen Early-Exits
+        if getattr(self, "_c5_asked_this_session", False):
+            logger.info("[C5.4] skip: bereits diese Session gefragt")
+            return
+        try:
+            bedarf = self._estimate_vram_for_model(model_name) * 1.15
+            frei_jetzt = self._get_free_vram_gb()
+            ollama_gb = self._get_ollama_vram_gb()
+            logger.info(
+                "[C5.4] model=%r bedarf=%.2f frei=%.2f ollama=%.2f",
+                model_name, bedarf,
+                frei_jetzt if frei_jetzt is not None else -1.0,
+                ollama_gb,
+            )
+            if frei_jetzt is None:
+                logger.info("[C5.4] skip: VRAM nicht messbar")
+                return
+            if bedarf <= frei_jetzt:
+                logger.info(
+                    "[C5.4] skip: genug VRAM (bedarf %.2f <= frei %.2f)",
+                    bedarf, frei_jetzt,
+                )
+                return
+            if ollama_gb < 0.5:
+                logger.info("[C5.4] skip: ollama_gb=%.2f < 0.5", ollama_gb)
+                return
+            frei_ohne = frei_jetzt + ollama_gb
+            if bedarf > frei_ohne:
+                logger.info(
+                    "[C5.4] skip: Ollama entladen reicht nicht "
+                    "(bedarf=%.2f > frei_ohne=%.2f)",
+                    bedarf, frei_ohne,
+                )
+                return
+            logger.info("[C5.4] -> Dialog wird geoeffnet")
+
+            self._c5_asked_this_session = True
+            msg = (
+                f"Modell '{model_name}' benoetigt ca. {bedarf:.1f} GB VRAM.\n"
+                f"Aktuell frei: {frei_jetzt:.1f} GB.\n"
+                f"Ollama belegt: {ollama_gb:.1f} GB.\n\n"
+                f"Ollama jetzt entladen und fortfahren?"
+            )
+            antwort = DarkMessageBox.askyesno(
+                title="VRAM knapp - Ollama entladen?",
+                message=msg,
+            )
+            if not antwort:
+                logger.info("[C5] Nutzer hat Ollama-Unload abgelehnt")
+                return
+
+            self.update_status("Entlade Ollama und warte auf VRAM...")
+            ok = self._unload_ollama_and_wait(target_free_gb=bedarf)
+            if not ok:
+                logger.warning("[C5] Ollama entladen, aber VRAM weiterhin knapp")
+                self.update_status("VRAM weiterhin knapp - Fortsetzung")
+                return
+
+            frei_neu = self._get_free_vram_gb() or 0.0
+            logger.info("[C5] Ollama entladen, %.1f GB frei", frei_neu)
+
+            try:
+                adv = (
+                    getattr(self, "advanced_settings", None)
+                    or getattr(self, "settings", None)
+                )
+                if adv is not None and not getattr(adv, "gpu_acceleration", False):
+                    adv.gpu_acceleration = True
+                    save_fn = getattr(adv, "save_to_file", None)
+                    if callable(save_fn):
+                        save_fn()
+                    logger.info("[C5] gpu_acceleration=True persistiert")
+            except Exception as e:
+                logger.debug("[C5] gpu_acceleration-Persist fehlgeschlagen: %s", e)
+
+            try:
+                sel_fn = getattr(self, "_perform_auto_model_selection", None)
+                if callable(sel_fn):
+                    sel_fn()
+            except Exception as e:
+                logger.debug(
+                    "[C5] _perform_auto_model_selection fehlgeschlagen: %s", e,
+                )
+
+            # PATCH C5.2: gpu_acceleration=True → Modell MUSS neu geladen werden
+            try:
+                ap = getattr(self, "audio_processor", None)
+                eng = getattr(ap, "transcription_engine", None) if ap else None
+
+                # 1) Device-Detection neu auswerten
+                refresh_fn = getattr(eng, "_refresh_device", None) if eng else None
+                if callable(refresh_fn):
+                    try:
+                        refresh_fn()
+                        logger.info("[C5.2] _refresh_device() aufgerufen")
+                    except Exception as e:
+                        logger.debug("[C5.2] _refresh_device: %s", e)
+
+                # 2) Cache invalidieren (cache_key enthaelt KEIN device!)
+                cleanup_fn = (
+                    getattr(eng, "_force_model_cleanup", None) if eng else None
+                )
+                if callable(cleanup_fn):
+                    try:
+                        cleanup_fn()
+                        logger.info(
+                            "[C5.2] _force_model_cleanup aufgerufen "
+                            "(Cache invalidiert)",
+                        )
+                    except Exception as e:
+                        logger.debug("[C5.2] _force_model_cleanup: %s", e)
+
+                # 3) Modell neu laden → landet jetzt auf GPU
+                # PATCH C5.3: model_name-Parameter hat Vorrang vor GUI-Var
+                # (model_var.get() kann 'none' liefern, wenn die GUI-Variable
+                #  durch _perform_auto_model_selection zurueckgesetzt wurde.)
+                cur_model = (model_name or "").strip()
+                if not cur_model or cur_model.lower() in ("none", "null"):
+                    model_var = getattr(self, "model_var", None)
+                    if model_var is not None and hasattr(model_var, "get"):
+                        try:
+                            _mv = (model_var.get() or "").strip()
+                            if _mv and _mv.lower() not in ("none", "null"):
+                                cur_model = _mv
+                        except Exception:
+                            pass
+                if not cur_model or cur_model.lower() in ("none", "null"):
+                    cur_model = "large-v3"
+                logger.info(
+                    "[C5.3] cur_model=%r (model_name param=%r)",
+                    cur_model, model_name,
+                )
+
+                reload_candidates = []
+                if eng is not None:
+                    reload_candidates.append(
+                        ("engine.reload_model", getattr(eng, "reload_model", None))
+                    )
+                if ap is not None:
+                    reload_candidates.append(
+                        ("ap.reload_model", getattr(ap, "reload_model", None))
+                    )
+                reload_candidates.append(
+                    ("gui.reload_model", getattr(self, "reload_model", None))
+                )
+
+                reload_fn = None
+                reload_label = ""
+                for label, fn in reload_candidates:
+                    if callable(fn):
+                        reload_fn = fn
+                        reload_label = label
+                        break
+
+                if reload_fn is None:
+                    logger.warning(
+                        "[C5.2] Kein reload_model gefunden – "
+                        "verlasse mich auf _force_model_cleanup. "
+                        "Kandidaten: %s",
+                        [lbl for lbl, _ in reload_candidates],
+                    )
+                else:
+                    self.update_status(
+                        f"Lade {cur_model} neu auf GPU..."
+                    )
+                    logger.info(
+                        "[C5.2] %s(model_size=%r) wird aufgerufen...",
+                        reload_label, cur_model,
+                    )
+                    try:
+                        reload_fn(model_size=cur_model)
+                        logger.info("[C5.2] Modell-Reload auf GPU abgeschlossen")
+                    except TypeError:
+                        try:
+                            reload_fn()
+                            logger.info(
+                                "[C5.2] Modell-Reload (ohne arg) abgeschlossen",
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "[C5.2] Modell-Reload (ohne arg) "
+                                "fehlgeschlagen: %s", e,
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "[C5.2] Modell-Reload fehlgeschlagen: %s", e,
+                        )
+            except Exception as e:
+                logger.debug(
+                    "[C5.2] Device-Refresh/Reload fehlgeschlagen: %s",
+                    e, exc_info=True,
+                )
+        except Exception as e:
+            logger.debug("[C5] Check-Exception: %s", e, exc_info=True)
 
 
 class ControllerFatalError(Exception):
@@ -132807,12 +136085,6 @@ class StreamHandler:
         1) Event-Loop mit Health-Checks, Inactivity-Detection, Read.
         2) Cleanup (Timeout-Timer, Cleanup-After-Loop, Metriken).
 
-        v2.1 – Erweitertes Debug + Chunk-Audit:
-          ``[STREAM-LOOP] 🔍 chunks-audit:`` zeigt Werte aus
-          6 Quellen (result, state, AP._chunk_counter,
-          AP._dispatcher_chunk_counter, pinfo, reader).
-          ``[AI-SESSION-END]`` enthält alle Audit-Werte.
-
         Rückgabe
         --------
         ``dict`` mit Feldern:
@@ -132893,9 +136165,6 @@ class StreamHandler:
         }
 
         normal_ending_event.clear()
-        # Session 7 (Bug O): konfigurierbar via DW_STREAM_TIMEOUT_S.
-        # Default: 3600s im Debug-Modus, 0 (unbegrenzt) sonst.
-        # Fuer 24/7-Livestreams mit Debug-Logging: DW_STREAM_TIMEOUT_S=0
         _env_t = os.environ.get("DW_STREAM_TIMEOUT_S", "")
         if _env_t.isdigit():
             STREAM_TIMEOUT_SECONDS = int(_env_t)
@@ -133298,9 +136567,6 @@ class StreamHandler:
 
             result["stream_duration"] = time.time() - start_time
 
-            # ▼ NEU — Fix J2: start_time liegt NACH der Setup-Phase,
-            #          daher ist stream_duration zu klein. Reader-Dauer
-            #          als Fallback, wenn sie größer ist.
             with contextlib.suppress(Exception):
                 _dur_ap = None
                 if state is not None:
@@ -133398,7 +136664,6 @@ class StreamHandler:
                             if _pinfo_obj is not None:
                                 break
                 if _pinfo_obj is None and _ap_ref is not None:
-                    # ▼ NEU — Fallback: ap.ffmpeg_manager._processes
                     _fm_ref_h = getattr(_ap_ref, "ffmpeg_manager", None)
                     if _fm_ref_h is not None:
                         _proc_map_h = getattr(_fm_ref_h, "_processes", None) or {}
@@ -133424,7 +136689,6 @@ class StreamHandler:
                     if _rstat:
                         _chunks_reader = int(_rstat.get("flushed_chunks", -1))
                 if _chunks_reader < 0 and _ap_ref is not None:
-                    # ▼ NEU — Fallback: ap.ffmpeg_manager._reader_stats
                     _fm_ref = getattr(_ap_ref, "ffmpeg_manager", None)
                     if _fm_ref is not None:
                         _rstat_fm = (
@@ -133437,13 +136701,9 @@ class StreamHandler:
             except Exception:
                 pass
 
-            # ▼ NEU — Fix I: pinfo.chunks_processed wird im Pipe-Mode
-            #          nicht inkrementiert – Reader-Wert als Fallback
             if _chunks_pinfo <= 0 and _chunks_reader > 0:
                 _chunks_pinfo = _chunks_reader
 
-            # ▼ NEU — Fix J1: state.total_chunks_processed bleibt im
-            #          Pipe-Mode auf 0 – Reader-Wert als Fallback
             if _chunks_state <= 0 and _chunks_reader > 0:
                 _chunks_state = _chunks_reader
 
@@ -133493,11 +136753,9 @@ class StreamHandler:
                 user_stopped=result["user_stopped"],
                 error=result["error"],
             )
-            # Session 8 - Patch 7C: AI-SUMMARY mit Endbilanz
             with contextlib.suppress(Exception):
                 _ai_sum_req = int(getattr(self, "_translation_requests", 0))
                 if _ai_sum_req == 0:
-                    # ▼ NEU — Fix N2: Fallback auf AP-Zaehler
                     try:
                         _ap_ref = None
                         _ap_getter = getattr(self, "_get_ap", None)
@@ -133710,10 +136968,6 @@ class StreamHandler:
                     exception_container = [None]
                     done = threading.Event()
 
-                    # V8-Fix 2026-09-21: Loop-Variablen explizit
-                    # binden (B023). Sonst greift der noch laufende
-                    # Thread auf die NEUEN Container der naechsten
-                    # Iteration zu, wenn done.wait() timeoutet.
                     def reader_thread(
                         _data_container=data_container,
                         _exception_container=exception_container,
@@ -135169,12 +138423,7 @@ class StreamHandler:
                     )
                 return
 
-            # Session 7 (Bug B): Wenn der Dispatcher tot ist und keine
-            # pending-Tasks mehr laufen, holt niemand mehr die Queue ab.
-            # Der Rest ist Sentinel oder verwaister Chunk. Ohne diesen
-            # Check wartet die Schleife bis zum vollen Timeout
-            # (30-600s) und blockiert den Shutdown bei Shorts/VODs.
-            _disp_alive = True  # konservativ: bei Fehler weiter warten
+            _disp_alive = True 
             try:
                 _dt = getattr(ap, "_dispatcher_thread", None)
                 _disp_alive = _dt is not None and _dt.is_alive()
@@ -135857,9 +139106,6 @@ class StreamHandler:
         _bps = getattr(state, "bytes_per_sec", 32000) or 32000
         _expected_s = (bytes_read / _bps) if _bps > 0 else 10.0
         _slow_default = max(5.0, _expected_s * 1.15)
-        # S17-A3: Default 3.0 statt 1.50 – 1.7× ist noch normal
-        # bei Netzwerk-Jitter; erst >3× ist ein echter Warnfall.
-        # Konfigurierbar via DW_SLOW_READ_FACTOR.
         try:
             _extreme_factor = float(os.getenv("DW_SLOW_READ_FACTOR", "3.0"))
         except (TypeError, ValueError):
@@ -138590,6 +141836,8 @@ class AudioProcessor:
         self._translation_queue = deque(maxlen=int(100 * cache_factor))
         self._timed_transcriptions = deque(maxlen=int(500 * cache_factor))
         self._timed_translations = deque(maxlen=int(200 * cache_factor))
+        self._last_session_transcriptions: list = []  
+        self._last_session_translations: list = []         
         self._already_flushed_texts: set[str] = set()
         self._flushed_combined_texts: set[str] = set()
         self._segment_buffer = OrderedDict()
@@ -139322,7 +142570,17 @@ class AudioProcessor:
         changed = {}
         skipped = []
 
-        PROTECTED_ATTRS = {"config", "_adaptive_bytes_per_sec"}
+        # === PATCH F16: user setting protect ===
+        PROTECTED_ATTRS = {
+            "config",
+            "_adaptive_bytes_per_sec",
+            # condition_on_previous_text NIEMALS automatisch
+            # ueberschreiben. True kann bei Stille/Streams zu
+            # Endlos-Halluzinationen fuehren (Whisper nutzt
+            # eigene Fehler als Kontext fuer den naechsten Chunk).
+            "condition_on_previous_text",
+        }
+        # === END PATCH F16 ===
 
         _DEFAULT_BEAM = getattr(
             getattr(adv, "config", None), "DEFAULT_BEAM_SIZE", 10,
@@ -140301,6 +143559,50 @@ class AudioProcessor:
         self._pending_tasks = 0
         self._tasks_done_event.set()
 
+    def reset_subtitle_state(self) -> None:
+        """Setzt die komplette Subtitle-Pipeline zurueck.
+
+        Wird vom Trash-Button im GUI aufgerufen. Leert Timed-Listen,
+        Segment-Buffer, Watchdog-Zeiger und Snapshot. Re-armiert das
+        Subtitle-Event, wenn der Subtitle-Modus weiterhin aktiv ist —
+        so kann ein anschliessender Transkriptions-Lauf sauber fuellen.
+        """
+        try:
+            _lock = getattr(self, "_subtitle_lock", None)
+            _cm = _lock if _lock is not None else contextlib.nullcontext()
+            with _cm:
+                # Datenquellen fuer SRT-Export
+                self._timed_transcriptions.clear()
+                self._timed_translations.clear()
+                # Segment-Buffer (Chunk-Overlap-Puffer)
+                if hasattr(self, "_segment_buffer"):
+                    self._segment_buffer.clear()
+                if hasattr(self, "_segment_keys"):
+                    self._segment_keys.clear()
+                if hasattr(self, "_segment_fingerprints"):
+                    self._segment_fingerprints.clear()
+                if hasattr(self, "_sorted_keys_cache"):
+                    self._sorted_keys_cache = []
+                # Watchdog / Zeiger
+                self._next_expected_start = 0.0
+                self._last_emitted_start = 0.0
+                # Snapshot (Fallback-Quelle im Export)
+                self._last_session_transcriptions = []
+                self._last_session_translations = []
+                # Subtitle-Event re-armieren
+                try:
+                    self._subtitle_event.clear()
+                    if getattr(self, "subtitle_mode", False):
+                        self._subtitle_event.set()
+                except Exception:
+                    pass
+            logger.info(
+                "[TRASH] Subtitle-Pipeline zurueckgesetzt (subtitle_mode=%s)",
+                getattr(self, "subtitle_mode", None),
+            )
+        except Exception as exc:
+            logger.warning("[TRASH] Subtitle-Reset fehlgeschlagen: %s", exc)
+
     def _init_duplicate_and_subtitle(self) -> None:
         self._last_transcription_text = ""
         self._recent_transcriptions.clear()
@@ -140510,9 +143812,6 @@ class AudioProcessor:
         logger = logging.getLogger("dragon")
         debug_level = getattr(self, "debug_level", DEBUG_LEVEL)
         _total_t0 = time.perf_counter()
-
-        # Session 6 (Bug E.2): Dispose-Snapshot VOR _init_state_machines,
-        # weil das die _disposed/_dispose_in_progress-Flags zuruecksetzt.
         _was_disposing = (
             getattr(self, "_disposed", False)
             or getattr(self, "_dispose_in_progress", False)
@@ -145060,7 +148359,6 @@ class AudioProcessor:
                 except Exception as e:
                     log_debug(f"Fehler beim Prüfen von FFmpeg: {e}")
 
-            # Session 8 - Bug O2 Fix: Queue-Referenz beim Start dokumentieren.
             _o2_initial_queue = raw_audio_queue
             _o2_queue_switch_count = 0
             if debug_level >= 3:
@@ -145077,10 +148375,6 @@ class AudioProcessor:
                 and not stop_event.is_set()
                 and not dispatcher_stop_event.is_set()
             ):
-                # Session 8 - Bug O2 Fix: Queue-Referenz dynamisch nachziehen.
-                # Wenn die Pipe eine neue Queue registriert hat, muessen wir
-                # sie uebernehmen, sonst hoeren wir fuer immer auf eine tote
-                # (leere) Queue.
                 _o2_current_q = getattr(self, "_raw_audio_queue", None)
                 if _o2_current_q is not None and _o2_current_q is not raw_audio_queue:
                     _o2_queue_switch_count += 1
@@ -145194,7 +148488,6 @@ class AudioProcessor:
                                 pass
 
                         if ffmpeg_alive:
-                            # Session 8 - Bug O2 Diag: Inaktivitaets-Resets zaehlen
                             _o2_reset_n = getattr(
                                 self, "_dispatcher_inactivity_resets", 0,
                             ) + 1
@@ -145211,10 +148504,6 @@ class AudioProcessor:
                                     f"Inaktivität ({INACTIVITY_TIMEOUT:.1f}s), aber FFmpeg läuft – warte weiter",
                                     extra={"component": "dispatcher"},
                                 )
-                            # Session 8 - Patch 6E: Wenn der Reader-Thread aktiv
-                            # laeuft, ist der Dispatcher-Timeout harmlos (ein
-                            # zweiter Consumer-Pfad verarbeitet die Chunks).
-                            # Dann auf INFO-Level loggen statt WARNING.
                             _o2_alt_path_active = bool(_o2_reader_alive)
                             _o2_log_fn = (
                                 log_debug if _o2_alt_path_active else log_warning
@@ -148939,11 +152228,9 @@ class AudioProcessor:
         if not success:
             with contextlib.suppress(Exception):
                 log_dbg("GUI", event="callback_emergency", chunk_id=chunk_id)
-            # S17-P2b: Im Headless-Mode nur einmal warnen.
             if globals().get("_DW_HEADLESS_RUN", False):
                 if not getattr(self, "_headless_emg_warned", False):
                     self._headless_emg_warned = True
-                    # S17-A4.2: zu info degradiert (siehe A4.1).
                     logger.info(
                         "[CALLBACK] Headless-Mode: direkter Notfall-Aufruf "
                         "(GUI-Stufen erwartungsgemäß nicht verfügbar) – "
@@ -149987,7 +153274,6 @@ class AudioProcessor:
             else:
                 with contextlib.suppress(Exception):
                     log_dbg("GUI", event="gui_queue_none", chunk_id=chunk_id)
-                # S17-P2: Im Headless-Mode nur einmal warnen.
                 if globals().get("_DW_HEADLESS_RUN", False):
                     if not getattr(self, "_headless_disp_warned", False):
                         self._headless_disp_warned = True
@@ -151295,7 +154581,6 @@ class AudioProcessor:
                     )
 
             queue = self._translation_queue
-            # Session 8 - Patch 5B-Diag: Queue-Rein beobachten
             if DEBUG_LEVEL >= 3:
                 _q_pairs = []
                 for _e in queue:
@@ -151819,7 +155104,7 @@ class AudioProcessor:
         else:
             gap_tolerance = _gap_base
 
-        max_backward_time = getattr(self, "_subtitle_max_backward_time", 30.0)
+        max_backward_time = getattr(self, "_subtitle_max_backward_time", 5.0)
         max_segment_age = getattr(self, "_subtitle_max_segment_age", 30.0)
         watchdog_seconds = getattr(self, "_subtitle_watchdog_seconds", 5.0)
         drift_warning_threshold = getattr(self, "_subtitle_drift_threshold", 5.0)
@@ -152013,13 +155298,47 @@ class AudioProcessor:
 
         flushed_this_call = 0
         flush_reasons: dict[str, int] = {
+            "watermark": 0,
+            "soft_timeout": 0,
+            "hard_cap": 0,
+            "hallu_drop": 0,
+            "overflow": 0,
             "normal": 0,
             "Alter": 0,
             "global": 0,
             "zu alt": 0,
-            "overflow": 0,
             "watchdog_bulk": 0,
         }
+
+        # ══════════════════════════════════════════════════════════════
+        # ADVANCED SLIDING-WINDOW FLUSH  (v5.0)
+        # ══════════════════════════════════════════════════════════════
+        # Statt eines fragilen _next_expected_start-Cursors (der durch
+        # Whisper-Bogus-Werte wie start=484 dauerhaft aus dem Tritt
+        # gerät) verwenden wir ein Watermark-Prinzip:
+        #
+        #   1) WATERMARK-FLUSH
+        #      newest = max(start). Alles mit start <= newest - retain_s
+        #      ist garantiert fertig (spätere Chunks können keine
+        #      früheren Segmente mehr liefern). Chronologische Ausgabe.
+        #   2) SOFT-TIMEOUT (Wallclock)
+        #      >N Sekunden kein Flush → älteste 25% zwangsweise raus.
+        #   3) HARD-CAP
+        #      Buffer > 90% von max_size → älteste 25% zwangsweise raus.
+        #   4) HALLU-GUARD
+        #      Segment > 300s nach letzter Ausgabe → verwerfen.
+        #
+        # Kein Verwerfen wegen "zu alt". Kein gap_tolerance. Kein
+        # next_exp-Cursor. Chronologie = sortierte Ausgabe. Retention
+        # = Dedup für Chunk-Overlap.
+        # ══════════════════════════════════════════════════════════════
+
+        _base_retain_s = 3.0
+        _soft_timeout_s = 15.0
+        _hard_cap_ratio = 0.9
+        _hallu_jump_s = 300.0
+        _check_drift_every_n = 20
+
         max_iterations = 1000
         iteration = 0
 
@@ -152027,151 +155346,168 @@ class AudioProcessor:
             iteration += 1
 
             with lock:
-                if not self._segment_buffer or not self._sorted_keys_cache:
+                if not self._segment_buffer:
                     break
 
-                next_start = self._sorted_keys_cache[0]
-                seg = self._segment_buffer.get(next_start)
-                if seg is None:
-                    self._sorted_keys_cache.pop(0)
-                    continue
+                if (not self._sorted_keys_cache
+                        or len(self._sorted_keys_cache) != len(self._segment_buffer)):
+                    self._sorted_keys_cache = sorted(self._segment_buffer.keys())
 
-                now = time.monotonic()
-                seg_start = seg.start
+                sorted_keys = self._sorted_keys_cache
+                if not sorted_keys:
+                    break
 
-                if not self._next_expected_start_initialized:
-                    self._next_expected_start = max(
-                        0.0,
-                        min(self._segment_buffer.keys()),
-                    )
-                    self._next_expected_start_initialized = True
+                oldest_start = sorted_keys[0]
+                newest_start = sorted_keys[-1]
+                _buf_n = len(sorted_keys)
 
-                if seg_start < self._next_expected_start - max_backward_time:
+                # Adaptive Retention: bei großem Buffer schneller ausgeben
+                if _buf_n > max_size * 0.5:
+                    _retain_s = 0.5
+                elif _buf_n > max_size * 0.2:
+                    _retain_s = 1.5
+                else:
+                    _retain_s = _base_retain_s
+
+                last_emit = float(
+                    getattr(self, "_last_emitted_start", 0.0) or 0.0
+                )
+
+                # ── Hallu-Guard ────────────────────────────────────────
+                if last_emit > 0.0 and oldest_start > last_emit + _hallu_jump_s:
+                    _seg_h = self._segment_buffer.get(oldest_start)
                     logger.warning(
-                        "Verwerfe zu altes Segment: start=%.2f, expected=%.2f",
-                        seg_start,
-                        self._next_expected_start,
+                        "[BUFFER] Hallu-Guard: Segment %.2fs liegt %.0fs "
+                        "nach letzter Ausgabe (%.2fs) — verworfen: '%.40s'",
+                        oldest_start,
+                        oldest_start - last_emit,
+                        last_emit,
+                        (_seg_h.text or "")[:40] if _seg_h else "?",
                     )
-                    self._remove_and_output_segment(
-                        seg,
-                        next_start,
-                        transcription_callback,
-                        translation_callback,
-                        disable_duplicate_check=True,
-                        _log_reason="zu alt",
-                    )
+                    _fp_h = self._segment_fingerprints.pop(oldest_start, None)
+                    if _fp_h is not None:
+                        self._segment_keys.discard(_fp_h)
+                    self._segment_buffer.pop(oldest_start, None)
+                    self._sorted_keys_cache = sorted(self._segment_buffer.keys())
                     flushed_this_call += 1
-                    flush_reasons["zu alt"] += 1
+                    flush_reasons["hallu_drop"] += 1
                     continue
 
-                age_since_last_flush = now - self._subtitle_watchdog_time
-                if age_since_last_flush > max_segment_age:
-                    if debug_subtitle:
-                        log_debug(
-                            "subtitle",
-                            f"Watchdog (Alter): erzwinge Ausgabe von "
-                            f"start={seg_start:.2f}",
-                        )
+                # ── Watermark-Flush ────────────────────────────────────
+                watermark = newest_start - _retain_s
+                _emitted = 0
+                for _sk in list(sorted_keys):
+                    if _sk > watermark:
+                        break
+                    _seg = self._segment_buffer.get(_sk)
+                    if _seg is None:
+                        continue
                     self._remove_and_output_segment(
-                        seg,
-                        next_start,
+                        _seg,
+                        _sk,
                         transcription_callback,
                         translation_callback,
                         disable_duplicate_check=True,
-                        _log_reason="Alter",
+                        _log_reason="watermark",
                     )
+                    _fp = self._segment_fingerprints.pop(_sk, None)
+                    if _fp is not None:
+                        self._segment_keys.discard(_fp)
+                    self._segment_buffer.pop(_sk, None)
                     flushed_this_call += 1
-                    flush_reasons["Alter"] += 1
-                    self._subtitle_watchdog_time = now
-                    continue
-
-                if seg_start <= self._next_expected_start + gap_tolerance:
-                    self._remove_and_output_segment(
-                        seg,
-                        next_start,
-                        transcription_callback,
-                        translation_callback,
-                        disable_duplicate_check=True,
-                        _log_reason="normal",
-                    )
-                    flushed_this_call += 1
+                    flush_reasons["watermark"] += 1
                     flush_reasons["normal"] += 1
-                    self._subtitle_watchdog_time = now
+                    _emitted += 1
+                    self._last_emitted_start = float(_sk)
 
-                    if flushed_this_call % 10 == 0 and len(self._segment_buffer) > 1:
-                        self._check_subtitle_drift(drift_warning_threshold)
+                if _emitted > 0:
+                    self._sorted_keys_cache = sorted(self._segment_buffer.keys())
+                    self._subtitle_watchdog_time = time.monotonic()
+                    self._next_expected_start = self._last_emitted_start
+                    if (flushed_this_call % _check_drift_every_n) == 0:
+                        with contextlib.suppress(Exception):
+                            self._check_subtitle_drift(drift_warning_threshold)
                     continue
 
-                if now - self._subtitle_watchdog_time > watchdog_seconds:
-                    if debug_subtitle:
-                        log_debug(
-                            "subtitle",
-                            f"Watchdog (global/bulk): "
-                            f"next_expected {self._next_expected_start:.2f} "
-                            f"→ {seg_start:.2f}, "
-                            f"Buffer wird freigegeben",
-                        )
+                now_mono = time.monotonic()
+                age_since_last = now_mono - getattr(
+                    self, "_subtitle_watchdog_time", now_mono
+                )
 
-                    _old_next = self._next_expected_start
-                    self._next_expected_start = (
-                        self._sorted_keys_cache[-1]
-                        if self._sorted_keys_cache
-                        else seg_start
-                    )
-                    
-                    self._subtitle_watchdog_time = now
-
-                    flush_reasons["watchdog_bulk"] += 1
-
-                    if debug_subtitle:
-                        log_debug(
-                            "subtitle",
-                            f"Watchdog: next_expected "
-                            f"{_old_next:.2f} → {seg_start:.2f}",
-                        )
-                    continue
-
-                if debug_flush:
-                    log_debug(
-                        "subtitle",
-                        f"[BUFFER] warte: seg_start={seg_start:.3f} "
-                        f"next_expected={self._next_expected_start:.3f} "
-                        f"gap_tol={gap_tolerance:.3f} "
-                        f"age={age_since_last_flush:.2f}s "
-                        f"watchdog={watchdog_seconds:.1f}s",
-                    )
-                break
-
-            with lock:
-                if self._segment_buffer and len(self._segment_buffer) > max_size * 0.9:
+                # ── Soft-Timeout ───────────────────────────────────────
+                if age_since_last > _soft_timeout_s:
+                    _emit_n = max(1, _buf_n // 4)
                     logger.warning(
-                        "Puffer fast voll (%d/%d) – erzwinge Ausgabe aller Segmente",
-                        len(self._segment_buffer),
-                        max_size,
+                        "[BUFFER] Soft-Timeout: %.1fs ohne Flush, "
+                        "%d Segmente — erzwinge %d älteste Ausgaben",
+                        age_since_last, _buf_n, _emit_n,
                     )
-                    items = list(self._segment_buffer.items())
-                    for start_key, seg in items:
+                    for _sk in sorted_keys[:_emit_n]:
+                        _seg = self._segment_buffer.get(_sk)
+                        if _seg is None:
+                            continue
                         self._remove_and_output_segment(
-                            seg,
-                            start_key,
+                            _seg,
+                            _sk,
                             transcription_callback,
                             translation_callback,
                             disable_duplicate_check=True,
-                            _log_reason="overflow",
+                            _log_reason="soft_timeout",
                         )
+                        _fp = self._segment_fingerprints.pop(_sk, None)
+                        if _fp is not None:
+                            self._segment_keys.discard(_fp)
+                        self._segment_buffer.pop(_sk, None)
                         flushed_this_call += 1
-                        flush_reasons["overflow"] += 1
-                    self._segment_buffer.clear()
-                    self._segment_keys.clear()
-                    self._segment_fingerprints.clear()
-                    self._sorted_keys_cache = []
-                    if items:
-                        self._next_expected_start = max(
-                            self._next_expected_start,
-                            items[-1][1].end or 0.0,
-                        )
+                        flush_reasons["soft_timeout"] += 1
+                        self._last_emitted_start = float(_sk)
+                    self._sorted_keys_cache = sorted(self._segment_buffer.keys())
                     self._subtitle_watchdog_time = time.monotonic()
-                    break
+                    self._next_expected_start = self._last_emitted_start
+                    continue
+
+                # ── Hard-Cap ───────────────────────────────────────────
+                if _buf_n > max_size * _hard_cap_ratio:
+                    _emit_n = max(1, _buf_n // 4)
+                    logger.warning(
+                        "[BUFFER] Hard-Cap: %d Segmente > %.0f%% von %d — "
+                        "erzwinge %d älteste Ausgaben",
+                        _buf_n, _hard_cap_ratio * 100.0, max_size, _emit_n,
+                    )
+                    for _sk in sorted_keys[:_emit_n]:
+                        _seg = self._segment_buffer.get(_sk)
+                        if _seg is None:
+                            continue
+                        self._remove_and_output_segment(
+                            _seg,
+                            _sk,
+                            transcription_callback,
+                            translation_callback,
+                            disable_duplicate_check=True,
+                            _log_reason="hard_cap",
+                        )
+                        _fp = self._segment_fingerprints.pop(_sk, None)
+                        if _fp is not None:
+                            self._segment_keys.discard(_fp)
+                        self._segment_buffer.pop(_sk, None)
+                        flushed_this_call += 1
+                        flush_reasons["hard_cap"] += 1
+                        self._last_emitted_start = float(_sk)
+                    self._sorted_keys_cache = sorted(self._segment_buffer.keys())
+                    self._subtitle_watchdog_time = time.monotonic()
+                    self._next_expected_start = self._last_emitted_start
+                    continue
+
+                # ── Nichts zu tun (Warten) ────────────────────────────
+                if debug_flush:
+                    log_debug(
+                        "subtitle",
+                        f"[BUFFER] warte: oldest={oldest_start:.3f} "
+                        f"newest={newest_start:.3f} watermark={watermark:.3f} "
+                        f"retain={_retain_s:.1f}s age={age_since_last:.2f}s "
+                        f"buf={_buf_n}",
+                    )
+                break
 
         if debug_flush or flushed_this_call > 0:
             with lock:
@@ -153120,6 +156456,36 @@ class AudioProcessor:
                 logger.exception("Fehler in Fallback‑Transkription nach Timeout:")
 
             self._save_lost_chunk(audio_data, "timeout_fallback_failed")
+
+            # === PATCH D: timeout-triggered model downgrade ===
+            # Nach 3 aufeinanderfolgenden Timeouts: Modell-Downgrade
+            if consecutive >= 3:
+                try:
+                    _d_can_downgrade = hasattr(
+                        engine, "_try_smaller_model_iterative"
+                    )
+                    if _d_can_downgrade:
+                        logger.warning(
+                            "[D] %d aufeinanderfolgende Timeouts – "
+                            "Modell-Downgrade wird ausgeloest",
+                            consecutive,
+                        )
+                        _d_success = engine._try_smaller_model_iterative()
+                        if _d_success:
+                            logger.info(
+                                "[D] Downgrade erfolgreich – kleineres Modell aktiv"
+                            )
+                            with self._stats_lock:
+                                self._consecutive_timeouts = 0
+                        else:
+                            logger.warning(
+                                "[D] Downgrade-Versuch ohne Erfolg"
+                            )
+                except Exception as _d_exc:
+                    logger.warning(
+                        "[D] Downgrade fehlgeschlagen: %s", _d_exc
+                    )
+            # === END PATCH D ===
 
             if consecutive >= 3:
                 logger.warning(
@@ -170721,6 +174087,17 @@ class AudioProcessor:
 
         _run_step("clear_and_sync_raw_queue", self._clear_and_sync_queue)
 
+        with contextlib.suppress(Exception):
+            with self._subtitle_lock:
+                self._last_session_transcriptions = list(self._timed_transcriptions)
+                self._last_session_translations = list(self._timed_translations)
+            log_debug(
+                "cleanup",
+                "Session-Snapshot: %d Transkriptionen, %d Übersetzungen",
+                len(self._last_session_transcriptions),
+                len(self._last_session_translations),
+            )
+
         _run_step(
             "reset_internal_state",
             lambda: self._reset_internal_state(
@@ -172457,10 +175834,11 @@ class AudioProcessor:
         if regex is None:
             import re
 
+            _sorted_bl = sorted((w for w in blacklist), key=len, reverse=True)
             if mode == "word":
-                pattern = r"\b(" + "|".join(re.escape(w) for w in blacklist) + r")\b"
+                pattern = r"\b(" + "|".join(re.escape(w) for w in _sorted_bl) + r")\b"
             else:
-                pattern = "(" + "|".join(re.escape(w) for w in blacklist) + ")"
+                pattern = "(" + "|".join(re.escape(w) for w in _sorted_bl) + ")"
             try:
                 regex = re.compile(pattern, re.IGNORECASE)
                 self._blacklist_regex_cache[cache_key] = regex
@@ -182078,6 +185456,111 @@ class WhisperLayoutManager:
         gui.lang_combo.pack(fill="x", expand=True)
         ToolTip(gui.lang_combo, "Zielsprache für die Übersetzung")
 
+        # === PATCH UI1: main-context field in control panel ===
+        # Kontext-Feld fuer eigene Begriffe (Hangang, Ttukseom, ...)
+        # Wird an drei Stellen genutzt:
+        #   1. Whisper initial_prompt (W1)
+        #   2. Transkript-Korrektur (E1x)
+        #   3. Zusammenfassung (E1)
+        ctx_row = tk.Frame(
+            control_frame,
+            bg=theme_color("BG_PRIMARY", "#0f1419"),
+        )
+        ctx_row.grid(
+            row=1, column=0, columnspan=3,
+            sticky="ew", padx=8, pady=(4, 0),
+        )
+        tk.Label(
+            ctx_row,
+            text="\U0001f50e Eigene Begriffe:",
+            bg=theme_color("BG_PRIMARY", "#0f1419"),
+            fg=theme_color("TEXT_PRIMARY", "#e6edf3"),
+            font=Fonts.SMALL,
+        ).pack(side="left", padx=2)
+
+        _initial_ctx = ""
+        try:
+            _initial_ctx = (
+                getattr(gui.advanced_settings, "summary_context", "") or ""
+            )
+        except Exception:
+            _initial_ctx = ""
+        gui.main_context_var = tk.StringVar(value=_initial_ctx)
+        gui.main_context_entry = tk.Entry(
+            ctx_row,
+            textvariable=gui.main_context_var,
+            bg=theme_color("BG_TERTIARY", "#161b22"),
+            fg=theme_color("TEXT_PRIMARY", "#e6edf3"),
+            insertbackground=theme_color("TEXT_PRIMARY", "#e6edf3"),
+            font=Fonts.SMALL,
+            relief="flat",
+        )
+        gui.main_context_entry.pack(
+            side="left", fill="x", expand=True, padx=4,
+        )
+        try:
+            ToolTip(
+                gui.main_context_entry,
+                "z. B. Hangang, Ttukseom, Marakochi, "
+                "\u1108\u1161\u110c\u1161\u1107\u116E\u11AB = eine Frau\n"
+                "Wird fuer Whisper, Transkript-Korrektur UND "
+                "Zusammenfassung genutzt.",
+            )
+        except Exception:
+            pass
+
+        _ctx_save_timer = {"id": None}
+
+        def _persist_ctx() -> None:
+            _ctx_save_timer["id"] = None
+            try:
+                adv = getattr(gui, "advanced_settings", None)
+                if adv is not None and hasattr(adv, "save_to_file"):
+                    adv.save_to_file()
+            except Exception as _e:
+                _logger.debug("Kontext-Persistenz fehlgeschlagen: %s", _e)
+
+        def _on_ctx_change(*_args) -> None:
+            try:
+                val = gui.main_context_var.get() or ""
+                adv = getattr(gui, "advanced_settings", None)
+                if adv is None:
+                    return
+                if getattr(adv, "summary_context", "") == val:
+                    return
+                adv.summary_context = val
+                if DEBUG_LEVEL >= 3:
+                    _logger.debug(
+                        "[UI1-CONTEXT] geaendert: %r",
+                        val[:80],
+                    )
+                # === PATCH E1: sync main -> dialog ===
+                try:
+                    _active_dlg = getattr(gui, "_active_summarize_dialog", None)
+                    if _active_dlg is not None:
+                        _dvar = getattr(_active_dlg, "context_var", None)
+                        if _dvar is not None and (_dvar.get() or "") != val:
+                            _dvar.set(val)
+                            _upd = getattr(_active_dlg, "_update_preview", None)
+                            if callable(_upd):
+                                _upd()
+                            if DEBUG_LEVEL >= 3:
+                                _logger.debug("[E1-SYNC] Dialog-Feld aktualisiert")
+                except Exception as _sync_exc:
+                    _logger.debug("[E1-SYNC] Fehler: %s", _sync_exc)
+                # === END PATCH E1 ===
+                if _ctx_save_timer["id"] is not None:
+                    try:
+                        gui.root.after_cancel(_ctx_save_timer["id"])
+                    except Exception:
+                        pass
+                _ctx_save_timer["id"] = gui.root.after(600, _persist_ctx)
+            except Exception as _e:
+                _logger.debug("Kontext-Handler Fehler: %s", _e)
+
+        gui.main_context_var.trace_add("write", _on_ctx_change)
+        # === END PATCH UI1 ===
+
         if DEBUG_LEVEL >= 2:
             try:
                 _vals_count = len(target_lang_values)
@@ -184091,9 +187574,6 @@ else:
             pass
 
 
-# ▼ NEU — Session 15 / Bug T: Bekannte Whisper-Halluzinations-Phrasen.
-#   Filtert Ein-Wort- und Kurzphrasen, die Whisper bei stillem Audio
-#   produziert — unabhängig von no_speech_prob (die oft niedrig bleibt).
 _WHISPER_HALLUCINATION_PHRASES: frozenset[str] = frozenset({
     # Englisch
     "you", "bye", "i'll", "i will", "thank you", "thanks",
@@ -184104,6 +187584,14 @@ _WHISPER_HALLUCINATION_PHRASES: frozenset[str] = frozenset({
     "thanks for watching", "please subscribe", "subscribe",
     "subtitles by", "amara.org", "thanks for watching!",
     "we'll be right back", "see you next time",
+    "bye-bye", "bye bye", "byebye", "bye bye bye",
+    "let's see how many pieces are done",
+    "let's see how many pieces are done.",
+    "let's see how many",
+    "拜拜", "拜拜", "再見", "再见",
+    "bye bye bye bye",
+    "let's see how many pieces",
+    "bye bye!", "bye-bye!",
     # Deutsch
     "du", "tschüss", "danke", "untertitel", "vielen dank",
     "danke fürs zuschauen", "danke für das zuschauen",
@@ -184111,6 +187599,24 @@ _WHISPER_HALLUCINATION_PHRASES: frozenset[str] = frozenset({
     "wir sehen uns beim nächsten mal",
     "wir sehen uns das nächste mal",
     "wir sind gleich wieder da",
+    # NEU — Chinesische Untertitel-Credits (Mingjing/Diandian & Co.)
+    # Normalisierung: lower() + rstrip(".!?,;:…") + strip()
+    "请不吝点赞",
+    "请不吝点赞 订阅 转发 打赏支持明镜与点点栏目",
+    "请不吝点赞 订阅 转发 打赏支持明镜与点点",
+    "请不吝点赞 订阅 转发 打赏支持明镜",
+    "订阅 转发 打赏支持明镜与点点栏目",
+    "打赏支持明镜与点点栏目",
+    "明镜与点点",
+    "明镜与点点栏目",
+    "优优独播剧场",
+    "yoyo television series exclusive",
+    "中文字幕志愿者",
+    "字幕志愿者",
+    # NEU — Deutsche Übersetzungs-Fragmente des Credits (falls Whisper/Google sie liefern)
+    "bitte zögern sie nicht, die kolumnen „der spiegel“ und „diandian“ zu liken, zu abonnieren, weiterzuleiten und zu belohnen, um sie zu unterstützen",
+    "bitte zögern sie nicht, die kolumnen der spiegel und diandian zu liken",
+    "spiegel und diandian zu liken",
 })
 
 _DEFAULT_BLACKLIST: tuple[str, ...] = (
@@ -184154,6 +187660,16 @@ _DEFAULT_BLACKLIST: tuple[str, ...] = (
     "We'll be right back",
     "We'll see you next time.",
     "Stay tuned.",
+    "请不吝点赞",
+    "打赏支持明镜",
+    "明镜与点点",
+    "订阅 转发 打赏",
+    "优优独播剧场",
+    "字幕志愿者",
+    "中文字幕志愿者",
+    "Transcription by",
+    "Subtitles by",
+    "明镜与点点",
 )
 
 
@@ -184175,6 +187691,20 @@ class AdvancedSettings:
     vram_idle_timeout_seconds: int = 120
     optimize_translations: bool = False
     translate_active: bool = True
+
+    # === PATCH F14a: summary_* als Dataclass-Felder ===
+    # Diese Felder waren bisher NUR __init__-Attribute, nicht
+    # dataclass-Felder. Daher wurden sie weder gespeichert noch
+    # geladen – bei jedem Neustart gingen sie verloren.
+    summary_language: str = "Deutsch"
+    summary_style: str = "Kompakt (3-5 Sätze)"
+    summary_context: str = ""
+    summary_strategy: str = "Schnell (parallel)"
+    summary_max_chunk_tokens: int = 2000
+    summary_use_title: bool = False
+    summary_structured: bool = False
+    summary_max_parallel_requests: int = 2
+    # === END PATCH F14a ===
 
     config_type: str = "high_accuracy"
     transcript_max_lines: int = 800
@@ -184307,7 +187837,9 @@ class AdvancedSettings:
     proxy_enabled: bool = False
 
     summarize_temperature: float = 0.1
-    summarize_model: str = "qwen2.5:7b"
+    summarize_model: str = "auto"
+    # PATCH U1a: correction_model Dataclass-Feld
+    correction_model: str = ""
 
     live_from_start: bool = False
     download_inactivity_timeout: float = 30.0
@@ -184462,6 +187994,9 @@ class AdvancedSettings:
         self.summary_use_title = False
         self.summary_structured = False
         self.summary_max_chunk_tokens = 2000
+        # === PATCH E1c1: summary_context in AdvancedSettings ===
+        self.summary_context = ""
+        # === END PATCH E1c1 ===
         self.summary_max_parallel_requests = 2
 
         self.multilingual_mode = True
@@ -185815,19 +189350,7 @@ class AdvancedSettings:
 
         _p0 = time.perf_counter()
         data = cls._read_json_safe(file_path)
-        if data is None and backup_path.exists():
-            logger.warning(
-                f"⚠️ Hauptkonfiguration beschädigt – versuche Backup {backup_path}",
-            )
-            data = cls._read_json_safe(backup_path)
-            if data is not None:
-                logger.info("✅ Backup erfolgreich geladen.")
-                with suppress(Exception):
-                    shutil.copy2(backup_path, file_path)
-                    log_debug(
-                        "settings",
-                        "Backup als Hauptdatei wiederhergestellt",
-                    )
+        # Kein stiller .json.bak-Fallback mehr.
         _mark("read_json", _p0)
 
         if data is None:
@@ -186245,25 +189768,29 @@ class AdvancedSettings:
         try:
             data = json.loads(content)
         except json.JSONDecodeError as e:
-            logger.error(
-                f"JSONDecodeError in {file_path} (Zeile {e.lineno}, Spalte {e.colno}): {
-                    e.msg
-                }",
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            corrupt = file_path.with_suffix(file_path.suffix + f".corrupted_{ts}")
+            with contextlib.suppress(Exception):
+                file_path.rename(corrupt)
+            logger.warning(
+                "⚠️  %s: defekte JSON (Zeile %d, Spalte %d: %s) → "
+                "umbenannt nach %s. Standardwerte werden neu geschrieben.",
+                file_path.name, e.lineno, e.colno, e.msg, corrupt.name,
             )
-            backup_path = file_path.with_suffix(".json.bak")
-            try:
-                shutil.copy2(file_path, backup_path)
-                logger.warning(f"Korrupte Einstellungen gesichert als: {backup_path}")
-            except Exception as be:
-                logger.warning(f"Konnte kein Backup erstellen: {be}")
             return None
         except Exception as e:
             logger.error(f"Unerwarteter Fehler beim Parsen von {file_path}: {e}")
             return None
 
         if not isinstance(data, dict):
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            corrupt = file_path.with_suffix(file_path.suffix + f".corrupted_{ts}")
+            with contextlib.suppress(Exception):
+                file_path.rename(corrupt)
             logger.warning(
-                f"JSON-Wurzel ist kein Dictionary in {file_path} – Typ: {type(data).__name__}",
+                "⚠️  %s: JSON-Wurzel ist %s statt dict → umbenannt nach %s. "
+                "Standardwerte werden neu geschrieben.",
+                file_path.name, type(data).__name__, corrupt.name,
             )
             return None
 
@@ -187141,6 +190668,10 @@ class AdvancedSettings:
             self.ollama_model = "llama3.1:8b"
             changes.append(f"ollama_model: {old} -> {self.ollama_model}")
 
+        # PATCH U1h: correction_model Validierung (leer erlaubt)
+        if not isinstance(getattr(self, "correction_model", ""), str):
+            self.correction_model = ""
+
         old = self.ollama_host
         if not isinstance(self.ollama_host, str) or not self.ollama_host.strip():
             self.ollama_host = "http://localhost:11434"
@@ -187526,7 +191057,27 @@ class AdvancedSettings:
             _changed = True
             self.blacklist = []
 
-        if not self.blacklist:
+        # Builtin-Einträge IMMER mergen – sonst verdrängt die User-JSON
+        # die Builtin-Liste komplett und zukünftige Erweiterungen
+        # bleiben wirkungslos. Vergleich case-insensitive.
+        if self.blacklist:
+            _existing = {p.lower() for p in self.blacklist}
+            _added_builtin = 0
+            for _p in _DEFAULT_BLACKLIST:
+                if _p.lower() not in _existing:
+                    self.blacklist.append(_p)
+                    _existing.add(_p.lower())
+                    _added_builtin += 1
+            if _added_builtin:
+                _changed = True
+                logger.info(
+                    "🔧 %d Builtin-Blacklist-Einträge ergänzt "
+                    "(User: %d → gesamt: %d)",
+                    _added_builtin,
+                    len(self.blacklist) - _added_builtin,
+                    len(self.blacklist),
+                )
+        else:
             self.blacklist = list(_DEFAULT_BLACKLIST)
             _changed = True
             logger.info(
@@ -187653,7 +191204,9 @@ class AdvancedSettings:
         Nur explizit aufgeführte Felder werden gespeichert.
         """
         return {
-            "_version": 3,
+            # === PATCH F14c: version bump to 4 ===
+            "_version": 4,
+            # === END PATCH F14c ===
             "beam_size": self.beam_size,
             "temperature": self.temperature,
             "vad_filter": self.vad_filter,
@@ -187670,6 +191223,8 @@ class AdvancedSettings:
             "translation_max_lines": self.translation_max_lines,
             "translation_engine": self.translation_engine,
             "ollama_model": self.ollama_model,
+            # PATCH U1b: correction_model in to_dict
+            "correction_model": getattr(self, "correction_model", ""),
             "ollama_host": self.ollama_host,
             "ollama_temperature": self.ollama_temperature,
             "asian_mode": self.asian_mode,
@@ -187711,6 +191266,16 @@ class AdvancedSettings:
             "proxy_enabled": self.proxy_enabled,
             "summarize_temperature": self.summarize_temperature,
             "summarize_model": self.summarize_model,
+            # === PATCH F14b: summary_* in to_dict ===
+            "summary_language": self.summary_language,
+            "summary_style": self.summary_style,
+            "summary_context": self.summary_context,
+            "summary_strategy": self.summary_strategy,
+            "summary_max_chunk_tokens": self.summary_max_chunk_tokens,
+            "summary_use_title": self.summary_use_title,
+            "summary_structured": self.summary_structured,
+            "summary_max_parallel_requests": self.summary_max_parallel_requests,
+            # === END PATCH F14b ===
             "live_from_start": self.live_from_start,
             "download_inactivity_timeout": self.download_inactivity_timeout,
             "allowed_dirs": self.allowed_dirs,
@@ -187768,13 +191333,9 @@ class AdvancedSettings:
             logger.info(f"💾 Saving target_language: {data.get('target_language')}")
 
             if file_path.exists():
-                backup_path = file_path.with_suffix(".json.bak")
-                try:
-                    shutil.copy2(file_path, backup_path)
-                    if DEBUG_LEVEL >= 3:
-                        log_debug("settings", f"Backup created: {backup_path}")
-                except Exception as be:
-                    logger.warning(f"Backup-Erstellung fehlgeschlagen: {be}")
+                _bak_created = _backup_rotate(file_path)
+                if _bak_created is not None and DEBUG_LEVEL >= 3:
+                    log_debug("settings", f"Backup created: {_bak_created}")
 
             with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
