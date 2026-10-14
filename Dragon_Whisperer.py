@@ -436,7 +436,7 @@ import psutil
 DEBUG_LEVEL = 0
 DEBUG_COMPONENTS: list[str] = []
 QUIET_MODE = False
-_TESTING = False
+_TESTING = os.environ.get("DW_TEST_MODE", "0") == "1"
 MAX_DISPLAY = 20
 
 _DRAGON_LOGGER = None
@@ -619,6 +619,60 @@ if DEBUG_LEVEL >= 2 and not QUIET_MODE:
         logger.debug("File logging enabled to %s", log_dir / "dragon_debug.log")
     except Exception as exc:
         logger.warning("File logging could not be enabled: %s", exc)
+
+class _ErrorAggregator(logging.Handler):
+    """PATCH ERRAGG: Sammelt WARNING/ERROR-Meldungen."""
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self._counts: dict = {}
+        self._total_warn = 0
+        self._total_err = 0
+        self._total_crit = 0
+        self._lock = threading.Lock()
+
+    def emit(self, record):
+        try:
+            if record.levelno < logging.WARNING:
+                return
+            msg = str(record.getMessage())[:80]
+            key = f"[{record.levelname}] {msg}"
+            with self._lock:
+                self._counts[key] = self._counts.get(key, 0) + 1
+                if record.levelno >= logging.CRITICAL:
+                    self._total_crit += 1
+                elif record.levelno >= logging.ERROR:
+                    self._total_err += 1
+                else:
+                    self._total_warn += 1
+        except Exception:
+            pass
+
+    def summary(self, top_n: int = 15) -> dict:
+        with self._lock:
+            items = sorted(self._counts.items(), key=lambda x: -x[1])
+            return {
+                "total_warnings": self._total_warn,
+                "total_errors": self._total_err,
+                "total_criticals": self._total_crit,
+                "classes": len(self._counts),
+                "top": items[:top_n],
+            }
+
+    def reset(self) -> None:
+        with self._lock:
+            self._counts.clear()
+            self._total_warn = 0
+            self._total_err = 0
+            self._total_crit = 0
+
+
+try:
+    _ERRAGG = _ErrorAggregator()
+    logger.addHandler(_ERRAGG)
+except Exception as _ea_init_exc:
+    _ERRAGG = None
+    logger.warning("[ERRAGG] Init fehlgeschlagen: %s", _ea_init_exc)
+
 
 for lib in ("huggingface_hub", "faster_whisper", "httpx", "urllib3", "httpcore"):
     lib_logger = logging.getLogger(lib)
@@ -2113,10 +2167,6 @@ def safe_shutdown_executor(
 
         if queue_size_after > 0:
             if cancel_futures:
-                # S17-B1: cancel_futures=True bedeutet: verbleibende Tasks
-                # werden bewusst verworfen. Der Queue-Rest ist ein Race mit
-                # dem Worker-Poll (Worker holt Item nach shutdown()), kein
-                # echter Verlust. Info-Level statt Warning.
                 logger.info(
                     f"{context}Nach Shutdown {queue_size_after} "
                     f"Task(s) im Queue-Rest (cancel_futures=True – "
@@ -2925,7 +2975,6 @@ def log_ai(tag: str, **fields: Any) -> None:
         pass
 
 
-# ── S17: Extended-Debug-Gates (Default aus, doppelt gated mit DW_AI_LOG) ──
 _DEBUG_LEVELS_ENABLED = os.getenv("DW_DEBUG_LEVELS", "0") == "1"
 _DEBUG_CHUNKS_ENABLED = os.getenv("DW_DEBUG_CHUNKS", "0") == "1"
 _DEBUG_GUI_ENABLED    = os.getenv("DW_DEBUG_GUI", "0") == "1"
@@ -2953,10 +3002,6 @@ def log_dbg(category: str, **fields: Any) -> None:
         pass
 
 
-# ── S17-B8: Registry für URLs, die dauerhaft nicht verfügbar sind. ──
-# Verhindert, dass alle Retry-Layer (mode-loop, attempt-loop,
-# format-loop) dieselbe tote URL mehrfach durchlaufen.
-# LRU-artig: max 200 Einträge, älteste werden verworfen.
 _PERMANENT_FAIL_URLS: set[str] = set()
 _PERMANENT_FAIL_LOCK = threading.Lock()
 _PERMANENT_FAIL_MAX = 200
@@ -2971,7 +3016,6 @@ def _mark_permanent_fail(url: str) -> None:
     try:
         with _PERMANENT_FAIL_LOCK:
             if len(_PERMANENT_FAIL_URLS) >= _PERMANENT_FAIL_MAX:
-                # Ältestes beliebiges Element verwerfen (Set.pop)
                 with contextlib.suppress(KeyError):
                     _PERMANENT_FAIL_URLS.pop()
             _PERMANENT_FAIL_URLS.add(url)
@@ -3638,11 +3682,9 @@ class EventBus:
         else:
             for cb in all_callbacks:
                 if is_main_thread and self._scheduler is not None:
-                    # PATCH TB1: root.after(delay, callback) - Argumente waren vertauscht
                     try:
                         self._scheduler(0, lambda _cb=cb: _invoke(_cb))
                     except TypeError:
-                        # Fallback: alter (falscher) Aufruf, falls Scheduler anders signiert
                         logger.debug(
                             "TB1: Scheduler-Signatur unerwartet, nutze Fallback"
                         )
@@ -5797,6 +5839,7 @@ class ConfigDefaults:
         "hi": {"threshold": 0.32, "min_speech_ms": 280, "min_silence_ms": 110},
         "tr": {"threshold": 0.32, "min_speech_ms": 260, "min_silence_ms": 95},
         "fa": {"threshold": 0.33, "min_speech_ms": 270, "min_silence_ms": 100},
+        "tl": {"threshold": 0.3, "min_speech_ms": 300, "min_silence_ms": 100},
     }
     """Sprachspezifische VAD‑Parameter (überschreiben die globalen Werte für bestimmte Sprachen)."""
 
@@ -10280,12 +10323,6 @@ class PlatformUtils:
             saved_settings = getattr(cls, "_original_stty_settings", None)
 
             if saved_settings is not None:
-                # S17-B7: SIGTTOU-sicherer stty-Restore.
-                # In Hintergrund-Prozessgruppen kann SIGTTOU den stty-
-                # Subprozess stoppen → subprocess.run läuft in den 3s-Timeout.
-                # SIG_IGN wird über exec() an stty vererbt; damit läuft es
-                # durch, ohne zu stoppen. Windows hat kein SIGTTOU → Guard
-                # macht den Patch auf Win32 zu einem No-op.
                 _old_sigttou = None
                 if hasattr(py_signal, "SIGTTOU") and sys.platform != "win32":
                     with contextlib.suppress(Exception):
@@ -19872,6 +19909,10 @@ class BaseCachedTranslationEngine(BaseTranslationEngine, ErrorHandlingMixin):
     )
 
     _GOOGLE_LANG_MAP: ClassVar[dict[str, str]] = {
+        "nn": "no",      # Nynorsk -> Norwegisch
+        "nb": "no",      # Bokmaal -> Norwegisch
+        "jw": "jv", 
+        "yue": "zh-tw", 
         "zh": "zh-CN",
         "zh-cn": "zh-CN",
         "zh-tw": "zh-TW",
@@ -20015,8 +20056,6 @@ class BaseCachedTranslationEngine(BaseTranslationEngine, ErrorHandlingMixin):
             return False
 
         if translated.lower() == original.lower():
-            # Kurze Strings (Eigennamen, Zahlen, "OK") dürfen identisch sein.
-            # Lange identische Strings sind ein Silent-Fallback-Signal.
             if len(original.strip()) >= 4:
                 logger.debug(
                     "[TRANSLATE] ❌ _is_valid_translation: identisch "
@@ -20388,20 +20427,12 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
         "please try again later",
     )
 
-    # === PATCH F17: circuit breaker tuning ===
-    # Vorher: threshold=1, cooldown=1800s (30 Minuten). Eine einzige
-    # Netzwerkstoerung sperrte Google fuer 30 Minuten. Neue Werte:
-    #   threshold=3    -> erst nach 3 Fehlern in Folge oeffnen
-    #   cooldown=120s  -> 2 Minuten Recovery statt 30
     _GOOGLE_CIRCUIT_THRESHOLD = 3
     _GOOGLE_CIRCUIT_COOLDOWN_S = 120.0
-    # === END PATCH F17 ===
-    # # === PATCH J: google rate constants fixed ===
-    _GOOGLE_RATE_START = 1.5   # war 0.3 (zu niedrig)
-    _GOOGLE_RATE_MAX = 3.0     # war 0.5 (Google kann viel mehr)
-    _GOOGLE_RATE_MIN = 0.5     # OK, jetzt < START
-    _GOOGLE_RATE_CAPACITY = 4.0  # war 2.0
-    # === END PATCH J ===
+    _GOOGLE_RATE_START = 1.5  
+    _GOOGLE_RATE_MAX = 3.0   
+    _GOOGLE_RATE_MIN = 0.5  
+    _GOOGLE_RATE_CAPACITY = 4.0 
 
     _HEALTH_FAIL_THRESHOLD: ClassVar[int] = 2
     _HEALTH_SKIP_AFTER_SUCCESS_S: ClassVar[float] = 120.0
@@ -21889,7 +21920,6 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
             self._google_success_streak += 1
             streak_snapshot = self._google_success_streak
 
-            # === PATCH J2: Recovery-Schwelle 5 -> 2 ===
             if self._google_success_streak >= 2:
                 new_rate = min(
                     self._GOOGLE_RATE_MAX,
@@ -22048,7 +22078,6 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
 
         if google_available:
             try:
-                # === PATCH H1: rate-limiter retry ===
                 _rl_ok = self._google_rate_limiter.consume(1.0)
                 _rl_tries = 0
                 while not _rl_ok and _rl_tries < 3:
@@ -22087,7 +22116,6 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
                         self._metrics["rate_limited_count"] = (
                             self._metrics.get("rate_limited_count", 0) + 1
                         )
-                # === END PATCH H1 ===
             except Exception as e:
                 logger.debug("[TRANSLATE] Rate-Limiter-Check fehlgeschlagen: %s", e)
                 google_available = False
@@ -22293,6 +22321,15 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
 
         attempt = 0
         while attempt < self._max_retries:
+            if getattr(self, "_disposed", False) or self._translator is None:
+                if debug_level >= 3:
+                    logger.debug(
+                        "[TRANSLATE] _call_deep_translator: disposed "
+                        "oder Translator=None – Abort vor Versuch %d/%d",
+                        attempt + 1,
+                        self._max_retries,
+                    )
+                return None
             if cancel_event and cancel_event.is_set():
                 if debug_level >= 3:
                     logger.debug(
@@ -22695,9 +22732,16 @@ class GoogleTranslationEngine(BaseCachedTranslationEngine):
                         attempt += 1
                         continue
 
+                    _cooldown_s = 45.0
+                    with self._lock:
+                        self._google_circuit_open_until = (
+                            time.monotonic() + _cooldown_s
+                        )
                     logger.warning(
                         "[TRANSLATE] Google Rate-Limit (429) persistent "
-                        "– breche ab (kein weiterer Retry)",
+                        "– Circuit-Breaker fuer %.0fs geoeffnet "
+                        "(kein weiterer Retry, kein deep_translator)",
+                        _cooldown_s,
                     )
                     break
 
@@ -23954,8 +23998,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                 self.timeout,
             )
 
-    # === PATCH G2a: _has_target_script helper ===
-    # Unicode-Bereiche pro Zielsprache (Basiscodes ohne Region).
     _SCRIPT_RANGES = {
         "ko": ((0xAC00, 0xD7AF), (0x1100, 0x11FF), (0x3130, 0x318F)),
         "ja": ((0x3040, 0x309F), (0x30A0, 0x30FF), (0x4E00, 0x9FFF)),
@@ -23997,10 +24039,7 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                     break
         if total_alpha == 0:
             return True
-        # # === PATCH G3b: threshold 0.55 ===
         return (in_script / total_alpha) >= 0.55
-        # === END PATCH G3b ===
-    # === END PATCH G2a ===
 
     def _validate_and_normalize_host(self, host: str) -> str:
         """Überprüft und normalisiert die Host-URL."""
@@ -24195,15 +24234,12 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                 flags=re.IGNORECASE | re.DOTALL,
             )
 
-        # # === PATCH G3c: strip inner (Note:) ===
-        # Innere (Note: ...) entfernen (nicht nur am Rand)
         translated = re.sub(
             r"\s*\(Note:[^)]*\)\s*",
             " ",
             translated,
             flags=re.IGNORECASE,
         )
-        # === END PATCH G3c ===
         trailing_patterns = [
             r"\s*\(Note:.*?\)\s*$",
             r"\s*\(Please keep in mind.*?\)\s*$",
@@ -24227,7 +24263,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         source_lang: str,
         target_lang: str,
     ) -> str:
-        # # === PATCH G1: prompt uses LLM names ===
         _llm_names = self._LLM_LANG_NAMES
         if source_lang == "auto" or not source_lang:
             source_name = _llm_names["auto"]
@@ -24240,7 +24275,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
             target_lang,
             SUPPORTED_LANGUAGES.get(target_lang, target_lang),
         )
-        # === END PATCH G1 ===
         safe_text = self._sanitize_text(text)
 
         prompt = (
@@ -24647,9 +24681,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         chunks = self._split_text_into_chunks(text, self._max_single_chunk_length)
         self._log(logging.DEBUG, f"Langer Text in {len(chunks)} Chunks aufgeteilt.")
 
-        # Google-Web-Endpunkt (translate.google.com/translate_a/single)
-        # verträgt keine parallelen Requests → immer sequenziell.
-        # Ollama/Argos bleiben parallel (lokale Rechenleistung, keine Rate-Limits).
         _is_google_engine = self.__class__.__name__ == "GoogleTranslationEngine"
         if self._enable_parallel_chunks and not _is_google_engine:
             return self._translate_chunks_parallel(chunks, source_lang, target_lang)
@@ -24779,7 +24810,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                 if translated:
                     post = self._postprocess_translation(translated, "")
                     if post:
-                        # === PATCH G2b: reject wrong-language response ===
                         _tgt_lang = getattr(self, "default_target_lang", "") or ""
                         if not self._has_target_script(post, _tgt_lang):
                             self._log(
@@ -24791,13 +24821,9 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
                             last_exception = ValueError(
                                 f"Antwort nicht in Zielsprache {_tgt_lang}"
                             )
-                            # === PATCH G3a: early break on lang mismatch ===
-                            # Retry bringt bei gleicher Strategie nichts
                             return None, last_exception
-                            # === END PATCH G3a ===
                         else:
                             return post, None
-                        # === END PATCH G2b ===
                     else:
                         last_exception = ValueError("Leere Antwort nach Bereinigung")
                         self._log(
@@ -25342,7 +25368,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
     MAX_RESPONSE_TOKENS: int = 1024
     HEALTH_ENDPOINTS: tuple = ("/api/tags", "/api/version")
 
-    # === PATCH G0: _LLM_LANG_NAMES dict ===
     _LLM_LANG_NAMES: dict[str, str] = {
         "auto": "the source language",
         "de": "German", "en": "English", "ko": "Korean",
@@ -25366,7 +25391,6 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         "cy": "Welsh", "gl": "Galician", "eu": "Basque",
         "ca": "Catalan", "mt": "Maltese", "la": "Latin",
     }
-    # === END PATCH G0 ===
 
 
 class ReflectionTranslationEngine(BaseCachedTranslationEngine):
@@ -26762,7 +26786,6 @@ _HALLUCINATION_WHITELIST = frozenset(
 )
 
 
-# === PATCH W1a: language-agnostic whisper hint extractor ===
 def _extract_whisper_hint(raw_context: str, target_lang: str) -> str:
     """Extrahiert aus dem Nutzer-Kontext eine Whisper-taugliche
     Token-Liste (initial_prompt) – sprach-agnostisch.
@@ -26778,7 +26801,6 @@ def _extract_whisper_hint(raw_context: str, target_lang: str) -> str:
     if not raw_context or not isinstance(raw_context, str):
         return ""
     import re as _re_w1
-    # Schriftbereiche pro Sprache (Basiscode)
     _SCRIPT_RANGES = {
         "ko": ((0xAC00, 0xD7AF), (0x1100, 0x11FF), (0x3130, 0x318F)),
         "ja": ((0x3040, 0x309F), (0x30A0, 0x30FF), (0x4E00, 0x9FFF)),
@@ -26793,14 +26815,11 @@ def _extract_whisper_hint(raw_context: str, target_lang: str) -> str:
         "hi": ((0x0900, 0x097F),),
         "el": ((0x0370, 0x03FF),),
     }
-    # Latin-Sprachen: hier ist Schrift-Erkennung unzuverlaessig,
-    # wir nutzen stattdessen Stop-Wort-Filter.
     _LATIN_LANGS = frozenset({
         "de", "en", "fr", "es", "it", "pt", "nl", "sv", "da",
         "no", "fi", "pl", "cs", "sk", "hu", "ro", "hr", "sl",
         "tr", "id", "ms", "vi", "tl", "ca", "gl", "eu",
     })
-    # Sehr kurze Stop-Wort-Liste (dt/en/fr) fuer Latin-Filter
     _STOP = frozenset({
         "ein", "eine", "einer", "eines", "einem", "einen",
         "der", "die", "das", "den", "dem", "des",
@@ -26830,20 +26849,16 @@ def _extract_whisper_hint(raw_context: str, target_lang: str) -> str:
             return False
         if not all(c.isalpha() or c in "-'." for c in _tok):
             return False
-        # Kein Umlaut-only, kein Wort < 3 Zeichen
         return len(_tok) >= 3
 
     _clean = raw_context.strip()
-    # 1. Erklaerungen abschneiden (nach =, :, -)
     _clean = _re_w1.sub(r"\s*[=:].*", "", _clean)
     _clean = _re_w1.sub(r"\s+-\s+.*", "", _clean)
-    # 2. In Tokens aufteilen
     _tokens = []
     for _raw in _re_w1.split(r"[,;\n]+", _clean):
         _t = _raw.strip()
         if not _t:
             continue
-        # Einzelne Woerter innerhalb (falls "A B C" mit Leerzeichen)
         for _w in _t.split():
             _w = _w.strip()
             if not _w:
@@ -26859,7 +26874,6 @@ def _extract_whisper_hint(raw_context: str, target_lang: str) -> str:
                     _tokens.append(_w)
     if not _tokens:
         return ""
-    # Dedupe unter Beibehaltung der Reihenfolge
     _seen = set()
     _uniq = []
     for _t in _tokens:
@@ -27047,9 +27061,6 @@ class TranscriptionEngine:
                 settings = AdvancedSettings()
         self.settings = settings
         self.config = self.settings.config
-
-        # Session 6 (Bug I): Debug-Level auf Instanz setzen, damit
-        # getattr(self, "debug_level", 0) den globalen Wert liefert.
         self.debug_level = int(globals().get("DEBUG_LEVEL", 0))
 
         self.model: Any = None
@@ -27163,14 +27174,13 @@ class TranscriptionEngine:
                 "advanced settings to suppress this warning.",
             )
 
-        # === PATCH F15c: warn when setting=False but GPU available ===
-        # F15c: Warnung wenn Setting False, aber GPU offensichtlich verfuegbar
         if (
             not self.settings.gpu_acceleration
             and self.device == "cpu"
         ):
             try:
-                if torch.cuda.is_available():
+                import torch as _t_f15c
+                if _t_f15c.cuda.is_available():
                     _f15c_free = self._get_free_gpu_memory(device="cuda")
                     if _f15c_free is not None and _f15c_free >= 4.0:
                         _logger.warning(
@@ -27181,7 +27191,6 @@ class TranscriptionEngine:
                         )
             except Exception:
                 pass
-        # === END PATCH F15c ===
 
         self.event_bus = event_bus
         if self.event_bus is None and DEBUG_LEVEL >= 2:
@@ -28111,8 +28120,6 @@ class TranscriptionEngine:
                 avg_confidence,
             )
             if hallucination_risk:
-                # S17-A2b: zu info degradiert (Filter greift sowieso,
-                # Diagnose-Info; Zähler _hallucination_counter läuft weiter).
                 logger.info(
                     f"[TRANSCRIBE] ℹ️ Halluzinations-Filter: "
                     f"Segmente={len(segments)}, Konfidenz={avg_confidence:.2f}, "
@@ -28154,8 +28161,6 @@ class TranscriptionEngine:
         if segments:
             completeness = self._check_chunk_completeness(audio_len, segments)
             if completeness < 0.3:
-                # S17-A1: zu info degradiert (tritt regelmäßig bei
-                # Whisper-Leerlauf auf, ist normal, kein Handlungsbedarf).
                 logger.info(
                     f"[TRANSCRIBE] ℹ️ Niedrige Vollständigkeit: {completeness:.1%} "
                     f"({len(segments)} Segmente für {audio_len} Bytes)",
@@ -28305,8 +28310,6 @@ class TranscriptionEngine:
         _stripped = text.strip().rstrip("。.！!?？ ").strip()
 
         if _stripped in self._KNOWN_HALLUCINATIONS_EXACT:
-            # S17-A2a: zu info degradiert (Filter greift sowieso,
-            # das ist nur Diagnose-Info, kein Warnfall).
             logger.info(
                 f"[TRANSCRIBE] ℹ️ Halluzinations-Filter: exakte Phrase "
                 f"'{_stripped[:40]}' verworfen",
@@ -28315,8 +28318,8 @@ class TranscriptionEngine:
             return True
 
         _is_cjk = any(
-            "\u4e00" <= c <= "\u9fff"  # CJK Unified Ideographs
-            or "\u3040" <= c <= "\u30ff"  # Hiragana + Katakana
+            "\u4e00" <= c <= "\u9fff"
+            or "\u3040" <= c <= "\u30ff"  
             for c in text
         )
         if _is_cjk:
@@ -28572,7 +28575,7 @@ class TranscriptionEngine:
     ) -> list[str | None]:
         """Erstellt die Liste der zu testenden Sprachen."""
         candidates: list[str | None] = []
-        _excluded: list[tuple[str, str]] = []  # (lang, grund)
+        _excluded: list[tuple[str, str]] = []  
 
         if effective_language is not None:
             candidates.append(effective_language)
@@ -31317,6 +31320,42 @@ class TranscriptionEngine:
 
         language = self.forced_language or None
 
+        _LSC_LANGS = globals().setdefault("_LSC_PROBED_LANGS", set())
+        if language is not None and language not in _LSC_LANGS:
+            _LSC_LANGS.add(language)
+            try:
+                _lsc_mdl = self.model
+                if _lsc_mdl is not None and hasattr(_lsc_mdl, "detect_language"):
+                    _lsc_r = _lsc_mdl.detect_language(audio_np)
+                    _lsc_l = _lsc_r[0] if _lsc_r else None
+                    _lsc_p = _lsc_r[1] if len(_lsc_r) > 1 else None
+                    _lsc_pf = float(_lsc_p) if _lsc_p is not None else 0.0
+                    log_debug(
+                        "language",
+                        f"[LSC-PROBE] audio={_lsc_l} p={_lsc_pf:.3f} "
+                        f"gewaehlt={language}",
+                    )
+                    if (
+                        _lsc_l
+                        and _lsc_l.lower() != language.lower()
+                        and _lsc_pf >= 0.60
+                    ):
+                        _lsc_msg = (
+                            f"⚠️ Sprache-Mismatch: Audio wirkt wie "
+                            f"'{_lsc_l}' (Konfidenz {_lsc_pf:.2f}) "
+                            f"— gewählt: '{language}'. Transkription "
+                            f"läuft in '{language}'."
+                        )
+                        logger.warning("[LSC] %s", _lsc_msg)
+                        _lsc_bus = getattr(self, "event_bus", None)
+                        if _lsc_bus is not None:
+                            try:
+                                _lsc_bus.emit("info", _lsc_msg)
+                            except Exception:
+                                pass
+            except Exception as _lsc_e:
+                log_debug("language", f"[LSC] Probe-Fehler: {_lsc_e}")
+
         with self._state_lock:
             vad_language = self.forced_language or self._last_detected_language
         vad_params = self._get_vad_parameters(vad_language)
@@ -32855,14 +32894,13 @@ class TranscriptionEngine:
                                 auto_lang,
                             )
                     elif auto_lang in WHISPER_SUPPORTED_LANGUAGES:
-                        # Hint (noch) nicht aktiv – Whisper darf neu erkennen.
-                        effective_language = None
-                        _lang_source = "auto_off"
+                        effective_language = auto_lang
+                        _lang_source = "auto_soft"
                         if DEBUG_LEVEL >= 3:
                             log_debug(
                                 "transcribe",
-                                "_prepare_transcribe_kwargs: Hint inaktiv, "
-                                "Whisper erkennt selbst (auto_lang=%s)",
+                                "_prepare_transcribe_kwargs: Soft-Hint "
+                                "aus auto_lang=%s",
                                 auto_lang,
                             )
                     else:
@@ -32904,7 +32942,6 @@ class TranscriptionEngine:
                     condition_on_previous_text,
                 )
 
-        # ▼ NEU — Extended Debug S14: Opt-in via DW_WHISPER_NO_CONDITION=1
         try:
             import os as _os_wnc  # noqa: PLC0415
             if _os_wnc.getenv("DW_WHISPER_NO_CONDITION", "").strip().lower() in ("1", "true", "yes"):
@@ -32919,22 +32956,12 @@ class TranscriptionEngine:
         except Exception:
             pass
 
-        # === PATCH F18: force condition_on_previous_text=False for streams ===
-        # Safety-Guard: Bei Live-Streams fuehrt True zu
-        # Endlos-Halluzinationen (Chunk N halluziniert, Chunk N+1
-        # nutzt es als Kontext). Fuer Streams IMMER False.
-        # === PATCH F18b: unconditional copt=False ===
-        # IMMER False fuer Streams. True fuehrt zu Endlos-Halluzinationen
-        # (Chunk N halluziniert, Chunk N+1 nutzt es als Kontext).
-        # Override moeglich via DW_WHISPER_NO_CONDITION=0 (siehe oben).
         if condition_on_previous_text:
             logger.warning(
                 "[F18b] condition_on_previous_text=True -> auf False "
                 "erzwungen (Halluzinations-Schutz)"
             )
             condition_on_previous_text = False
-        # === END PATCH F18b ===
-        # === END PATCH F18 ===
 
         kwargs: dict[str, Any] = {
             "language": effective_language,
@@ -32952,9 +32979,6 @@ class TranscriptionEngine:
             "word_timestamps": include_timestamps,
         }
 
-        # === PATCH W1b: initial_prompt into transcribe kwargs ===
-        # Whisper initial_prompt aus Nutzer-Kontext (sprach-agnostisch)
-        # Nur wenn Zielsprache eindeutig (nicht auto)
         try:
             _w1_raw = getattr(
                 self.settings, "summary_context", ""
@@ -32983,7 +33007,6 @@ class TranscriptionEngine:
                 )
         except Exception as _w1_exc:
             logger.debug("[W1] Fehler: %s", _w1_exc)
-        # === END PATCH W1b ===
 
         if self.settings.vad_filter:
             kwargs["vad_filter"] = True
@@ -33418,7 +33441,6 @@ class TranscriptionEngine:
                 total_confidence,
             )
 
-        # Session 7 (Debug): [WHISPER-SEG] pro Chunk
         if valid_segments:
             try:
                 _confs_dbg = [
@@ -35010,10 +35032,6 @@ class TranscriptionEngine:
         min_confidence = getattr(self, "_min_segment_confidence", 0.10)
         if confidence < min_confidence:
             return False
-        # Session 6 (Bug A.4): text_core einmal zentral berechnen. Whisper
-        # haengt bei kurzen Aeusserungen Punkt-Padding an (KI..., Ja,...).
-        # Alle Laengen- und Ratio-Checks laufen auf dem Kern-Text — sonst
-        # lehnt der alnum_ratio<0.3-Check valide Kurztexte ab.
         text_core = text.strip(".!?,;: ")
         if len(text_core) < 2:
             return False
@@ -35314,14 +35332,28 @@ class TranscriptionEngine:
                     "– nichts wiederherzustellen",
                 )
 
-        if DEBUG_LEVEL >= 4:
-            with self._auto_detected_language_lock:
-                _kept_auto = self._last_auto_detected_language
+        _lang_reset_old = None
+        with self._auto_detected_language_lock:
+            if self._last_auto_detected_language is not None:
+                _lang_reset_old = self._last_auto_detected_language
+                self._last_auto_detected_language = None
+                did_reset = True
+            _hist = getattr(self, "_language_history", None)
+            if _hist is not None:
+                try:
+                    _hist.clear()
+                except Exception:
+                    pass
+            if getattr(self, "_language_hint_active", False):
+                self._language_hint_active = False
+                if _lang_reset_old is None:
+                    did_reset = True
+        if DEBUG_LEVEL >= 3:
             log_debug(
                 "language",
-                "reset_fallback_state: _last_auto_detected_language "
-                "bewusst beibehalten ('%s')",
-                _kept_auto,
+                "reset_fallback_state: Auto-Lang %s + History + Hint "
+                "zurueckgesetzt",
+                f"'{_lang_reset_old}'" if _lang_reset_old else "(war leer)",
             )
 
         if did_reset and self.event_bus is not None:
@@ -36531,10 +36563,6 @@ class YtDlpHelper:
         "default_timeout": 30,
         "live_timeout": 60,
         "quick_live_timeout": 20,
-        # Session 6 (JSON-Fix): 45 -> 20. Die 45s kamen nie zum
-        # Tragen, weil YouTube cookie-lose Requests blockt. 20s
-        # reichen als Fallback, parallel laeuft der Cookie-Pfad
-        # bereits in ~1.6s erfolgreich.
         "deep_live_timeout": 20,
         "socket_timeout_normal": 30,
         "socket_timeout_live": 45,
@@ -37864,13 +37892,6 @@ class YtDlpHelper:
                     except Exception:
                         pass
 
-                # S17-B4: communicate() statt wait()-Loop.
-                # Der alte Loop rief nur proc.wait(timeout=0.1) in einer
-                # while-Schleife und liest die Pipes erst NACH Prozessende.
-                # Wenn das Kind (yt-dlp) mehr als die Pipe-Puffergröße
-                # (~64 KB) in stdout/stderr schreibt, blockiert es auf write()
-                # — Deadlock bis zum Deadline-Timer. communicate() liest
-                # die Pipes kontinuierlich während des Wartens.
                 if cancel_event and cancel_event.is_set():
                     cls._terminate_process(proc)
                     return (None, "Cancelled", -1) if return_stderr else None
@@ -39253,12 +39274,6 @@ class YtDlpHelper:
                 else cls._config.get("deep_live_timeout", 30)
             )
 
-        # Session 6 (JSON-Fix): use_cookies=True statt False.
-        # Der parallele StreamInfoExtractor laeuft mit Cookies und
-        # ist in ~1.6s fertig. Der cookie-lose Pfad lief dagegen
-        # immer in den vollen Timeout (YouTube Bot-Detection).
-        # Bei Cookies-Fehler greift der Fallback ueber
-        # `effective_browser = None` und die kurze Timeout-Kette.
         data = cls.get_json(
             url,
             timeout=timeout,
@@ -40278,7 +40293,12 @@ class YtDlpHelper:
         if not info:
             return {}
         return {
-            "channel": info.get("channel", info.get("uploader", "unknown")),
+            "channel": (
+                info.get("uploader_id")
+                if isinstance(info.get("uploader_id"), str)
+                and info.get("uploader_id", "").startswith("@")
+                else info.get("channel", info.get("uploader", "unknown"))
+            ),
             "channel_id": info.get("channel_id", info.get("uploader_id", "")),
             "channel_url": info.get("channel_url", info.get("uploader_url", "")),
             "subscriber_count": info.get("channel_follower_count", 0),
@@ -45312,10 +45332,7 @@ class FFmpegManager:
             import subprocess
             import threading as _threading
             import time as _t5_f5
-
             _logger = logging.getLogger("dragon")
-
-            # Session 7 (Bug F.5): Timing-Instrumentierung
             _t5_total = _t5_f5.monotonic()
 
             try:
@@ -45431,11 +45448,6 @@ class FFmpegManager:
 
             _t5_x = _t5_f5.monotonic()
             _pipes_closed = 0
-            # Session 7 (Bug F.5.3): pipe.close() blockiert auf Enkel-
-            # Kindern, die FD offen halten. F.4 hat denselben Fix in
-            # _cleanup_pipe_resources; hier in _ProcessInfo.dispose
-            # fehlte er. Close in Daemon-Thread mit 50 ms Timeout,
-            # dann FD-Direct-Close als Notausgang.
             import os as _os_f53
             for proc in (self.process, self.yt_process):
                 if proc is None:
@@ -45830,9 +45842,6 @@ class FFmpegManager:
         _CLEANUP_SIGKILL_S = 1.0
         _MAX_READER_STATS = 100
         _STDERR_RING_LINES = 500
-        # S17-B5: Default 30.0 statt 10.0 – 10s waren bei Live-
-        # Streams mit variabler Netzqualität zu aggressiv (Fehlalarm).
-        # Konfigurierbar via DW_READER_STALL_S.
         try:
             _READER_HEALTH_WARN_AFTER_S = float(
                 os.getenv("DW_READER_STALL_S", "30.0")
@@ -46818,12 +46827,6 @@ class FFmpegManager:
                 cmd.extend(extra_yt_args)
             if is_live and not getattr(self, "_is_vod_playback", False):
                 cmd.extend(["--wait-for-video", "10"])
-                # S16-P1: HLS-Refresh für Nicht-YouTube-Livestreams.
-                # Twitch/Kick/Rumble liefern HLS-Playlist-URLs, deren
-                # Segmente periodisch neu signiert werden. Ohne
-                # --hls-use-mpegts re-muxt yt-dlp HLS→MPEG-TS bei jedem
-                # Playlist-Reload und der ffmpeg-Reader stirbt nach ~2 min.
-                # --hls-prefer-native bevorzugt ffmpegs nativen HLS-Parser.
                 if not _is_youtube:
                     cmd.append("--hls-use-mpegts")
                     cmd.append("--hls-prefer-native")
@@ -46974,13 +46977,7 @@ class FFmpegManager:
                     )
 
                     if _reason != "format_unavailable":
-                        # Session 8 - Bug Cookie: 403/Cookie-Fehler erkennen
                         _stderr_lower = (_stderr_preview or "").lower()
-                        # S17-B8: Permanente Fehler erkennen – kein Retry
-                        # mit anderen Formaten, weil die Ursache nicht am
-                        # Format liegt (Stream offline, Video entfernt,
-                        # privat, Geo-Sperre). Spart ~30s Wartezeit und
-                        # 8 Phantom-ERROR-Logs pro fehlgeschlagenem Stream.
                         _is_permanent_err = any(
                             _p in _stderr_lower
                             for _p in (
@@ -47010,8 +47007,6 @@ class FFmpegManager:
                                     format=_attempt_fmt,
                                     reason=_stderr_preview[:120],
                                 )
-                            # S17-B8b: URL global markieren, damit
-                            # äußere Retry-Layer abbrechen.
                             with contextlib.suppress(Exception):
                                 _mark_permanent_fail(video_url)
                             _last_error = {
@@ -47020,7 +47015,6 @@ class FFmpegManager:
                                 "stderr": _stderr_preview[:500],
                                 "reason": "permanent_error",
                             }
-                            # Aus dem Format-Loop ausbrechen – kein Retry.
                             yt_proc = None
                             _cleanup(_attempt_yt, force=True)
                             break
@@ -48147,12 +48141,6 @@ class FFmpegManager:
                     id(output_queue),
                     is_live,
                 )
-                # Session 8 - Patch 6F: Reader-Thread-Referenz auf AP setzen.
-                # Hier ist der richtige Ort: nach _ProcessInfo-Erstellung und
-                # Registrierung, wo reader (Thread) und audio_processor beide
-                # garantiert verfuegbar sind. Vorherige Patch-Versuche waren
-                # in _start_pipe_mode() - einer Legacy-Methode, die nicht
-                # im aktiven Pipe-Pfad liegt.
                 _ap_ref = audio_processor
                 if _ap_ref is None:
                     _ap_ref = getattr(self, "audio_processor", None)
@@ -49542,9 +49530,6 @@ class FFmpegManager:
             ):
                 if _wp is None:
                     continue
-                # Session 7 (Bug F.5.2): 200 -> 100 ms. Nach SIGTERM
-                # (F.1) reagieren wohlwollende Prozesse in <50 ms oder
-                # gar nicht. 100 ms ist konservativ genug.
                 with contextlib.suppress(Exception):
                     _wp.wait(timeout=0.1)
                 if _wp.poll() is None:
@@ -49555,10 +49540,6 @@ class FFmpegManager:
                             f"Bug F.1b: SIGKILL -> {_wn} PID {_wp.pid}",
                             level=3,
                         )
-                        # Session 7 (Bug F.5.2): 200 -> 50 ms. SIGKILL
-                        # ist synchron - der Prozess ist beim poll()
-                        # bereits tot. 50 ms sind reiner Robustheits-
-                        # Puffer gegen ungewoehnliche Kernel-Situationen.
                         _wp.wait(timeout=0.05)
                     except Exception as _e:
                         _log_step(
@@ -49567,15 +49548,6 @@ class FFmpegManager:
                             level=3,
                         )
 
-            # Session 6 (Bug F.3): Reader-Thread kooperativ stoppen,
-            # BEVOR die Pipes geschlossen werden. Ohne diesen Schritt
-            # blockiert close() bis zu 500 ms, weil der Reader-Thread
-            # noch in read()/readline() haengt. Der Prozess ist durch
-            # F.1/F.1b bereits tot - der blockierte Syscall kehrt aber
-            # erst zurueck, wenn das FD geschlossen ist oder der Thread
-            # das Stop-Event sieht. Reihenfolge: F.1 SIGTERM ->
-            # F.1b SIGKILL -> F.3 read_stop -> _cleanup_pipe_resources
-            # (close in <10ms).
             _rs = getattr(pinfo, "read_stop", None)
             if _rs is not None:
                 with contextlib.suppress(Exception):
@@ -51724,8 +51696,6 @@ class FFmpegManager:
         result = None
         last_error_category = None
 
-        # S17-B8b: Wenn URL bereits bekannt als permanent tot,
-        # alle Mode-Versuche überspringen.
         if _is_permanent_fail(video_url):
             logger.warning(
                 "[STREAM_INTERNAL] ⛔ URL bekannt als dauerhaft nicht "
@@ -51741,7 +51711,6 @@ class FFmpegManager:
                 )
                 break
 
-            # S17-B8b: Marker könnte im vorigen Mode gesetzt worden sein.
             if _is_permanent_fail(video_url):
                 logger.info(
                     "[STREAM_INTERNAL] ⛔ Dauerhafter Fehler erkannt "
@@ -52609,12 +52578,6 @@ class FFmpegManager:
 
         _is_youtube = "youtube.com" in url.lower() or "youtu.be" in url.lower()
 
-        # HINWEIS (Session 3, Thema 3 — Parallelpfad):
-        # Diese Selektor-Liste ist die ÄUSSERE Auswahl (was versuchen wir
-        # als primary bei yt-dlp). Sie wird pro Plattform angepasst
-        # (YouTube vs. generisch). Eine innere Fallback-Kette existiert
-        # separat in `_do_start_stream_pipe_mode_impl@45055` und
-        # de-dupliziert nur. Keine echte Redundanz.
         if _is_youtube:
             format_selectors = [
                 "bestaudio/best",
@@ -52680,10 +52643,6 @@ class FFmpegManager:
                 **kwargs,
             )
 
-            # S17-B8c: Wenn _start_stream_pipe_mode einen dauerhaften
-            # Fehler erkannt hat (Marker wurde via _mark_permanent_fail
-            # gesetzt), NICHT weitere Formate durchprobieren – die Ursache
-            # liegt nicht am Format.
             if _is_permanent_fail(url):
                 _log_warning(
                     "⛔ Dauerhafter Fehler im Format-Loop erkannt "
@@ -54054,12 +54013,6 @@ class FFmpegManager:
                 name=f"PipeClose-{name}-{pipe_name}",
             )
             _t.start()
-            # Session 7 (Bug F.5): 500 ms -> 50 ms. Nach SIGKILL ist
-            # pipe.close() entweder sofort fertig oder blockiert bis
-            # zum Prozessende (Enkel-Kinder halten FD). Der haeufige
-            # Fall braucht <10 ms; Blockade wird von F.4 (FD-Direct-
-            # Close) in <1 ms gerettet. 500 ms Wartezeit war grob
-            # ueberdimensioniert.
             _t.join(timeout=0.05)
 
             if _t.is_alive():
@@ -54068,12 +54021,6 @@ class FFmpegManager:
                     f"    {name} {pipe_name}.close() blockiert – "
                     f"versuche FD-Direkt-Close",
                 )
-                # Session 6 (Bug F.4): Der Python-BufferedReader wartet
-                # auf Enkel-Kinder, die die Pipe offen halten. SIGTERM/
-                # SIGKILL an den Parent reicht nicht, weil Subshells
-                # die Pipe weiter offen halten. Direkter Kernel-FD-Close
-                # blockiert nie. Der BufferedReader bleibt inkonsistent,
-                # ist im Shutdown-Pfad aber irrelevant.
                 try:
                     _fd_f4 = pipe.fileno()
                     import os as _os_f4
@@ -56860,6 +56807,7 @@ class FFmpegManager:
         except (OSError, PermissionError) as e:
             logger.warning(f"Konnte bereinigte Cookie-Datei nicht schreiben: {e}")
 
+    # PATCH DEAD-CODE-CANDIDATE: Duplikat von nested _validate_cookie_string (L56372). Kein Aufrufer.
     def _validate_cookie_string(self, cookie_str: str) -> bool:
         """Prüft, ob der Cookie-String mindestens ein YouTube-relevantes Cookie enthält."""
         if not cookie_str or len(cookie_str) < 20:
@@ -57709,7 +57657,7 @@ class FFmpegManager:
         logger.debug("🔥🔥🔥 register_process V5.0 – ZENTRALE REGISTRIERUNG! 🔥🔥🔥")
         logger.critical(f"   • CALL-ID:      {call_id}")
         logger.critical(f"   • PROCESS_ID:   {process_id}")
-        logger.critical(f"   • PID:          {process.pid if process else 'None'}")
+        logger.critical(f"   • PID:          {getattr(process, 'pid', None) if process else 'None'}")  # PATCH TEST-GUARD-PID-ACCESS
         logger.critical(f"   • PIPE_MODE:    {pipe_mode}")
         logger.critical(f"   • IS_LIVE:      {is_live}")
         logger.critical(f"   • URL:          {url[:100]}...")
@@ -61674,6 +61622,7 @@ class FFmpegManager:
     # Methode bleibt vorerst erhalten, wird in S18 entfernt.
     # Nicht reaktivieren – aktive Alternative in den aktiven Pfaden.
     # ────────────────────────────────────────────────────────────────
+    # PATCH DEAD-CODE-CANDIDATE: Kein Aufrufer gefunden (2026-10-13). Prüfen ob entfernen oder reaktivieren.
     def _build_yt_dlp_pipe_command(
         self,
         video_url: str,
@@ -62837,7 +62786,7 @@ class AppSettings:
         """
         import json
         import logging
-        import shutil
+        # PATCH RUFF-FIX: unused shutil entfernt
         import threading
         import time
         from collections import OrderedDict
@@ -67740,9 +67689,14 @@ def _fetch_ollama_model_names(host: str, timeout: float = 2.0):
     """
     import urllib.request
     try:
-        url = f"{host.rstrip('/')}/api/tags"
+        # PATCH HYGIENE: nur http/https erlauben (Bandit B310)
+        _host_clean = host.rstrip("/")
+        if not _host_clean.startswith(("http://", "https://")):
+            return None
+        url = f"{_host_clean}/api/tags"
         req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # PATCH HYGIENE-2: nosec mit Begruendung (Schema-Check oben)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
             data = json.loads(resp.read().decode("utf-8"))
         models = data.get("models") or []
         return [m.get("name", "") for m in models if m.get("name")]
@@ -69785,6 +69739,53 @@ class OllamaSummarizer:
         if not self.available:
             raise self.ServerUnreachableError("Ollama nicht verfügbar")
 
+        # PATCH SUMMARY-MIN-CONTENT: Bei zu wenig Inhalt ist jede
+        # LLM-Zusammenfassung eine Halluzination. Lieber ehrlich sagen,
+        # dass nichts zusammenzufassen ist. Schwelle per Env steuerbar
+        # (DW_SUMMARY_MIN_WORDS), Default 40 Woerter.
+        try:
+            import os as _os_min
+            _min_words = int(_os_min.environ.get("DW_SUMMARY_MIN_WORDS", "40"))
+        except (ImportError, TypeError, ValueError):
+            _min_words = 40
+        if _min_words > 0 and text is not None:
+            # PATCH SUMMARY-GUARD-STRIP-TS: [00:00.000 -> 00:05.810]-Praefixe
+            # entfernen, sonst zaehlen sie als Woerter und der Guard greift
+            # bei kurzen Transkripten nicht.
+            try:
+                import re as _re_min
+                # PATCH SUMMARY-GUARD-STRIP-TS-FIX: vorher stand \u2192
+                # in einem Raw-String — das wurde als Literal gesucht,
+                # nicht als Pfeil-Zeichen. Deshalb griff der Guard nie.
+                _text_no_ts = _re_min.sub(
+                    r"\[\d+:\d+\.\d+[^\]]*\]",
+                    "",
+                    str(text),
+                )
+                # PATCH SUMMARY-GUARD-STRIP-META: Der Titel-Kontext-Block
+                # aus TITLE-AS-CONTEXT zaehlte bisher als Inhalt. Bei 34
+                # Wort-Transkript + 17 Wort-Meta = 51 → Guard griff nicht.
+                _text_no_ts = _re_min.sub(
+                    r"\[TITEL.*?ENDE TITEL[^\]]*\]",
+                    "",
+                    _text_no_ts,
+                    flags=_re_min.DOTALL,
+                )
+            except Exception:
+                _text_no_ts = str(text)
+            _word_count = len(_text_no_ts.split())
+            if _word_count < _min_words:
+                self._log_debug(
+                    "ollama",
+                    f"summarize_sync: Text zu kurz ({_word_count} < {_min_words} Woerter) "
+                    f"- keine Zusammenfassung",
+                )
+                return (
+                    f"⚠️ Zu wenig Transkript-Inhalt für eine aussagekräftige "
+                    f"Zusammenfassung ({_word_count} Wörter). "
+                    f"Mindestens {_min_words} Wörter erforderlich."
+                )
+
         cache_key = None
         if use_cache and not force_refresh:
             cache_key = self._get_cache_key(prompt, text, temperature)
@@ -69819,6 +69820,28 @@ class OllamaSummarizer:
             options=options,
             output_format=output_format,
         )
+        # PATCH SUMMARY-TRIM-SELF-DENIAL: Manche LLMs antworten zuerst
+        # korrekt mit "Keine ausreichende Information..." und schreiben
+        # danach trotzdem eine erfundene Zusammenfassung. Trim auf die
+        # erste Zeile.
+        if isinstance(result, str) and result:
+            _trimmed = result.lstrip()
+            _low = _trimmed[:200].lower()
+            for _marker in (
+                "keine ausreichende information",
+                "keine ausreichenden informationen",
+                "no sufficient information",
+                "insufficient information",
+                "not enough information",
+            ):
+                if _low.startswith(_marker):
+                    result = _trimmed.split("\n", 1)[0].rstrip()
+                    self._log_debug(
+                        "ollama",
+                        "summarize_sync: LLM-Selbstverneinung erkannt - "
+                        "Rueckgabe auf erste Zeile gekuerzt",
+                    )
+                    break
         if result and use_cache and cache_key is not None:
             self._cache_set(cache_key, result, ttl=self.cache_ttl)
         return result
@@ -70924,10 +70947,38 @@ class QueueManager:
                     f"shutdown: verarbeite Queue '{name}' (initial_size={initial_size}, timeout={remaining_time:.2f}s)",
                 )
 
+            # PATCH QUEUE-JOIN-TIMEOUT: queue.join() blockiert ewig, wenn
+            # task_done() nie gerufen wurde. Ersetzt durch Daemon-Thread mit
+            # Deadline = remaining_time. Danach übernimmt _drain_queue_with_timeout.
             try:
                 if hasattr(queue, "join"):
-                    queue.join()
-                    if debug:
+                    import threading as _thr_j
+                    _jt = _thr_j.Thread(
+                        target=queue.join,
+                        daemon=True,
+                        name=f"qjoin-{name}",
+                    )
+                    _jt.start()
+                    # PATCH QUEUE-JOIN-BUDGET-FIX: nur kleinen Teil des
+                    # Budgets für join() opfern, Rest bleibt fürs Draining.
+                    _join_budget = min(remaining_time * 0.25, 0.5)
+                    _jt.join(timeout=_join_budget)
+                    if _jt.is_alive():
+                        # PATCH QUEUE-JOIN-BUDGET-LOG: zeigte irreführend
+                        # remaining_time, obwohl wir nur _join_budget warten.
+                        logger.warning(
+                            f"shutdown: queue.join() für '{name}' nach "
+                            f"{_join_budget:.2f}s (Join-Budget) nicht "
+                            f"abgeschlossen – fahre fort "
+                            f"(Restbudget für Draining: "
+                            f"{max(0.0, remaining_time - _join_budget):.2f}s)"
+                        )
+                        if debug:
+                            log_debug(
+                                "queue",
+                                f"shutdown: queue.join() TIMEOUT für '{name}'",
+                            )
+                    elif debug:
                         log_debug(
                             "queue",
                             f"shutdown: queue.join() für '{name}' abgeschlossen",
@@ -71004,11 +71055,16 @@ class QueueManager:
 
         elapsed = time.monotonic() - start_time
 
-        if not all_drained and not force:
-            logger.info(
-                "shutdown: verbleibende Elemente werden nun mit force=True verworfen",
-            )
-            self._discard_remaining_queues()
+        # PATCH QUEUE-SHUTDOWN-FORCE-VERIFY: Bei force=True wurde die
+        # Verifikation übersprungen und all_drained blieb False, obwohl die
+        # Queue leer war. Jetzt: immer verifizieren; force steuert nur, ob
+        # vorher _discard_remaining_queues aufgerufen wird.
+        if not all_drained:
+            if not force:
+                logger.info(
+                    "shutdown: verbleibende Elemente werden nun mit force=True verworfen",
+                )
+                self._discard_remaining_queues()
             still_present = False
             for queue, _, name, _ in queue_configs:
                 if queue is not None:
@@ -78538,19 +78594,26 @@ class SummarizeDialog(BaseDialog):
             "in Markdown-Format.\n"
             "Ziel: Der Leser soll das Gefuehl haben, selbst dabei gewesen zu sein — "
             "wie ein Reisebericht an einen guten Freund.\n\n"
+            # PATCH PROMPT-NEUTRALIZE-ERZAEHLEND: konkrete Inhaltsbeispiele
+            # (Hangang/Sonnenuntergang/Food-Truck) entfernt. Sie wurden vom
+            # LLM bei inhaltsleerem Transkript wörtlich als Inhalt übernommen.
             "STRUKTUR (Markdown verwenden!):\n"
             "1. Einstieg (2-3 Saetze): Eine lebendige Szene aus dem Video.\n"
-            "2. Chronologische Abschnitte mit **Fett-Ueberschrift**, z.B.:\n"
-            "   **Der Sonnenuntergang am Hangang (한강)**\n"
-            "   - Details\n"
-            "   **Am Food-Truck**\n"
-            "   - Details\n"
+            "2. Chronologische Abschnitte mit **Fett-Ueberschrift**.\n"
+            "   Pro Abschnitt 1-3 Stichpunkte zu konkreten Details.\n"
+            "   Abschnittstitel und Details MUSS aus dem Transkript stammen.\n"
             "3. Fazit (1-2 Saetze): Was nimmt der Erzaehler mit?\n\n"
+            "PFLICHTREGELN:\n"
+            "• Verwende AUSSCHLIESSLICH Informationen aus dem TRANSKRIPT.\n"
+            "• Enthaelt das Transkript keine verwertbaren Details, antworte "
+            "EXAKT mit: 'Keine ausreichende Information im Transkript.'\n"
+            "• Erfinde KEINE Namen, Orte, Produkte oder Handlungen.\n"
+            "• Die STRUKTUR dient nur als Format-Geruest — nicht als Inhalt.\n\n"
             "REGELN:\n"
             "• Behalte die Markdown-Formatierung (Fett, Listen) bei.\n"
             "• Schreibe AKTIV und LEBENDIG: Farben, Geraeusche, Stimmung.\n"
-            "• Zeige statt zu erklaeren: 'Die untergehende Sonne taucht den "
-            "Han-Fluss (한강) in warmes Orange'.\n"
+            "• Zeige statt zu erklaeren — beschreibe die Szene mit eigenen "
+            "Worten, aber nur mit Inhalten aus dem Transkript.\n"
             "• Gefuehle erlaubt, aber nur aus dem Video abgeleitet.\n"
             "• VERBOTEN: 'Der Sprecher...', 'Das Video zeigt...', "
             "'Hier ist eine Zusammenfassung...'.\n"
@@ -78563,23 +78626,32 @@ class SummarizeDialog(BaseDialog):
             "des Videos in Markdown-Format.\n"
             "Ziel: Maximale Information mit angenehmer Lesbarkeit — zum Teilen, "
             "Archivieren und Weitergeben.\n\n"
+            # PATCH PROMPT-NEUTRALIZE-AUSGEWOGEN: konkrete Inhaltsbeispiele
+            # ('Hangang Ramen (한강라면)', 'Ttukseom (뚝섬) Hangang Park')
+            # entfernt. Sie wurden vom LLM bei inhaltsleerem Transkript
+            # als Inhalt übernommen.
             "STRUKTUR (Markdown verwenden!):\n"
             "1. Einleitungsabsatz (2-3 Saetze): Worum geht es? Kernaussage.\n"
-            "2. Thematische Abschnitte mit **Fett-Ueberschrift**, z.B.:\n"
-            "   **Kulinarische Spezialitaeten**\n"
-            "   - Konkrete Details mit Namen, Zahlen, Preisen\n"
-            "   - Weitere Details\n"
-            "   **Aktivitaeten**\n"
-            "   - Details\n"
+            "2. Thematische Abschnitte mit **Fett-Ueberschrift**.\n"
+            "   Pro Abschnitt 1-4 Stichpunkte zu konkreten Details.\n"
+            "   Abschnittstitel und Details MUSS aus dem Transkript stammen.\n"
             "3. Abschlussabsatz (1-2 Saetze): Was bleibt am Ende?\n\n"
+            "PFLICHTREGELN:\n"
+            "• Verwende AUSSCHLIESSLICH Informationen aus dem TRANSKRIPT.\n"
+            "• Enthaelt das Transkript keine verwertbaren Details, antworte "
+            "EXAKT mit: 'Keine ausreichende Information im Transkript.'\n"
+            "• Erfinde KEINE Namen, Orte, Produkte, Mengen oder Preise.\n"
+            "• Die STRUKTUR dient nur als Format-Geruest — nicht als Inhalt.\n\n"
             "REGELN:\n"
             "• Behalte die Markdown-Formatierung (Fett, Listen, Zeilenumbrueche) "
             "bei — keine Fliesstext-Umschreibung.\n"
-            "• Schreibe AKTIV, konkret: Zahlen, Namen, Mengen, Preise.\n"
+            "• Schreibe AKTIV, konkret: Zahlen, Namen, Mengen, Preise — "
+            "nur wenn im Transkript genannt.\n"
             "• VERBOTEN: 'Der Sprecher...', 'Das Video zeigt...', 'Der Besitzer...', "
             "'Hier ist eine Zusammenfassung...', 'In diesem Clip...'.\n"
-            "• Eigennamen in Originalsprache mit Uebersetzung in Klammern, "
-            "z.B. 'Ttukseom (뚝섬) Hangang Park', 'Hangang Ramen (한강라면)'.\n"
+            "• Eigennamen in Originalsprache mit Uebersetzung in Klammern. "
+            "Format-Vorlage: 'Name (Uebersetzung)'. NUR Namen, die im Transkript "
+            "tatsaechlich vorkommen.\n"
             "• Keine Spekulation. Nur was im Video gesagt wird.\n"
             "• Laenge: so lang wie noetig fuer vollstaendige Information.\n\n"
             "{text}\n\n"
@@ -79155,6 +79227,49 @@ class SummarizeDialog(BaseDialog):
                 log_debug("summarize", f"Regex-Split fehlgeschlagen: {e}")
 
         return [clean] if clean else []
+
+    # PATCH SY2: Filter fuer Halluzinationen im Summary-Input
+    def _strip_hallucinations_from_input(self, text: str) -> str:
+        """Entfernt Zeilen aus dem Summary-Input, die Halluzinationen sind.
+
+        Nutzt _SUMMARY_HALLUCINATION_SUBSTRINGS fuer Substring-Match.
+        Behaelt das Zeitmarken-Prefix [HH:MM:SS] der uebrigen Zeilen.
+        """
+        if not text or not isinstance(text, str):
+            return text
+        _substrings = _SUMMARY_HALLUCINATION_SUBSTRINGS
+        if not _substrings:
+            return text
+        _kept = []
+        _removed = 0
+        for _ln in text.splitlines():
+            _stripped = _ln.strip()
+            if not _stripped:
+                _kept.append(_ln)
+                continue
+            _lower = _stripped.lower()
+            # Zeitmarken-Prefix entfernen fuer Check
+            import re as _re_sy2
+            _no_ts = _re_sy2.sub(
+                r"^\[[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?[^\]]*\]\s*",
+                "", _lower,
+            ).strip()
+            _match = False
+            for _p in _substrings:
+                if _p in _no_ts:
+                    _match = True
+                    break
+            if _match:
+                _removed += 1
+            else:
+                _kept.append(_ln)
+        if _removed > 0:
+            logger.info(
+                "[SY2] %d Halluzinations-Zeile(n) aus Summary-Input "
+                "entfernt (Original: %d Zeilen, jetzt: %d)",
+                _removed, len(text.splitlines()), len(_kept),
+            )
+        return "\n".join(_kept)
 
     def _split_into_chunks(self, text: str, max_tokens: int) -> list[str]:
         """Teilt einen Text in Chunks auf, wobei jeder Chunk maximal
@@ -79823,7 +79938,16 @@ class SummarizeDialog(BaseDialog):
                 self.TEMPLATES["Kompakt (3-5 Sätze)"],
             )
             if self.use_title_context and self.stream_title:
-                base = f"Titel: {self.stream_title}\n\n{base}"
+                # PATCH TITLE-AS-CONTEXT: Titel war vorher ungeschuetzt
+                # vor dem Prompt. LLM nutzte ihn als Narrativ-Schablone
+                # ("3 Stunden", "Snacks", "Passport") und erfand passende
+                # Inhalte. Jetzt explizit als Kontext markiert.
+                base = (
+                    "[TITEL — nur Orientierung, NICHT als Inhalt verwenden]\n"
+                    f"Titel: {self.stream_title}\n"
+                    "[ENDE TITEL — Zusammenfassung basiert nur auf dem TRANSKRIPT]\n\n"
+                    f"{base}"
+                )
             effective = f"{base}\n\n{style}"
             # === PATCH E1b: Kontext in effective_prompt ===
             _ctx = ""
@@ -81254,7 +81378,14 @@ class SummarizeDialog(BaseDialog):
 
         log_debug("summarize", "  limit=%d tokens, max_tok=%d", limit, max_tok)
 
-        chunks = self._split_into_chunks(self.text, max_tok)
+        # PATCH SY2: Halluzinationen aus Input entfernen (Outro-Phrasen etc.)
+        _sy2_clean = self._strip_hallucinations_from_input(self.text)
+        if _sy2_clean != self.text:
+            logger.info(
+                "[SY2] Input-Laenge: %d -> %d Zeichen nach Filter",
+                len(self.text), len(_sy2_clean),
+            )
+        chunks = self._split_into_chunks(_sy2_clean, max_tok)
         if not chunks:
             log_debug("summarize", "  ❌ Keine Chunks erzeugt")
             self._set_status("⚠️ Kein Text zum Verarbeiten")
@@ -81275,10 +81406,14 @@ class SummarizeDialog(BaseDialog):
         # === PATCH F13g-d: chunk dump debug ===
         if DEBUG_LEVEL >= 3:
             try:
-                _dump_path = (
-                    "/tmp/dragon_chunks_"
+                # PATCH HYGIENE: cross-platform temp path (war /tmp/)
+                import tempfile as _tf_f13gd
+                import os as _os_f13gd
+                _dump_path = _os_f13gd.path.join(
+                    _tf_f13gd.gettempdir(),
+                    "dragon_chunks_"
                     + time.strftime("%Y%m%d_%H%M%S")
-                    + ".txt"
+                    + ".txt",
                 )
                 self._chunk_dump_path = _dump_path
             except Exception:
@@ -81569,8 +81704,14 @@ class SummarizeDialog(BaseDialog):
                 try:
                     # # === PATCH F9b: datetime dump fix ===
                     import time as _time_mod
+                    # PATCH HYGIENE: cross-platform temp path
+                    import tempfile as _tf_f8
+                    import os as _os_f8
                     _ts = _time_mod.strftime('%Y%m%d_%H%M%S')
-                    _dump = f"/tmp/dragon_synth_dump_{_ts}.txt"
+                    _dump = _os_f8.path.join(
+                        _tf_f8.gettempdir(),
+                        f"dragon_synth_dump_{_ts}.txt",
+                    )
                     with open(_dump, 'w', encoding='utf-8') as _f:
                         _f.write("=== PROMPT (len=" + str(len(synthesis_prompt)) + ") ===\n")
                         _f.write(synthesis_prompt)
@@ -81601,8 +81742,14 @@ class SummarizeDialog(BaseDialog):
             if DEBUG_LEVEL >= 3:
                 try:
                     import time as _time_mod2
+                    # PATCH HYGIENE: cross-platform temp path
+                    import tempfile as _tf_f8b
+                    import os as _os_f8b
                     _ts2 = _time_mod2.strftime('%Y%m%d_%H%M%S')
-                    _dump2 = f"/tmp/dragon_synth_output_{_ts2}.txt"
+                    _dump2 = _os_f8b.path.join(
+                        _tf_f8b.gettempdir(),
+                        f"dragon_synth_output_{_ts2}.txt",
+                    )
                     with open(_dump2, 'w', encoding='utf-8') as _f2:
                         _f2.write("=== SYNTHESE-OUTPUT (len=" + str(len(result) if result else 0) + ") ===\n")
                         _f2.write(result if result else '')
@@ -81753,6 +81900,22 @@ class SummarizeDialog(BaseDialog):
                 return bool(val)
         return True  # Default
 
+    # PATCH SY3: Video-Zeit-Erkennung fuer adaptive Kapitel
+    def _has_video_time(self, text: str) -> bool:
+        """Prueft, ob der Summary-Input echte Video-Zeit enthaelt.
+
+        Video-Zeit aus _format_timestamp hat IMMER Millisekunden:
+          [MM:SS.mmm]  oder  [H:MM:SS.mmm].
+        Wall-Clock-Format nutzt [HH:MM:SS] ohne Millisekunden.
+        """
+        if not text:
+            return False
+        import re as _re_sy3
+        sample = text[:5000]
+        _pat = r"\[\d{1,2}:\d{2}(?::\d{2})?\.\d{3}"
+        matches = _re_sy3.findall(_pat, sample)
+        return len(matches) >= 2
+
     def _get_synthesis_prompt(self) -> str:
         """Konsolidierter Synthese-Prompt (eine REGELN-Sektion)."""
         # PATCH G: minimal - Kapitel-Block
@@ -81768,13 +81931,55 @@ class SummarizeDialog(BaseDialog):
             )
         except Exception:
             pass
-        _chapters_de = (
-            "KAPITEL-STRUKTUR:\n"
-            "\u2022 Gliedere in 3\u20136 Kapitel.\n"
-            "\u2022 Format pro Kapitel: **MM:SS \u2013 MM:SS | Titel**\n"
-            "\u2022 Nutze Zeitmarken [MM:SS] aus dem Material.\n"
-            "\u2022 Falls keine Zeitmarken: nur **Titel**.\n\n"
-        ) if _chapters_enabled else ""
+        # PATCH SY3: adaptive Kapitel-Struktur je nach Datenlage
+        _has_vt_sy3 = self._has_video_time(_txt)
+        try:
+            logger.info(
+                "[SY3] Kapitel-Modus: %s",
+                "VIDEO_TIME" if _has_vt_sy3 else "TITLE_ONLY",
+            )
+        except Exception:
+            pass
+        if _chapters_enabled and _has_vt_sy3:
+            _chapters_de = (
+                "KAPITEL-STRUKTUR:\n"
+                "\u2022 Gliedere in 3\u20136 Kapitel.\n"
+                "\u2022 Format pro Kapitel: **MM:SS \u2013 MM:SS | Titel**\n"
+                "\u2022 Nutze Zeitmarken [MM:SS] aus dem Material.\n"
+                "\u2022 Leerzeile zwischen Kapiteln, chronologisch.\n\n"
+            )
+            # PATCH SY3-FIX: _chapters_en ergaenzt
+            _chapters_en = (
+                "CHAPTER STRUCTURE:\n"
+                "\u2022 Structure into 3\u20136 chapters.\n"
+                "\u2022 Format per chapter: **MM:SS \u2013 MM:SS | Title**\n"
+                "\u2022 Use timestamps [MM:SS] from the material.\n"
+                "\u2022 Blank line between chapters, chronological.\n\n"
+            )
+        elif _chapters_enabled:
+            _chapters_de = (
+                "KAPITEL-STRUKTUR:\n"
+                "\u2022 Gliedere in 3\u20136 Kapitel.\n"
+                "\u2022 WICHTIG: Das Material enthaelt KEINE verwertbaren "
+                "Video-Zeitmarken. Erfinde KEINE Zeitangaben.\n"
+                "\u2022 Beginne jedes Kapitel NUR mit einem Titel:\n"
+                "  **Kurzer Titel**\n"
+                "\u2022 Leerzeile zwischen Kapiteln, chronologisch.\n\n"
+            )
+            # PATCH SY3-FIX: _chapters_en ergaenzt (Titel-Modus)
+            _chapters_en = (
+                "CHAPTER STRUCTURE:\n"
+                "\u2022 Structure into 3\u20136 chapters.\n"
+                "\u2022 IMPORTANT: The material contains NO usable video "
+                "timestamps. Do NOT invent any times.\n"
+                "\u2022 Each chapter starts with a TITLE ONLY:\n"
+                "  **Short Title**\n"
+                "\u2022 Blank line between chapters, chronological.\n\n"
+            )
+        else:
+            _chapters_de = ""
+            # PATCH SY3-FIX: _chapters_en ergaenzt (disabled)
+            _chapters_en = ""
         _task_de = (
             "Kombiniere die folgenden Teilzusammenfassungen zu EINER "
             "vollstaendigen Gesamtzusammenfassung auf Deutsch.\n"
@@ -81801,8 +82006,9 @@ class SummarizeDialog(BaseDialog):
             "\u2022 Bei Detail-Ueberschneidungen zwischen Teilen: fuehre die "
             "Erklaerung EINMAL in der vollstaendigsten Form zusammen. "
             "Kein Meta-Verweis.\n"
-            "\u2022 Eigennamen in Originalsprache mit Uebersetzung in Klammern, "
-            "z.B. 'Ttukseom (ttukseom)'.\n"
+            # PATCH PROMPT-NEUTRALIZE-LONGTEXT: konkretes Beispiel entfernt
+            "\u2022 Eigennamen in Originalsprache mit Uebersetzung in Klammern. "
+            "Format-Vorlage: 'Name (Uebersetzung)'. Nur Namen aus dem Transkript.\n"
             "\u2022 Keine Spekulationswoerter ('vermutlich', 'koennte', "
             "'moeglicherweise'). Nur was in den Teilzusammenfassungen steht.\n"
             "\u2022 Keine Vorrede \u2014 direkt die Saetze.\n\n"
@@ -81856,7 +82062,8 @@ class SummarizeDialog(BaseDialog):
             ) if _chapters_enabled else ""
             return (
                 _task_en + "\n\n"
-                + _chapter_en + _warn_en
+                # PATCH RUFF-FIX: _chapter_en -> _chapters_en (Tippfehler SY3)
+                + _chapters_en + _warn_en
                 + _style_prefix
                 + _remind_en
                 + _rules_en
@@ -81993,7 +82200,13 @@ class SummarizeDialog(BaseDialog):
                 if i == 0:
                     base_prompt = prompt
                     if self.use_title_context and self.stream_title:
-                        base_prompt = f"Titel: {self.stream_title}\n\n{base_prompt}"
+                        # PATCH TITLE-AS-CONTEXT (chunk)
+                        base_prompt = (
+                            "[TITEL — nur Orientierung, NICHT als Inhalt verwenden]\n"
+                            f"Titel: {self.stream_title}\n"
+                            "[ENDE TITEL — Zusammenfassung basiert nur auf dem TRANSKRIPT]\n\n"
+                            f"{base_prompt}"
+                        )
                     chunk_prompt = (
                         f"{base_prompt}\n\nText:\n{chunk}\n\nZusammenfassung:"
                     )
@@ -83473,6 +83686,17 @@ class SummarizeDialog(BaseDialog):
                 "summarize",
                 "safe_after: TclError ignoriert (Dialog zerstört)",
             )
+        except RuntimeError:
+            # PATCH SAFE-AFTER-RUNTIMEERROR-GUARD (Marker 26)
+            # Tkinter wirft RuntimeError('main thread is not in main loop'),
+            # wenn der Root zerstört wurde und ein Worker-Thread noch
+            # after() oder winfo_exists() aufruft. Kein TclError, daher
+            # vom obigen except nicht gefangen → Log-Spam + Race.
+            log_debug(
+                "summarize",
+                "safe_after: RuntimeError ignoriert (Root zerstört, "
+                "Worker-Thread nach Shutdown)",
+            )
 
     def _is_destroyed(self) -> bool:
         """Gibt zurück, ob der Dialog bereits zerstört wurde."""
@@ -84023,9 +84247,11 @@ class SummarizeDialog(BaseDialog):
         )
         self.context_entry.pack(side="left", fill="x", expand=True, padx=4)
         try:
+            # PATCH GUI-PLACEHOLDER-NEUTRAL-DIALOG
             ToolTip(
                 self.context_entry,
-                "z. B. Koreanische Lehrerin, Hangang, Ttukseom Park, Marakochi.\n"
+                "Eigene Begriffe, die im Video vorkommen — pro Komma trennen.\n"
+                "Beispiele: 'Markenname', 'Ortsname', 'Fachbegriff'.\n"
                 "Der LLM nutzt diese Begriffe zur Identifikation,\n"
                 "erfindet aber NICHTS, was nicht im Transkript steht.",
             )
@@ -86338,6 +86564,8 @@ class InstallDependencyDialog(BaseDialog):
         "tensorflow",
         "jax",
         "stanza",
+        # PATCH BLACKLIST-FIX: argos-translate verlangt sacremoses<0.2
+        "sacremoses",
         "thinc",
         "spacy",
         "protobuf",
@@ -88476,6 +88704,15 @@ class InstallDependencyDialog(BaseDialog):
                 False,
             ),
             ("loky", "loky (parallele Verarbeitung)", "loky", "loky", False, False),
+            # PATCH FIX-PYRESILIENCE: pyresilience in InstallDialog-Liste
+            (
+                "pyresilience",
+                "pyresilience (Circuit-Breaker + Bulkhead)",
+                "pyresilience",
+                "pyresilience",
+                False,
+                False,
+            ),
             (
                 "dimits",
                 "dimits (Piper TTS Unterstützung)",
@@ -88705,11 +88942,21 @@ class InstallDependencyDialog(BaseDialog):
         if not pydantic_ver or not core_ver:
             return False, pydantic_ver, core_ver
 
-        pydantic_base = pydantic_ver.split("+")[0]
-        core_base = core_ver.split("+")[0]
-        compatible = pydantic_base.split(".")[:2] == core_base.split(".")[:2]
+        # PATCH PYDANTIC-FIX: Funktionaler Import-Test statt naivem
+        # Versionsvergleich. pydantic und pydantic-core nutzen
+        # unterschiedliche Schemata (2.14 vs 2.50). Nur der
+        # tatsaechliche Import verraet, ob sie kompatibel sind.
+        try:
+            import pydantic as _pyd_test  # noqa: F401
+            from pydantic import BaseModel as _PydBM_test
 
-        return compatible, pydantic_ver, core_ver
+            class _PydTestModel(_PydBM_test):
+                x: int
+
+            _PydTestModel(x=1)
+            return True, pydantic_ver, core_ver
+        except Exception:
+            return False, pydantic_ver, core_ver
 
     def _check_and_repair_pydantic_auto(self) -> None:
         """Prüft die Pydantic-Kompatibilität und bietet Reparatur an.
@@ -91437,7 +91684,7 @@ class InstallDependencyDialog(BaseDialog):
                             url,
                             headers={"User-Agent": "DragonWhisperer/4.0"},
                         )
-                        with urllib.request.urlopen(
+                        with urllib.request.urlopen(  # nosec B310
                             req,
                             timeout=60,
                         ) as resp:  # nosec B310
@@ -101446,6 +101693,33 @@ class AdvancedSettingsDialog:
                     f"Fehler beim Aktualisieren des Paket‑Status: {e}",
                 )
 
+    # PATCH LOG-FIX: _log-Helper fuer AdvancedSettingsDialog
+    def _log(
+        self,
+        msg: str,
+        level: str = "debug",
+        component: str = "settings",
+        exc_info: bool = False,
+        **_kwargs,
+    ) -> None:
+        """PATCH LOG-FIX: Wrapper fuer diverse Log-Level.
+
+        Wird von _update_critical_packages und ggf. weiteren Methoden
+        mit keyword-Argumenten aufgerufen.
+        """
+        try:
+            _lvl = (level or "debug").lower()
+            if _lvl in ("error", "err", "critical"):
+                logger.error(msg, exc_info=exc_info)
+            elif _lvl in ("warn", "warning"):
+                logger.warning(msg, exc_info=exc_info)
+            elif _lvl in ("info",):
+                logger.info(msg)
+            else:
+                log_debug(component or "settings", msg)
+        except Exception:
+            pass
+
     def _update_critical_packages(self) -> None:
         """Öffentliche Methode – startet die Aktualisierung der Basis-Pakete."""
         if DEBUG_LEVEL >= 1:
@@ -104841,7 +105115,10 @@ class DragonWhispererGUI:
         self._last_valid_language: str | None = None
 
         if not hasattr(self, "_last_transcription_time"):
-            self._last_transcription_time: float = time.time()
+            # PATCH IDLE-FIX: monotonic() statt time() — Touch/Read nutzen
+            # ebenfalls monotonic(), sonst mischt der Idle-Check zwei
+            # Zeitbasen und liefert riesig negative Werte.
+            self._last_transcription_time: float = time.monotonic()
         self._last_translation_time: float = time.time()
         self._last_activity_time: float = time.time()
 
@@ -107941,6 +108218,9 @@ class DragonWhispererGUI:
             _lock = _th.RLock()
             self._overlap_strip_lock = _lock
 
+        # PATCH OVERLAP-STRIP-RATIO: Reset vor jeder Auswertung
+        self._overlap_last_strip_ratio = 0.0
+
         if not text:
             return text
 
@@ -107966,15 +108246,27 @@ class DragonWhispererGUI:
                     best = n
 
             if best == 0:
-                if len(new_w) >= _MIN_WORDS and len(new_w) <= len(prev_w):
-                    _n = len(new_w)
-                    for _i in range(len(prev_w) - _n + 1):
-                        if prev_w[_i:_i + _n] == new_w:
+                # PATCH STRIP-WORD-OVERLAP-SHORT (Marker 20)
+                # Kurz-Subset-Match (1-2 Woerter) nur mit Laengen-Filter,
+                # damit legitime kurze Antworten ("Ja.", "Gut.") nicht
+                # faelschlich gestrippt werden.
+                #   * 1 Wort  -> nur strippen wenn len >= 6 ("zerlegen.")
+                #   * 2 Woerter -> nur strippen wenn beide >= 3 Zeichen
+                _m20_n_new = len(new_w)
+                _m20_short_ok = (
+                    (_m20_n_new == 1 and len(new_w[0]) >= 6)
+                    or (_m20_n_new == 2 and all(len(w) >= 3 for w in new_w))
+                )
+                if ((_m20_n_new >= _MIN_WORDS or _m20_short_ok)
+                        and _m20_n_new <= len(prev_w)):
+                    _m20_n = _m20_n_new
+                    for _m20_i in range(len(prev_w) - _m20_n + 1):
+                        if prev_w[_m20_i:_m20_i + _m20_n] == new_w:
                             logger.debug(
-                                "[OVERLAP-STRIP] slot=%s subset words=%d "
-                                "new_head=%r",
-                                slot, _n,
-                                " ".join(new_w[:8]),
+                                "[OVERLAP-STRIP-SHORT] slot=%s subset "
+                                "words=%d new_head=%r short=%s",
+                                slot, _m20_n,
+                                " ".join(new_w[:8]), _m20_short_ok,
                             )
                             return ""
                 setattr(self, _ATTR, text)
@@ -108005,6 +108297,13 @@ class DragonWhispererGUI:
                 " ".join(prev_w[-best:]),
                 " ".join(new_w[:best]),
             )
+
+            # PATCH OVERLAP-STRIP-RATIO: Anteil der gestrippten Wörter,
+            # damit der Caller den Start-Timestamp proportional verschiebt.
+            try:
+                self._overlap_last_strip_ratio = float(best) / max(1, len(new_w))
+            except Exception:
+                self._overlap_last_strip_ratio = 0.0
 
             setattr(self, _ATTR, stripped)
             return stripped
@@ -108103,6 +108402,30 @@ class DragonWhispererGUI:
                 except Exception as e:
                     logger.error(f"[{call_id}] Konvertierung fehlgeschlagen: {e}")
                     return
+
+            # PATCH DROP-BEYOND-CAP: Whisper halluziniert am Video-Ende
+            # oft Segmente jenseits der echten Dauer (Beispiel: start=20.0
+            # bei 15s-Video, "I-request ko yun", "Depende sa approver").
+            # Die _clamp_segment_to_hard_cap() klemmt start/end zwar auf
+            # cap, aber der Widget-Pfad nutzt teils die Original-Objekte
+            # mit unveränderten Timestamps. Hier verwerfen wir solche
+            # Segmente zentral, bevor der Payload gebaut wird.
+            if start is not None:
+                _cap = None
+                _ap = getattr(self, "audio_processor", None)
+                if _ap is not None:
+                    _cap = getattr(_ap, "_hard_cap", None)
+                if _cap is not None:
+                    try:
+                        if float(start) >= float(_cap):
+                            if debug_level >= 3:
+                                logger.debug(
+                                    f"[{call_id}] Drop beyond-cap segment "
+                                    f"(start={start:.3f} >= cap={_cap:.3f})",
+                                )
+                            return
+                    except (TypeError, ValueError):
+                        pass
 
             cleaned = raw_text.strip()
             if not cleaned:
@@ -108235,6 +108558,32 @@ class DragonWhispererGUI:
                         f"Overlap – ueberspringe",
                     )
                 return
+
+            # PATCH OVERLAP-STRIP-RATIO: Wenn ein Overlap-Praefix entfernt
+            # wurde, verschiebe start proportional zum gestrippten Anteil.
+            # Beispiel: Text 'A B C D' -> 'C D' (ratio=0.5); start=0.05,
+            # end=11.85 -> neuer start = 0.05 + 11.80 * 0.5 = 5.95.
+            _strip_ratio = getattr(self, "_overlap_last_strip_ratio", 0.0)
+            if (
+                _strip_ratio > 0.0
+                and start is not None
+                and end is not None
+            ):
+                try:
+                    _s_f = float(start)
+                    _e_f = float(end)
+                    _dur = _e_f - _s_f
+                    if _dur > 0.0 and _strip_ratio < 1.0:
+                        _old_start = start
+                        start = _s_f + _dur * _strip_ratio
+                        if debug_level >= 3:
+                            logger.debug(
+                                f"[{call_id}] Overlap-Strip: start "
+                                f"{_old_start:.3f} -> {start:.3f} "
+                                f"(ratio={_strip_ratio:.2f})",
+                            )
+                except (TypeError, ValueError):
+                    pass
         except Exception as _ov_exc:
             logger.debug(f"[{call_id}] overlap-strip Fehler: {_ov_exc}")
 
@@ -113479,6 +113828,33 @@ class DragonWhispererGUI:
                 handler = getattr(self, "_on_processing_finished", None)
                 if handler is not None:
                     handler(result)
+                # PATCH DEDUP-Final: Widget nach Stream-Ende durchraeumen
+                try:
+                    self.root.after(1500, self._post_dedup_widget)
+                except Exception as _df_sched:
+                    logger.debug("[DEDUP-Final] Schedule: %s", _df_sched)
+                # PATCH ERRAGG: Aggregat ausgeben
+                try:
+                    if _ERRAGG is not None:
+                        _ea = _ERRAGG.summary()
+                        log_ai(
+                            "ERR-AGG",
+                            warnings=_ea["total_warnings"],
+                            errors=_ea["total_errors"],
+                            criticals=_ea["total_criticals"],
+                            classes=_ea["classes"],
+                        )
+                        for _ek, _ec in _ea["top"]:
+                            _ek_safe = (
+                                _ek.replace(" ", "_")
+                                .replace("=", ":")
+                                .replace("\n", " ")
+                            )
+                            log_ai(
+                                "ERR-CLASS", count=_ec, msg=_ek_safe
+                            )
+                except Exception as _ea_exc:
+                    logger.debug("[ERRAGG] summary: %s", _ea_exc)
             except Exception as e:
                 logger.error(
                     f"❌ Fehler in finished_callback: {e}",
@@ -114115,7 +114491,13 @@ class DragonWhispererGUI:
                             "stream_info_updated",
                             {
                                 "title": info.get("title", "Unbekannter Titel"),
-                                "channel": info.get("uploader", "Unbekannter Kanal"),
+                                # PATCH CHANNEL-PREFER-HANDLE-EVENT
+                                "channel": (
+                                    info.get("uploader_id")
+                                    if isinstance(info.get("uploader_id"), str)
+                                    and info.get("uploader_id", "").startswith("@")
+                                    else info.get("uploader", "Unbekannter Kanal")
+                                ),
                                 "duration": info.get("duration", 0),
                             },
                         )
@@ -115040,6 +115422,166 @@ class DragonWhispererGUI:
             except Exception as e:
                 logger.debug(f"Event-Bus Fehler: {e}")
 
+    # PATCH DEDUP-Final: Widget nach Stream-Ende vollstaendig deduplizieren
+    def _post_dedup_widget(self) -> None:
+        """PATCH DEDUP-Final: Raeumt Sub-Segmente aus dem Widget.
+
+        Zweiter Durchgang nach dem Stream-Ende. Faengt Faelle, die
+        der Live-Filter (DEDUP-Widget-v2) nicht sah (Sub-vor-Container).
+        """
+        # PATCH DEDUP-Final-Guard: nur einmal pro Session laufen
+        if getattr(self, "_dedup_final_done", False):
+            logger.debug("[DEDUP-Final-Guard] bereits gelaufen - skip")
+            return
+        self._dedup_final_done = True
+        import re as _df_re
+        try:
+            widget = getattr(self, "transcript_text", None)
+            if widget is None or not widget.winfo_exists():
+                logger.debug("[DEDUP-Final] Widget nicht verfuegbar")
+                return
+            raw = widget.get("1.0", "end-1c")
+            if not raw or not raw.strip():
+                logger.debug("[DEDUP-Final] Widget leer")
+                return
+            _pat = _df_re.compile(
+                r"^\[(\d{1,2}):(\d{2})\.(\d{3})"
+                r"\s*(?:\u2192|->|-)\s*"
+                r"(\d{1,2}):(\d{2})\.(\d{3})\]\s*(.+)$"
+            )
+            _lines = raw.splitlines()
+            _entries = []
+            for _i, _ln in enumerate(_lines):
+                _m = _pat.match(_ln)
+                if not _m:
+                    continue
+                _s = (
+                    int(_m.group(1)) * 60
+                    + int(_m.group(2))
+                    + int(_m.group(3)) / 1000.0
+                )
+                _e = (
+                    int(_m.group(4)) * 60
+                    + int(_m.group(5))
+                    + int(_m.group(6)) / 1000.0
+                )
+                _t = (_m.group(7) or "").strip()
+                _entries.append((_i, _s, _e, _t))
+            if not _entries:
+                logger.debug("[DEDUP-Final] Keine Zeitmarken-Zeilen gefunden")
+                return
+            _skip = set()
+            for _idx_a, (_i_a, _s_a, _e_a, _t_a) in enumerate(_entries):
+                for _idx_b, (_i_b, _s_b, _e_b, _t_b) in enumerate(_entries):
+                    if _idx_a == _idx_b:
+                        continue
+                    if (
+                        _s_b <= _s_a
+                        and _e_b >= _e_a
+                        and _t_a
+                        and _t_a in _t_b
+                        and len(_t_b) > len(_t_a)
+                    ):
+                        _skip.add(_i_a)
+                        break
+            if not _skip:
+                logger.info("[DEDUP-Final] Keine Duplikate gefunden")
+                return
+            _cleaned = [
+                _ln for _i, _ln in enumerate(_lines) if _i not in _skip
+            ]
+            _new_text = "\n".join(_cleaned)
+            widget.delete("1.0", "end")
+            widget.insert("end", _new_text)
+            if _new_text and not _new_text.endswith("\n"):
+                widget.insert("end", "\n")
+            logger.info(
+                "[DEDUP-Final] %d Zeile(n) entfernt (%d -> %d)",
+                len(_skip), len(_lines), len(_cleaned),
+            )
+        except Exception as _df_err:
+            logger.debug("[DEDUP-Final] Fehler: %s", _df_err)
+
+    # PATCH HEALTH: periodischer Status-Log (alle 60 s)
+    def _health_log_tick(self) -> None:
+        """PATCH HEALTH: Loggt Threads, RAM, VRAM, CPU, Queue."""
+        try:
+            import threading as _h_th
+            import time as _h_time
+            _h_t0 = getattr(self, "_health_t0", None)
+            if _h_t0 is None:
+                _h_t0 = _h_time.time()
+                self._health_t0 = _h_t0
+            _h_elapsed = int(_h_time.time() - _h_t0)
+            _h_threads = _h_th.active_count()
+            _h_ram_used = "n/a"
+            _h_ram_total = "n/a"
+            _h_cpu = "n/a"
+            try:
+                import psutil as _h_ps
+                _h_mem = _h_ps.virtual_memory()
+                _h_ram_used = round(_h_mem.used / (1024**3), 1)
+                _h_ram_total = round(_h_mem.total / (1024**3), 1)
+                _h_cpu = _h_ps.cpu_percent(interval=None)
+            except Exception:
+                pass
+            _h_vram_free = "n/a"
+            _h_vram_total = "n/a"
+            try:
+                _h_fn = getattr(self, "_get_free_vram_gb", None)
+                if callable(_h_fn):
+                    _h_vram_free = _h_fn()
+                    if _h_vram_free is not None:
+                        _h_vram_free = round(_h_vram_free, 1)
+            except Exception:
+                pass
+            try:
+                import pynvml as _h_nv
+                _h_nv.nvmlInit()
+                _h_h = _h_nv.nvmlDeviceGetHandleByIndex(0)
+                _h_info = _h_nv.nvmlDeviceGetMemoryInfo(_h_h)
+                _h_vram_total = round(_h_info.total / (1024**3), 1)
+            except Exception:
+                pass
+            _h_queue = "n/a"
+            _h_pending = "n/a"
+            try:
+                _h_ap = getattr(self, "audio_processor", None)
+                if _h_ap is None:
+                    _h_wr = getattr(self, "_ap_ref", None)
+                    if _h_wr is not None:
+                        try:
+                            _h_ap = _h_wr()
+                        except Exception:
+                            _h_ap = None
+                if _h_ap is not None:
+                    _h_q = getattr(_h_ap, "_raw_audio_queue", None)
+                    if _h_q is not None:
+                        try:
+                            _h_queue = _h_q.qsize()
+                        except Exception:
+                            _h_queue = "n/a"
+                    _h_pending = getattr(_h_ap, "_pending_tasks", "n/a")
+            except Exception:
+                pass
+            logger.info(
+                "[HEALTH] t=%ds threads=%d RAM=%s/%s cpu=%s%% "
+                "VRAM_free=%s/%s queue=%s pending=%s",
+                _h_elapsed, _h_threads,
+                _h_ram_used, _h_ram_total, _h_cpu,
+                _h_vram_free, _h_vram_total,
+                _h_queue, _h_pending,
+            )
+        except Exception as _h_exc:
+            logger.debug("[HEALTH] tick-Fehler: %s", _h_exc)
+        finally:
+            try:
+                self._health_timer_id = self.root.after(
+                    60000, self._health_log_tick
+                )
+            except Exception:
+                pass
+
     def _insert_transcription_text(self, formatted: str) -> None:
         """Fügt den formatierten Transkriptionstext direkt in das transcript_text‑Widget ein."""
         if not formatted or not isinstance(formatted, str):
@@ -115048,6 +115590,55 @@ class DragonWhispererGUI:
         formatted = formatted.strip()
         if not formatted:
             return
+
+        # PATCH DEDUP-Widget: Sub-Segmente verwerfen, die in einem
+        # kuerzlich eingefuegten Container-Segment enthalten sind.
+        try:
+            import re as _re_dw
+            _dw_m = _re_dw.match(
+                r"^\[(\d{1,2}):(\d{2})\.(\d{3})"
+                r"\s*(?:\u2192|->|-)\s*"
+                r"(\d{1,2}):(\d{2})\.(\d{3})\]\s*(.+)$",
+                formatted,
+            )
+            if _dw_m:
+                _dw_s = (
+                    int(_dw_m.group(1)) * 60 + int(_dw_m.group(2))
+                    + int(_dw_m.group(3)) / 1000.0
+                )
+                _dw_e = (
+                    int(_dw_m.group(4)) * 60 + int(_dw_m.group(5))
+                    + int(_dw_m.group(6)) / 1000.0
+                )
+                _dw_txt = (_dw_m.group(7) or "").strip()
+                _dw_recent = getattr(self, "_dedupw_recent", None)
+                if _dw_recent is None:
+                    _dw_recent = []
+                    self._dedupw_recent = _dw_recent
+                _dw_skip = False
+                for _rw_s, _rw_e, _rw_t in _dw_recent:
+                    if (
+                        _rw_s <= _dw_s and _rw_e >= _dw_e
+                        and _dw_txt and _dw_txt in _rw_t
+                        and len(_rw_t) > len(_dw_txt)
+                    ):
+                        _dw_skip = True
+                        logger.debug(
+                            "[DEDUP-Widget] Sub-Segment verworfen: "
+                            "%.2f-%.2f %r (in %.2f-%.2f)",
+                            _dw_s, _dw_e, _dw_txt[:40],
+                            _rw_s, _rw_e,
+                        )
+                        break
+                if _dw_skip:
+                    return
+                # Container im Recent-Puffer speichern
+                _dw_recent.append((_dw_s, _dw_e, _dw_txt))
+                # Nur die letzten 20 Segmente behalten
+                if len(_dw_recent) > 20:
+                    del _dw_recent[:-20]
+        except Exception as _dw_err:
+            logger.debug("[DEDUP-Widget] Fehler: %s", _dw_err)
 
         try:
             widget = getattr(self, "transcript_text", None)
@@ -117763,7 +118354,8 @@ class DragonWhispererGUI:
             return
         logger.info("🧠 Manuelles Entladen des Whisper-Modells aus dem VRAM")
         self.transcription_engine._force_model_cleanup()
-        self._last_transcription_time = 0
+        # PATCH IDLE-FIX: monotonic() statt 0 (verhindert Idle-Sofort-Trigger)
+        self._last_transcription_time = time.monotonic()
         self.update_status("🧠 Whisper-Modell aus VRAM entladen")
         if hasattr(self, "vram_unload_btn") and self.vram_unload_btn.winfo_exists():
             self.vram_unload_btn.config(state="disabled")
@@ -119005,6 +119597,13 @@ class DragonWhispererGUI:
         return ""
 
     def _bind_shortcuts(self) -> None:
+        # PATCH SELFTEST: TRIGGER_v4 - einmaliger Startup-Report
+        if not getattr(self, "_selftest_done", False):
+            self._selftest_done = True
+            try:
+                self.root.after(300, self._startup_selftest)
+            except Exception:
+                pass
         """Bindet alle Tastaturkürzel an das Hauptfenster."""
         mod = "Command" if IS_MACOS else "Control"
 
@@ -119314,20 +119913,10 @@ class DragonWhispererGUI:
         _t_use = self._prepare_subtitle_data(_src_t, mode="aggregated")
         _tr_use = self._prepare_subtitle_data(_src_tr, mode="aggregated")
 
-        # Bei "translation" nur: Original-Text durch Übersetzung ersetzen
+        # PATCH HYGIENE: toten Listen-Comprehension-Block entfernt
+        # (war immer "if False else s" -> ergab identische Liste)
         if content == "translation":
-            _t_use = [
-                type(s)(
-                    text=getattr(s, "text", ""),
-                    translated=None,
-                    start=getattr(s, "start", None),
-                    end=getattr(s, "end", None),
-                    source_lang=getattr(s, "source_lang", ""),
-                    target_lang=getattr(s, "target_lang", ""),
-                ) if False else s
-                for s in _t_use
-            ]
-            # Einfacher: schreibe Übersetzung in eigenem Pfad
+            # Uebersetzung wird im eigenen Pfad geschrieben
             _write_transl_only = True
         else:
             _write_transl_only = False
@@ -121693,19 +122282,60 @@ class DragonWhispererGUI:
                                 "[CORRECT] dispose-Fehler: %s", _d_exc,
                             )
                     # PATCH F-CORR-8: Laengen-Guard gegen Content-Loss
+                    # PATCH F-CORR-10: Halluzinations-Chunks durchlassen
                     if result and isinstance(result, str):
                         _fc8_in_len = max(1, len(chunk))
                         _fc8_out_len = len(result.strip())
                         _fc8_ratio = _fc8_out_len / _fc8_in_len
                         if _fc8_ratio < 0.7:
-                            logger.warning(
-                                "[F-CORR-8] Chunk %d/%d: Korrektur "
-                                "kuerzt zu stark (%.0f%% von %d auf %d "
-                                "Zeichen) - verwerfe, behalte Original",
-                                idx + 1, total_chunks,
-                                _fc8_ratio * 100, _fc8_in_len, _fc8_out_len,
+                            # F-CORR-10: pruefen ob Original ueberwiegend
+                            # aus Halluzinationen besteht -> Kuerzung OK
+                            import re as _re_fc10
+                            _f10_lines = 0
+                            _f10_hall = 0
+                            _f10_subs = (
+                                globals().get(
+                                    "_SUMMARY_HALLUCINATION_SUBSTRINGS",
+                                    frozenset(),
+                                )
                             )
-                            result = None
+                            for _f10_ln in chunk.splitlines():
+                                _f10_s = _f10_ln.strip()
+                                if not _f10_s:
+                                    continue
+                                _f10_lines += 1
+                                _f10_norm = _re_fc10.sub(
+                                    r"^\[[0-9]{1,2}:[0-9]{2}"
+                                    r"(?::[0-9]{2})?[^\]]*\]\s*",
+                                    "", _f10_s.lower(),
+                                ).strip()
+                                for _f10_p in _f10_subs:
+                                    if _f10_p in _f10_norm:
+                                        _f10_hall += 1
+                                        break
+                            _f10_ratio = (
+                                _f10_hall / max(1, _f10_lines)
+                            )
+                            if _f10_ratio >= 0.5:
+                                logger.info(
+                                    "[F-CORR-10] Chunk %d/%d: "
+                                    "%.0f%% Halluzinationen erkannt "
+                                    "(ratio=%.0f%%) - Kuerzung akzeptiert",
+                                    idx + 1, total_chunks,
+                                    _f10_ratio * 100, _fc8_ratio * 100,
+                                )
+                                # result bleibt (gekuerzt vom LLM)
+                            else:
+                                logger.warning(
+                                    "[F-CORR-8] Chunk %d/%d: Korrektur "
+                                    "kuerzt zu stark (%.0f%% von %d auf %d "
+                                    "Zeichen, nur %.0f%% Hallus) - "
+                                    "verwerfe, behalte Original",
+                                    idx + 1, total_chunks,
+                                    _fc8_ratio * 100, _fc8_in_len,
+                                    _fc8_out_len, _f10_ratio * 100,
+                                )
+                                result = None
                     if result and result.strip():
                         corrected_chunks.append(result.strip())
                     else:
@@ -121853,7 +122483,10 @@ class DragonWhispererGUI:
         ap = getattr(self, "audio_processor", None)
         if ap is None:
             return ""
+        # PATCH G4-Fix: Kette _timed_transcriptions -> _last_session_*
         timed = []
+        _g4_src = "none"
+        _g4_had_timed = False
         try:
             _lock = getattr(ap, "_subtitle_lock", None)
             if _lock is not None:
@@ -121861,15 +122494,36 @@ class DragonWhispererGUI:
                     timed = list(
                         getattr(ap, "_timed_transcriptions", []) or []
                     )
+                    _g4_had_timed = bool(timed)
+                    if not timed:
+                        timed = list(
+                            getattr(ap, "_last_session_transcriptions", []) or []
+                        )
             else:
                 timed = list(
                     getattr(ap, "_timed_transcriptions", []) or []
                 )
+                _g4_had_timed = bool(timed)
+                if not timed:
+                    timed = list(
+                        getattr(ap, "_last_session_transcriptions", []) or []
+                    )
+            if _g4_had_timed:
+                _g4_src = "timed"
+            elif timed:
+                _g4_src = "last_session"
         except Exception as _e:
-            logger.debug("[G4] _timed_transcriptions lesen: %s", _e)
+            logger.debug("[G4-Fix] Segment-Quelle lesen: %s", _e)
             return ""
         if not timed:
+            logger.debug(
+                "[G4-Fix] Keine Segmente in timed/last_session - leer"
+            )
             return ""
+        logger.info(
+            "[G4-Fix] Nutze Quelle=%s (%d Segmente)",
+            _g4_src, len(timed),
+        )
         try:
             segments = self._prepare_subtitle_data(timed, mode="aggregated")
         except Exception as _e:
@@ -122150,6 +122804,8 @@ class DragonWhispererGUI:
                     ("keyring", "keyring"),
                     ("pyttsx3", "pyttsx3"),
                     ("langdetect", "langdetect"),
+                    # PATCH FIX-PYRESILIENCE: neuer Eintrag
+                    ("pyresilience", "pyresilience"),
                 ]
                 for pkg_name, import_name in optional_packages:
                     try:
@@ -123416,6 +124072,69 @@ class DragonWhispererGUI:
                             skipped_count += 1
                             continue
 
+                        # PATCH DEDUP-Widget-v2: Sub-Segmente verwerfen,
+                        # die zeitlich in einem kuerzlich eingefuegten
+                        # Container-Segment enthalten sind.
+                        try:
+                            import re as _dw2_re
+                            _dw2_m = _dw2_re.match(
+                                r"^\[(\d{1,2}):(\d{2})\.(\d{3})"
+                                r"\s*(?:\u2192|->|-)\s*"
+                                r"(\d{1,2}):(\d{2})\.(\d{3})\]\s*(.+)$",
+                                line,
+                            )
+                            if _dw2_m:
+                                _dw2_s = (
+                                    int(_dw2_m.group(1)) * 60
+                                    + int(_dw2_m.group(2))
+                                    + int(_dw2_m.group(3)) / 1000.0
+                                )
+                                _dw2_e = (
+                                    int(_dw2_m.group(4)) * 60
+                                    + int(_dw2_m.group(5))
+                                    + int(_dw2_m.group(6)) / 1000.0
+                                )
+                                _dw2_txt = (
+                                    _dw2_m.group(7) or ""
+                                ).strip()
+                                _dw2_recent = getattr(
+                                    self, "_dedupw2_recent", None
+                                )
+                                if _dw2_recent is None:
+                                    _dw2_recent = []
+                                    self._dedupw2_recent = _dw2_recent
+                                _dw2_skip = False
+                                for _rw2_s, _rw2_e, _rw2_t in _dw2_recent:
+                                    if (
+                                        _rw2_s <= _dw2_s
+                                        and _rw2_e >= _dw2_e
+                                        and _dw2_txt
+                                        and _dw2_txt in _rw2_t
+                                        and len(_rw2_t) > len(_dw2_txt)
+                                    ):
+                                        _dw2_skip = True
+                                        logger.debug(
+                                            "[DEDUP-Widget-v2] "
+                                            "Sub-Segment verworfen: "
+                                            "%.2f-%.2f %r (in %.2f-%.2f)",
+                                            _dw2_s, _dw2_e,
+                                            _dw2_txt[:40],
+                                            _rw2_s, _rw2_e,
+                                        )
+                                        break
+                                if _dw2_skip:
+                                    skipped_count += 1
+                                    continue
+                                _dw2_recent.append(
+                                    (_dw2_s, _dw2_e, _dw2_txt)
+                                )
+                                if len(_dw2_recent) > 20:
+                                    del _dw2_recent[:-20]
+                        except Exception as _dw2_err:
+                            logger.debug(
+                                "[DEDUP-Widget-v2] Fehler: %s", _dw2_err
+                            )
+
                         if debug_level >= 4:
                             logger.debug(
                                 "[CONSUMER-INSERT-TX] line_len=%d, repr=%r",
@@ -123992,6 +124711,326 @@ class DragonWhispererGUI:
         except Exception as e:
             logger.debug("Ignored exception: %s", e, exc_info=True)
 
+    def _startup_selftest(self) -> None:
+        """PATCH SELFTEST: TRIGGER_v4 - Startup-Dashboard mit Patch-/Status-Check."""
+        import platform as _pf
+        import os as _os
+        import sys as _sys
+        from pathlib import Path as _Path
+
+        lines = ["", "=" * 60, "===== DRAGON WHISPERER STARTUP ====="]
+
+        # PATCH FIX-MISMATCH: Pre-Sync VOR Dashboard-Aufbau.
+        # Ohne diesen Block zeigt der Language-Check forced_language=None,
+        # weil der LANG2b-Sync sonst erst NACH dem Dashboard-Bau laeuft.
+        try:
+            _pre_lv = getattr(self, "src_lang_var", None)
+            _pre_lang = ""
+            if _pre_lv is not None:
+                try:
+                    _pre_lang = _pre_lv.get() or ""
+                except Exception:
+                    _pre_lang = ""
+            if _pre_lang:
+                for _pre_attr in ("controller", "whisper_controller", "_controller"):
+                    _pre_ctrl = getattr(self, _pre_attr, None)
+                    if _pre_ctrl is None:
+                        continue
+                    _pre_fn = getattr(_pre_ctrl, "_set_source_language", None)
+                    if callable(_pre_fn):
+                        try:
+                            _pre_fn(self, _pre_lang)
+                            logger.debug(
+                                "[FIX-MISMATCH] Pre-Sync: source=%r",
+                                _pre_lang,
+                            )
+                        except Exception:
+                            pass
+                        break
+        except Exception:
+            pass
+
+        try:
+            lines.append(f"Python:    {_sys.version.split()[0]}")
+            venv = _os.environ.get("VIRTUAL_ENV", "(kein venv)")
+            lines.append(f"Venv:      {venv}")
+            lines.append(f"Platform:  {_pf.platform()}")
+        except Exception as e:
+            lines.append(f"System:    (Fehler: {e})")
+
+        try:
+            import torch as _t
+            if _t.cuda.is_available():
+                name = _t.cuda.get_device_name(0)
+                cc = _t.cuda.get_device_capability(0)
+                lines.append(f"CUDA:      OK {name} (CC {cc[0]}.{cc[1]})")
+            else:
+                lines.append("CUDA:      FEHLT (torch meldet nicht verfuegbar)")
+        except Exception as _e:
+            lines.append(f"CUDA:      FEHLT ({_e})")
+
+        try:
+            import requests as _r
+            r = _r.get("http://localhost:11434/api/tags", timeout=2)
+            if r.status_code == 200:
+                n = len(r.json().get("models", []))
+                lines.append(f"Ollama:    OK localhost:11434 ({n} Modelle)")
+            else:
+                lines.append(f"Ollama:    WARN HTTP {r.status_code}")
+        except Exception:
+            lines.append("Ollama:    FEHLT (nicht erreichbar)")
+
+        try:
+            gui_lang = None
+            lv = getattr(self, "src_lang_var", None)
+            if lv is not None:
+                try:
+                    gui_lang = lv.get()
+                except Exception:
+                    pass
+            adv = getattr(self, "advanced_settings", None)
+            eng = getattr(self, "transcription_engine", None)
+            forced = getattr(eng, "forced_language", None) if eng else None
+            ap = getattr(self, "audio_processor", None)
+            ap_eng = getattr(ap, "transcription_engine", None) if ap else None
+            ap_forced = getattr(ap_eng, "forced_language", None) if ap_eng else None
+            adv_lang = getattr(adv, "source_language", None) if adv else None
+
+            lines.append("Language:")
+            lines.append(f"  GUI:        {gui_lang!r}")
+            lines.append(f"  adv.source: {adv_lang!r}")
+            lines.append(f"  Engine:     forced_language={forced!r}")
+            lines.append(f"  AP-Engine:  forced_language={ap_forced!r}")
+            # PATCH LANG2c: Controller existiert beim Dashboard-Lauf
+            # meist noch nicht -> kein False-Positive
+            _ctrl_exists = any(
+                getattr(self, _a, None) is not None
+                for _a in ("controller", "whisper_controller", "_controller")
+            )
+            if (
+                gui_lang and gui_lang != "Automatisch"
+                and forced is None and _ctrl_exists
+            ):
+                lines.append(
+                    "  >> MISMATCH: GUI-Sprache gewaehlt, "
+                    "aber Engine.forced_language=None"
+                )
+            elif gui_lang and gui_lang != "Automatisch" and not _ctrl_exists:
+                lines.append(
+                    "  (Controller noch nicht initialisiert - "
+                    "Sync erfolgt beim Stream-Start)"
+                )
+        except Exception as e:
+            lines.append(f"Language:  (Fehler: {e})")
+
+        try:
+            adv = getattr(self, "advanced_settings", None)
+            if adv is not None:
+                lines.append(
+                    f"Config:    v{getattr(adv, '_version', '?')} (advanced_settings)"
+                )
+        except Exception:
+            pass
+
+        try:
+            src_path = _Path(__file__)
+            src_text = src_path.read_text(encoding="utf-8")
+            # PATCH SELFTEST-EXT: Registry um alle Patches erweitert
+            registry = [
+                ("C5-Familie", ["PATCH C5:", "PATCH C5.1", "PATCH C5.2",
+                                "PATCH C5.3", "PATCH C5.4"]),
+                ("G (Kapitel)", ["PATCH G: minimal", "PATCH G4:"]),
+                ("G4-Fix", ["PATCH G4-Fix"]),
+                ("SAVE", ["PATCH SAVE-FIX", "PATCH SAVE-CLEANUP"]),
+                ("U1", ["PATCH U1a:", "PATCH U1b:", "PATCH U1c:",
+                        "PATCH U1d:", "PATCH U1e:", "PATCH U1f:",
+                        "PATCH U1g:", "PATCH U1h:"]),
+                ("UI-FIX-1", ["PATCH UI-FIX-1"]),
+                ("F-CORR", ["PATCH F-CORR-1", "PATCH F-CORR-2",
+                            "PATCH F-CORR-3", "PATCH F-CORR-4",
+                            "PATCH F-CORR-5", "PATCH F-CORR-6",
+                            "PATCH F-CORR-7", "PATCH F-CORR-8",
+                            "PATCH F-CORR-9", "PATCH F-CORR-10"]),
+                ("LT1", ["PATCH LT1:"]),
+                ("TB1", ["PATCH TB1"]),
+                ("U3", ["PATCH U3:"]),
+                ("LANG1", ["PATCH LANG1"]),
+                ("LANG2", ["PATCH LANG2a", "PATCH LANG2b", "PATCH LANG2c"]),
+                ("TR1a", ["PATCH TR1a"]),
+                ("SELFTEST", ["PATCH SELFTEST"]),
+                ("ST1", ["PATCH ST1"]),
+                ("ST1-fix", ["PATCH ST1-fix"]),
+                ("SY2", ["PATCH SY2"]),
+                ("SY3", ["PATCH SY3"]),
+                ("DEDUP-Live", ["PATCH DEDUP-Live"]),
+                ("DEDUP-Widget-v2", ["PATCH DEDUP-Widget-v2"]),
+                ("DEDUP-Final", ["PATCH DEDUP-Final"]),
+                ("DEDUP-Final-Guard", ["PATCH DEDUP-Final-Guard"]),
+                ("ERRAGG", ["PATCH ERRAGG"]),
+            ]
+            total = sum(len(ms) for _, ms in registry)
+            ok = sum(1 for _, ms in registry for m in ms if m in src_text)
+            lines.append(f"Patches:   {ok}/{total}")
+            for group, ms in registry:
+                g_ok = sum(1 for m in ms if m in src_text)
+                if g_ok < len(ms):
+                    lines.append(f"  WARN {group} ({g_ok}/{len(ms)})")
+        except Exception as e:
+            lines.append(f"Patches:   (Fehler: {e})")
+
+        # PATCH DEPCHECK: Dependency-Report
+        try:
+            lines.extend(self._selftest_dependency_report())
+        except Exception as _dep_exc:
+            lines.append(f"Dependencies: (Fehler: {_dep_exc})")
+
+        # PATCH LANG2b: initialer Engine-Sync aus persistierter Sprache
+        try:
+            _gui_lang = self.src_lang_var.get()
+            for _attr in ("controller", "whisper_controller", "_controller"):
+                ctrl = getattr(self, _attr, None)
+                if ctrl is None:
+                    continue
+                set_fn = getattr(ctrl, "_set_source_language", None)
+                if not callable(set_fn):
+                    continue
+                try:
+                    set_fn(self, _gui_lang)
+                    logger.info(
+                        "[LANG2b] Startup-Sync: source_language=%r",
+                        _gui_lang,
+                    )
+                except Exception as _e:
+                    logger.debug("[LANG2b] Startup-Sync: %s", _e)
+                break
+        except Exception:
+            pass
+
+        # PATCH HEALTH: Health-Monitor starten (alle 60 s)
+        try:
+            if getattr(self, "_health_timer_id", None) is None:
+                self._health_t0 = __import__("time").time()
+                self._health_timer_id = self.root.after(
+                    60000, self._health_log_tick
+                )
+        except Exception as _h_start_exc:
+            logger.debug("[HEALTH] Start: %s", _h_start_exc)
+
+        lines.append("=" * 60)
+        lines.append("")
+        for ln in lines:
+            try:
+                logger.info(ln)
+            except Exception:
+                pass
+
+    def _on_src_lang_var_change(self) -> None:
+        """PATCH LANG2b: Quellsprache wurde im GUI geaendert."""
+        try:
+            val = self.src_lang_var.get()
+        except Exception:
+            return
+        try:
+            adv = getattr(self, "advanced_settings", None)
+            if adv is not None:
+                adv.source_language = val
+                try:
+                    adv.save_to_file()
+                except Exception as _e:
+                    logger.debug("[LANG2b] save_to_file: %s", _e)
+        except Exception as _e:
+            logger.debug("[LANG2b] Persist: %s", _e)
+        # Engine-Sync (nur wenn Controller verfuegbar)
+        for _attr in ("controller", "whisper_controller", "_controller"):
+            ctrl = getattr(self, _attr, None)
+            if ctrl is None:
+                continue
+            set_fn = getattr(ctrl, "_set_source_language", None)
+            if not callable(set_fn):
+                continue
+            try:
+                set_fn(self, val)
+                logger.info(
+                    "[LANG2b] Engine-Sync: source_language=%r", val,
+                )
+            except Exception as _e:
+                logger.debug("[LANG2b] Engine-Sync: %s", _e)
+            break
+
+    # PATCH DEPCHECK: zentraler Dependency-Report fuer SELFTEST
+    def _selftest_dependency_report(self) -> list:
+        """Prueft kritische Pakete + Binaries (DEPCHECK).
+
+        Basiert auf der Vereinigung von:
+          - _check_dependencies (pyresilience etc.)
+          - PACKAGE_SPECS (InstallDialog)
+          - critical/optional_packages (System-Check)
+        """
+        import importlib.util as _dep_util
+        import shutil as _dep_shutil
+        lines = ["Dependencies:"]
+
+        # --- Python-Module (kritisch + optional) ---
+        _modules = [
+            ("torch", "torch"),
+            ("faster-whisper", "faster_whisper"),
+            ("openai-whisper", "whisper"),
+            ("numpy", "numpy"),
+            ("scipy", "scipy"),
+            ("psutil", "psutil"),
+            ("pydantic", "pydantic"),
+            ("pydantic-core", "pydantic_core"),
+            ("requests", "requests"),
+            ("tiktoken", "tiktoken"),
+            ("pyresilience", "pyresilience"),
+            ("deep-translator", "deep_translator"),
+            ("argos-translate", "argostranslate"),
+            ("langdetect", "langdetect"),
+            ("python-docx", "docx"),
+            ("pyspellchecker", "spellchecker"),
+            ("rapidfuzz", "rapidfuzz"),
+            ("noisereduce", "noisereduce"),
+            ("browser-cookie3", "browser_cookie3"),
+            ("keyring", "keyring"),
+            ("loky", "loky"),
+        ]
+        _ok = 0
+        _missing = []
+        for _pkg, _mod in _modules:
+            try:
+                if _dep_util.find_spec(_mod) is not None:
+                    _ok += 1
+                else:
+                    _missing.append(_pkg)
+            except Exception:
+                _missing.append(_pkg)
+        lines.append(f"  Python:   {_ok}/{len(_modules)} OK")
+        if _missing:
+            lines.append(f"  Fehlend:  {', '.join(_missing)}")
+
+        # --- Subprocess-Binaries ---
+        _bins = [
+            ("ffmpeg", True),
+            ("yt-dlp", True),
+            ("ffplay", False),
+            ("espeak", False),
+            ("piper", False),
+        ]
+        _ok_b = 0
+        _missing_b = []
+        for _bname, _crit in _bins:
+            if _dep_shutil.which(_bname):
+                _ok_b += 1
+            else:
+                _missing_b.append(
+                    _bname if _crit else f"{_bname} (opt)"
+                )
+        lines.append(f"  Binaries: {_ok_b}/{len(_bins)} OK")
+        if _missing_b:
+            lines.append(f"  Fehlt:    {', '.join(_missing_b)}")
+
+        return lines
+
     def _safe_exit_dialog(self) -> None:
         """Öffnet den modalen Exit-Dialog und leitet bei Bestätigung den Shutdown ein.
         # PATCH U3: Progress-Pump stoppen (verhindert Timer-Leak)
@@ -124507,7 +125546,9 @@ class DragonWhispererGUI:
                 logger.warning(
                     "_direct_shutdown: root nicht gefunden – os._exit(0)",
                 )
-            os._exit(0)
+            if not _TESTING:  # PATCH TEST-GUARD
+                os._exit(0)
+            # PATCH TEST-GUARD-RETURN: im Test-Mode nur return
             return
 
         if debug_level >= 2:
@@ -124552,7 +125593,10 @@ class DragonWhispererGUI:
             with contextlib.suppress(Exception):
                 if root is not None and original_destroy is not None:
                     original_destroy(root)
-            os._exit(0)
+            if not _TESTING:  # PATCH TEST-GUARD
+                os._exit(0)
+            # PATCH TEST-GUARD-RETURN: im Test-Mode nur return
+            return
 
         timer = threading.Timer(SHUTDOWN_TIMEOUT, emergency_exit)
         timer.daemon = True
@@ -124655,13 +125699,16 @@ class DragonWhispererGUI:
             with contextlib.suppress(Exception):
                 sys.stderr.flush()
                 log_ai("SESSION-END", reason="shutdown_hard")
-                sys.stderr.flush()
-
-            try:
-                os._exit(0)
-            except Exception:
-                with contextlib.suppress(Exception):
-                    sys.exit(0)
+            # PATCH TEST-GUARD-NO-RETURN: kein 'return' im finally-Block,
+            # weil das Exceptions aus dem try-Teil verschluckt. Stattdessen
+            # im Test-Mode den harten Kill nur überspringen – der finally-
+            # Block läuft normal aus, die Funktion kehrt regulär zurück.
+            if not _TESTING:
+                try:
+                    os._exit(0)
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        sys.exit(0)
 
     def _save_last_url(self) -> None:
         """Speichert die aktuell im URL‑Eingabefeld angezeigte Adresse
@@ -136725,6 +137772,79 @@ class StreamHandler:
                 level=2,
             )
 
+            # PATCH ST1: Stream Summary mit Audio-Dauer-Verifikation
+            try:
+                # PATCH ST1-fix: _ap_ref ist ein weakref-Objekt
+                _st1_ap = None
+                for _st1_attr in ("audio_processor", "_audio_processor"):
+                    _st1_ap = getattr(self, _st1_attr, None)
+                    if _st1_ap is not None:
+                        break
+                if _st1_ap is None:
+                    _st1_wr = getattr(self, "_ap_ref", None)
+                    if _st1_wr is not None:
+                        try:
+                            _st1_ap = _st1_wr()
+                        except Exception:
+                            _st1_ap = None
+                _st1_segs_list = []
+                if _st1_ap is not None:
+                    _st1_segs_list = list(
+                        getattr(_st1_ap, "_timed_transcriptions", []) or []
+                    )
+                    if not _st1_segs_list:
+                        _st1_segs_list = list(
+                            getattr(
+                                _st1_ap,
+                                "_last_session_transcriptions",
+                                [],
+                            ) or []
+                        )
+                _st1_segs = len(_st1_segs_list)
+                _st1_last_t = 0.0
+                _st1_first_t = 0.0
+                if _st1_segs_list:
+                    try:
+                        _st1_ends = [
+                            float(getattr(s, "end", 0.0) or 0.0)
+                            for s in _st1_segs_list
+                        ]
+                        _st1_last_t = max(_st1_ends) if _st1_ends else 0.0
+                        _st1_starts = [
+                            float(getattr(s, "start", 0.0) or 0.0)
+                            for s in _st1_segs_list
+                        ]
+                        _st1_first_t = min(_st1_starts) if _st1_starts else 0.0
+                    except Exception:
+                        pass
+                _st1_wall = float(result.get("stream_duration", 0.0) or 0.0)
+                _st1_speed = (
+                    round(_st1_last_t / _st1_wall, 1)
+                    if _st1_wall > 0 and _st1_last_t > 0
+                    else "n/a"
+                )
+                _st1_status = (
+                    "COMPLETE"
+                    if _chunks_reader > 0 and _chunks_ap >= int(_chunks_reader * 0.9)
+                    else ("PARTIAL" if _chunks_reader > 0 else "UNKNOWN")
+                )
+                log_ai(
+                    "STREAM-SUMMARY",
+                    session=process_id,
+                    audio_dur_s=round(_st1_last_t, 1),
+                    first_ts_s=round(_st1_first_t, 1),
+                    wall_dur_s=round(_st1_wall, 1),
+                    speed_x=_st1_speed,
+                    chunks_reader=_chunks_reader,
+                    chunks_ap=_chunks_ap,
+                    chunks_disp=_chunks_disp,
+                    chunks_state=_chunks_state,
+                    segments=_st1_segs,
+                    status=_st1_status,
+                )
+            except Exception as _st1_err:
+                logger.debug("[ST1] Fehler: %s", _st1_err)
+
             _log(
                 f"🏁 run_loop beendet: process_id={process_id}, "
                 f"user_stopped={result['user_stopped']}, "
@@ -138776,11 +139896,25 @@ class StreamHandler:
         effective_timeout = min(effective_timeout, max_timeout)
 
         current_time = time.monotonic()
-        elapsed = current_time - state.last_data_time
+
+        # PATCH INACTIVITY-LIVE-ASYNC-DATA-TIME (Marker 27b)
+        # Bei Live-Streams laeuft der Datenfluss ueber den Async-
+        # Dispatcher-Pfad. state.last_data_time wird dort nicht
+        # aktualisiert, aber self._last_chunk_submit_time schon
+        # (Marker 27a). Wir nehmen den spaeteren Zeitstempel, damit
+        # der Watchdog nur bei echter Inaktivitaet feuert.
+        _ap = getattr(state, "ap", None)
+        _async_ts = (
+            getattr(_ap, "_last_chunk_submit_time", 0.0) if _ap else 0.0
+        )
+        _last_activity = max(state.last_data_time, _async_ts)
+        elapsed = current_time - _last_activity
 
         _log_debug(
             f"Letzte Aktivität: {elapsed:.1f}s her "
-            f"(Timeout: {effective_timeout:.1f}s, is_live={is_live})",
+            f"(state={current_time - state.last_data_time:.1f}s, "
+            f"async={current_time - _async_ts:.1f}s, "
+            f"Timeout: {effective_timeout:.1f}s, is_live={is_live})",
             level=4,
         )
 
@@ -138912,6 +140046,53 @@ class StreamHandler:
             )
             state.user_stopped = True
             state.should_exit = True
+            return False
+
+        # PATCH RUN-LOOP-DEFER-TO-DISPATCHER: Wenn der AudioProcessor-
+        # Dispatcher aktiv läuft, ist ER der exklusive Konsument der
+        # _raw_audio_queue. run_loop darf dann NICHT parallel aus derselben
+        # Queue lesen — sonst konkurrieren zwei Konsumenten um dieselben
+        # Chunks (Beobachtung: chunks_reader=2 aber chunks_ap=1, letzte
+        # ~5.4 s Audio verloren). Stattdessen: Prozess-/Watchdog-Monitoring
+        # bleibt aktiv (process.poll, inactivity, cancel_event), und die
+        # state.process_bytes_processed-Synchronisation hält den Watchdog
+        # ruhig, damit er nicht fälschlich den Reader neu startet.
+        _dispatcher_thread = getattr(ap, "_dispatcher_thread", None)
+        _dispatcher_shutdown = getattr(ap, "_dispatcher_shutdown", None)
+        if (
+            _dispatcher_thread is not None
+            and _dispatcher_thread.is_alive()
+            and not (
+                _dispatcher_shutdown is not None
+                and _dispatcher_shutdown.is_set()
+            )
+        ):
+            _ap_bytes = 0
+            try:
+                _ap_bytes = int(getattr(ap, "_total_bytes_processed", 0) or 0)
+            except (TypeError, ValueError):
+                _ap_bytes = 0
+            if _ap_bytes > 0:
+                try:
+                    state.process_bytes_processed = _ap_bytes
+                except Exception:
+                    pass
+                if is_verbose:
+                    logger.debug(
+                        "[STREAM] \u21b7 Defer-To-Dispatcher: Dispatcher "
+                        "aktiv, state synchronisiert (%d Bytes, process_id=%s)",
+                        _ap_bytes,
+                        state.process_id,
+                        extra={"component": "stream"},
+                    )
+                return True
+            if is_verbose:
+                logger.debug(
+                    "[STREAM] \u21b7 Defer-To-Dispatcher: Dispatcher aktiv, "
+                    "noch keine Bytes (process_id=%s)",
+                    state.process_id,
+                    extra={"component": "stream"},
+                )
             return False
 
         chunk_size = self._calculate_safe_chunk_size(state, ap)
@@ -141835,6 +143016,9 @@ class AudioProcessor:
         self._transcript_queue = deque(maxlen=int(500 * cache_factor))
         self._translation_queue = deque(maxlen=int(100 * cache_factor))
         self._timed_transcriptions = deque(maxlen=int(500 * cache_factor))
+        # PATCH DEDUP-Live: persistenter Chunk-uebergreifender Dedup
+        self._dedup_last_end: float = -1.0
+        self._dedup_last_text: str = ""
         self._timed_translations = deque(maxlen=int(200 * cache_factor))
         self._last_session_transcriptions: list = []  
         self._last_session_translations: list = []         
@@ -148735,6 +149919,69 @@ class AudioProcessor:
             raise
 
         finally:
+            # PATCH DISPATCHER-GRACE-DRAIN: Wenn der Dispatcher die
+            # While-Schleife über eines der Stop-Events verlässt, kann
+            # der Reader seinen letzten Rest-Chunk noch nicht geflusht
+            # haben. Beobachtet: 2 Chunks im Reader, aber processed=1 im
+            # Dispatcher — letzter Chunk verfiel still in der Queue.
+            # 0,5 s Nachlauf, um späte Chunks zu retten.
+            if not stop_requested and raw_audio_queue is not None:
+                _grace_end = time.monotonic() + 0.5
+                _grace_drained = 0
+                _grace_submitted = 0
+                while time.monotonic() < _grace_end:
+                    try:
+                        _g_item = raw_audio_queue.get_nowait()
+                    except queue.Empty:
+                        time.sleep(0.03)
+                        continue
+                    except Exception:
+                        break
+                    _grace_drained += 1
+                    try:
+                        with contextlib.suppress(Exception):
+                            raw_audio_queue.task_done()
+                    except Exception:
+                        pass
+                    try:
+                        _g_audio = None
+                        if isinstance(_g_item, bytes):
+                            _g_audio = _g_item
+                        elif (
+                            isinstance(_g_item, tuple)
+                            and len(_g_item) > 0
+                            and isinstance(_g_item[0], bytes)
+                        ):
+                            _g_audio = _g_item[0]
+                        if _g_audio is not None:
+                            _g_future = executor.submit(
+                                self._process_audio_chunk_async,
+                                _g_audio,
+                                self._dispatcher_trans_cb or (lambda x: None),
+                                self._dispatcher_transl_cb or (lambda x: None),
+                                self._dispatcher_err_cb or (lambda x: None),
+                            )
+                            _g_future.add_done_callback(
+                                lambda f: self._modify_pending_tasks(
+                                    -1, reason="grace_drain_done"
+                                )
+                            )
+                            self._modify_pending_tasks(
+                                1, reason="grace_drain_submit"
+                            )
+                            _grace_submitted += 1
+                    except Exception as _gex:
+                        log_warning(
+                            f"Dispatcher-Grace-Drain: Submit fehlgeschlagen: {_gex}",
+                            extra={"component": "dispatcher"},
+                        )
+                if _grace_drained > 0 or _grace_submitted > 0:
+                    log_debug(
+                        f"Dispatcher-Grace-Drain: {_grace_drained} Item(s) "
+                        f"drainiert, {_grace_submitted} nachtraeglich submitted",
+                        extra={"component": "dispatcher"},
+                    )
+
             log_debug(
                 "Dispatcher: Starte Cleanup...",
                 extra={"component": "dispatcher"},
@@ -150120,6 +151367,18 @@ class AudioProcessor:
         import gc
         import logging
         import time
+
+        # PATCH INACTIVITY-LIVE-ASYNC-DATA-TIME (Marker 27a)
+        # Live-Streams laufen ueber den Async-Dispatcher-Pfad, der
+        # state.last_data_time NICHT setzt (nur der synchrone
+        # _process_valid_chunk tut das). Ohne eigenen Stempel feuert
+        # der Inactivity-Watchdog nach 20s seit Chunk #1, obwohl
+        # fortlaufend Chunks eintreffen. Der Stempel wird in 27b vom
+        # Watchdog mitgelesen.
+        try:
+            self._last_chunk_submit_time = time.monotonic()
+        except Exception:
+            pass
 
         logger = logging.getLogger("dragon")
         debug_level = getattr(self, "debug_level", 0)
@@ -151798,6 +153057,25 @@ class AudioProcessor:
             )
             return _finalize()
 
+        # PATCH SUBTITLE-MODE-SKIP-COMBINED: Im Subtitle-Mode emittiert der
+        # Subtitle-Buffer (`_buffer_and_flush_segments`) die Segmente bereits
+        # einzeln mit korrekten Timestamps. Der kombinierte _CallbackSegment
+        # (full_text, start=min, end=max) würde ein ZWEITES Mal mit falscher
+        # Zeitspanne im Widget landen – z.B. ein 11,85s-Block statt drei
+        # kurzer Blöcke à 2-6s. Deshalb hier überspringen.
+        if getattr(self, "subtitle_mode", False):
+            metrics["callback_type"] = "skipped_subtitle_mode"
+            metrics["success"] = False
+            metrics["translation_skip_reason"] = "subtitle_mode_active"
+            if debug_level >= 3:
+                logger.debug(
+                    "[CALLBACK] #%d Kombinierter _CallbackSegment übersprungen "
+                    "(Subtitle-Mode aktiv – Einzelsegmente übernehmen)",
+                    chunk_id,
+                    extra={"component": "callback", "chunk_id": chunk_id},
+                )
+            return _finalize()
+
         invoke_t0 = time.perf_counter()
         success, error, chain, cb_type = self._dispatch_callback_with_fallback(
             callback_payload=callback_payload,
@@ -153469,7 +154747,9 @@ class AudioProcessor:
         )
 
         unique_segments: list[TranscriptionResult] = []
-        last_end = -1.0
+        # PATCH DEDUP-Live: persistentes last_end ueber Chunks hinweg
+        last_end = getattr(self, "_dedup_last_end", -1.0)
+        last_text = getattr(self, "_dedup_last_text", "") or ""
         tolerance = 0.1
 
         for seg in sorted_segments:
@@ -153483,6 +154763,20 @@ class AudioProcessor:
                             "subtitle",
                             f"Chunk #{chunk_id}: Duplikat übersprungen: "
                             f"'{seg.text[:50]}...'",
+                        )
+                    continue
+                # PATCH DEDUP-Live: Substring-Check gegen letzten Text
+                _dedup_norm = (seg.text or "").strip()
+                if (
+                    _dedup_norm
+                    and last_text
+                    and _dedup_norm in last_text
+                ):
+                    if _sub_debug:
+                        log_debug(
+                            "subtitle",
+                            f"Chunk #{chunk_id}: Substring-Duplikat "
+                            f"übersprungen: '{seg.text[:50]}...'",
                         )
                     continue
                 if unique_segments:
@@ -153507,6 +154801,22 @@ class AudioProcessor:
                     f"Chunk #{chunk_id}: alle Segmente als Duplikate gefiltert",
                 )
             return
+
+        # PATCH DEDUP-Live: persistenten Zustand aktualisieren
+        try:
+            _new_end = max(
+                (s.end for s in unique_segments if s.end is not None),
+                default=None,
+            )
+            if _new_end is not None:
+                self._dedup_last_end = float(_new_end)
+            # letzten ~500 Zeichen als Substring-Referenz speichern
+            _joined = " ".join(
+                (s.text or "") for s in unique_segments
+            )
+            self._dedup_last_text = _joined[-500:]
+        except Exception as _dd_err:
+            logger.debug("[DEDUP-Live] Persist-Fehler: %s", _dd_err)
 
         MAX_SEGMENTS_PER_CALLBACK = 50
         segments_to_send = unique_segments[:MAX_SEGMENTS_PER_CALLBACK]
@@ -155233,6 +156543,260 @@ class AudioProcessor:
                         f"base={_offset_base:.2f}",
                     )
 
+                # ════════════════════════════════════════════════════════════
+                # PATCH BUFFER-CONTAINED-SHORT-SEGMENT (Marker 21)
+                # Kurze Whisper-Fragmente (1-3 Woerter), die zusammenhaengend
+                # in einem benachbarten gepufferten Segment vorkommen und
+                # zeitlich ueberlappen, werden verworfen.
+                if seg.text:
+                    _m21_drop = False
+                    try:
+                        import re as _m21_re
+                        _m21_wre = _m21_re.compile(r"[\w\u00C0-\u024F]+")
+                        _m21_new_words = _m21_wre.findall(seg.text.lower())
+                        if 1 <= len(_m21_new_words) <= 3:
+                            for _m21_old_start in tuple(buffer.keys()):
+                                try:
+                                    if abs(float(_m21_old_start) - start_val) > 3.0:
+                                        continue
+                                except (TypeError, ValueError):
+                                    continue
+                                _m21_old_seg = buffer.get(_m21_old_start)
+                                if (_m21_old_seg is None or _m21_old_seg is seg
+                                        or not _m21_old_seg.text):
+                                    continue
+                                _m21_old_words = _m21_wre.findall(_m21_old_seg.text.lower())
+                                if len(_m21_old_words) < len(_m21_new_words):
+                                    continue
+                                _m21_n = len(_m21_new_words)
+                                for _m21_i in range(len(_m21_old_words) - _m21_n + 1):
+                                    if (_m21_old_words[_m21_i:_m21_i + _m21_n]
+                                            == _m21_new_words):
+                                        _m21_drop = True
+                                        logger.debug(
+                                            "[SHORT-FRAG-DROP] drop new(%.3f..%.3f) "
+                                            "words=%d contained_in(%.3f..%.3f)",
+                                            start_val, end_val,
+                                            _m21_n,
+                                            _m21_old_start,
+                                            getattr(_m21_old_seg, "end", _m21_old_start),
+                                        )
+                                        break
+                                if _m21_drop:
+                                    break
+                    except Exception as _m21_exc:
+                        logger.debug("[SHORT-FRAG-DROP] skip: %s", _m21_exc)
+                    if _m21_drop:
+                        continue
+                # PATCH BUFFER-CONTAINED-SHORT-DROP-REVERSE (Marker 21b)
+                # Wenn das EINGEHENDE Segment laenger ist (>=3 Woerter) und
+                # ein bereits gepuffertes KURZES Fragment (1-3 Woerter) als
+                # Praefix enthaelt (Dstart < 3s), entferne das Fragment aus
+                # dem Buffer und ziehe den neuen Start auf das Fragment-Start.
+                # Deckt die Arrival-Order ab, bei der Whisper das kurze
+                # Fragment VOR dem langen Segment liefert:
+                #   vorher gepuffert: [31.310..31.670] "zerlegen."
+                #   jetzt eingehend:  [31.751..33.940] "zerlegen, in zwei ..."
+                if seg.text:
+                    try:
+                        import re as _m21b_re
+                        _m21b_wre = _m21b_re.compile(r"[\w\u00C0-\u024F]+")
+                        _m21b_words_new = _m21b_wre.findall(seg.text.lower())
+                        if len(_m21b_words_new) >= 3:
+                            for _m21b_old_start in tuple(buffer.keys()):
+                                try:
+                                    if abs(float(_m21b_old_start) - start_val) > 3.0:
+                                        continue
+                                except (TypeError, ValueError):
+                                    continue
+                                _m21b_old_seg = buffer.get(_m21b_old_start)
+                                if (_m21b_old_seg is None
+                                        or _m21b_old_seg is seg
+                                        or not _m21b_old_seg.text):
+                                    continue
+                                _m21b_words_old = _m21b_wre.findall(
+                                    _m21b_old_seg.text.lower()
+                                )
+                                if not (1 <= len(_m21b_words_old) <= 3):
+                                    continue
+                                _m21b_n = len(_m21b_words_old)
+                                if _m21b_words_new[:_m21b_n] != _m21b_words_old:
+                                    continue
+                                buffer.pop(_m21b_old_start, None)
+                                self._segment_fingerprints.pop(_m21b_old_start, None)
+                                for _k in tuple(keys):
+                                    if (isinstance(_k, tuple) and _k
+                                            and _k[0] == _m21b_old_start):
+                                        keys.discard(_k)
+                                try:
+                                    _m21b_old_start_f = float(_m21b_old_start)
+                                    if _m21b_old_start_f < start_val:
+                                        start_val = _m21b_old_start_f
+                                        seg.start = start_val
+                                except (TypeError, ValueError):
+                                    pass
+                                logger.debug(
+                                    "[SHORT-FRAG-DROP-REV] drop old(%.3f..%.3f) "
+                                    "words=%d extended new(%.3f..%.3f)",
+                                    _m21b_old_start,
+                                    getattr(_m21b_old_seg, "end", _m21b_old_start),
+                                    _m21b_n, start_val, end_val,
+                                )
+                                break
+                    except Exception as _m21b_exc:
+                        logger.debug("[SHORT-FRAG-DROP-REV] skip: %s", _m21b_exc)
+                # PATCH BUFFER-OVERLAP-DEDUP-PREFIX (Marker 17)
+                # ════════════════════════════════════════════════════════════
+                # Whisper liefert an Chunk-Grenzen teils ZWEI unterschiedliche
+                # Transkriptionen fuer denselben Audiobereich (gleicher Wort-
+                # Praefix, ueberlappende Zeitstempel). Beide wurden bisher
+                # eingefuegt -> doppelte Zeilen im Transkript, z.B.:
+                #   [40.210..41.970] "Aber in der topologischen Phase, in der
+                #                     die Haelften zusammengehalten werden,"
+                #   [40.340..44.840] "Aber in der topologischen Phase verbindet
+                #                     sich jede Haelfte mit dem Nachbarn."
+                # Fix: Bei zeitlichem Overlap (|dStart| < 3s) UND gemeinsamem
+                # Wort-Praefix >= 4 Woerter nur das Segment mit dem spaeteren
+                # end-Timestamp behalten.
+                if seg.text:
+                    import re as _dd_re  # noqa: PLC0415
+                    _dd_w_re = _dd_re.compile(r"[\w\u00C0-\u024F]+")
+                    _dd_skip_new = False
+                    for _ex_start in tuple(buffer.keys()):
+                        try:
+                            if abs(float(_ex_start) - start_val) > 3.0:
+                                continue
+                        except (TypeError, ValueError):
+                            continue
+                        _ex_seg = buffer.get(_ex_start)
+                        if _ex_seg is None or _ex_seg is seg or not _ex_seg.text:
+                            continue
+                        _w_old = _dd_w_re.findall(_ex_seg.text.lower())
+                        _w_new = _dd_w_re.findall(seg.text.lower())
+                        _shared = 0
+                        for _a, _b in zip(_w_old, _w_new):
+                            if _a != _b:
+                                break
+                            _shared += 1
+                        if _shared < 4:
+                            continue
+                        _ex_end = float(
+                            getattr(_ex_seg, "end", _ex_start) or _ex_start
+                        )
+                        _keep_new = (end_val > _ex_end) or (
+                            end_val == _ex_end
+                            and len(seg.text or "") >= len(_ex_seg.text or "")
+                        )
+                        if _keep_new:
+                            buffer.pop(_ex_start, None)
+                            self._segment_fingerprints.pop(_ex_start, None)
+                            for _k in tuple(keys):
+                                if (isinstance(_k, tuple) and _k
+                                        and _k[0] == _ex_start):
+                                    keys.discard(_k)
+                            logger.debug(
+                                "[OVERLAP-DEDUP] replace old(%.3f..%.3f) "
+                                "new(%.3f..%.3f) shared=%d",
+                                _ex_start, _ex_end,
+                                start_val, end_val, _shared,
+                            )
+                        else:
+                            if end_val > _ex_end:
+                                _ex_seg.end = end_val
+                            logger.debug(
+                                "[OVERLAP-DEDUP] drop new(%.3f..%.3f) "
+                                "old(%.3f..%.3f) shared=%d",
+                                start_val, end_val,
+                                _ex_start,
+                                getattr(_ex_seg, "end", _ex_end),
+                                _shared,
+                            )
+                            _dd_skip_new = True
+                            break
+                    if _dd_skip_new:
+                        continue
+                # PATCH BUFFER-OVERLAP-DEDUP-MERGE (Marker 19)
+                # Wenn der gemeinsame Wortblock NICHT am Anfang des alten,
+                # sondern mitten drin liegt, und am Anfang des neuen:
+                #   old: "... könnte es die Lösung für eines der größten Probleme sein."
+                #   new: "könnte es die Lösung für eines der größten Probleme der Quantencomputer sein."
+                # Dann: new ersetzt alles ab dem Block im old-Text.
+                if seg.text:
+                    _m19_merged = False
+                    try:
+                        import re as _m19_re
+                        _m19_wre = _m19_re.compile(r"[\w\u00C0-\u024F]+")
+                        _m19_new_words = _m19_wre.findall(seg.text.lower())
+                        if len(_m19_new_words) >= 5:
+                            for _m19_old_start in tuple(buffer.keys()):
+                                try:
+                                    if abs(float(_m19_old_start) - start_val) > 5.0:
+                                        continue
+                                except (TypeError, ValueError):
+                                    continue
+                                _m19_old_seg = buffer.get(_m19_old_start)
+                                if (_m19_old_seg is None or _m19_old_seg is seg
+                                        or not _m19_old_seg.text):
+                                    continue
+                                _m19_old_words = _m19_wre.findall(_m19_old_seg.text.lower())
+                                if len(_m19_old_words) < 5:
+                                    continue
+                                _m19_best_n = 0
+                                _m19_best_j = -1
+                                _m19_max = min(15, len(_m19_new_words))
+                                for _m19_n in range(_m19_max, 4, -1):
+                                    _m19_needle = _m19_new_words[:_m19_n]
+                                    for _m19_j in range(len(_m19_old_words) - _m19_n + 1):
+                                        if (_m19_old_words[_m19_j:_m19_j + _m19_n]
+                                                == _m19_needle):
+                                            _m19_best_n = _m19_n
+                                            _m19_best_j = _m19_j
+                                            break
+                                    if _m19_best_n > 0:
+                                        break
+                                if _m19_best_n < 5:
+                                    continue
+                                try:
+                                    _m19_old_matches = list(
+                                        _m19_wre.finditer(_m19_old_seg.text)
+                                    )
+                                    if _m19_best_j >= len(_m19_old_matches):
+                                        continue
+                                    _m19_char_pos = _m19_old_matches[_m19_best_j].start()
+                                except Exception:
+                                    continue
+                                _m19_prefix = _m19_old_seg.text[:_m19_char_pos]
+                                _m19_merged_text = (_m19_prefix + seg.text).strip()
+                                if not _m19_merged_text:
+                                    continue
+                                _m19_old_end = float(
+                                    getattr(_m19_old_seg, "end", _m19_old_start)
+                                    or _m19_old_start
+                                )
+                                _m19_merge_start = float(_m19_old_start)
+                                _m19_merge_end = max(_m19_old_end, end_val)
+                                _m19_old_seg.text = _m19_merged_text
+                                _m19_old_seg.start = _m19_merge_start
+                                _m19_old_seg.end = _m19_merge_end
+                                self._segment_fingerprints[_m19_merge_start] = (
+                                    _m19_merge_start,
+                                    _m19_merge_end,
+                                    f"{len(_m19_merged_text)}:{_m19_merged_text[:50]}",
+                                )
+                                logger.debug(
+                                    "[OVERLAP-DEDUP-MERGE] merged old(%.3f..%.3f) "
+                                    "+ new(%.3f..%.3f) -> (%.3f..%.3f) block=%d",
+                                    _m19_old_start, _m19_old_end,
+                                    start_val, end_val,
+                                    _m19_merge_start, _m19_merge_end,
+                                    _m19_best_n,
+                                )
+                                _m19_merged = True
+                                break
+                    except Exception as _m19_exc:
+                        logger.debug("[OVERLAP-DEDUP-MERGE] skip: %s", _m19_exc)
+                    if _m19_merged:
+                        continue
                 text_fingerprint = f"{len(seg.text)}:{seg.text[:50]}"
                 key = (start_val, end_val, text_fingerprint)
 
@@ -159403,7 +160967,7 @@ class AudioProcessor:
                 except Exception:
                     pass
 
-                if self._event_bus is not None:
+                if getattr(self, "_event_bus", None) is not None:  # PATCH TEST-GUARD-EVENTBUS
                     try:
                         self._event_bus.emit(
                             "lost_chunk_saved",
@@ -170772,7 +172336,13 @@ class AudioProcessor:
 
                 return {
                     "title": data.get("title", "Unbekannt"),
-                    "channel": data.get("uploader", "Unbekannt"),
+                    # PATCH CHANNEL-PREFER-HANDLE: @handle bevorzugen
+                    "channel": (
+                        data.get("uploader_id")
+                        if isinstance(data.get("uploader_id"), str)
+                        and data.get("uploader_id", "").startswith("@")
+                        else data.get("uploader", data.get("channel", "Unbekannt"))
+                    ),
                     "duration": data.get("duration", 0),
                     "thumbnail": data.get("thumbnail", ""),
                     "platform": _platform,
@@ -185308,8 +186878,19 @@ class WhisperLayoutManager:
             font=Fonts.SMALL,
         ).pack(anchor="w")
 
-        _src_values = [name for name, _ in SORTED_LANGUAGES]
-        gui.src_lang_var = tk.StringVar(value="Automatisch")
+        # PATCH LANG2a: "Automatisch" als erster Eintrag
+        _src_values = ["Automatisch"] + [name for name, _ in SORTED_LANGUAGES]
+        # PATCH LANG2a: persistierten Wert laden
+        _saved_src_lang = "Automatisch"
+        try:
+            _adv_l2 = getattr(gui, "advanced_settings", None)
+            if _adv_l2 is not None:
+                _saved_src_lang = (
+                    getattr(_adv_l2, "source_language", "") or "Automatisch"
+                )
+        except Exception:
+            pass
+        gui.src_lang_var = tk.StringVar(value=_saved_src_lang)
         gui.src_lang_combo = ttk.Combobox(
             src_lang_frame,
             textvariable=gui.src_lang_var,
@@ -185323,6 +186904,17 @@ class WhisperLayoutManager:
             "Quellsprache der Transkription.\n"
             "Automatisch = Whisper erkennt die Sprache selbst.",
         )
+        # PATCH LANG2b: onChange-Handler
+        try:
+            def _on_src_lang_change(*_a):
+                try:
+                    if hasattr(gui, "_on_src_lang_var_change"):
+                        gui._on_src_lang_var_change()
+                except Exception:
+                    pass
+            gui.src_lang_var.trace_add("write", _on_src_lang_change)
+        except Exception:
+            pass
 
         if DEBUG_LEVEL >= 3:
             _logger.debug(
@@ -185499,10 +187091,13 @@ class WhisperLayoutManager:
             side="left", fill="x", expand=True, padx=4,
         )
         try:
+            # PATCH GUI-PLACEHOLDER-NEUTRAL-MAIN
             ToolTip(
                 gui.main_context_entry,
-                "z. B. Hangang, Ttukseom, Marakochi, "
-                "\u1108\u1161\u110c\u1161\u1107\u116E\u11AB = eine Frau\n"
+                "Eigene Begriffe, die im Video vorkommen — pro Komma trennen.\n"
+                "Format: einfach Namen eintragen, oder 'Original = Bedeutung'\n"
+                "fuer fremdsprachige Begriffe / Erklaerungen.\n"
+                "Beispiele: 'Markenname', 'Ortsname', 'Fachbegriff'.\n"
                 "Wird fuer Whisper, Transkript-Korrektur UND "
                 "Zusammenfassung genutzt.",
             )
@@ -187673,6 +189268,59 @@ _DEFAULT_BLACKLIST: tuple[str, ...] = (
 )
 
 
+# PATCH SY2: Substring-Phrasen fuer Summary-Input-Filter.
+# Nur MEHR-WORT-Phrasen um False-Positives zu vermeiden.
+# Match: prueft, ob die Phrase als Substring (lowercase) vorkommt.
+_SUMMARY_HALLUCINATION_SUBSTRINGS: frozenset[str] = frozenset({
+    # Japanisch (Outro)
+    "見てくれてありがとう",
+    "見てくれてありがとう!",
+    "ご視聴ありがとうございました",
+    "ご視聴ありがとう",
+    "次回は美味しいビデオでお会いしましょう",
+    "またねー",
+    # Chinesisch (Outro)
+    "谢谢收看",
+    "谢谢观看",
+    "謝謝收看",
+    "謝謝觀看",
+    "谢谢你们的观看",
+    "感謝觀看",
+    "感谢观看",
+    "下次見",
+    "下次见",
+    "下次再見",
+    "下次再见",
+    "我们下次见",
+    "我們下次見",
+    # Indonesisch / Malaiisch
+    "terima kasih telah menonton",
+    "terima kasih sudah menonton",
+    "terima kasih",
+    # Russisch
+    "спасибо за просмотр",
+    "спасибо за внимание",
+    "до следующего видео",
+    # Norwegisch / Nynorsk (Whisper-Fehlklassifikation)
+    "norske rydde",
+    "takk for at du så på",
+    # Englisch
+    "thank you for watching",
+    "thanks for watching",
+    "please subscribe",
+    "subscribe to the channel",
+    "see you next time",
+    "have a nice day",
+    # Deutsch
+    "danke fürs zuschauen",
+    "danke für das zuschauen",
+    "vielen dank fürs zuschauen",
+    "bis zum nächsten mal",
+    "bis nächstes mal",
+    "wir sehen uns",
+})
+
+
 @dataclass(init=False)
 class AdvancedSettings:
     """Erweiterte Einstellungen für Dragon Whisperer.
@@ -187840,6 +189488,8 @@ class AdvancedSettings:
     summarize_model: str = "auto"
     # PATCH U1a: correction_model Dataclass-Feld
     correction_model: str = ""
+    # PATCH LANG2a: Quellsprache persistent
+    source_language: str = "Automatisch"
 
     live_from_start: bool = False
     download_inactivity_timeout: float = 30.0
@@ -191225,6 +192875,8 @@ class AdvancedSettings:
             "ollama_model": self.ollama_model,
             # PATCH U1b: correction_model in to_dict
             "correction_model": getattr(self, "correction_model", ""),
+            # PATCH LANG2a: source_language in to_dict
+            "source_language": getattr(self, "source_language", "Automatisch"),
             "ollama_host": self.ollama_host,
             "ollama_temperature": self.ollama_temperature,
             "asian_mode": self.asian_mode,
@@ -191299,7 +192951,7 @@ class AdvancedSettings:
         """Speichert die aktuellen Einstellungen atomar in eine JSON‑Datei.
         Dabei werden Modellnamen normalisiert (geschützte Bindestriche ersetzt).
         """
-        import shutil
+        # PATCH RUFF-FIX: unused shutil entfernt
         import time
 
         start_time = time.perf_counter()
@@ -194956,6 +196608,8 @@ class StartupConfig:
     profile: str | None = None
     model: str | None = None
     language: str | None = None
+    # PATCH CLI-SOURCE-LANGUAGE (Marker 23a)
+    source_language: str | None = None
     benchmark: bool = False
     safe_mode: bool = False
     repair_config: bool = False
@@ -195203,6 +196857,23 @@ def _run_headless(args: argparse.Namespace, startup_config: StartupConfig) -> in
         transcription_engine=transcription_engine,
         translation_engine=translation_engine,
     )
+
+    # PATCH BIND-FORCED-LANGUAGE (Marker 23b)
+    # Wenn --source-language gesetzt wurde, binden wir die Quell-Sprache
+    # direkt an die TranscriptionEngine. forced_language umgeht die
+    # Auto-Erkennung und verhindert Whisper-Bias ("tatoo" statt "tata").
+    _forced_src = getattr(startup_config, "source_language", None)
+    if _forced_src:
+        try:
+            if transcription_engine is not None:
+                transcription_engine.forced_language = _forced_src
+                logger.info(
+                    "[CLI-SRC-LANG] forced_language='%s' an %s gebunden",
+                    _forced_src,
+                    type(transcription_engine).__name__,
+                )
+        except Exception as _e:
+            logger.warning("[CLI-SRC-LANG] Binden fehlgeschlagen: %s", _e)
     if args.quiet:
 
         def trans_cb(res: TranscriptionResult) -> None:
@@ -196891,6 +198562,13 @@ def main() -> int:
         profile=args.profile,
         model=args.model,
         language=args.language,
+        # PATCH CLI-SOURCE-LANGUAGE (Marker 23a-fix)
+        # Bestehender --source-language-Parameter liefert "" statt None,
+        # wenn nicht gesetzt. Wir normalisieren das hier zu None, damit
+        # die Engine es als "auto" interpretiert.
+        source_language=(
+            getattr(args, "source_language", None) or None
+        ),
         benchmark=args.benchmark,
         safe_mode=args.safe_mode,
         repair_config=args.repair_config,
