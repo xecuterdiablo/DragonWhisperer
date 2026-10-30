@@ -491,6 +491,19 @@ except ImportError:
 _EXIT_IN_PROGRESS_EVENT = threading.Event()
 _COMPONENT = "config"
 
+# ── P11-P0a-A: Run-Kontext (ID, Start, Counter) ───────────────────────────
+import time as _p11_time  # unabhaengig vom Modul-Level `time`
+_RUN_ID: str = os.urandom(4).hex()  # 8 hex, kein uuid-Import noetig
+_RUN_START_MONO: float = _p11_time.monotonic()
+_RUN_LOG_DIR_BASE: str = os.getenv(
+    "DW_DIAGNOSTICS_DIR",
+    os.path.expanduser("~/.local/share/dragonwhisperer/runs"),
+)
+_RUN_COUNTERS: dict[str, int] = {}
+_RUN_COUNTERS_LOCK = threading.Lock()
+_RUN_LOG_DIR_CACHE: str | None = None
+# END P11-P0a-A
+
 if DEBUG_LEVEL >= 3:
     print("Handler:", logger.handlers)
     print("Filter:", logger.filters)
@@ -1040,6 +1053,29 @@ def get_model_manager() -> ModelManager:
 _ALLOWED_KEYS_CACHE: dict[int, set[str]] = {}
 _CACHE_LOCK = threading.RLock()
 _CACHE_MAXSIZE = 1000
+
+# PATCH 34: Warn-Deduplizierung (Erste Occurrence -> WARNING, weitere -> DEBUG)
+_WARN_ONCE: dict[str, bool] = {}
+
+
+def _warn_once(key: str, msg: str, *args: Any, extra: dict | None = None) -> None:
+    """Loggt eine Warnung nur beim ersten Auftreten pro Key.
+
+    Erste Occurrence -> WARNING, weitere -> DEBUG. Der Text bleibt identisch,
+    damit die Log-Analyse bei --debug 3 weiterhin alle Vorkommen sieht.
+    """
+    if _WARN_ONCE.get(key):
+        if args:
+            logger.debug(msg, *args, extra=extra)
+        else:
+            logger.debug(msg, extra=extra)
+    else:
+        _WARN_ONCE[key] = True
+        if args:
+            logger.warning(msg, *args, extra=extra)
+        else:
+            logger.warning(msg, extra=extra)
+# END PATCH 34
 
 
 def _get_allowed_keys_for_func(func: Any) -> set[str]:
@@ -2208,14 +2244,30 @@ def _cleanup_loky_on_startup() -> None:
 
 _cleanup_loky_on_startup()
 
-logger.info(
-    "🐉 Dragon Whisperer - Platform: %s %s (Debug-Level: %d, Container: %s, GUI: %s)",
-    SYSTEM,
-    "ARM" if IS_ARM else "x86",
-    DEBUG_LEVEL,
-    "yes" if IS_CONTAINERIZED else "no",
-    "available" if GUI_AVAILABLE else "unavailable",
-)
+
+# PATCH 32a: QUIT-SUPPRESS-STARTUP-LOGS
+def _cli_quiet_requested() -> bool:
+    """Prueft sys.argv auf -q/--quiet OHNE argparse zu instanziieren.
+
+    Wird auch auf Modul-Level (Import-Zeit) benoetigt, wo ``args`` noch
+    nicht existiert. Bei Fehlern (z.B. sys.argv manipuliert) defensiv
+    ``False`` zurueckgeben, damit nichts unterdrueckt wird.
+    """
+    try:
+        return any(a in ("-q", "--quiet") for a in sys.argv[1:])
+    except Exception:
+        return False
+
+
+if not _cli_quiet_requested():
+    logger.info(
+        "🐉 Dragon Whisperer - Platform: %s %s (Debug-Level: %d, Container: %s, GUI: %s)",
+        SYSTEM,
+        "ARM" if IS_ARM else "x86",
+        DEBUG_LEVEL,
+        "yes" if IS_CONTAINERIZED else "no",
+        "available" if GUI_AVAILABLE else "unavailable",
+    )
 
 __all__ = [
     "DEBUG_COMPONENTS",
@@ -3000,6 +3052,219 @@ def log_dbg(category: str, **fields: Any) -> None:
         log_ai(f"DBG-{category}", **fields)
     except Exception:
         pass
+
+
+# ── P11-P0a-B: Run-Log-Dir, Event-Log, Counter, Summary ─────────────────────
+def _run_log_dir() -> str:
+    """Run-Diagnose-Verzeichnis; lazy erstellt. Crasht nie."""
+    global _RUN_LOG_DIR_CACHE
+    if _RUN_LOG_DIR_CACHE is not None:
+        return _RUN_LOG_DIR_CACHE
+    try:
+        ts = _p11_time.strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(_RUN_LOG_DIR_BASE, f"{ts}-{_RUN_ID}")
+        os.makedirs(path, exist_ok=True)
+        _RUN_LOG_DIR_CACHE = path
+        return path
+    except Exception:
+        try:
+            fb = os.path.join("/tmp", f"dragon_run_{_RUN_ID}")
+            os.makedirs(fb, exist_ok=True)
+            _RUN_LOG_DIR_CACHE = fb
+            return fb
+        except Exception:
+            _RUN_LOG_DIR_CACHE = "/tmp"
+            return "/tmp"
+
+
+def _run_counter_inc(key: str, n: int = 1) -> None:
+    """Thread-sicherer Counter. Crasht nie."""
+    try:
+        with _RUN_COUNTERS_LOCK:
+            _RUN_COUNTERS[key] = _RUN_COUNTERS.get(key, 0) + n
+    except Exception:
+        pass
+
+
+def _run_log_event(event: str, **fields: Any) -> None:
+    """Schreibt strukturiertes Event nach events.jsonl UND spiegelt zu log_ai.
+    Crasht nie. JSONL immer an, stderr-Spiegel via DW_AI_LOG=1.
+    """
+    try:
+        import json as _json
+        entry: dict = {
+            "ts": _p11_time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "mono": round(_p11_time.monotonic() - _RUN_START_MONO, 3),
+            "rid": _RUN_ID,
+            "event": event,
+        }
+        if fields:
+            entry["fields"] = fields
+        line = _json.dumps(entry, ensure_ascii=False, default=str, separators=(",", ":"))
+        with open(os.path.join(_run_log_dir(), "events.jsonl"), "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+    try:
+        _ai_fields = dict(fields)
+        _ai_fields["rid"] = _RUN_ID
+        log_ai(f"RUN-{event}", **_ai_fields)
+    except Exception:
+        pass
+
+
+def _run_summary() -> dict:
+    """Sammelt Endbilanz: rid, elapsed, counters, ERRAGG-Summary, log_dir."""
+    s: dict = {"rid": _RUN_ID, "elapsed_s": 0.0, "counters": {},
+               "warnings": 0, "errors": 0, "criticals": 0, "log_dir": None}
+    try:
+        s["elapsed_s"] = round(_p11_time.monotonic() - _RUN_START_MONO, 2)
+    except Exception:
+        pass
+    try:
+        with _RUN_COUNTERS_LOCK:
+            s["counters"] = dict(_RUN_COUNTERS)
+    except Exception:
+        pass
+    try:
+        if _ERRAGG is not None:
+            err = _ERRAGG.summary(top_n=10)
+            s["warnings"] = err.get("total_warnings", 0)
+            s["errors"] = err.get("total_errors", 0)
+            s["criticals"] = err.get("total_criticals", 0)
+            s["error_top"] = err.get("top", [])
+    except Exception:
+        pass
+    try:
+        s["log_dir"] = _run_log_dir()
+    except Exception:
+        pass
+    return s
+
+
+def _run_summary_print() -> None:
+    """Menschenlesbare Endbilanz auf stderr. Gated via DEBUG_LEVEL >= 1."""
+    try:
+        if int(globals().get("DEBUG_LEVEL", 0) or 0) < 1:
+            return
+        s = _run_summary()
+        lines = [
+            f"[RUN-SUMMARY] rid={s['rid']} elapsed={s['elapsed_s']}s",
+            f"  counters: {s['counters']}",
+            f"  warn={s['warnings']} err={s['errors']} crit={s['criticals']}",
+        ]
+        if s.get("error_top"):
+            lines.append(f"  top-errors: {s['error_top'][:3]}")
+        lines.append(f"  events: {s.get('log_dir')}/events.jsonl")
+        sys.stderr.write("\n".join(lines) + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+# END P11-P0a-B
+
+# ── P11-P0d-A: Finalizer (idempotent, crasht nie) ─────────────────────
+def _p11_finalize_run(cause: str = "unknown", exc_info_tuple=None) -> None:
+    """Schreibt session.end (idempotent). Crasht nie."""
+    try:
+        if getattr(_p11_finalize_run, "_done", False):
+            return
+        _p11_finalize_run._done = True  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    try:
+        _run_log_event("session.end", cause=cause, **_run_summary())
+    except Exception:
+        pass
+    if exc_info_tuple is not None:
+        try:
+            t, v, tb = exc_info_tuple
+            import traceback as _tb_p11
+            bundle = os.path.join(_run_log_dir(), "exception.log")
+            with open(bundle, "w", encoding="utf-8") as f:
+                f.write(f"[P11-P0d] cause={cause}\n")
+                _tb_p11.print_exception(t, v, tb, file=f)
+            _run_log_event(
+                "session.crashed",
+                cause=cause,
+                exc_type=getattr(t, "__name__", str(t)),
+                exc_msg=str(v)[:300],
+                bundle=bundle,
+            )
+        except Exception:
+            pass
+# END P11-P0d-A
+
+# ── P11-P0d-D: os._exit-Hook (fängt ALLE exit-Pfade) ──────────────
+# Begründung: 10+ os._exit(0)-Stellen in dw.py. Manche laufen NICHT
+# über _direct_shutdown (z.B. stop_processing(force=True) -> Force-Shutdown).
+# Statt jede Stelle einzeln zu patchen: os._exit wrappen. _p11_finalize_run
+# ist idempotent (._done-Flag), doppelte Calls sind No-Op.
+_P11_OS_EXIT_ORIG = getattr(os, "_exit", None)
+
+
+def _p11_patched_os_exit(code: int = 0) -> None:
+    """os._exit-Ersatz: session.end + Terminal-Restore, dann echter exit."""
+    try:
+        _p11_finalize_run(cause="os_exit")
+    except Exception:
+        pass
+    # P11-P0d-G: Terminal-Restore via termios (kein subprocess)
+    # Vorher: subprocess.run(["stty","sane"]) — hat nicht zuverlaessig
+    # gegriffen. Jetzt: direkter tcsetattr, plus Newline-Flush, damit
+    # Bash's readline sauber neu startet und den Prompt zeigt.
+    if sys.platform != "win32":
+        try:
+            import signal as _sig_p11g
+            _sig_p11g.signal(_sig_p11g.SIGTTOU, _sig_p11g.SIG_IGN)
+        except Exception:
+            pass
+        try:
+            import termios as _p11g_t
+            import sys as _p11g_s
+            _p11g_t.tcsetattr(
+                _p11g_s.stdin.fileno(),
+                _p11g_t.TCSANOW,
+                [
+                    _p11g_t.ICRNL | _p11g_t.IXON,
+                    _p11g_t.OPOST | _p11g_t.ONLCR,
+                    _p11g_t.CS8 | _p11g_t.CREAD | _p11g_t.B38400,
+                    _p11g_t.ISIG | _p11g_t.ICANON
+                    | _p11g_t.ECHO | _p11g_t.ECHOE | _p11g_t.ECHOK,
+                    0,
+                    0,
+                ],
+            )
+        except Exception:
+            # Fallback: stty sane (wie vorher)
+            try:
+                import subprocess as _sp_p11g
+                _sp_p11g.run(
+                    ["stty", "sane"],
+                    stdin=sys.stdin,
+                    capture_output=True, timeout=2, check=False,
+                )
+            except Exception:
+                pass
+        # Newline + Flush: Bash's readline zeigt Prompt erst nach 
+
+        try:
+            import sys as _p11g_s2
+            _p11g_s2.stdout.write("\n")
+            _p11g_s2.stdout.flush()
+            _p11g_s2.stderr.write("\n")
+            _p11g_s2.stderr.flush()
+        except Exception:
+            pass
+    # END P11-P0d-G
+    if _P11_OS_EXIT_ORIG is not None:
+        _P11_OS_EXIT_ORIG(code)
+    else:
+        raise SystemExit(code)
+
+
+if _P11_OS_EXIT_ORIG is not None and not globals().get("_TESTING", False):
+    os._exit = _p11_patched_os_exit
+# END P11-P0d-D
 
 
 _PERMANENT_FAIL_URLS: set[str] = set()
@@ -3900,6 +4165,23 @@ class PeriodicTaskMixin:
         return self.wait_for_stop(timeout)
 
 
+def _safe_winfo_exists(widget) -> bool:
+    """PATCH 33c: SAFE-WINFO-EXISTS
+
+    Wrapper um ``widget.winfo_exists()``, der ``TclError`` abfaengt.
+    Notwendig, wenn ein Hintergrund-Thread nach ``tearDown()`` noch
+    ``close()`` auf einem Dialog aufruft, dessen Tk-Root bereits
+    zerstoert wurde. Ohne diesen Guard killt ``TclError`` den
+    aufrufenden Thread, und der Test haengt bis zum Timeout.
+    """
+    if widget is None:
+        return False
+    try:
+        return bool(widget.winfo_exists())
+    except Exception:
+        return False
+
+
 class BaseDialog:
     """BASISKLASSE für alle modalen Dialoge in Dragon Whisperer."""
 
@@ -4352,7 +4634,7 @@ class BaseDialog:
 
     def _center_dialog(self) -> None:
         """Zentriert den Dialog relativ zum Parent (oder Bildschirm)."""
-        if not self.dialog or not self.dialog.winfo_exists():
+        if not _safe_winfo_exists(self.dialog):
             return
 
         try:
@@ -9795,8 +10077,16 @@ class PlatformUtils:
         return result
 
     @classmethod
-    def setup_platform_environment(cls) -> None:
-        """Richtet plattformspezifische Umgebungsvariablen und Konsolen ein."""
+    def setup_platform_environment(cls, quiet: "bool | None" = None) -> None:
+        """Richtet plattformspezifische Umgebungsvariablen und Konsolen ein.
+
+        PATCH 32a: QUIT-SUPPRESS-STARTUP-LOGS
+        ``quiet=None`` (Default) prueft ``sys.argv`` via
+        ``_cli_quiet_requested()``. ``quiet=True`` unterdrueckt die
+        INFO-Startup-Zeilen; ``quiet=False`` erzwingt sie.
+        """
+        if quiet is None:
+            quiet = _cli_quiet_requested()
         with cls._environment_setup_lock:
             if cls._environment_setup_done:
                 cls.logger.debug(
@@ -9805,7 +10095,13 @@ class PlatformUtils:
                 )
                 return
 
-            cls.logger.info("🔧 Setting up platform environment...")
+            if quiet:
+                cls.logger.debug(
+                    "Setting up platform environment (quiet)",
+                    extra={"component": cls._DEBUG_COMPONENT},
+                )
+            else:
+                cls.logger.info("🔧 Setting up platform environment...")
             cls.logger.debug(
                 "Starting environment setup",
                 extra={"component": cls._DEBUG_COMPONENT},
@@ -9832,7 +10128,7 @@ class PlatformUtils:
                     "Linux: no extra setup needed",
                     extra={"component": cls._DEBUG_COMPONENT},
                 )
-                if cls.is_containerized():
+                if cls.is_containerized() and not quiet:
                     cls.logger.info(
                         f"🐳 Running in container: {cls.get_container_type()}",
                     )
@@ -9844,7 +10140,13 @@ class PlatformUtils:
             os.environ["PYTHONUTF8"] = "1"
 
             cls._environment_setup_done = True
-            cls.logger.info("✅ Platform environment setup complete")
+            if quiet:
+                cls.logger.debug(
+                    "Platform environment setup complete (quiet)",
+                    extra={"component": cls._DEBUG_COMPONENT},
+                )
+            else:
+                cls.logger.info("✅ Platform environment setup complete")
             cls.logger.debug(
                 "Environment setup finished",
                 extra={"component": cls._DEBUG_COMPONENT},
@@ -24855,6 +25157,12 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
         if self._requests is None:
             raise RuntimeError("Requests-Bibliothek nicht verfügbar")
 
+        # P11-P0b: Counter (jeder HTTP-Request an Ollama)
+        try:
+            _run_counter_inc("llm.calls.total")
+        except Exception:
+            pass
+
         url = f"{self.host}/api/generate"
         temperature = (
             temperature_override
@@ -24870,6 +25178,7 @@ class OllamaTranslationEngine(BaseCachedTranslationEngine):
             "options": {
                 "temperature": temperature,
                 "num_predict": self._max_response_tokens,
+                "num_ctx": 16384,  # PATCH 34e-c-v3
             },
         }
         if self.system_prompt:
@@ -32957,9 +33266,10 @@ class TranscriptionEngine:
             pass
 
         if condition_on_previous_text:
-            logger.warning(
+            _warn_once(
+                "f18b_condition",
                 "[F18b] condition_on_previous_text=True -> auf False "
-                "erzwungen (Halluzinations-Schutz)"
+                "erzwungen (Halluzinations-Schutz)",
             )
             condition_on_previous_text = False
 
@@ -66560,6 +66870,8 @@ class ExportManager:
                 "export_date": datetime.now(UTC).isoformat(),
                 "total_segments": len(transcript_data),
                 "version": "4.1.3",
+                # PATCH P7-P1-1b: video_title fuer Kreislauf-Persistenz
+                "video_title": getattr(self, "stream_title", "") or "",
             },
             "transcripts": [
                 {
@@ -67699,17 +68011,22 @@ def _fetch_ollama_model_names(host: str, timeout: float = 2.0):
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
             data = json.loads(resp.read().decode("utf-8"))
         models = data.get("models") or []
-        return [m.get("name", "") for m in models if m.get("name")]
+        # PATCH P6-P2r-2: alphabetisch sortiert
+        return sorted([m.get("name", "") for m in models if m.get("name")])
     except Exception:
         return None
 
 
 _SUMMARIZE_MODEL_PRIORITY = (
-    "qwen2.5:14b-instruct-q3_K_M",  # PATCH A0: q3_K_M in Priority
+    # P9-P1-1a: 7b-Varianten zuerst (8 GB VRAM-safe, schneller)
+    "qwen2.5:7b-instruct-q5_K_M",
+    "qwen2.5:7b-instruct-q4_K_M",
+    # P9-P1-1c: "qwen2.5:7b" entfernt (nicht installiert, bare Name existiert nicht)
     "llama3.1:8b",
     "llama3.1:latest",
+    # P9-P1-1a: 14b-q3 als Fallback (zu langsam fuer Tests, q3 reduziert Kontext)
+    "qwen2.5:14b-instruct-q3_K_M",
     "qwen2.5:14b",
-    "qwen2.5:7b",
     "mistral:latest",
     "gemma2:9b",
     "llama3.2:3b",
@@ -67719,6 +68036,1060 @@ _SUMMARIZE_MODEL_PRIORITY = (
 _SUMMARIZE_EXCLUDE_HINTS = (
     "coder", "embed", "vision", "llava", "bakllava",
 )
+
+
+# PATCH P6-P1-1: embedded model-registry (single-file)
+# Metadaten pro Ollama-Modell: Familie, Größe, Sprachen, VRAM-Schätzung.
+# Neue Modelle hier ergänzen; unbekannte fallen auf Ollama-API-Infos zurück.
+_DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
+
+_MODEL_METADATA: dict[str, dict] = {
+    "qwen2.5:14b": {
+        "family": "qwen2", "params_b": 14, "quant": "q4_K_M",
+        "context_length": 32768,
+        "languages": ("ko", "de", "en", "zh", "ja"),
+        "strengths": ("korean_summary", "long_context"),
+        "vram_estimate_gb": 7.4,  # P6-P2i-2: gemessen 7.4
+        "deprecated": False,
+        "replaced_by": "qwen2.5:14b-instruct-q3_K_M",
+    },
+    "qwen2.5:14b-instruct-q3_K_M": {
+        "family": "qwen2", "params_b": 14, "quant": "q3_K_M",
+        "context_length": 32768,
+        "languages": ("ko", "de", "en", "zh", "ja"),
+        "strengths": ("korean_summary", "long_context", "vram_friendly"),
+        "vram_estimate_gb": 7.5,  # P6-P2i-2: gemessen 7.47
+        "deprecated": False,
+    },
+    "qwen2.5:7b-instruct-q5_K_M": {
+        "family": "qwen2", "params_b": 7, "quant": "q5_K_M",
+        "context_length": 32768,
+        "languages": ("ko", "de", "en", "zh", "ja"),
+        "strengths": ("korean_summary", "vram_friendly"),
+        "vram_estimate_gb": 5.9,  # P6-P2i-2: gemessen 5.84
+        "deprecated": False,
+    },
+    "gemma2:9b-instruct-q5_K_M": {
+        "family": "gemma2", "params_b": 9, "quant": "q5_K_M",
+        "context_length": 8192,
+        "languages": ("de", "en"),
+        "strengths": ("german_summary",),
+        "vram_estimate_gb": 7.6,  # P6-P2i-2: gemessen 7.55
+        "deprecated": False,
+    },
+    "gemma2:9b": {
+        "family": "gemma2", "params_b": 9, "quant": "q4",
+        "context_length": 8192,
+        "languages": ("de", "en"),
+        "strengths": ("german_summary", "vram_friendly"),
+        "vram_estimate_gb": 7.6,  # P6-P2i-2: gemessen 7.55
+        "deprecated": False,
+    },
+    "llama3.1:8b": {
+        "family": "llama3", "params_b": 8, "quant": "q4_K_M",
+        "context_length": 131072,
+        "languages": ("de", "en", "ko"),
+        "strengths": ("balanced", "long_context"),
+        "vram_estimate_gb": 5.7,  # P6-P2i-2: gemessen 5.67
+        "deprecated": False,
+    },
+    "llama3.1:latest": {
+        "family": "llama3", "params_b": 8, "quant": "q4_K_M",
+        "context_length": 131072,
+        "languages": ("de", "en", "ko"),
+        "strengths": ("balanced",),
+        "vram_estimate_gb": 5.7,  # P6-P2i-2: gemessen 5.67
+        "deprecated": True,
+        "replaced_by": "llama3.1:8b",
+    },
+    "mistral:latest": {
+        "family": "mistral", "params_b": 7, "quant": "q4",
+        "context_length": 32768,
+        "languages": ("de", "en"),
+        "strengths": ("balanced",),
+        "vram_estimate_gb": 5.2,  # P6-P2i-2: gemessen 5.22
+        "deprecated": False,
+    },
+    "qwen3:8b": {
+        "family": "qwen3", "params_b": 8, "quant": "q4",
+        "context_length": 32768,
+        "languages": ("ko", "de", "en", "zh"),
+        "strengths": ("korean_summary",),
+        "vram_estimate_gb": 5.8,  # P6-P2i-2: gemessen 5.81
+        "thinking": True,  # P6-P2i-2: Thinking-Modell
+        "deprecated": False,
+    },
+    "glm4:9b": {
+        "family": "glm4", "params_b": 9, "quant": "q4",
+        "context_length": 128000,
+        "languages": ("de", "en", "ko"),
+        "strengths": ("long_context",),
+        "vram_estimate_gb": 5.8,  # P6-P2i-2: gemessen 5.82
+        "deprecated": False,
+    },
+}
+
+
+# PATCH P6-P2l-4: extended model registry (measured 2026-10-26)
+_MODEL_METADATA.update({
+    # --- Neue valide Modelle (nicht vorher in Registry) ---
+    "huihui_ai/qwen3-abliterated:8b": {
+        "family": "qwen3", "params_b": 8, "quant": "q4",
+        "context_length": 32768,
+        "languages": ("ko", "de", "en", "zh"),
+        "strengths": ("korean_summary",),
+        "vram_estimate_gb": 5.6,
+        "thinking": True,
+        "deprecated": False,
+    },
+    "jaahas/qwen3-abliterated:8b": {
+        "family": "qwen3", "params_b": 8, "quant": "q4",
+        "context_length": 32768,
+        "languages": ("ko", "de", "en", "zh"),
+        "strengths": ("korean_summary",),
+        "vram_estimate_gb": 5.6,
+        "thinking": True,
+        "deprecated": False,
+    },
+    "dolphin-mistral:latest": {
+        "family": "mistral", "params_b": 7, "quant": "q4",
+        "context_length": 32768,
+        "languages": ("de", "en"),
+        "strengths": ("balanced",),
+        "vram_estimate_gb": 5.0,  # P6-P2m-1c: gemessen 4.99
+        "deprecated": False,
+    },
+    "dolphin-mixtral:latest": {
+        "family": "mixtral", "params_b": 47, "quant": "q4",
+        "context_length": 32768,
+        "languages": ("de", "en"),
+        "strengths": ("balanced",),
+        "vram_estimate_gb": 7.4,
+        "deprecated": False,
+    },
+    "mixtral:8x7b": {
+        "family": "mixtral", "params_b": 47, "quant": "q4",
+        "context_length": 32768,
+        "languages": ("de", "en"),
+        "strengths": ("balanced",),
+        "vram_estimate_gb": 6.5,
+        "deprecated": True,
+        "replaced_by": "dolphin-mixtral:latest",
+    },
+    "mixtral:latest": {
+        "family": "mixtral", "params_b": 47, "quant": "q4",
+        "context_length": 32768,
+        "languages": ("de", "en"),
+        "strengths": ("balanced",),
+        "vram_estimate_gb": 6.5,
+        "deprecated": True,
+        "replaced_by": "dolphin-mixtral:latest",
+    },
+    "llama3.2-vision:latest": {
+        "family": "llama3", "params_b": 11, "quant": "q4",
+        "context_length": 131072,
+        "languages": ("de", "en"),
+        "strengths": ("vision", "long_context"),
+        "vram_estimate_gb": 7.4,
+        "deprecated": False,
+    },
+    "mannix/llamax3-8b-alpaca:latest": {
+        "family": "llama3", "params_b": 8, "quant": "q4",
+        "context_length": 8192,
+        "languages": ("de", "en"),
+        "strengths": ("balanced",),
+        "vram_estimate_gb": 5.4,
+        "deprecated": False,
+    },
+    "wizardlm2:7b": {
+        "family": "wizardlm2", "params_b": 7, "quant": "q4",
+        "context_length": 32768,
+        "languages": ("de", "en"),
+        "strengths": ("balanced",),
+        "vram_estimate_gb": 5.0,  # P6-P2m-1c: gemessen 4.99
+        "deprecated": False,
+    },
+
+    # --- Ungeeignet für Summary (Code/Persona-Modelle) ---
+    "coder-wifi:latest": {
+        "family": "unknown", "params_b": 7, "quant": "q4",
+        "context_length": 8192, "languages": ("en",), "strengths": (),
+        "vram_estimate_gb": 5.9,
+        "unsuitable_for_summary": True,
+        "unsuitable_reason": "gibt Code statt Text aus",
+        "deprecated": False,
+    },
+    "coder-wifi-v2:latest": {
+        "family": "unknown", "params_b": 7, "quant": "q4",
+        "context_length": 8192, "languages": ("en",), "strengths": (),
+        "vram_estimate_gb": 6.8,
+        "unsuitable_for_summary": True,
+        "unsuitable_reason": "gibt Code statt Text aus",
+        "deprecated": False,
+    },
+    "coder-wifi-v3:latest": {
+        "family": "unknown", "params_b": 7, "quant": "q4",
+        "context_length": 8192, "languages": ("en",), "strengths": (),
+        "vram_estimate_gb": 6.8,
+        "unsuitable_for_summary": True,
+        "unsuitable_reason": "gibt Code statt Text aus",
+        "deprecated": False,
+    },
+    "deepseek-coder:6.7b": {
+        "family": "deepseek-coder", "params_b": 6.7, "quant": "q4",
+        "context_length": 16384, "languages": ("en",), "strengths": (),
+        "vram_estimate_gb": 6.2,
+        "unsuitable_for_summary": True,
+        "unsuitable_reason": "gibt Code statt Text aus",
+        "deprecated": False,
+    },
+    "deepseek-coder:6.7b-instruct-q4_K_M": {
+        "family": "deepseek-coder", "params_b": 6.7, "quant": "q4_K_M",
+        "context_length": 16384, "languages": ("en",), "strengths": (),
+        "vram_estimate_gb": 6.4,
+        "unsuitable_for_summary": True,
+        "unsuitable_reason": "gibt Code statt Text aus",
+        "deprecated": False,
+    },
+    "FableForge-AI/nexus-security:q4_k_m": {
+        "family": "unknown", "params_b": 1, "quant": "q4_K_M",
+        "context_length": 4096, "languages": ("en",), "strengths": (),
+        "vram_estimate_gb": 2.7,
+        "unsuitable_for_summary": True,
+        "unsuitable_reason": "Persona-Prompt verhindert Aufgabe",
+        "deprecated": False,
+    },
+    "foundation-sec-clean:latest": {
+        "family": "unknown", "params_b": 7, "quant": "q4",
+        "context_length": 8192, "languages": ("en",), "strengths": (),
+        "vram_estimate_gb": 5.7,
+        "unsuitable_for_summary": True,
+        "unsuitable_reason": "Persona-Prompt verhindert Aufgabe",
+        "deprecated": False,
+    },
+    "huihui_ai/foundation-sec-abliterated:latest": {
+        "family": "unknown", "params_b": 7, "quant": "q4",
+        "context_length": 8192, "languages": ("en",), "strengths": (),
+        "vram_estimate_gb": 5.7,
+        "unsuitable_for_summary": True,
+        "unsuitable_reason": "Persona-Prompt verhindert Aufgabe",
+        "deprecated": False,
+    },
+})
+
+
+# P6-P2l-4: Messwerte aus Session 2026-10-26 auf bestehende Einträge
+_MEASURED_META = {
+    "mistral:latest": {"measured_tps": 55.1, "measured_vram_gb": 5.22},
+    "llama3.1:8b": {"measured_tps": 51.2, "measured_vram_gb": 5.66},
+    "llama3.1:latest": {"measured_tps": 51.2, "measured_vram_gb": 5.66},
+    "glm4:9b": {"measured_tps": 46.9, "measured_vram_gb": 5.82},
+    "qwen2.5:14b": {"measured_tps": 14.2, "measured_vram_gb": 7.40},
+    "qwen2.5:14b-instruct-q3_K_M": {"measured_tps": 18.5, "measured_vram_gb": 7.47},
+    "gemma2:9b": {"measured_tps": 27.5, "measured_vram_gb": 7.55},
+    "gemma2:9b-instruct-q5_K_M": {"measured_tps": 26.5, "measured_vram_gb": 7.55},
+    "qwen3:8b": {"measured_tps": 46.7, "measured_vram_gb": 5.81},
+}
+for _n, _m in _MEASURED_META.items():
+    _MODEL_METADATA.setdefault(_n, {}).update(_m)
+
+
+# PATCH P6-P2o-2: measured_* auf Retest 2026-10-26 aktualisiert
+_MEASURED_META.update({
+    "dolphin-mistral:latest": {"measured_tps": 58.7, "measured_vram_gb": 4.99},
+    "wizardlm2:7b": {"measured_tps": 58.3, "measured_vram_gb": 4.99},
+    "mannix/llamax3-8b-alpaca:latest": {"measured_tps": 54.7, "measured_vram_gb": 5.43},
+    "qwen2.5-coder:7b": {"measured_tps": 54.2, "measured_vram_gb": 5.20},
+    "R4C3R/qwen2.5-coder-7b-instruct-heretic:q4_k_m": {"measured_tps": 54.2, "measured_vram_gb": 5.21},
+    "huihui_ai/qwen2.5-coder-abliterate:7b": {"measured_tps": 53.8, "measured_vram_gb": 5.21},
+    "llama3.1:8b": {"measured_tps": 51.3, "measured_vram_gb": 5.67},
+    "llama3.1:latest": {"measured_tps": 51.3, "measured_vram_gb": 5.67},
+    "huihui_ai/dolphin3-abliterated:latest": {"measured_tps": 51.3, "measured_vram_gb": 5.67},
+    "mistral:latest": {"measured_tps": 50.9, "measured_vram_gb": 5.23},
+    "qwen2.5-coder:7b-instruct-q5_K_M": {"measured_tps": 47.3, "measured_vram_gb": 5.85},
+    "qwen2.5:7b-instruct-q5_K_M": {"measured_tps": 47.2, "measured_vram_gb": 5.85},
+    "glm4:9b": {"measured_tps": 47.1, "measured_vram_gb": 5.83},
+    "qwen3:8b": {"measured_tps": 46.7, "measured_vram_gb": 5.82},
+    "huihui_ai/qwen3-abliterated:8b": {"measured_tps": 48.5, "measured_vram_gb": 5.64},
+    "jaahas/qwen3-abliterated:8b": {"measured_tps": 48.2, "measured_vram_gb": 5.63},
+    "llama3.2-vision:latest": {"measured_tps": 38.8, "measured_vram_gb": 7.08},
+    "gemma2:9b": {"measured_tps": 27.3, "measured_vram_gb": 7.55},
+    "gemma2:9b-instruct-q5_K_M": {"measured_tps": 17.9, "measured_vram_gb": 7.57},
+    "qwen2.5:14b-instruct-q3_K_M": {"measured_tps": 18.7, "measured_vram_gb": 7.48},
+    "qwen2.5:14b": {"measured_tps": 14.1, "measured_vram_gb": 7.40},
+    "qwen2.5-coder:14b": {"measured_tps": 13.8, "measured_vram_gb": 7.39},
+    "dolphin-mixtral:latest": {"measured_tps": 10.0, "measured_vram_gb": 6.51},
+    "mixtral:8x7b": {"measured_tps": 9.8, "measured_vram_gb": 6.51},
+    "mixtral:latest": {"measured_tps": 8.6, "measured_vram_gb": 6.47},
+})
+# PATCH P6-P2o-2-fix: Re-Loop nach update (neue Werte in Registry anwenden)
+for _n, _m in _MEASURED_META.items():
+    _MODEL_METADATA.setdefault(_n, {}).update(_m)
+
+
+def _find_faster_alternative(model: str, my_tps: float,
+                              min_ratio: float = 1.15):
+    """Findet schnelleres valides Modell mit Sprache-Überschneidung.
+
+    P6-P2o-2: Basiert auf measured_tps in der Registry. Überspringt
+    deprecated und unsuitable Modelle.
+    """
+    meta = _get_model_metadata(model)
+    langs = set(meta.get("languages", ()))
+    candidates = []
+    for _name, _m in _MODEL_METADATA.items():
+        if _name == model:
+            continue
+        if _m.get("deprecated") or _m.get("unsuitable_for_summary"):
+            continue
+        _tps = _m.get("measured_tps")
+        if not _tps or _tps <= my_tps * min_ratio:
+            continue
+        if langs and not (langs & set(_m.get("languages", ()))):
+            continue
+        candidates.append({"model": _name, "tps": _tps,
+                          "vram": _m.get("measured_vram_gb") or
+                                  _m.get("vram_estimate_gb") or 0})
+    if not candidates:
+        return None
+    return max(candidates, key=lambda x: x["tps"])
+# === END PATCH P6-P2o-2 ===
+
+
+_MODEL_METADATA.update({
+    # P6-P2m-1d: neue Top-Modelle aus Retest
+    "R4C3R/qwen2.5-coder-7b-instruct-heretic:q4_k_m": {
+        "family": "qwen2", "params_b": 7, "quant": "q4_k_m",
+        "context_length": 32768,
+        "languages": ("en", "de", "ko"),
+        "strengths": ("balanced",),
+        "vram_estimate_gb": 5.2,
+        "deprecated": False,
+    },
+    "huihui_ai/qwen2.5-coder-abliterate:7b": {
+        "family": "qwen2", "params_b": 7, "quant": "q4",
+        "context_length": 32768,
+        "languages": ("ko", "de", "en", "zh", "ja"),
+        "strengths": ("korean_summary", "balanced"),
+        "vram_estimate_gb": 5.2,
+        "deprecated": False,
+    },
+    "huihui_ai/dolphin3-abliterated:latest": {
+        "family": "llama3", "params_b": 8, "quant": "q4",
+        "context_length": 32768,
+        "languages": ("de", "en"),
+        "strengths": ("balanced",),
+        "vram_estimate_gb": 5.7,
+        "deprecated": False,
+    },
+    "qwen2.5-coder:7b": {
+        "family": "qwen2", "params_b": 7, "quant": "q4",
+        "context_length": 32768,
+        "languages": ("ko", "de", "en", "zh", "ja"),
+        "strengths": ("korean_summary",),
+        "vram_estimate_gb": 5.2,
+        "deprecated": False,
+    },
+    "qwen2.5-coder:7b-instruct-q5_K_M": {
+        "family": "qwen2", "params_b": 7, "quant": "q5_K_M",
+        "context_length": 32768,
+        "languages": ("ko", "de", "en", "zh", "ja"),
+        "strengths": ("korean_summary",),
+        "vram_estimate_gb": 5.85,
+        "deprecated": False,
+    },
+    "qwen2.5-coder:14b": {
+        "family": "qwen2", "params_b": 14, "quant": "q4",
+        "context_length": 32768,
+        "languages": ("ko", "de", "en", "zh", "ja"),
+        "strengths": ("korean_summary", "long_context"),
+        "vram_estimate_gb": 7.4,
+        "deprecated": False,
+    },
+    "codellama:34b": {
+        "family": "codellama", "params_b": 34, "quant": "q4",
+        "context_length": 16384,
+        "languages": ("en",), "strengths": (),
+        "vram_estimate_gb": 6.9,
+        "unsuitable_for_summary": True,
+        "unsuitable_reason": "zu langsam (4.2 t/s)",
+        "deprecated": False,
+    },
+    "codellama:13b-instruct-q4_K_M": {
+        "family": "codellama", "params_b": 13, "quant": "q4_K_M",
+        "context_length": 16384,
+        "languages": ("en",), "strengths": (),
+        "vram_estimate_gb": 7.0,
+        "unsuitable_for_summary": True,
+        "unsuitable_reason": "coder, keine Sprachqualität",
+        "deprecated": False,
+    },
+    "codellama:latest": {
+        "family": "codellama", "params_b": 7, "quant": "q4",
+        "context_length": 16384,
+        "languages": ("en",), "strengths": (),
+        "vram_estimate_gb": 6.5,
+        "unsuitable_for_summary": True,
+        "unsuitable_reason": "coder",
+        "deprecated": True,
+        "replaced_by": "codellama:13b-instruct-q4_K_M",
+    },
+    "deepseek-coder-v2:lite": {
+        "family": "deepseek-coder", "params_b": 16, "quant": "q4",
+        "context_length": 163840,
+        "languages": ("en",), "strengths": (),
+        "vram_estimate_gb": 7.6,
+        "unsuitable_for_summary": True,
+        "unsuitable_reason": "coder",
+        "deprecated": False,
+    },
+    # PATCH P6-P2p-1a: neue Modelle aus Okt 2026 Retest
+    "granite3.1-dense:8b": {
+        "family": "granite", "params_b": 8, "quant": "q4",
+        "context_length": 131072,
+        # PATCH P6-P2u-6a: 'ko' entfernt (VOD-Test Okt 2026 negativ)
+        "languages": ("de", "en", "fr", "es", "pt", "it"),
+        "strengths": ("summary_specialized", "long_context"),
+        "vram_estimate_gb": 6.0,
+        "measured_tps": 46.9, "measured_vram_gb": 5.99,
+        "deprecated": False,
+    },
+    "command-r7b:latest": {
+        "family": "command-r", "params_b": 7, "quant": "q4",
+        "context_length": 131072,
+        "languages": ("de", "en", "ko", "fr", "es", "pt", "it", "ja",
+                     "zh", "ar", "nl", "pl", "tr", "vi", "id"),
+        "strengths": ("multilingual", "long_context"),
+        "vram_estimate_gb": 6.3,
+        "measured_tps": 47.0, "measured_vram_gb": 6.30,
+        "deprecated": False,
+    },
+    "hf.co/teddylee777/EEVE-Korean-Instruct-10.8B-v1.0-gguf:q4_k_m": {
+        "family": "eeve", "params_b": 10.8, "quant": "q4_k_m",
+        "context_length": 32768,
+        "languages": ("ko", "en"),
+        "strengths": ("korean_specialized",),
+        "vram_estimate_gb": 7.4,
+        "measured_tps": 34.0, "measured_vram_gb": 7.42,
+        "deprecated": False,
+    },
+})
+
+
+def _is_unsuitable_for_summary(model: str) -> bool:
+    """Prüft ob ein Modell für Summary-Aufgaben ungeeignet ist (Coder/Persona)."""
+    meta = _get_model_metadata(model)
+    return bool(meta.get("unsuitable_for_summary", False))
+
+
+# PATCH P6-P2p-1b: Empfohlene Modelle (Stand Okt 2026, eigene Messungen)
+_RECOMMENDED_MODELS: list[dict] = [
+    {
+        "badge": "\u26a1",
+        "title": "Schnell (nur DE/EN)",
+        "model": "dolphin-mistral:latest",
+        "why": "58.7 t/s bei 4.99 GB \u2014 schnellster valider Kandidat",
+        "detail": "Nur Deutsch + Englisch (Mistral-Basis). F\u00fcr Koreanisch, "
+                  "Chinesisch, Japanisch oder Arabisch nicht geeignet \u2014 "
+                  "nimm dort granite3.1-dense oder qwen2.5.",
+        "pull": "ollama pull dolphin-mistral",
+    },
+    {
+        "badge": "\U0001f947",
+        "title": "Summary (DE/EN, 131k)",  # PATCH P6-P2u-6a
+        "model": "granite3.1-dense:8b",
+        "why": "46.9 t/s bei 5.99 GB \u2014 IBM Granite, auf Summary trainiert",
+        "detail": "Deutsch, Englisch (getestet + empfohlen). 131k Kontext. "
+                  "Franz\u00f6sisch, Spanisch, Portugiesisch, Italienisch: "
+                  "offiziell unterst\u00fctzt, nicht einzeln getestet. "
+                  "Koreanisch: offiziell unterst\u00fctzt, aber Qualit\u00e4t "
+                  "im Test schwach \u2014 nutze qwen2.5:7b-instruct-q5_K_M.",
+        "pull": "ollama pull granite3.1-dense:8b",
+    },
+    {
+        "badge": "\U0001f30d",
+        "title": "Mehrsprachig (23 Sprachen)",
+        "model": "command-r7b:latest",
+        "why": "47.0 t/s bei 6.30 GB \u2014 Cohere, breite Sprachabdeckung",
+        "detail": "Explizit trainiert für 23 Sprachen inkl. DE/KO/JA/ZH. "
+                  "Gute Wahl wenn du häufig zwischen Sprachen wechselst.",
+        "pull": "ollama pull command-r7b",
+    },
+    {
+        "badge": "\U0001f4cf",
+        "title": "Lange Videos (100k+ Tokens)",
+        "model": "llama3.1:8b",
+        "why": "51.3 t/s bei 5.67 GB \u2014 131k Kontext",
+        "detail": "Deutsch, Englisch, Koreanisch. Für Videos >30 Min "
+                  "oder sehr lange Transkripte die andere Modelle abschneiden.",
+        "pull": "ollama pull llama3.1:8b",
+    },
+    {
+        "badge": "\U0001f3c6",
+        "title": "Koreanisch + Summary (native, empfohlen)",
+        "model": "qwen2.5:7b-instruct-q5_K_M",
+        "why": "47.2 t/s bei 5.85 GB \u2014 heute bew\u00e4hrt: 1h-KO-VOD, GPU-Only",
+        "detail": "Erfolgreicher VOD-Test (Okt 2026): 5\u201310 Min f\u00fcr 1h-"
+                  "koreanisches Video, 0 Retries, native KO-Ausgabe mit "
+                  "Zeitmarken. Beste Balance aus Qualit\u00e4t und Tempo.",
+        "pull": "ollama pull qwen2.5:7b-instruct-q5_K_M",
+    },
+    {
+        "badge": "\u26a1",
+        "title": "Koreanisch (schnellste, coder-basiert)",
+        "model": "huihui_ai/qwen2.5-coder-abliterate:7b",
+        "why": "53.8 t/s bei 5.21 GB \u2014 schnellste KO-Option, coder-basiert",
+        "detail": "Schneller als qwen2.5:7b-q5 (53.8 vs 47.2 t/s). "
+                  "Basierend auf Qwen2.5-Coder \u2014 'coder' im Namen, "
+                  "aber auch f\u00fcr nat\u00fcrliche Sprache brauchbar.",
+        "pull": "ollama pull huihui_ai/qwen2.5-coder-abliterate:7b",
+    },
+    {
+        "badge": "\U0001f4be",
+        "title": "Minimales VRAM (< 5 GB)",
+        "model": "dolphin-mistral:latest",
+        "why": "4.99 GB Peak \u2014 passt auf kleine GPUs",
+        "detail": "Identisch mit dem Allrounder. Wenn deine GPU < 6 GB "
+                  "nutzbar hat, ist das die sicherste Wahl.",
+        "pull": "ollama pull dolphin-mistral",
+    },
+]
+
+
+def _get_dynamic_recommendations():
+    """Baut Empfehlungen aus Registry + Cache (nur wenn >=3 valide bekannt).
+
+    Bevorzugt Modelle mit ``measured_tps`` (also tatsächlich gemessen) oder
+    mit Cache-Eintrag. Reine Registry-Einträge ohne Messung zählen nicht.
+    """
+    candidates = []
+    _seen = set()
+    for m, r in _MODEL_TEST_CACHE.items():
+        if m in _seen:
+            continue
+        _seen.add(m)
+        v = r.get("validation") or {}
+        if not v.get("ok"):
+            continue
+        if _is_unsuitable_for_summary(m):
+            continue
+        meta = _get_model_metadata(m)
+        candidates.append({
+            "model": m,
+            "tps": r.get("tokens_per_sec", 0) or 0,
+            "vram": r.get("peak_vram_gb", 0) or 0,
+            "langs": meta.get("languages", ()),
+        })
+    for m, meta in _MODEL_METADATA.items():
+        if m in _seen:
+            continue
+        _tps = meta.get("measured_tps")
+        if not _tps:
+            continue
+        if _is_unsuitable_for_summary(m):
+            continue
+        candidates.append({
+            "model": m,
+            "tps": _tps,
+            "vram": meta.get("measured_vram_gb") or meta.get("vram_estimate_gb") or 0,
+            "langs": meta.get("languages", ()),
+        })
+    if len(candidates) < 3:
+        return []
+    recs = []
+    # 1. Schnellstes
+    top = max(candidates, key=lambda x: x["tps"])
+    recs.append({
+        "badge": "\U0001f3c6",
+        "title": "Schnellstes (aus deinen Daten)",
+        "model": top["model"],
+        "why": f"{top['tps']:.1f} t/s bei {top['vram']:.2f} GB VRAM",
+        "detail": "Basiert auf deinen Tests oder gemessenen Werten. "
+                  "Wenn du willst, kannst du im Dashboard neu testen.",
+        "pull": "",
+    })
+    # 2. Wenigstes VRAM
+    small = min(candidates, key=lambda x: x["vram"] or 999)
+    if small["model"] != top["model"]:
+        recs.append({
+            "badge": "\U0001f4be",
+            "title": "Wenigstes VRAM",
+            "model": small["model"],
+            "why": f"{small['vram']:.2f} GB Peak",
+            "detail": "Passt auch auf GPUs mit wenig Speicher.",
+            "pull": "",
+        })
+    # 3. Beste Sprache pro vorhandener Sprache
+    for code, flag, name in (("ko", "\U0001f1f0\U0001f1f7", "Koreanisch"),
+                             ("de", "\U0001f1e9\U0001f1ea", "Deutsch"),
+                             ("en", "\U0001f1ec\U0001f1e7", "Englisch"),
+                             ("zh", "\U0001f1e8\U0001f1f3", "Chinesisch"),
+                             ("ar", "\U0001f1f8\U0001f1e6", "Arabisch"),
+                             ("pt", "\U0001f1e7\U0001f1f7", "Portugiesisch")):
+        sub = [c for c in candidates if code in c["langs"]]
+        if not sub:
+            continue
+        best = max(sub, key=lambda x: x["tps"])
+        if any(r["model"] == best["model"] for r in recs):
+            continue
+        recs.append({
+            "badge": flag,
+            "title": f"Beste für {name}",
+            "model": best["model"],
+            "why": f"{best['tps']:.1f} t/s \u00b7 {name} unterst\u00fctzt",
+            "detail": "Basiert auf deinen Daten.",
+            "pull": "",
+        })
+        if len(recs) >= 5:
+            break
+    return recs
+
+
+def _get_all_recommendations():
+    """Dynamisch (aus eigenen Daten) + Fix (Entwickler-Empfehlung)."""
+    dyn = _get_dynamic_recommendations()
+    if not dyn:
+        return []
+    # PATCH P6-P2u-6c: Dyn-Eintraege fuer fix bekannte Modelle
+    # erben Titel+Badge aus _RECOMMENDED_MODELS (kuratiert gewinnt).
+    _fixed_by_model = {r["model"]: r for r in _RECOMMENDED_MODELS}
+    for _r in dyn:
+        _fix = _fixed_by_model.get(_r["model"])
+        if _fix is not None:
+            _r["badge"] = _fix["badge"]
+            _r["title"] = _fix["title"]
+    dyn_models = {r["model"] for r in dyn}
+    fixed = [r for r in _RECOMMENDED_MODELS if r["model"] not in dyn_models]
+    return [("dynamic", dyn), ("fixed", fixed)]
+
+
+def _show_model_register_dialog(parent, model_name, host=None, on_save=None):
+    """Dialog zum Eintragen unbekannter Modelle in die User-Registry."""
+    import tkinter as tk
+    if not model_name:
+        return
+    try:
+        _tk_master = _resolve_parent_tk(parent)
+    except RuntimeError as e:
+        logger.warning("[REGISTER] %s", e)
+        return
+    theme = _resolve_dialog_theme(parent)
+    def _c(attr, default):
+        return getattr(theme, attr, default) if theme else default
+    bg = _c("BG_SECONDARY", "#2b2b2b")
+    fg = _c("TEXT_PRIMARY", "#e0e0e0")
+    fg2 = _c("TEXT_SECONDARY", "#a0a0a0")
+    bg3 = _c("BG_TERTIARY", "#3a3a3a")
+    accent = _c("TEXT_ACCENT", "#4fc3f7")
+    f_small = ("Segoe UI", 9)
+    f_main = ("Segoe UI", 10)
+    f_head = ("Segoe UI", 12, "bold")
+
+    _ensure_user_registry_loaded()
+    meta = _get_model_metadata(model_name)
+
+    top = tk.Toplevel(_tk_master)
+    top.title(f"\u2795 Modell eintragen: {model_name}")
+    top.geometry("580x600")
+    top.minsize(520, 500)
+    top.configure(bg=bg)
+    try:
+        top.transient(_tk_master)
+    except Exception:
+        pass
+
+    tk.Label(top, text=f"\u2795 {model_name}", bg=bg, fg=accent,
+             font=f_head, anchor="w").pack(fill="x", padx=14, pady=(10, 2))
+    tk.Label(top,
+             text="Trage die Daten ein, damit das Modell in Empfehlungen, "
+                  "Sprachfiltern und im Vergleich korrekt einsortiert wird.",
+             bg=bg, fg=fg2, font=f_small, anchor="w",
+             justify="left", wraplength=540).pack(fill="x", padx=14, pady=(0, 10))
+
+    fam_row = tk.Frame(top, bg=bg)
+    fam_row.pack(fill="x", padx=14, pady=2)
+    tk.Label(fam_row, text="Familie:", bg=bg, fg=fg, font=f_main,
+             width=14, anchor="w").pack(side="left")
+    fam_var = tk.StringVar(value=str(meta.get("family", "")))
+    tk.Entry(fam_row, textvariable=fam_var, bg=bg3, fg=fg,
+             insertbackground=fg, font=f_main, relief="flat").pack(
+        side="left", fill="x", expand=True)
+
+    p_row = tk.Frame(top, bg=bg)
+    p_row.pack(fill="x", padx=14, pady=2)
+    tk.Label(p_row, text="Parameter (B):", bg=bg, fg=fg, font=f_main,
+             width=14, anchor="w").pack(side="left")
+    p_var = tk.StringVar(value=str(meta.get("params_b", "")))
+    tk.Entry(p_row, textvariable=p_var, bg=bg3, fg=fg,
+             insertbackground=fg, font=f_main, relief="flat").pack(
+        side="left", fill="x", expand=True)
+
+    ctx_row = tk.Frame(top, bg=bg)
+    ctx_row.pack(fill="x", padx=14, pady=2)
+    tk.Label(ctx_row, text="Kontext (Tokens):", bg=bg, fg=fg, font=f_main,
+             width=14, anchor="w").pack(side="left")
+    ctx_var = tk.StringVar(value=str(meta.get("context_length", "")))
+    tk.Entry(ctx_row, textvariable=ctx_var, bg=bg3, fg=fg,
+             insertbackground=fg, font=f_main, relief="flat").pack(
+        side="left", fill="x", expand=True)
+
+    tk.Label(top, text="Sprachen:", bg=bg, fg=fg, font=f_main,
+             anchor="w").pack(fill="x", padx=14, pady=(10, 2))
+    lang_frame = tk.Frame(top, bg=bg)
+    lang_frame.pack(fill="x", padx=14)
+    lang_codes = [
+        ("de", "\U0001f1e9\U0001f1ea Deutsch"),
+        ("en", "\U0001f1ec\U0001f1e7 Englisch"),
+        ("ko", "\U0001f1f0\U0001f1f7 Koreanisch"),
+        ("zh", "\U0001f1e8\U0001f1f3 Chinesisch"),
+        ("ja", "\U0001f1ef\U0001f1f5 Japanisch"),
+        ("ar", "\U0001f1f8\U0001f1e6 Arabisch"),
+        ("pt", "\U0001f1e7\U0001f1f7 Portugiesisch"),
+        ("fr", "\U0001f1eb\U0001f1f7 Franz\u00f6sisch"),
+        ("es", "\U0001f1ea\U0001f1f8 Spanisch"),
+        ("ru", "\U0001f1f7\U0001f1fa Russisch"),
+        ("it", "\U0001f1ee\U0001f1f9 Italienisch"),
+        ("nl", "\U0001f1f3\U0001f1f1 Niederl\u00e4ndisch"),
+    ]
+    _current_langs = set(meta.get("languages", ()))
+    lang_vars = {}
+    per_row = 3
+    for i, (code, name) in enumerate(lang_codes):
+        v = tk.BooleanVar(value=(code in _current_langs))
+        lang_vars[code] = v
+        tk.Checkbutton(lang_frame, text=name, variable=v, bg=bg,
+                       fg=fg, font=f_small, anchor="w",
+                       selectcolor=bg3, activebackground=bg,
+                       activeforeground=accent,
+                       ).grid(row=i // per_row, column=i % per_row,
+                              sticky="w", padx=4, pady=1)
+
+    flags_row = tk.Frame(top, bg=bg)
+    flags_row.pack(fill="x", padx=14, pady=(10, 2))
+    thinking_var = tk.BooleanVar(value=bool(meta.get("thinking")))
+    tk.Checkbutton(flags_row, text="Thinking-Modell (Zeit \u00d7 2)",
+                   variable=thinking_var, bg=bg, fg=fg, font=f_small,
+                   selectcolor=bg3, activebackground=bg,
+                   activeforeground=accent).pack(side="left", padx=4)
+    unsuitable_var = tk.BooleanVar(value=bool(meta.get("unsuitable_for_summary")))
+    tk.Checkbutton(flags_row, text="Ungeeignet f\u00fcr Summary",
+                   variable=unsuitable_var, bg=bg, fg=fg, font=f_small,
+                   selectcolor=bg3, activebackground=bg,
+                   activeforeground=accent).pack(side="left", padx=4)
+
+    btn_row = tk.Frame(top, bg=bg)
+    btn_row.pack(fill="x", padx=14, pady=(10, 10), side="bottom")
+
+    def _save():
+        try:
+            _langs = tuple(c for c, v in lang_vars.items() if v.get())
+            try:
+                _params = float(p_var.get()) if p_var.get().strip() else 0.0
+            except ValueError:
+                _params = 0.0
+            try:
+                _ctx = int(ctx_var.get()) if ctx_var.get().strip() else 0
+            except ValueError:
+                _ctx = 0
+            _entry = {
+                "family": fam_var.get().strip() or "unknown",
+                "params_b": _params,
+                "context_length": _ctx,
+                "languages": _langs,
+                "thinking": thinking_var.get(),
+                "unsuitable_for_summary": unsuitable_var.get(),
+                "vram_estimate_gb": float(meta.get("vram_estimate_gb", 5.5)),
+                "deprecated": False,
+                "_source": "user_registry",
+            }
+            _USER_REGISTRY[model_name] = _entry
+            _save_user_registry()
+            if on_save:
+                try:
+                    on_save()
+                except Exception:
+                    pass
+            try:
+                top.destroy()
+            except tk.TclError:
+                pass
+        except Exception as e:
+            logger.warning("[REGISTER] Save failed: %s", e)
+
+    def _remove():
+        _USER_REGISTRY.pop(model_name, None)
+        _save_user_registry()
+        if on_save:
+            try:
+                on_save()
+            except Exception:
+                pass
+        try:
+            top.destroy()
+        except tk.TclError:
+            pass
+
+    tk.Button(btn_row, text="\U0001f4be Speichern", command=_save,
+              bg=accent, fg=bg, font=f_main, relief="flat",
+              cursor="hand2", padx=16, pady=4).pack(side="left")
+    tk.Button(btn_row, text="Abbrechen",
+              command=lambda: top.destroy() if False else top.destroy(),
+              bg=bg3, fg=fg, font=f_main, relief="flat",
+              cursor="hand2", padx=16, pady=4).pack(side="left", padx=(6, 0))
+    if model_name in _USER_REGISTRY:
+        tk.Button(btn_row, text="\U0001f5d1 Aus User-Registry entfernen",
+                  command=_remove,
+                  bg=bg3, fg=fg2, font=f_small, relief="flat",
+                  cursor="hand2", padx=10, pady=4).pack(side="right")
+
+    try:
+        top.grab_set()
+    except Exception:
+        pass
+
+
+def _show_recommendations_dialog(parent):
+    """Zeigt Empfehlungen mit Modell + Pull-Befehl (Stand Okt 2026)."""
+    import tkinter as tk
+    try:
+        _tk_master = _resolve_parent_tk(parent)
+    except RuntimeError as e:
+        logger.warning("[RECOMMEND] %s", e)
+        return
+    theme = _resolve_dialog_theme(parent)
+    def _c(attr, default):
+        return getattr(theme, attr, default) if theme else default
+    bg = _c("BG_SECONDARY", "#2b2b2b")
+    fg = _c("TEXT_PRIMARY", "#e0e0e0")
+    fg2 = _c("TEXT_SECONDARY", "#a0a0a0")
+    bg3 = _c("BG_TERTIARY", "#3a3a3a")
+    accent = _c("TEXT_ACCENT", "#4fc3f7")
+    ok_g = "#81c784"
+    f_small = ("Segoe UI", 9)
+    f_main = ("Segoe UI", 10)
+    f_bold = ("Segoe UI", 10, "bold")
+    f_head = ("Segoe UI", 13, "bold")
+
+    top = tk.Toplevel(_tk_master)
+    top.title("\U0001f4a1 Modell-Empfehlungen (Okt 2026)")
+    top.geometry("820x640")
+    top.minsize(700, 480)
+    top.configure(bg=bg)
+    try:
+        top.transient(_tk_master)
+    except Exception:
+        pass
+
+    # Header
+    head = tk.Frame(top, bg=bg)
+    head.pack(fill="x", padx=14, pady=(10, 4))
+    tk.Label(head, text="\U0001f4a1 Modell-Empfehlungen",
+             bg=bg, fg=accent, font=f_head, anchor="w").pack(fill="x")
+    tk.Label(head,
+             text="Basierend auf eigenen Tests (Okt 2026) mit RTX 4060 Laptop "
+                  "(8 GB VRAM). Kein Anspruch auf Vollst\u00e4ndigkeit \u2014 "
+                  "dient als Startpunkt.",
+             bg=bg, fg=fg2, font=f_small, anchor="w",
+             justify="left", wraplength=780).pack(fill="x", pady=(2, 0))
+
+    # Scrollbarer Bereich
+    outer = tk.Frame(top, bg=bg)
+    outer.pack(fill="both", expand=True, padx=10, pady=4)
+    scroll = tk.Scrollbar(outer, orient="vertical")
+    scroll.pack(side="right", fill="y")
+    canvas = tk.Canvas(outer, bg=bg, highlightthickness=0, bd=0,
+                      yscrollcommand=scroll.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    scroll.config(command=canvas.yview)
+    inner = tk.Frame(canvas, bg=bg)
+    inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+    inner.bind("<Configure>",
+              lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.bind("<Configure>",
+               lambda e: canvas.itemconfig(inner_id, width=e.width))
+
+    def _copy_cmd(cmd, _btn_ref=None):
+        try:
+            top.clipboard_clear()
+            top.clipboard_append(cmd)
+            if _btn_ref is not None:
+                _btn_ref.config(text="\u2713 Kopiert")
+                top.after(1500, lambda: _btn_ref.config(
+                    text="\U0001f4cb Kopieren"))
+        except Exception:
+            pass
+
+    def _render_rec_card(_inner, rec):
+        box = tk.Frame(_inner, bg=bg3, bd=0)
+        box.pack(fill="x", padx=4, pady=4)
+        box_inner = tk.Frame(box, bg=bg3)
+        box_inner.pack(fill="x", padx=12, pady=8)
+        _render_rec_body(box_inner, rec)
+
+    def _render_rec_body(box_inner, rec):
+        # Titel-Zeile: Badge + Title + Model
+        title_row = tk.Frame(box_inner, bg=bg3)
+        title_row.pack(fill="x")
+        tk.Label(title_row,
+                text=f"{rec['badge']} {rec['title']}",
+                bg=bg3, fg=accent, font=f_bold,
+                anchor="w").pack(side="left")
+        tk.Label(title_row, text="  \u00b7  ", bg=bg3, fg=fg2,
+                font=f_small).pack(side="left")
+        tk.Label(title_row, text=rec["model"], bg=bg3, fg=fg,
+                font=f_main, anchor="w").pack(side="left")
+        # Why
+        tk.Label(box_inner, text=rec["why"], bg=bg3, fg=ok_g,
+                font=f_small, anchor="w", justify="left",
+                wraplength=740).pack(fill="x", pady=(2, 0))
+        # Detail
+        tk.Label(box_inner, text=rec["detail"], bg=bg3, fg=fg2,
+                font=f_small, anchor="w", justify="left",
+                wraplength=740).pack(fill="x", pady=(2, 4))
+        # Pull-Befehl + Copy-Button
+        cmd_row = tk.Frame(box_inner, bg=bg)
+        cmd_row.pack(fill="x")
+        cmd_lbl = tk.Label(cmd_row, text=rec["pull"], bg=bg, fg=fg,
+                          font=("Consolas", 9), anchor="w",
+                          padx=8, pady=4)
+        cmd_lbl.pack(side="left", fill="x", expand=True)
+        copy_btn = tk.Button(cmd_row, text="\U0001f4cb Kopieren",
+                            bg=bg3, fg=fg, font=f_small,
+                            relief="flat", cursor="hand2",
+                            padx=8, pady=2, bd=0)
+        copy_btn.config(command=lambda c=rec["pull"], b=copy_btn: _copy_cmd(c, b))
+        copy_btn.pack(side="right", padx=(4, 0))
+        return
+
+    _sections = _get_all_recommendations()
+    if _sections:
+        for _kind, _recs in _sections:
+            if not _recs:
+                continue
+            _head = ("\U0001f3c6 Basierend auf deinen Daten"
+                     if _kind == "dynamic"
+                     else "\U0001f4a1 Entwickler-Empfehlungen (Okt 2026)")
+            tk.Label(inner, text=_head, bg=bg, fg=accent,
+                     font=f_bold, anchor="w").pack(
+                fill="x", padx=4, pady=(6, 2))
+            for _rec in _recs:
+                _render_rec_card(inner, _rec)
+    else:
+        # Fallback: nur fixe Liste, ohne dynamische Sektion
+        for _rec in _RECOMMENDED_MODELS:
+            _render_rec_card(inner, _rec)
+
+    # Close-Button
+    bottom = tk.Frame(top, bg=bg)
+    bottom.pack(fill="x", padx=14, pady=(4, 10))
+    tk.Label(bottom,
+             text="Tipp: Nach dem Pull im Dashboard testen \u2192 \U0001f9ea, "
+                  "dann im Vergleich einordnen.",
+             bg=bg, fg=fg2, font=f_small, anchor="w").pack(side="left")
+    def _close():
+        try:
+            top.grab_release()
+        except Exception:
+            pass
+        try:
+            top.destroy()
+        except tk.TclError:
+            pass
+    tk.Button(bottom, text="Schließen", command=_close,
+              bg=bg3, fg=fg, font=f_main, relief="flat", cursor="hand2",
+              padx=18, pady=5).pack(side="right")
+    top.protocol("WM_DELETE_WINDOW", _close)
+    try:
+        top.grab_set()
+    except Exception:
+        pass
+
+
+# PATCH P6-P2q-2: user-registry (persistente benutzerdefinierte Metadaten)
+_USER_REGISTRY_PATH = (
+    Path.home() / ".config" / "dragonwhisperer" / "model_registry_user.json"
+)
+_USER_REGISTRY: dict[str, dict] = {}
+_USER_REGISTRY_LOADED: bool = False
+
+
+def _ensure_user_registry_loaded() -> None:
+    """Lädt User-Registry einmalig von Disk."""
+    global _USER_REGISTRY_LOADED
+    if _USER_REGISTRY_LOADED:
+        return
+    _USER_REGISTRY_LOADED = True
+    try:
+        if not _USER_REGISTRY_PATH.exists():
+            return
+        _data = json.loads(_USER_REGISTRY_PATH.read_text(encoding="utf-8"))
+        _models = _data.get("models") or {}
+        for _name, _entry in _models.items():
+            if isinstance(_entry, dict):
+                _USER_REGISTRY[_name] = _entry
+    except Exception:
+        pass
+
+
+def _save_user_registry() -> None:
+    """Persistiert User-Registry."""
+    try:
+        _USER_REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _data = {
+            "version": 1,
+            "updated": time.time(),
+            "models": _USER_REGISTRY,
+        }
+        _USER_REGISTRY_PATH.write_text(
+            json.dumps(_data, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _get_model_metadata(model_name: str) -> dict:
+    """Liefert Metadaten zu einem Modell (User-Registry hat Vorrang).
+
+    Match-Reihenfolge: exakt (User) → exakt (intern) → Präfix → User-only.
+    """
+    if not model_name:
+        return {}
+    _ensure_user_registry_loaded()
+    _user = _USER_REGISTRY.get(model_name)
+    if model_name in _MODEL_METADATA:
+        _base = dict(_MODEL_METADATA[model_name])
+        if _user:
+            # P9-P2-7: context_length NIEMALS von User ueberschreiben
+            _user_filtered = {
+                k: v for k, v in _user.items()
+                if k != "context_length"
+            }
+            _base.update(_user_filtered)
+        return _base
+    if _user:
+        return dict(_user)
+    candidates = [k for k in _MODEL_METADATA if model_name.startswith(k)]
+    if candidates:
+        return dict(_MODEL_METADATA[max(candidates, key=len)])
+    return {}
+
+
+def _get_vram_status() -> dict | None:
+    """Live-VRAM: {total_gb, used_gb, free_gb} oder None bei Fehler."""
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        return {
+            "total_gb": round(mem.total / (1024**3), 2),
+            "used_gb": round(mem.used / (1024**3), 2),
+            "free_gb": round(mem.free / (1024**3), 2),
+        }
+    except Exception:
+        return None
+# === END PATCH P6-P1-1 ===
 
 
 def _looks_like_loop(
@@ -67770,7 +69141,10 @@ def _looks_like_loop(
     return False, ""
 
 
-def _resolve_summarize_model(preferred, available):
+def _resolve_summarize_model(preferred, available, language=None):
+    """P9-P2-5: language-Parameter fuer sprachspezifische Priority.
+    Arabisch/Hebraeisch -> llama3.1 (besser als qwen2.5).
+    Andere -> bestehende Priority."""
     """Wählt ein geeignetes Ollama-Modell für Zusammenfassungen.
 
     Regeln:
@@ -67786,6 +69160,13 @@ def _resolve_summarize_model(preferred, available):
     _explicit = bool(preferred) and preferred != "auto"
     if _explicit and preferred in available:
         return preferred, f"User-Wahl '{preferred}' verfügbar"
+    # P9-P2-5: Sprachspezifische Priority
+    _p9_lang = (language or "").strip().lower()[:2]
+    if _p9_lang in ("ar", "he", "fa"):
+        for candidate in ("llama3.1:8b", "llama3.1:latest"):
+            if candidate in available:
+                return candidate, f"Sprach-Priority {_p9_lang} -> {candidate}"
+    # END P9-P2-5
     for candidate in _SUMMARIZE_MODEL_PRIORITY:
         if candidate in available:
             if _explicit:
@@ -67806,6 +69187,2660 @@ def _resolve_translation_model(preferred, available):
     """Waehlt ein Ollama-Modell fuer Uebersetzungen."""
     return _resolve_summarize_model(preferred, available)
 # === END PATCH A1 ===
+
+
+# PATCH P6-P1-2: model-details-dialog
+def _show_model_details_dialog(parent, model_name: str, host: str | None = None):
+    """Info-Fenster mit Modell-Details + Live-VRAM-Status.
+
+    ``parent`` darf entweder das Tk-Root (``DragonWhispererGUI``) oder
+    ein Toplevel sein; die Theme-Auflösung ist defensiv.
+    """
+    import tkinter as tk
+
+    _host = host or _DEFAULT_OLLAMA_HOST  # noqa: F841  (Phase 3: /api/show)
+    _meta = _get_model_metadata(model_name)
+    _vram = _get_vram_status()
+
+    # PATCH P6-P2-1: shared theme resolver
+    theme = _resolve_dialog_theme(parent)
+
+    if theme is not None:
+        bg = getattr(theme, "BG_SECONDARY", "#2b2b2b")
+        fg = getattr(theme, "TEXT_PRIMARY", "#e0e0e0")
+        warn_fg = "#e57373"
+        font_main = ("Segoe UI", 10)
+        font_head = ("Segoe UI", 11, "bold")
+    else:
+        bg, fg, warn_fg = "#2b2b2b", "#e0e0e0", "#e57373"
+        font_main = ("TkDefaultFont", 10)
+        font_head = ("TkDefaultFont", 11, "bold")
+
+    # PATCH P6-P2-1: shared resolver
+    _tk_master = _resolve_parent_tk(parent)
+    top = tk.Toplevel(_tk_master)
+    top.title(f"Modell-Details: {model_name or '(kein Modell)'}")
+    top.geometry("580x460")
+    top.configure(bg=bg)
+    try:
+        top.transient(_tk_master)
+    except Exception:
+        pass
+
+    row = 0
+
+    def _put(lbl: str, val: str, *, warn: bool = False):
+        nonlocal row
+        tk.Label(top, text=lbl, bg=bg, fg=fg, font=font_main, anchor="w").grid(
+            row=row, column=0, sticky="w", padx=(15, 8), pady=2
+        )
+        tk.Label(
+            top, text=val, bg=bg, fg=(warn_fg if warn else fg),
+            font=font_main, anchor="w", justify="left",
+        ).grid(row=row, column=1, sticky="w", padx=(0, 15), pady=2)
+        row += 1
+
+    tk.Label(
+        top, text=model_name or "(kein Modell gewählt)",
+        bg=bg, fg=fg, font=font_head, anchor="w",
+    ).grid(row=row, column=0, columnspan=2, sticky="w", padx=15, pady=(12, 8))
+    row += 1
+
+    if not _meta:
+        _put("Herkunft:", "Nicht im Registry – nur Ollama-Basics")
+    else:
+        _put("Familie:", str(_meta.get("family", "?")))
+        _put("Parameter:", f"{_meta.get('params_b', '?')} B")
+        _put("Quantisierung:", str(_meta.get("quant", "?")))
+        ctx = int(_meta.get("context_length", 0) or 0)
+        _put("Kontext:", f"{ctx:,}".replace(",", ".") + " Tokens")
+        _put("Sprachen:", ", ".join(_meta.get("languages", ())) or "?")
+        _put("Stärken:", ", ".join(_meta.get("strengths", ())) or "?")
+        _put("VRAM (geschätzt):", f"{float(_meta.get('vram_estimate_gb', 0) or 0):.1f} GB")
+        if _meta.get("deprecated"):
+            rb = _meta.get("replaced_by", "?")
+            _put("Status:", f"⚠ DEPRECATED → ersetze durch '{rb}'", warn=True)
+
+    if _vram is not None:
+        _put(
+            "VRAM jetzt:",
+            f"belegt {_vram['used_gb']:.1f} / {_vram['total_gb']:.1f} GB "
+            f"(frei: {_vram['free_gb']:.1f} GB)",
+        )
+        need = float(_meta.get("vram_estimate_gb", 0) or 0)
+        if need > 0:
+            fits = _vram["free_gb"] >= need + 0.5
+            _put(
+                "Passt ins VRAM:",
+                "✓ ja" if fits else "✗ nein (CPU-Offload)",
+                warn=not fits,
+            )
+    else:
+        _put("VRAM jetzt:", "pynvml/NVML nicht verfügbar", warn=True)
+
+    tk.Button(
+        top, text="Schließen", command=top.destroy,
+        bg=getattr(theme, "BG_TERTIARY", "#3a3a3a") if theme else "#3a3a3a",
+        fg=fg, relief="flat", cursor="hand2", padx=14, pady=4,
+    ).grid(row=row + 1, column=0, columnspan=2, pady=14)
+
+    try:
+        top.grab_set()
+    except Exception:
+        pass
+# === END PATCH P6-P1-2 ===
+
+
+# PATCH P6-P2-1: shared resolvers for Tk-master + Theme
+def _resolve_parent_tk(parent):
+    """Liefert ein echtes Tk-Widget aus diversen Wrapper-Typen.
+
+    Reihenfolge: self selbst (hat .tk) → .dialog (BaseDialog) → .root/.parent/.window.
+    Wirft RuntimeError, wenn nichts gefunden wird.
+    """
+    if parent is None:
+        raise RuntimeError("_resolve_parent_tk: parent ist None")
+    if hasattr(parent, "tk"):
+        return parent
+    for _attr in ("dialog", "root", "_root", "parent", "window"):
+        _cand = getattr(parent, _attr, None)
+        if _cand is not None and hasattr(_cand, "tk"):
+            return _cand
+    raise RuntimeError(
+        f"_resolve_parent_tk: kein Tk-Widget in {type(parent).__name__}"
+    )
+
+
+def _resolve_dialog_theme(parent):
+    """Theme-Objekt aus GUI/Dialog/Kontext auflösen (best effort).
+
+    Fallback: Modul-Global CURRENT_THEME (existiert ab GUI-Init).
+    """
+    if parent is not None:
+        obj = getattr(parent, "current_theme", None)
+        if obj is not None:
+            return obj
+        for _attr in ("gui", "dialog"):
+            sub = getattr(parent, _attr, None)
+            if sub is not None:
+                t = getattr(sub, "current_theme", None)
+                if t is not None:
+                    return t
+    try:
+        return CURRENT_THEME  # noqa: F821 — Modul-Global, ab GUI-Init gesetzt
+    except NameError:
+        return None
+# === END PATCH P6-P2-1-helpers ===
+
+
+# PATCH P6-P2-2: mini-test (VRAM-Peak + Tokens/s)
+_MODEL_TEST_CACHE: dict[str, dict] = {}
+
+# PATCH P6-P2f-1: Cache-Persistenz
+_TEST_CACHE_PATH = Path.home() / ".config" / "dragonwhisperer" / "model_test_cache.json"
+
+
+def _save_test_cache() -> None:
+    """Persistiert _MODEL_TEST_CACHE auf Disk (best effort, silently fails)."""
+    try:
+        _TEST_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "version": 1,
+            "updated": time.time(),
+            "models": _MODEL_TEST_CACHE,
+        }
+        _TEST_CACHE_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _load_test_cache() -> None:
+    """Lädt gecachte Test-Ergebnisse von Disk (idempotent)."""
+    try:
+        if not _TEST_CACHE_PATH.exists():
+            return
+        data = json.loads(_TEST_CACHE_PATH.read_text(encoding="utf-8"))
+        models = data.get("models") or {}
+        for name, entry in models.items():
+            if name not in _MODEL_TEST_CACHE:
+                _MODEL_TEST_CACHE[name] = entry
+    except Exception:
+        pass
+# === END PATCH P6-P2f-1-helper ===
+
+_MINI_TEST_PROMPT = "Count from 1 to 20, comma-separated. Only the numbers, no other text."
+
+# PATCH P7-P2a-1: Language Compliance Test — Prompts + Marker
+_LANG_TEST_PROMPTS = {
+    "ko": (
+        "서울 성수동에 도착했습니다. 여기는 무인 빵집으로 유명합니다. "
+        "가게에 들어가 보니 직원이 아무도 없었습니다. 빵집 이름은 "
+        "'Seongsu Bakery'였고, 계산은 키오스크로 했습니다. 저는 햄 "
+        "피자빵과 우유를 샀습니다.\n\n"
+        "그 다음 Nike 매장에 갔습니다. Halloween 시즌이라 거리에는 "
+        "호박, 해골, 유령 장식이 가득했습니다. 기와집 골목으로 "
+        "이동해서 옛날 한국 집 구조를 살펴봤습니다. 지붕 기와에는 "
+        "꽃 무늬가 새겨져 있었습니다.\n\n"
+        "벼룩시장에서는 중고 물건과 도자기를 팔고 있었고, 길거리 "
+        "버스킹도 열리고 있었습니다. 파전과 컵 마라탕을 먹었습니다. "
+        "마지막으로 한강에 가서 모터보트를 탔습니다.\n\n"
+        "이 내용을 3-4 문장으로 요약해주세요. 반드시 한국어로만 답하세요."
+    ),
+    "de": (
+        "Wir sind in Seongsu-dong in Seoul angekommen. Dieser Stadtteil ist "
+        "bekannt für seine unbemannten Bäckereien. Als wir den Laden "
+        "betraten, war kein einziger Mitarbeiter da. Die Bäckerei hieß "
+        "'Seongsu Bakery', und die Bezahlung erfolgte über einen Kiosk. "
+        "Ich kaufte ein Pizzabrot mit Schinken und Milch.\n\n"
+        "Danach gingen wir zu einem Nike-Geschäft. Es war "
+        "Halloween-Saison, und die Straßen waren voll mit Kürbissen, "
+        "Skeletten und Geisterdekorationen. Wir liefen durch eine Gasse mit "
+        "traditionellen koreanischen Häusern. Die Dachziegel waren mit "
+        "Blumenmustern verziert.\n\n"
+        "Auf dem Flohmarkt wurden gebrauchte Gegenstände und Keramik "
+        "verkauft, und es gab Straßenmusik. Wir aßen Pajeon und "
+        "Cup-Malatang. Zum Schluss fuhren wir zum Han-Fluss und machten "
+        "eine Motorboot-Tour.\n\n"
+        "Fasse dies in 3-4 Sätzen zusammen. Antworte nur auf Deutsch."
+    ),
+    "en": (
+        "We arrived in Seongsu-dong, Seoul. This neighborhood is famous "
+        "for its unmanned bakeries. When we entered the shop, there was "
+        "not a single employee. The bakery was called 'Seongsu Bakery', "
+        "and payment was made through a kiosk. I bought a pizza bread "
+        "with ham and some milk.\n\n"
+        "After that, we went to a Nike store. It was Halloween season, "
+        "and the streets were full of pumpkins, skeletons, and ghost "
+        "decorations. We walked through an alley with traditional Korean "
+        "houses. The roof tiles were decorated with flower patterns.\n\n"
+        "At the flea market, used items and ceramics were being sold, "
+        "and there was street busking. We ate pajeon and cup malatang. "
+        "Finally, we went to the Han River and took a motorboat ride.\n\n"
+        "Summarize this in 3-4 sentences. Answer only in English."
+    ),
+}
+
+_LANG_MARKERS_DE = frozenset({
+    "der", "die", "das", "und", "ist", "sind", "war", "waren",
+    "hat", "haben", "ein", "eine", "nicht", "auch", "mit",
+    "auf", "zu", "von", "bei", "f\u00fcr", "wir", "ich", "sie", "es",
+})
+_LANG_MARKERS_EN = frozenset({
+    "the", "and", "is", "are", "was", "were", "of", "to", "in",
+    "we", "i", "it", "that", "this", "with", "for", "on", "at",
+})
+
+# PATCH P7-P2a-1b: Per-Sprache Pass-Threshold.
+# KO = Hangul-Zeichen-Anteil (sauberes Koreanisch: 85-95%)
+# DE/EN = Funktionswort-Anteil (sauberes DE/EN: 40-55%)
+_LANG_PASS_THRESHOLD = {"ko": 0.6, "de": 0.35, "en": 0.35}
+# PATCH P7-P2a-1c: Mindest-Output-Laenge (3-4 Saetze ~ 100+ Zeichen)
+_LANG_OUTPUT_MIN_LEN = 100
+
+
+def _vram_sampler(stop_event, samples: list) -> None:
+    """Sample VRAM used_gb alle 100 ms. Daemon-Thread."""
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+    except Exception:
+        return
+    try:
+        while not stop_event.is_set():
+            try:
+                mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                samples.append(mem.used / (1024 ** 3))
+            except Exception:
+                pass
+            time.sleep(0.1)
+    finally:
+        try:
+            pynvml.nvmlShutdown()
+        except Exception:
+            pass
+
+
+def _suggest_alternative(model: str, free_gb: float) -> str | None:
+    """Findet ein kleineres Modell aus dem Registry mit passender Sprache."""
+    meta = _get_model_metadata(model)
+    if not meta:
+        return None
+    langs = set(meta.get("languages", ()))
+    strengths = set(meta.get("strengths", ()))
+    best = None
+    best_vram = float("inf")
+    for cand_name, cand_meta in _MODEL_METADATA.items():
+        if cand_name == model or cand_meta.get("deprecated"):
+            continue
+        if cand_meta.get("vram_estimate_gb", 0) > free_gb + 0.5:
+            continue
+        # Sprache muss sich überschneiden
+        if not (langs & set(cand_meta.get("languages", ()))):
+            continue
+        # Bevorzuge gleiche Strength
+        if not (strengths & set(cand_meta.get("strengths", ()))):
+            continue
+        if cand_meta["vram_estimate_gb"] < best_vram:
+            best = cand_name
+            best_vram = cand_meta["vram_estimate_gb"]
+    return best
+
+
+_MODEL_SHOW_CACHE: dict[str, dict] = {}
+
+
+def _fetch_ollama_ps(host: str, timeout: float = 2.0) -> list[dict] | None:
+    """Liefert aktuell geladene Modelle via /api/ps.
+
+    Jeder Eintrag: {name, size_gb, vram_gb, expires_in_s (negativ wenn abgelaufen)}
+    """
+    import urllib.request
+    from datetime import datetime, timezone
+    _host = (host or _DEFAULT_OLLAMA_HOST).rstrip("/")
+    if not _host.startswith(("http://", "https://")):
+        return None
+    try:
+        req = urllib.request.Request(f"{_host}/api/ps", method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    out = []
+    now = datetime.now(timezone.utc)
+    for m in data.get("models") or []:
+        _name = m.get("name") or m.get("model") or "?"
+        _vram = (m.get("size_vram") or 0) / (1024 ** 3)
+        _total = (m.get("size") or 0) / (1024 ** 3)
+        _exp = m.get("expires_at")
+        _secs = None
+        if _exp:
+            try:
+                dt = datetime.fromisoformat(_exp.replace("Z", "+00:00"))
+                _secs = (dt - now).total_seconds()
+            except Exception:
+                pass
+        out.append({
+            "name": _name,
+            "size_gb": round(_total, 2),
+            "vram_gb": round(_vram, 2),
+            "expires_in_s": _secs,
+        })
+    return out
+
+
+def _fetch_ollama_show(model: str, host: str, timeout: float = 3.0) -> dict | None:
+    """Liefert Modell-Fakten via POST /api/show. Cached pro Modell."""
+    if model in _MODEL_SHOW_CACHE:
+        return _MODEL_SHOW_CACHE[model]
+    import urllib.request
+    _host = (host or _DEFAULT_OLLAMA_HOST).rstrip("/")
+    if not _host.startswith(("http://", "https://")):
+        return None
+    try:
+        payload = json.dumps({"model": model}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{_host}/api/show", data=payload, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    _MODEL_SHOW_CACHE[model] = data
+    return data
+
+
+def _unload_model_sync(host: str, model: str, timeout: float = 2.0) -> None:
+    """Sendet keep_alive=0 an das Modell, um es aus dem VRAM zu entladen.
+
+    PATCH P6-P2k-2: Wird vor sequentiellen Tests aufgerufen, damit die
+    Baseline sauber ist. Best effort, blockiert max ``timeout`` Sekunden.
+    """
+    import urllib.request
+    _host = (host or _DEFAULT_OLLAMA_HOST).rstrip("/")
+    if not _host.startswith(("http://", "https://")):
+        return
+    try:
+        payload = json.dumps({
+            "model": model, "prompt": "", "keep_alive": 0,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{_host}/api/generate", data=payload, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=timeout).read()  # nosec B310
+    except Exception:
+        pass
+
+
+def _fetch_system_info() -> dict:
+    """GPU, Driver, CUDA, RAM, CPU (best effort)."""
+    info: dict = {
+        "gpu_name": None, "driver": None, "cuda": None,
+        "ram_total_gb": None, "ram_free_gb": None,
+        "cpu_count": None,
+    }
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        h = pynvml.nvmlDeviceGetHandleByIndex(0)
+        _n = pynvml.nvmlDeviceGetName(h)
+        info["gpu_name"] = _n.decode() if isinstance(_n, bytes) else _n
+        _d = pynvml.nvmlSystemGetDriverVersion()
+        info["driver"] = _d.decode() if isinstance(_d, bytes) else _d
+        try:
+            _c = pynvml.nvmlSystemGetCudaDriverVersion()
+            info["cuda"] = f"{_c // 1000}.{(_c % 1000) // 10}"
+        except Exception:
+            pass
+        pynvml.nvmlShutdown()
+    except Exception:
+        pass
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        info["ram_total_gb"] = round(vm.total / (1024 ** 3), 1)
+        info["ram_free_gb"] = round(vm.available / (1024 ** 3), 1)
+    except Exception:
+        pass
+    try:
+        import os
+        info["cpu_count"] = os.cpu_count()
+    except Exception:
+        pass
+    return info
+
+
+def _estimate_summary_time(load_s: float | None, tps: float,
+                           output_tokens: int = 500,
+                           prefill_s: float = 1.5) -> dict:
+    """Grobe Zeit-Schätzung für echte Summary (keine Messung!).
+
+    Berücksichtigt: Kaltstart (load) + Prefill (fix) + Generate (tokens/tps).
+    Der Mini-Test nutzt num_predict=64; echte Summary nutzt ~2048.
+    """
+    if tps <= 0:
+        return {"seconds": None, "breakdown": "keine t/s-Messung verfügbar"}
+    _load = load_s if load_s is not None else 2.0
+    _gen = output_tokens / tps
+    return {
+        "seconds": round(_load + prefill_s + _gen, 1),
+        "gen_s": round(_gen, 1),
+        "load_s": round(_load, 1),
+        "prefill_s": prefill_s,
+        "output_tokens": output_tokens,
+    }
+
+
+def _classify_speed(tps: float) -> tuple[str, str]:
+    """Gibt (class, label) für Tokens/s zurück."""
+    if tps <= 0:
+        return "unknown", "— (keine Messung)"
+    if tps < 5:
+        return "slow", f"🐌 langsam ({tps:.1f} t/s) – für Zusammenfassungen zäh"
+    if tps < 20:
+        return "medium", f"🚶 mittel ({tps:.1f} t/s) – spürbare Wartezeit"
+    if tps < 50:
+        return "fast", f"🏃 schnell ({tps:.1f} t/s) – gut interaktiv nutzbar"
+    return "very_fast", f"⚡ sehr schnell ({tps:.1f} t/s) – kaum Wartezeit"
+
+
+def _classify_mode(mode: str) -> str:
+    """Gibt eine erklärende Beschreibung für den Modus zurück."""
+    return {
+        "gpu": "⚡ GPU (Modell passt komplett ins VRAM – volle Geschwindigkeit)",
+        "partial": ("⚡ Partial (GPU + CPU) – Modell passt teilweise ins VRAM, "
+                    "~2–3× langsamer als reines GPU"),
+        "cpu": ("🐢 CPU (Modell passt nicht ins VRAM – komplett auf CPU, "
+                "~5–10× langsamer)"),
+        "unknown": ("❓ Modus unbekannt (kein Registry-Eintrag für VRAM-Schätzung)"),
+    }.get(mode, mode)
+
+
+def _classify_test_error(msg: str) -> tuple[str, str, str]:
+    """Kategorisiert Fehler in (category, kurztext, lösungshinweis)."""
+    m = (msg or "").lower()
+    if "connection" in m or "refused" in m or "econnrefused" in m:
+        return ("connection", "Ollama-Server nicht erreichbar",
+                "Starten mit: ollama serve\n"
+                "Prüfen mit: ps aux | grep ollama")
+    if "not found" in m or ("model" in m and "not" in m and "pull" in m):
+        return ("not_found", "Modell nicht installiert",
+                "Installieren mit: ollama pull <model>")
+    if "timeout" in m or "timed out" in m:
+        return ("timeout", "Timeout (180s überschritten)",
+                "Modell evtl. zu groß für das System.\n"
+                "Alternative: kleineres Modell wählen")
+    if "cuda" in m or "out of memory" in m or "oom" in m:
+        return ("oom", "VRAM erschöpft (Out of Memory)",
+                "Kleineres Modell wählen oder andere GPU-Prozesse beenden")
+    if "invalid" in m or "parse" in m or "json" in m:
+        return ("parse", "Antwort nicht parsebar",
+                "Ollama-Version prüfen: ollama --version")
+    return ("unknown", "Unbekannter Fehler", msg or "—")
+
+
+def _validate_counting_output(text: str) -> dict:
+    """Prüft, ob der Mini-Test-Output die Zahlen 1–20 enthält."""
+    import re
+    nums = set()
+    for _m in re.findall(r"\b(\d{1,3})\b", text or ""):
+        try:
+            _n = int(_m)
+            if 1 <= _n <= 20:
+                nums.add(_n)
+        except ValueError:
+            continue
+    expected = set(range(1, 21))
+    missing = sorted(expected - nums)
+    out_len = len((text or "").strip())
+    # Grund-Heuristik für Fehlschlag
+    if not missing:
+        reason = "ok"
+    elif out_len < 20:
+        reason = "leer_oder_zu_kurz"
+    elif len(nums) == 0:
+        reason = "keine_zahlen"
+    elif len(missing) > 15:
+        reason = "viele_luecken"
+    else:
+        reason = "einzelne_luecken"
+    return {
+        "ok": not missing,
+        "found": len(nums),
+        "expected": 20,
+        "missing": missing[:5],
+        "reason": reason,
+        "output_length": out_len,
+    }
+
+
+# PATCH P7-P2a-1: Language Compliance Test — Measure + Runner
+def _measure_language_compliance(text: str, lang: str) -> tuple[float, dict]:
+    """Misst Sprach-Compliance. Return (ratio, details)."""
+    text = text or ""
+    if lang == "ko":
+        hangul = sum(1 for c in text if "\uAC00" <= c <= "\uD7AF")
+        latin = sum(1 for c in text if c.isascii() and c.isalpha())
+        denom = hangul + latin
+        return (hangul / denom if denom else 0.0), {
+            "hangul_chars": hangul, "latin_chars": latin,
+            "basis": "hangul/(hangul+latin)",
+        }
+    words = [
+        w.strip(".,!?;:\"'()[]{}").lower()
+        for w in text.split() if w.strip()
+    ]
+    if not words:
+        return 0.0, {"words": 0}
+    if lang == "de":
+        marker_count = sum(1 for w in words if w in _LANG_MARKERS_DE)
+        umlaut_bonus = sum(1 for c in text if c in "\u00e4\u00f6\u00fc\u00df\u00c4\u00d6\u00dc") / max(len(text), 1) * 5
+        return min(marker_count / len(words) + umlaut_bonus, 1.0), {
+            "marker_words": marker_count, "words": len(words),
+        }
+    if lang == "en":
+        marker_count = sum(1 for w in words if w in _LANG_MARKERS_EN)
+        umlaut_penalty = sum(1 for c in text if c in "\u00e4\u00f6\u00fc\u00df\u00c4\u00d6\u00dc") / max(len(text), 1)
+        return min(marker_count / len(words) - umlaut_penalty, 1.0), {
+            "marker_words": marker_count, "words": len(words),
+        }
+    return 0.0, {}
+
+
+def _test_one_language(model: str, lang: str, host: str) -> dict:
+    """Blockierender Sprach-Test fuer ein Modell. Return dict."""
+    import urllib.request as _ur
+    meta = _get_model_metadata(model)
+    num_predict = 300 if meta.get("thinking") else 200
+    prompt = _LANG_TEST_PROMPTS.get(lang, _LANG_TEST_PROMPTS["ko"])
+    payload = json.dumps({
+        "model": model, "prompt": prompt, "stream": False,
+        "keep_alive": "0s",
+        "options": {"num_predict": num_predict, "temperature": 0.0},
+    }).encode()
+    req = _ur.Request(
+        f"{host}/api/generate", data=payload,
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    t0 = time.time()
+    try:
+        with _ur.urlopen(req, timeout=120) as resp:  # nosec B310
+            data = json.loads(resp.read())
+    except Exception as e:
+        return {"ok": False, "model": model, "lang": lang, "error": str(e)[:200]}
+    elapsed = time.time() - t0
+    output = (data.get("response") or "").strip()
+    ratio, details = _measure_language_compliance(output, lang)
+    _threshold = _LANG_PASS_THRESHOLD.get(lang, 0.6)  # PATCH P7-P2a-1b
+    passed = ratio > _threshold and len(output) > _LANG_OUTPUT_MIN_LEN
+    ec = data.get("eval_count", 0) or 0
+    ed = data.get("eval_duration", 0) or 0
+    tps = ec / (ed / 1e9) if ed > 0 else 0.0
+    return {
+        "ok": True, "model": model, "lang": lang,
+        "output": output, "output_len": len(output),
+        "ratio": ratio, "details": details, "passed": passed,
+        "tps": round(tps, 2), "elapsed_s": round(elapsed, 2),
+    }
+
+
+def _run_language_compliance_test(
+    langs: str = "ko",
+    models: list | None = None,
+    host: str | None = None,
+    save: bool = False,
+    skip_unsuitable: bool = False,
+) -> int:
+    """PATCH P7-P2a-1: Terminal-Runner fuer Language Compliance Test."""
+    host = (host or _DEFAULT_OLLAMA_HOST).rstrip("/")
+    lang_list = [x.strip() for x in (langs or "ko").split(",") if x.strip()]
+    if not all(l in _LANG_TEST_PROMPTS for l in lang_list):
+        print(f"ERROR: Ungueltige Sprachen: {langs}", file=sys.stderr)
+        return 1
+    if models:
+        model_list = list(models)
+    else:
+        try:
+            model_list = _fetch_ollama_model_names(host) or []
+        except Exception:
+            model_list = []
+    if not model_list:
+        print("ERROR: Keine Modelle gefunden", file=sys.stderr)
+        return 1
+    if skip_unsuitable:
+        model_list = [m for m in model_list if not _is_unsuitable_for_summary(m)]
+
+    print(f"\n{'=' * 80}")
+    print(f"Language Compliance Test — {len(model_list)} Modelle x {len(lang_list)} Sprachen")
+    print(f"Host: {host}")
+    print(f"{'=' * 80}\n")
+
+    results = []
+    for i, model in enumerate(model_list, 1):
+        for lang in lang_list:
+            print(f"[{i:>2}/{len(model_list)}] {model:<48} {lang.upper()}",
+                  end="", flush=True)
+            r = _test_one_language(model, lang, host)
+            results.append(r)
+            if not r.get("ok"):
+                print(f" -> ERROR: {r.get('error', '')[:60]}")
+                continue
+            st = "OK" if r["passed"] else "FAIL"
+            print(f" -> {st} {r['ratio'] * 100:>5.0f}% | {r['output_len']:>4}ch | {r['tps']:>5.1f}t/s")
+
+    print(f"\n{'=' * 80}\nBESTE PRO SPRACHE\n{'=' * 80}")
+    for lang in lang_list:
+        passed = sorted(
+            [r for r in results if r.get("ok") and r.get("lang") == lang and r.get("passed")],
+            key=lambda x: (-x["ratio"], -x["tps"]),
+        )
+        print(f"\n{lang.upper()}:")
+        if not passed:
+            print("  KEINE Modelle bestanden")
+        for r in passed[:5]:
+            print(f"  {r['model']:<45} {r['ratio'] * 100:>5.0f}% | {r['tps']:>5.1f} t/s")
+
+    if save:
+        out = Path.home() / ".config" / "dragonwhisperer" / "language_compliance_test.json"
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps({
+                "version": 1,
+                "langs": lang_list,
+                "host": host,
+                "results": results,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"\nGespeichert: {out}")
+        except Exception as e:
+            print(f"WARN: Save fehlgeschlagen: {e}", file=sys.stderr)
+
+    fails = sum(1 for r in results if r.get("ok") and not r.get("passed"))
+    return 0 if fails == 0 else 1
+
+
+def _run_model_mini_test_worker(model: str, host: str, state: dict, state_lock) -> None:
+    """Blocking. Läuft im Daemon-Thread. Berührt Tk nie direkt.
+
+    Mutiert ``state`` unter ``state_lock``:
+      stage: 'init' | 'generate' | 'done'
+      vram_now_gb: float
+      done: bool
+      result: dict | None
+    """
+    import urllib.request
+    _host = (host or _DEFAULT_OLLAMA_HOST).rstrip("/")
+    if not _host.startswith(("http://", "https://")):
+        with state_lock:
+            state["done"] = True
+            state["result"] = {
+                "ok": False, "model": model,
+                "error": f"Ungültiger Host: {host!r}",
+            }
+        return
+
+    baseline = 0.0
+    total_gb = 0.0
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        _h = pynvml.nvmlDeviceGetHandleByIndex(0)
+        _mem = pynvml.nvmlDeviceGetMemoryInfo(_h)
+        baseline = _mem.used / (1024 ** 3)
+        total_gb = _mem.total / (1024 ** 3)
+        pynvml.nvmlShutdown()
+    except Exception:
+        pass
+
+    stop_evt = threading.Event()
+    samples: list = []
+    sampler = threading.Thread(
+        target=_vram_sampler, args=(stop_evt, samples),
+        daemon=True, name=f"VRAMSampler-{model}",
+    )
+    sampler.start()
+
+    t0 = time.time()
+    t_first_content = None
+    n_tokens = 0
+    eval_duration_ns = 0
+    output_parts: list[str] = []
+    thinking_parts: list[str] = []  # PATCH P6-P2j-1b
+    thinking_used = False
+    error = None
+    _meta_pre = _get_model_metadata(model)
+    _is_thinking = bool(_meta_pre.get("thinking"))
+    # PATCH P6-P2i-4: Thinking-Models brauchen mehr Token-Budget
+    _num_predict = 1024 if _is_thinking else 96  # PATCH P6-P2k-1a (war 64)
+    try:
+        payload = json.dumps({
+            "model": model,
+            "prompt": _MINI_TEST_PROMPT,
+            "stream": True,
+            "keep_alive": "0s",  # PATCH P6-P2b-1: deterministisch
+            "options": {"num_predict": _num_predict, "temperature": 0.0},
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{_host}/api/generate",
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=180) as resp:  # nosec B310
+            for raw in resp:
+                if not raw.strip():
+                    continue
+                try:
+                    chunk = json.loads(raw.decode("utf-8"))
+                except Exception:
+                    continue
+                # PATCH P6-P2i-4: thinking separat behandeln
+                _think = chunk.get("thinking") or ""
+                if _think:
+                    thinking_used = True
+                    thinking_parts.append(_think)  # PATCH P6-P2j-1c
+                    if t_first_content is None:
+                        t_first_content = time.time()
+                _resp = chunk.get("response") or ""
+                if _resp:
+                    output_parts.append(_resp)
+                    if t_first_content is None:
+                        t_first_content = time.time()
+                if chunk.get("done"):
+                    n_tokens = int(chunk.get("eval_count", 0) or 0)
+                    eval_duration_ns = int(chunk.get("eval_duration", 0) or 0)
+                    break
+                with state_lock:
+                    state["stage"] = "generate"
+                    if samples:
+                        state["vram_now_gb"] = max(samples)
+    except Exception as e:
+        error = f"{type(e).__name__}: {e}"
+    finally:
+        stop_evt.set()
+        sampler.join(timeout=1.5)
+
+    # PATCH P6-P2c-3: auch bei Fehler baseline + peak sichern
+
+    t_end = time.time()
+    peak = max(samples) if samples else baseline
+    delta = max(0.0, peak - baseline)
+    tps = (n_tokens / (eval_duration_ns / 1e9)) if eval_duration_ns > 0 else 0.0
+
+    meta = _get_model_metadata(model)
+    estimate = float(meta.get("vram_estimate_gb", 0) or 0)
+    # PATCH P6-P2i-1b: VRAM-Sättigung > 90% → immer partial
+    _sat_ratio = (peak / total_gb) if total_gb > 0 else 0.0
+    # PATCH P6-P2m-1a: was_loaded-Erkennung + tps-Fallback
+    _was_already_loaded = (baseline > 1.0 and delta < 0.3)
+    if _was_already_loaded:
+        if tps >= 40:
+            mode = "gpu"
+        elif tps < 15:
+            mode = "cpu"
+        else:
+            mode = "partial"
+    elif _sat_ratio >= 0.90:
+        mode = "partial"
+    elif estimate > 0:
+        if delta >= estimate * 0.8:
+            mode = "gpu"
+        elif delta >= 0.3:
+            mode = "partial"
+        else:
+            mode = "cpu"
+    else:
+        # Kein Registry-Eintrag: tps als Indikator
+        if tps >= 40:
+            mode = "gpu"
+        elif tps < 15:
+            mode = "cpu"
+        else:
+            mode = "unknown"
+
+    _output = "".join(output_parts).strip()
+    # PATCH P6-P2j-1d: Thinking-Preview
+    _thinking_preview = "".join(thinking_parts)[:200] if thinking_parts else ""
+    _speed_class, _speed_label = _classify_speed(tps)
+    _err_cat, _err_text, _err_hint = (
+        _classify_test_error(error) if error
+        else ("", "", "")
+    )
+    result = {
+        "ok": error is None,
+        "model": model,
+        "error": error,
+        "error_category": _err_cat,
+        "error_text": _err_text,
+        "error_hint": _err_hint,
+        "output": _output,
+        "thinking_preview": _thinking_preview,  # PATCH P6-P2j-1e
+        "validation": _validate_counting_output(_output),
+        "thinking_used": thinking_used,
+        "speed_class": _speed_class,
+        "speed_label": _speed_label,
+        "mode_label": _classify_mode(mode),
+        "n_tokens": n_tokens,
+        "tokens_per_sec": round(tps, 2),
+        "wall_total_s": round(t_end - t0, 2),
+        "load_s": round(t_first_content - t0, 2) if t_first_content else None,
+        "baseline_vram_gb": round(baseline, 2),
+        "peak_vram_gb": round(peak, 2),
+        "delta_vram_gb": round(delta, 2),
+        "total_vram_gb": round(total_gb, 2),
+        "vram_saturation": round(_sat_ratio, 3),
+        "was_already_loaded": _was_already_loaded,  # PATCH P6-P2m-1b
+        "mode": mode,
+        "timestamp": t_end,
+    }
+    _MODEL_TEST_CACHE[model] = result
+    # PATCH P6-P2h-1: Test-Ergebnis loggen (maschinenlesbar)
+    try:
+        logger.info("[MINI-TEST-RESULT] %s",
+                    json.dumps(result, ensure_ascii=False, default=str))
+    except Exception:
+        pass
+    # PATCH P6-P2f-1: Cache auf Disk persistieren
+    _save_test_cache()
+    with state_lock:
+        state["stage"] = "done"
+        state["done"] = True
+        state["result"] = result
+
+
+def _show_model_mini_test_dialog(parent, model: str, host: str | None = None, on_close=None):
+    """Toplevel mit Progress + VRAM-Peak. Startet Worker, pollt via .after()."""
+    import tkinter as tk
+    if not model:
+        return
+
+    try:
+        _tk_master = _resolve_parent_tk(parent)
+    except RuntimeError as e:
+        logger.warning("[MINI-TEST] %s", e)
+        return
+
+    theme = _resolve_dialog_theme(parent)
+    bg = getattr(theme, "BG_SECONDARY", "#2b2b2b") if theme else "#2b2b2b"
+    fg = getattr(theme, "TEXT_PRIMARY", "#e0e0e0") if theme else "#e0e0e0"
+    bg3 = getattr(theme, "BG_TERTIARY", "#3a3a3a") if theme else "#3a3a3a"
+    accent = getattr(theme, "TEXT_ACCENT", "#4fc3f7") if theme else "#4fc3f7"
+    err_fg = "#e57373"
+    font_main = ("Segoe UI", 10)
+    font_bold = ("Segoe UI", 10, "bold")
+
+    top = tk.Toplevel(_tk_master)
+    top.title(f"Mini-Test: {model}")
+    top.geometry("520x300")
+    top.configure(bg=bg)
+    try:
+        top.transient(_tk_master)
+    except Exception:
+        pass
+
+    tk.Label(top, text=model, bg=bg, fg=accent, font=font_bold).pack(
+        anchor="w", padx=15, pady=(12, 2)
+    )
+    tk.Label(
+        top, text="Modell laden · VRAM-Peak messen · Tokens/s",
+        bg=bg, fg=fg, font=font_main,
+    ).pack(anchor="w", padx=15, pady=(0, 10))
+
+    lbl_stage = tk.Label(top, text="⏳ Starte…", bg=bg, fg=fg, font=font_bold)
+    lbl_stage.pack(anchor="w", padx=15, pady=2)
+    lbl_vram = tk.Label(top, text="VRAM: —", bg=bg, fg=fg, font=font_main)
+    lbl_vram.pack(anchor="w", padx=15, pady=2)
+    lbl_result = tk.Label(
+        top, text="", bg=bg, fg=fg, font=font_main,
+        justify="left", anchor="w", wraplength=480,
+    )
+    lbl_result.pack(anchor="w", padx=15, pady=(8, 2), fill="x", expand=True)
+
+    btn_close = tk.Button(
+        top, text="Schließen",
+        bg=bg3, fg=fg, relief="flat", cursor="hand2",
+        padx=14, pady=4, state="disabled",
+    )
+    btn_close.pack(side="bottom", pady=10)
+
+    state = {"stage": "init", "vram_now_gb": 0.0, "done": False, "result": None}
+    state_lock = threading.Lock()
+
+    def _on_close():
+        try:
+            top.destroy()
+        except tk.TclError:
+            pass
+        if on_close:
+            try:
+                on_close()
+            except Exception:
+                pass
+
+    top.protocol("WM_DELETE_WINDOW", _on_close)
+    btn_close.config(command=_on_close)
+
+    worker = threading.Thread(
+        target=_run_model_mini_test_worker,
+        args=(model, host, state, state_lock),
+        daemon=True, name=f"MiniTest-{model}",
+    )
+    worker.start()
+
+    mode_label = {"gpu": "GPU", "partial": "Partial (GPU+CPU)",
+                  "cpu": "CPU", "unknown": "?"}
+
+    def _tick():
+        try:
+            if not top.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        with state_lock:
+            snapshot = dict(state)
+        if snapshot.get("done"):
+            res = snapshot.get("result") or {}
+            if res.get("ok"):
+                lbl_stage.config(text="✓ Fertig", fg=accent)
+                load = res.get("load_s")
+                load_str = f" · Load {load}s" if load is not None else ""
+                txt = (
+                    f"{res.get('tokens_per_sec', 0)} t/s · "
+                    f"Peak {res.get('peak_vram_gb', 0):.2f} GB "
+                    f"(+{res.get('delta_vram_gb', 0):.2f} GB) · "
+                    f"{mode_label.get(res.get('mode', 'unknown'), '?')}\n"
+                    f"{res.get('n_tokens', 0)} Tokens · "
+                    f"{res.get('wall_total_s', 0)} s wall{load_str}"
+                )
+                lbl_result.config(text=txt, fg=fg)
+                lbl_vram.config(text=f"VRAM-Peak: {res.get('peak_vram_gb', 0):.2f} GB")
+            else:
+                lbl_stage.config(text="✗ Fehler", fg=err_fg)
+                lbl_result.config(text=str(res.get("error", "unbekannt")), fg=err_fg)
+            btn_close.config(state="normal")
+            return
+        stage = snapshot.get("stage", "init")
+        lbl_stage.config(text={
+            "init": "⏳ Starte…", "generate": "⚡ Generiere…",
+        }.get(stage, stage))
+        v = snapshot.get("vram_now_gb", 0.0)
+        if v > 0:
+            lbl_vram.config(text=f"VRAM jetzt: {v:.2f} GB")
+        top.after(200, _tick)
+
+    top.after(100, _tick)
+    try:
+        top.grab_set()
+    except Exception:
+        pass
+# === END PATCH P6-P2-2 ===
+
+
+# PATCH P6-P2b-1b: model-dashboard (vereint Details + Test + Liste + Output)
+def _show_model_dashboard(parent, initial_model: str = "", host: str | None = None,
+                          start_test: bool = False, on_model_choose=None):
+    """Zentrales Modell-Fenster: Liste links, Details/VRAM/Test rechts."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    try:
+        _tk_master = _resolve_parent_tk(parent)
+    except RuntimeError as e:
+        logger.warning("[DASHBOARD] %s", e)
+        return
+
+    theme = _resolve_dialog_theme(parent)
+    def _c(attr, default):
+        return getattr(theme, attr, default) if theme else default
+    bg = _c("BG_SECONDARY", "#2b2b2b")
+    fg = _c("TEXT_PRIMARY", "#e0e0e0")
+    fg2 = _c("TEXT_SECONDARY", "#a0a0a0")
+    bg3 = _c("BG_TERTIARY", "#3a3a3a")
+    accent = _c("TEXT_ACCENT", "#4fc3f7")
+    warn = "#e57373"
+    ok_g = "#81c784"
+    f_small = ("Segoe UI", 9)
+    f_main = ("Segoe UI", 10)
+    f_bold = ("Segoe UI", 10, "bold")
+    f_head = ("Segoe UI", 12, "bold")
+
+    _host = (host or _DEFAULT_OLLAMA_HOST).rstrip("/")
+
+    top = tk.Toplevel(_tk_master)
+    top.title("🧠 Model-Dashboard")
+    top.geometry("1000x720")
+    top.minsize(820, 560)
+    top.configure(bg=bg)
+    try:
+        top.transient(_tk_master)
+    except Exception:
+        pass
+
+    # --- State ---------------------------------------------------
+    _load_test_cache()  # PATCH P6-P2f-1: gecachte Ergebnisse laden
+    all_models: list[str] = []
+    try:
+        _fetched = _fetch_ollama_model_names(_host, timeout=2.0)
+    except Exception:
+        _fetched = None
+    if _fetched:
+        all_models = list(_fetched)
+    else:
+        all_models = list(_MODEL_METADATA.keys())
+    filtered_models: list[str] = list(all_models)
+    current_model = {"name": (initial_model or "").strip()}
+    if current_model["name"] and current_model["name"] not in all_models:
+        all_models.insert(0, current_model["name"])
+        filtered_models.insert(0, current_model["name"])
+
+    test_state = {"stage": "init", "vram_now_gb": 0.0, "done": False,
+                  "result": None, "running": False}
+    test_lock = threading.Lock()
+    # PATCH P6-P2p-2a: State für "Alle testen"-Fortschritt
+    all_test_state = {
+        "active": False, "total": 0, "done": 0, "skipped": 0,
+        "failed": 0, "current": None, "queue": [],
+        "started_at": None, "durations": [],
+        "skipped_details": {"unsuitable": 0, "cache": 0},  # PATCH P6-P2q-3a
+    }
+
+    # --- Layout --------------------------------------------------
+    # PATCH P6-P2d-2: System-Info-Zeile (kompakt, oben)
+    _sys = _fetch_system_info()
+    _sys_parts = []
+    if _sys["gpu_name"]:
+        _sys_parts.append(_sys["gpu_name"])
+    if _sys["ram_total_gb"]:
+        _sys_parts.append(f"{_sys['ram_total_gb']:.0f} GB RAM")
+    if _sys["cpu_count"]:
+        _sys_parts.append(f"{_sys['cpu_count']} CPUs")
+    if _sys["driver"]:
+        _sys_parts.append(f"Driver {_sys['driver']}")
+    if _sys["cuda"]:
+        _sys_parts.append(f"CUDA {_sys['cuda']}")
+    _sys_line = " · ".join(_sys_parts) if _sys_parts else "System-Info nicht verfügbar"
+    _sys_lbl = tk.Label(top, text=f"💻 {_sys_line}",
+                        bg=bg, fg=fg2, font=f_small, anchor="w")
+    _sys_lbl.pack(fill="x", padx=12, pady=(6, 0))
+
+    main = tk.PanedWindow(top, orient="horizontal", bg=bg,
+                          sashwidth=4, sashrelief="flat", bd=0)
+    main.pack(fill="both", expand=True, padx=6, pady=6)
+
+    left = tk.Frame(main, bg=bg, width=250)
+    left.pack_propagate(False)
+    right = tk.Frame(main, bg=bg)
+    main.add(left, minsize=220)
+    main.add(right, minsize=500)
+
+    # PATCH P6-P2g-1: Close-Button unten fix + Canvas-Scroll rechts
+    close_frame = tk.Frame(right, bg=bg)
+    close_frame.pack(side="bottom", fill="x", pady=(2, 8), padx=8)
+
+    def _dashboard_close():
+        try:
+            top.grab_release()
+        except Exception:
+            pass
+        try:
+            top.destroy()
+        except tk.TclError:
+            pass
+
+    close_btn = tk.Button(
+        close_frame, text="Schließen", command=_dashboard_close,
+        bg=bg3, fg=fg, font=f_main, relief="flat", cursor="hand2",
+        padx=18, pady=5,
+        activebackground=getattr(theme, "BG_HOVER", bg3) if theme else bg3,
+        activeforeground=getattr(theme, "TEXT_ACCENT", fg) if theme else fg,
+    )
+    close_btn.pack(side="right")
+    top.protocol("WM_DELETE_WINDOW", _dashboard_close)
+
+    scroll_outer = tk.Frame(right, bg=bg)
+    scroll_outer.pack(side="top", fill="both", expand=True, padx=2, pady=2)
+    _vscroll = tk.Scrollbar(scroll_outer, orient="vertical", width=12)
+    _vscroll.pack(side="right", fill="y")
+    _canvas = tk.Canvas(scroll_outer, bg=bg, highlightthickness=0, bd=0,
+                       yscrollcommand=_vscroll.set)
+    _canvas.pack(side="left", fill="both", expand=True)
+    _vscroll.config(command=_canvas.yview)
+    inner = tk.Frame(_canvas, bg=bg)
+    _inner_id = _canvas.create_window((0, 0), window=inner, anchor="nw")
+    inner.bind("<Configure>",
+              lambda e: _canvas.configure(scrollregion=_canvas.bbox("all")))
+    _canvas.bind("<Configure>",
+                lambda e: _canvas.itemconfig(_inner_id, width=e.width))
+
+    def _on_mousewheel(event):
+        d = 0
+        if getattr(event, "num", None) == 4:
+            d = -1
+        elif getattr(event, "num", None) == 5:
+            d = 1
+        elif getattr(event, "delta", 0):
+            d = -1 * (event.delta // 120) if event.delta > 0 else 1
+        if d:
+            _canvas.yview_scroll(d, "units")
+
+    def _bind_w(_e):
+        _canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        _canvas.bind_all("<Button-4>", _on_mousewheel)
+        _canvas.bind_all("<Button-5>", _on_mousewheel)
+
+    def _unbind_w(_e):
+        _canvas.unbind_all("<MouseWheel>")
+        _canvas.unbind_all("<Button-4>")
+        _canvas.unbind_all("<Button-5>")
+
+    scroll_outer.bind("<Enter>", _bind_w)
+    scroll_outer.bind("<Leave>", _unbind_w)
+    # === END PATCH P6-P2g-1-setup ===
+
+
+    # ----- Linke Spalte: Suche + Filter + Liste
+    tk.Label(left, text="Modelle", bg=bg, fg=accent, font=f_bold).pack(
+        anchor="w", padx=6, pady=(4, 2))
+    search_var = tk.StringVar()
+    tk.Entry(left, textvariable=search_var, bg=bg3, fg=fg, font=f_small,
+             insertbackground=fg, relief="flat").pack(
+        fill="x", padx=6, pady=(0, 4))
+    filter_var = tk.StringVar(value="Alle")
+    filter_cb = ttk.Combobox(left, textvariable=filter_var, state="readonly",
+                             values=("Alle", "Summary-tauglich", "Ohne Deprecated"),
+                             font=f_small)
+    filter_cb.pack(fill="x", padx=6, pady=(0, 6))
+
+    list_frame = tk.Frame(left, bg=bg)
+    list_frame.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+    scroll = tk.Scrollbar(list_frame, orient="vertical")
+    listbox = tk.Listbox(list_frame, bg=bg3, fg=fg, font=f_small,
+                        selectbackground=accent, selectforeground=bg,
+                        relief="flat", bd=0, activestyle="none",
+                        highlightthickness=0, yscrollcommand=scroll.set)
+    scroll.config(command=listbox.yview)
+    scroll.pack(side="right", fill="y")
+    listbox.pack(side="left", fill="both", expand=True)
+
+    # ----- Rechte Spalte: Header + Details + VRAM + Test
+    header_lbl = tk.Label(inner, text="(kein Modell gewählt)", bg=bg, fg=fg,
+                          font=f_head, anchor="w")
+    header_lbl.pack(fill="x", padx=8, pady=(4, 2))
+    badge_lbl = tk.Label(inner, text="", bg=bg, fg=fg2, font=f_small,
+                         anchor="w")
+    badge_lbl.pack(fill="x", padx=8, pady=(0, 6))
+
+    details_lf = tk.LabelFrame(inner, text=" Details ", bg=bg, fg=accent,
+                               font=f_bold, bd=0, padx=8, pady=6)
+    details_lf.pack(fill="x", padx=6, pady=(0, 6))
+    details_body = tk.Frame(details_lf, bg=bg)
+    details_body.pack(fill="x")
+
+    vram_lf = tk.LabelFrame(inner, text=" VRAM ", bg=bg, fg=accent,
+                            font=f_bold, bd=0, padx=8, pady=6)
+    vram_lf.pack(fill="x", padx=6, pady=(0, 6))
+    vram_body = tk.Frame(vram_lf, bg=bg)
+    vram_body.pack(fill="x")
+
+    # PATCH P6-P2d-2: geladene Modelle (aus /api/ps)
+    ps_lf = tk.LabelFrame(inner, text=" Aktuell geladen ", bg=bg, fg=accent,
+                          font=f_bold, bd=0, padx=8, pady=6)
+    ps_lf.pack(fill="x", padx=6, pady=(0, 6))
+    ps_body = tk.Frame(ps_lf, bg=bg)
+    ps_body.pack(fill="x")
+
+    test_lf = tk.LabelFrame(inner, text=" Mini-Test ", bg=bg, fg=accent,
+                            font=f_bold, bd=0, padx=8, pady=6)
+    test_lf.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+
+    test_btns = tk.Frame(test_lf, bg=bg)
+    test_btns.pack(fill="x", pady=(0, 4))
+    btn_test = tk.Button(test_btns, text="▶ Dieses testen",
+                         bg=bg3, fg=fg, font=f_main, relief="flat",
+                         cursor="hand2", padx=10, pady=3)
+    btn_test.pack(side="left")
+    btn_all = tk.Button(test_btns, text="▶▶ Alle testen",
+                        bg=bg3, fg=fg, font=f_small, relief="flat",
+                        cursor="hand2", padx=8, pady=3)
+    btn_all.pack(side="left", padx=(6, 0))
+    # PATCH P6-P2p-2b: Fortschritts-Frame (anfangs unsichtbar)
+    test_all_progress_frame = tk.Frame(test_lf, bg=bg)
+    progress_bar = ttk.Progressbar(
+        test_all_progress_frame, mode="determinate",
+        maximum=100, value=0,
+    )
+    progress_bar.pack(fill="x", pady=(2, 2))
+    counter_lbl = tk.Label(test_all_progress_frame, text="", bg=bg, fg=fg,
+                          font=f_small, anchor="w")
+    counter_lbl.pack(fill="x")
+    current_lbl = tk.Label(test_all_progress_frame, text="", bg=bg, fg=accent,
+                          font=f_small, anchor="w")
+    current_lbl.pack(fill="x")
+    eta_lbl = tk.Label(test_all_progress_frame, text="", bg=bg, fg=fg2,
+                      font=f_small, anchor="w")
+    eta_lbl.pack(fill="x")
+    # PATCH P6-P2f-3: Vergleich öffnen
+    btn_compare = tk.Button(test_btns, text="📊 Vergleich",
+                            bg=bg3, fg=fg, font=f_small, relief="flat",
+                            cursor="hand2", padx=8, pady=3)
+    btn_compare.pack(side="left", padx=(6, 0))
+    # PATCH P6-P2p-1c: Empfehlungen-Button
+    btn_recs = tk.Button(test_btns, text="💡 Empfehlungen",
+                         bg=bg3, fg=fg, font=f_small, relief="flat",
+                         cursor="hand2", padx=8, pady=3)
+    btn_recs.pack(side="left", padx=(6, 0))
+    btn_recs.config(command=lambda: _show_recommendations_dialog(top))
+    # PATCH P6-P2q-2d: Eintragen-Button
+    btn_register = tk.Button(test_btns, text="➕ Eintragen",
+                             bg=bg3, fg=fg, font=f_small, relief="flat",
+                             cursor="hand2", padx=8, pady=3)
+    btn_register.pack(side="left", padx=(6, 0))
+    def _on_register_save():
+        try:
+            _render_details(current_model["name"])
+        except Exception:
+            pass
+        try:
+            _refresh_list()
+        except Exception:
+            pass
+    btn_register.config(
+        command=lambda: _show_model_register_dialog(
+            top, current_model["name"], _host,
+            on_save=_on_register_save,
+        )
+    )
+
+    test_progress = tk.Label(test_lf, text="", bg=bg, fg=fg, font=f_small,
+                            anchor="w")
+    test_progress.pack(fill="x", pady=(2, 4))
+
+    # PATCH P6-P2c-2: Interpretations-Block
+    interpret_frame = tk.Frame(test_lf, bg=bg3, bd=0,
+                              highlightthickness=0)
+    interpret_frame.pack(fill="x", pady=(0, 4))
+    interpret_text = tk.Text(interpret_frame, height=9, bg=bg3, fg=fg,
+                             font=("Consolas", 9), relief="flat", bd=0,
+                             wrap="word", state="disabled", padx=6, pady=4)
+    interpret_text.pack(fill="both", expand=True)
+    # PATCH P6-P2c-fix: interpret_text per Closure in den defs referenziert
+
+    out_frame = tk.Frame(test_lf, bg=bg3)
+    out_frame.pack(fill="both", expand=True, pady=(0, 4))
+    out_scroll = tk.Scrollbar(out_frame, orient="vertical")
+    out_scroll.pack(side="right", fill="y")
+    output_text = tk.Text(out_frame, height=6, bg=bg3, fg=fg,
+                          font=("Consolas", 9), relief="flat", bd=0,
+                          wrap="word", state="disabled",
+                          yscrollcommand=out_scroll.set)
+    output_text.pack(side="left", fill="both", expand=True)
+    out_scroll.config(command=output_text.yview)
+
+    validation_lbl = tk.Label(test_lf, text="", bg=bg, fg=fg, font=f_small,
+                             anchor="w")
+    validation_lbl.pack(fill="x")
+
+    # --- Render-Helper ------------------------------------------
+    def _set_output(text: str):
+        output_text.config(state="normal")
+        output_text.delete("1.0", tk.END)
+        output_text.insert("1.0", text or "")
+        output_text.config(state="disabled")
+
+    def _set_validation(v: dict | None):
+        if not v:
+            validation_lbl.config(text="", fg=fg)
+            return
+        if v.get("ok"):
+            validation_lbl.config(
+                text=f"✓ Validierung: {v['found']}/{v['expected']} Zahlen, ok",
+                fg=ok_g)
+        else:
+            miss = v.get("missing", [])
+            miss_str = ", ".join(str(n) for n in miss) if miss else "?"
+            validation_lbl.config(
+                text=f"⚠ Validierung: {v['found']}/{v['expected']} – fehlt: {miss_str}",
+                fg=warn)
+
+    def _render_details(model: str):
+        for w in details_body.winfo_children():
+            w.destroy()
+        for w in vram_body.winfo_children():
+            w.destroy()
+        header_lbl.config(text=model or "(kein Modell gewählt)")
+
+        meta = _get_model_metadata(model) if model else {}
+        # Badge-Zeile
+        _tags = []
+        if meta.get("deprecated"):
+            _tags.append(f"⚠ deprecated → {meta.get('replaced_by', '?')}")
+        if model in _MODEL_TEST_CACHE:
+            _r = _MODEL_TEST_CACHE[model]
+            if _r.get("ok"):
+                _tags.append(f"⚡ {_r.get('tokens_per_sec', 0)} t/s "
+                            f"({_r.get('mode', '?')})")
+            else:
+                _tags.append("✗ Test fehlgeschlagen")
+        badge_lbl.config(text=" · ".join(_tags) if _tags else
+                        ("Nicht im Registry" if not meta else ""))
+
+        if not meta:
+            tk.Label(details_body,
+                    text="Keine Metadaten im Registry. Nur Ollama-Basics verfügbar.",
+                    bg=bg, fg=fg2, font=f_main, anchor="w").pack(fill="x")
+        else:
+            for label, val in (
+                ("Familie", meta.get("family", "?")),
+                ("Parameter", f"{meta.get('params_b', '?')} B"),
+                ("Quant", meta.get("quant", "?")),
+                ("Kontext", f"{int(meta.get('context_length', 0) or 0):,}".replace(",", ".") + " Tokens"),
+                ("Sprachen", ", ".join(meta.get("languages", ())) or "?"),
+                ("Stärken", ", ".join(meta.get("strengths", ())) or "?"),
+            ):
+                row_f = tk.Frame(details_body, bg=bg)
+                row_f.pack(fill="x", pady=1)
+                tk.Label(row_f, text=f"{label}:", bg=bg, fg=fg2,
+                        font=f_small, width=10, anchor="w").pack(side="left")
+                tk.Label(row_f, text=val, bg=bg, fg=fg, font=f_main,
+                        anchor="w").pack(side="left")
+
+        # VRAM
+        vram = _get_vram_status()
+        estimate = float(meta.get("vram_estimate_gb", 0) or 0)
+        if vram is None:
+            tk.Label(vram_body, text="NVML/pynvml nicht verfügbar",
+                    bg=bg, fg=warn, font=f_main, anchor="w").pack(fill="x")
+            return
+        free_gb = vram["free_gb"]
+        total_gb = vram["total_gb"]
+        used_gb = vram["used_gb"]
+
+        rows = [
+            ("Frei jetzt", f"{free_gb:.2f} GB", fg if estimate <= free_gb + 0.5 else fg2),
+            ("Belegt", f"{used_gb:.2f} GB / {total_gb:.2f} GB", fg2),
+            ("Geschätzt", f"{estimate:.2f} GB (inkl. KV-Cache)" if estimate else "—",
+             fg2),
+        ]
+        for label, val, color in rows:
+            row_f = tk.Frame(vram_body, bg=bg)
+            row_f.pack(fill="x", pady=1)
+            tk.Label(row_f, text=f"{label}:", bg=bg, fg=fg2,
+                    font=f_small, width=10, anchor="w").pack(side="left")
+            tk.Label(row_f, text=val, bg=bg, fg=color, font=f_main,
+                    anchor="w").pack(side="left")
+
+        # Balken (Canvas)
+        canvas_h = 18
+        canvas = tk.Canvas(vram_body, height=canvas_h, bg=bg3,
+                          highlightthickness=0, bd=0)
+        canvas.pack(fill="x", pady=(4, 2))
+        def _draw_bar(_evt=None):
+            canvas.delete("all")
+            w = canvas.winfo_width()
+            if w < 20:
+                return
+            if estimate <= 0:
+                return
+            frac = min(1.0, estimate / max(estimate, free_gb + used_gb, 1))
+            fills = min(1.0, free_gb / max(estimate, 1))
+            fill_w = int((w - 2) * fills)
+            need_w = int((w - 2) * 1.0)
+            # Hintergrund = "benötigt" rotlich
+            canvas.create_rectangle(1, 1, need_w + 1, canvas_h - 1,
+                                    fill="#5a2c2c", outline="")
+            # Frei (grün)
+            canvas.create_rectangle(1, 1, fill_w + 1, canvas_h - 1,
+                                    fill=ok_g, outline="")
+        canvas.bind("<Configure>", _draw_bar)
+        canvas.after(50, _draw_bar)
+
+        if estimate > free_gb + 0.5:
+            tk.Label(vram_body,
+                    text=f"⚠ Modell braucht ~{estimate:.1f} GB, "
+                         f"frei {free_gb:.1f} GB → CPU-Offload (langsam)",
+                    bg=bg, fg=warn, font=f_small, anchor="w",
+                    wraplength=520, justify="left").pack(fill="x", pady=(2, 0))
+        else:
+            tk.Label(vram_body,
+                    text=f"✓ Passt ins VRAM (Reserve {free_gb - estimate:.1f} GB)",
+                    bg=bg, fg=ok_g, font=f_small, anchor="w").pack(fill="x", pady=(2, 0))
+
+        # PATCH P6-P2d-2d: Erweiterte Fakten via /api/show
+        _ext_btn = tk.Button(
+            details_body, text="🛈 Erweiterte Fakten laden (Ollama API)",
+            bg=bg3, fg=fg, font=f_small, relief="flat",
+            cursor="hand2", padx=6, pady=2, anchor="w",
+        )
+        _ext_btn.pack(fill="x", pady=(4, 0))
+        _ext_txt = tk.Text(details_body, height=8, bg=bg3, fg=fg,
+                          font=("Consolas", 8), relief="flat", bd=0,
+                          wrap="word", state="disabled", padx=4, pady=2)
+        # zunächst versteckt (nicht gepackt)
+        def _show_ext():
+            if _ext_txt.winfo_ismapped():
+                _ext_txt.pack_forget()
+                return
+            _ext_btn.config(state="disabled", text="⏳ Lade…")
+            def _worker():
+                _data = _fetch_ollama_show(model, _host)
+                def _apply():
+                    _ext_btn.config(state="normal",
+                                   text="🛈 Erweiterte Fakten laden (Ollama API)")
+                    try:
+                        if not _ext_txt.winfo_exists():
+                            return
+                    except tk.TclError:
+                        return
+                    if not _data:
+                        _ext_txt.config(state="normal")
+                        _ext_txt.delete("1.0", tk.END)
+                        _ext_txt.insert("1.0", "Keine Antwort von /api/show")
+                        _ext_txt.config(state="disabled")
+                        _ext_txt.pack(fill="x", pady=(2, 0))
+                        return
+                    _lines = []
+                    _det = _data.get("details") or {}
+                    if _det.get("parameter_size"):
+                        _lines.append(f"Parameter:     {_det['parameter_size']}")
+                    if _det.get("quantization_level"):
+                        _lines.append(f"Quantisierung: {_det['quantization_level']}")
+                    if _det.get("family"):
+                        _lines.append(f"Familie:       {_det['family']}")
+                    if _det.get("families"):
+                        _lines.append(f"Familien:      {', '.join(_det['families'])}")
+                    _caps = _data.get("capabilities") or []
+                    if _caps:
+                        _lines.append(f"Capabilities:  {', '.join(_caps)}")
+                    _mi = _data.get("model_info") or {}
+                    for k, v in sorted(_mi.items()):
+                        if any(k.endswith(s) for s in
+                               (".context_length", ".embedding_length",
+                                ".block_count")):
+                            _short = k.rsplit(".", 1)[-1]
+                            _lines.append(f"{_short:14s} {v}")
+                    _sys = (_data.get("system") or "").strip()
+                    if _sys:
+                        _lines.append(f"\nSystem-Prompt (Anfang):\n  {_sys[:200]}")
+                    _tpl = (_data.get("template") or "").strip()
+                    if _tpl:
+                        _lines.append(f"\nTemplate (Anfang):\n  {_tpl[:200]}")
+                    _ext_txt.config(state="normal")
+                    _ext_txt.delete("1.0", tk.END)
+                    _ext_txt.insert("1.0", "\n".join(_lines) or "(leer)")
+                    _ext_txt.config(state="disabled")
+                    _ext_txt.pack(fill="x", pady=(2, 0))
+                try:
+                    if top.winfo_exists():
+                        top.after(0, _apply)
+                except tk.TclError:
+                    pass
+            threading.Thread(target=_worker, daemon=True,
+                            name=f"DashShow-{model}").start()
+        _ext_btn.config(command=_show_ext)
+
+    def _render_ps(ps_list):
+        """Rendert die Liste geladener Modelle in ps_body."""
+        for w in ps_body.winfo_children():
+            w.destroy()
+        if ps_list is None:
+            tk.Label(ps_body, text="Ollama antwortet nicht",
+                    bg=bg, fg=warn, font=f_small, anchor="w").pack(fill="x")
+            return
+        if not ps_list:
+            tk.Label(ps_body,
+                    text="Keine Modelle aktiv (alles entladen)",
+                    bg=bg, fg=fg2, font=f_small, anchor="w").pack(fill="x")
+            return
+        _total = 0.0
+        for m in ps_list:
+            _row = tk.Frame(ps_body, bg=bg)
+            _row.pack(fill="x", pady=1)
+            _total += m["vram_gb"]
+            _t = ""
+            if m["expires_in_s"] is not None:
+                _s = int(m["expires_in_s"])
+                if _s <= 0:
+                    _t = "läuft ab…"
+                elif _s >= 3600:
+                    _t = f"⏱ {_s // 3600}h {(_s % 3600) // 60}m"
+                elif _s >= 60:
+                    _t = f"⏱ {_s // 60}m {_s % 60}s"
+                else:
+                    _t = f"⏱ {_s}s"
+            tk.Label(_row, text=m["name"], bg=bg, fg=fg, font=f_small,
+                    anchor="w").pack(side="left")
+            tk.Label(_row,
+                    text=f" · {m['vram_gb']:.1f} GB VRAM {_t}",
+                    bg=bg, fg=fg2, font=f_small, anchor="w").pack(side="left")
+        if len(ps_list) > 1:
+            tk.Label(ps_body,
+                    text=f"Summe: {_total:.1f} GB VRAM belegt",
+                    bg=bg, fg=(warn if _total > 7.0 else fg2),
+                    font=f_small, anchor="w").pack(fill="x", pady=(4, 0))
+
+    def _refresh_ps_async():
+        """Fragt /api/ps im Thread, Updated GUI via .after."""
+        def _worker():
+            result = _fetch_ollama_ps(_host, timeout=1.5)
+            try:
+                if top.winfo_exists():
+                    top.after(0, lambda: _render_ps(result))
+            except tk.TclError:
+                pass
+        threading.Thread(target=_worker, daemon=True,
+                        name="DashPSRefresh").start()
+
+    def _render_test_section(model: str):
+        cached = _MODEL_TEST_CACHE.get(model)
+        if cached:
+            if cached.get("ok"):
+                test_progress.config(text="✓ Test erfolgreich", fg=ok_g)
+                _render_interpretation(cached)
+                _set_output(cached.get("output", ""))
+                _set_validation_v2(cached.get("validation"))
+            else:
+                _render_error_diagnosis(cached)
+                _set_output("")
+                _set_validation(None)
+            btn_test.config(state="normal")
+        elif test_state["running"] and test_state.get("_model") == model:
+            test_progress.config(text="⏳ Test läuft…", fg=fg)
+            _set_output("")
+            _set_validation(None)
+            btn_test.config(state="disabled")
+        else:
+            test_progress.config(text="Noch nicht getestet", fg=fg2)
+            _set_output("")
+            _set_validation(None)
+            btn_test.config(state="normal")
+
+    def _render_interpretation(res: dict):
+        """Füllt ein Text-Widget mit dem ausführlichen Interpretations-Block."""
+        speed_label = res.get("speed_label", "—")
+        mode_label = res.get("mode_label", "—")
+        peak = res.get("peak_vram_gb", 0)
+        baseline = res.get("baseline_vram_gb", 0)
+        delta = res.get("delta_vram_gb", 0)
+        wall = res.get("wall_total_s", 0)
+        load = res.get("load_s")
+        n_tok = res.get("n_tokens", 0)
+        tps = res.get("tokens_per_sec", 0)
+        # Wörter/s grob: 1 Token ≈ 0.75 Wörter
+        wps = tps * 0.75 if tps else 0
+
+        load_str = f"{load:.2f} s" if load is not None else "—"
+        tps_extra = f" (≈ {wps:.0f} Wörter/s)" if tps else ""
+
+        _think_note = ""
+        if res.get("thinking_used"):
+            _think_note = ("\n💭 THINKING-MODELL: nutzt Tokens für interne Überlegung.\n"
+                          "  Für echte Antworten mehr Token-Budget verfügbar.\n")
+        text = (
+            _think_note +
+            f"GESCHWINDIGKEIT\n"
+            f"  {speed_label}{tps_extra}\n\n"
+            f"AUSFÜHRUNG\n"
+            f"  {mode_label}\n\n"
+            f"VRAM-NUTZUNG\n"
+            f"  Vorher:      {baseline:.2f} GB (andere Prozesse)\n"
+            f"  Peak:        {peak:.2f} GB während Test\n"
+            f"  Modell:      +{delta:.2f} GB zusätzlich genutzt\n\n"
+            f"ZEITEN\n"
+            f"  Kaltstart:   {load_str} (Modell laden)\n"
+            f"  Gesamt:      {wall:.2f} s für {n_tok} Tokens\n\n"
+        )
+        # PATCH P6-P2d-3: Zeit-Schätzung für echte Zusammenfassung
+        _short = _estimate_summary_time(load, tps, output_tokens=200, prefill_s=1.0)
+        _long = _estimate_summary_time(load, tps, output_tokens=800, prefill_s=2.0)
+        if _short["seconds"] is not None:
+            text += (
+                f"ZEIT-SCHÄTZUNG für echte Zusammenfassung (auf dieser Hardware)\n"
+                f"  Kurz (~200 Tokens):    ~{_short['seconds']:.0f} s\n"
+                f"  Ausführlich (~800):    ~{_long['seconds']:.0f} s\n"
+                f"  (Kaltstart + Prefill + Generate; reale Werte können\n"
+                f"   durch Prompt-Länge und Systemlast abweichen)\n"
+            )
+        w = interpret_text
+        if w is None or not w.winfo_exists():
+            return
+        w.config(state="normal")
+        w.delete("1.0", tk.END)
+        w.insert("1.0", text)
+        w.config(state="disabled")
+
+    def _render_error_diagnosis(res: dict):
+        err_cat = res.get("error_category", "unknown")
+        err_text = res.get("error_text", "Unbekannt")
+        err_hint = res.get("error_hint", "—")
+        raw_err = res.get("error") or ""
+
+        text = (
+            f"FEHLERKATEGORIE: {err_cat.upper()}\n"
+            f"{err_text}\n\n"
+            f"DIAGNOSE:\n"
+        )
+        # Kategorie-spezifische Diagnose-Bausteine
+        if err_cat == "connection":
+            text += (
+                "  Ollama-Server antwortet nicht auf dem konfigurierten Port.\n"
+                "  Läuft der Server? ps aux | grep ollama\n"
+                "  Port korrekt? Standard: http://127.0.0.1:11434\n"
+            )
+        elif err_cat == "not_found":
+            text += (
+                "  Das Modell ist nicht in 'ollama list' sichtbar.\n"
+                "  Prüfen: ollama list\n"
+                "  Installieren: ollama pull <model>\n"
+            )
+        elif err_cat == "timeout":
+            text += (
+                "  Der Test wurde nach 180 s abgebrochen.\n"
+                "  Mögliche Ursachen:\n"
+                "  • Modell zu groß für VRAM → CPU-Offload\n"
+                "  • Modell lädt noch (sehr große Dateien)\n"
+                "  • Ollama-Server überlastet\n"
+            )
+        elif err_cat == "oom":
+            text += (
+                "  Das VRAM ist erschöpft.\n"
+                "  Andere Prozesse belegen zu viel Speicher.\n"
+                "  Prüfen: nvidia-smi\n"
+            )
+        else:
+            text += f"  {raw_err}\n"
+
+        text += (
+            f"\nLÖSUNG:\n  {err_hint}\n"
+        )
+        w = interpret_text
+        if w is None or not w.winfo_exists():
+            return
+        w.config(state="normal")
+        w.delete("1.0", tk.END)
+        w.insert("1.0", text)
+        w.config(state="disabled")
+
+    def _set_validation_v2(v: dict | None):
+        if not v:
+            validation_lbl.config(text="", fg=fg)
+            return
+        if v.get("ok"):
+            validation_lbl.config(
+                text=("✓ Qualität: 20 von 20 Zahlen gefunden (1–20 vollständig). "
+                      "Modell hat Aufgabe korrekt erfüllt."),
+                fg=ok_g)
+        else:
+            miss = v.get("missing", [])
+            miss_str = ", ".join(str(n) for n in miss) if miss else "?"
+            found = v.get("found", 0)
+            validation_lbl.config(
+                text=(f"⚠ Qualitätsproblem: {found}/20 Zahlen gefunden. "
+                      f"Fehlt: {miss_str}. "
+                      f"Mögliche Ursachen: Halluzination, abgeschnitten oder "
+                      f"Prompt nicht verstanden — Modell für diese Aufgabe prüfen."),
+                fg=warn)
+
+
+    def _select_model(model: str, scroll_to: bool = True):
+        if not model:
+            return
+        current_model["name"] = model
+        _render_details(model)
+        _render_test_section(model)
+        if scroll_to:
+            try:
+                idx = filtered_models.index(model)
+                listbox.selection_clear(0, tk.END)
+                listbox.selection_set(idx)
+                listbox.see(idx)
+            except ValueError:
+                pass
+
+    # --- Liste füllen -------------------------------------------
+    def _refresh_list():
+        nonlocal filtered_models
+        query = (search_var.get() or "").strip().lower()
+        flt = filter_var.get()
+        filtered_models = []
+        for m in all_models:
+            if query and query not in m.lower():
+                continue
+            meta = _get_model_metadata(m)
+            if flt == "Summary-tauglich":
+                strengths = meta.get("strengths", ())
+                if not any(s in strengths for s in
+                           ("korean_summary", "german_summary", "balanced")):
+                    continue
+            if flt == "Ohne Deprecated" and meta.get("deprecated"):
+                continue
+            filtered_models.append(m)
+        listbox.delete(0, tk.END)
+        for m in filtered_models:
+            meta = _get_model_metadata(m)
+            badge = ""
+            if meta.get("deprecated"):
+                badge = " ⚠"
+            elif m in _MODEL_TEST_CACHE and _MODEL_TEST_CACHE[m].get("ok"):
+                badge = f" ⚡{_MODEL_TEST_CACHE[m].get('tokens_per_sec', 0):.0f}"
+            listbox.insert(tk.END, m + badge)
+
+    search_var.trace_add("write", lambda *_: _refresh_list())
+    filter_cb.bind("<<ComboboxSelected>>", lambda _e: _refresh_list())
+
+    def _on_select(_e=None):
+        sel = listbox.curselection()
+        if not sel or test_state["running"]:
+            return
+        idx = sel[0]
+        if 0 <= idx < len(filtered_models):
+            _select_model(filtered_models[idx], scroll_to=False)
+
+    listbox.bind("<<ListboxSelect>>", _on_select)
+
+    # --- Test-Start ---------------------------------------------
+    def _start_test(model: str):
+        if test_state["running"]:
+            return
+        test_state.update({
+            "stage": "init", "vram_now_gb": 0.0, "done": False,
+            "result": None, "running": True, "_model": model,
+        })
+        btn_test.config(state="disabled")
+        btn_all.config(state="disabled")
+        listbox.config(state="disabled")
+        test_progress.config(text="⏳ Starte Test…", fg=fg)
+        _set_output("")
+        _set_validation(None)
+
+        threading.Thread(
+            target=_run_model_mini_test_worker,
+            args=(model, _host, test_state, test_lock),
+            daemon=True, name=f"DashTest-{model}",
+        ).start()
+        top.after(200, _poll_test)
+
+    def _poll_test():
+        try:
+            if not top.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        with test_lock:
+            snapshot = dict(test_state)
+        if snapshot.get("done"):
+            test_state["running"] = False
+            btn_test.config(state="normal")
+            btn_all.config(state="normal")
+            listbox.config(state="normal")
+            tested = snapshot.get("_model", "")
+            _refresh_list()
+            if tested == current_model["name"]:
+                _render_details(tested)
+                _render_test_section(tested)
+            return
+        stage = snapshot.get("stage", "init")
+        _v = snapshot.get("vram_now_gb", 0.0)
+        txt = {"init": "⏳ Modell lädt…",
+               "generate": f"⚡ Generiere… (VRAM {_v:.1f} GB)"}.get(stage, stage)
+        test_progress.config(text=txt, fg=fg)
+        top.after(200, _poll_test)
+
+    def _on_test_click():
+        if not current_model["name"]:
+            return
+        _start_test(current_model["name"])
+
+    def _update_progress_ui():
+        """PATCH P6-P2p-2c: Aktualisiert Fortschritts-Bar + Labels."""
+        if not all_test_state["active"]:
+            try:
+                test_all_progress_frame.pack_forget()
+            except Exception:
+                pass
+            return
+        try:
+            if not test_all_progress_frame.winfo_ismapped():
+                test_all_progress_frame.pack(fill="x", pady=(4, 4),
+                                              before=interpret_frame)
+        except Exception:
+            pass
+        done = all_test_state["done"]
+        total = all_test_state["total"]
+        skipped = all_test_state["skipped"]
+        failed = all_test_state["failed"]
+        current = all_test_state["current"]
+        remaining = total - done
+        try:
+            progress_bar["maximum"] = max(total, 1)
+            progress_bar["value"] = done
+        except Exception:
+            pass
+        try:
+            _sd = all_test_state.get("skipped_details") or {}
+            _skip_str = f"{skipped} \u00fcbersprungen"
+            if _sd:
+                _details = []
+                if _sd.get("unsuitable"):
+                    _details.append(f"{_sd['unsuitable']} ungeeignet")
+                if _sd.get("cache"):
+                    _details.append(f"{_sd['cache']} aus Cache")
+                if _details:
+                    _skip_str = f"{skipped} \u00fcbersprungen ({', '.join(_details)})"
+            counter_lbl.config(
+                text=f"{done}/{total} getestet  \u00b7  "
+                     f"{_skip_str}  \u00b7  "
+                     f"{failed} fehlgeschlagen  \u00b7  "
+                     f"verbleibend: {remaining}"
+            )
+        except Exception:
+            pass
+        if current:
+            try:
+                current_lbl.config(text=f"\u25b6 Aktuell: {current}")
+            except Exception:
+                pass
+        durations = all_test_state["durations"]
+        if durations and remaining > 0:
+            avg = sum(durations) / len(durations)
+            eta_s = avg * remaining + (1.5 if current else 0)
+            if eta_s >= 60:
+                eta_str = f"{int(eta_s // 60)} min {int(eta_s % 60)} s"
+            else:
+                eta_str = f"{int(eta_s)} s"
+            try:
+                eta_lbl.config(
+                    text=f"~{eta_str} verbleibend (\u00d8 {avg:.0f} s/Test)"
+                )
+            except Exception:
+                pass
+
+    def _on_test_all_click():
+        if test_state["running"] or not filtered_models:
+            return
+        # PATCH P6-P2p-2d: Queue bauen (Cache/unsuitable skippen)
+        queue = []
+        skipped_count = 0
+        _unsuitable_skip = 0
+        _cache_skip = 0
+        for m in filtered_models:
+            if m in _MODEL_TEST_CACHE:
+                skipped_count += 1
+                _cache_skip += 1
+                continue
+            if _is_unsuitable_for_summary(m):
+                skipped_count += 1
+                _unsuitable_skip += 1
+                continue
+            queue.append(m)
+        if not queue:
+            test_progress.config(
+                text=f"\u2713 Alle Modelle bereits getestet "
+                     f"({skipped_count} \u00fcbersprungen)",
+                fg=ok_g,
+            )
+            return
+        all_test_state.update({
+            "active": True,
+            "total": len(queue),
+            "done": 0,
+            "skipped": skipped_count,
+            "failed": 0,
+            "current": queue[0],
+            "queue": list(queue[1:]),
+            "started_at": time.time(),
+            "durations": [],
+            "skipped_details": {
+                "unsuitable": _unsuitable_skip,
+                "cache": _cache_skip,
+            },
+        })
+        _update_progress_ui()
+        _start_test(queue[0])
+
+        def _chain():
+            with test_lock:
+                finished = test_state.get("done")
+            if not finished:
+                top.after(300, _chain)
+                return
+            last = test_state.get("_model")
+            result = test_state.get("result") or {}
+            all_test_state["done"] += 1
+            if not result.get("ok"):
+                all_test_state["failed"] += 1
+            wall = result.get("wall_total_s")
+            if wall:
+                all_test_state["durations"].append(wall + 1.5)
+            if last:
+                _unload_model_sync(_host, last, timeout=2.0)
+            if all_test_state["queue"]:
+                nxt = all_test_state["queue"].pop(0)
+                all_test_state["current"] = nxt
+                _update_progress_ui()
+                def _start_next(nm=nxt):
+                    _start_test(nm)
+                    top.after(300, _chain)
+                top.after(1500, _start_next)
+            else:
+                all_test_state["active"] = False
+                all_test_state["current"] = None
+                _update_progress_ui()
+                test_progress.config(
+                    text=f"\u2713 Alle Tests abgeschlossen "
+                         f"({all_test_state['total']} Modelle, "
+                         f"{all_test_state['failed']} fehlgeschlagen)",
+                    fg=ok_g,
+                )
+        top.after(300, _chain)
+
+    btn_test.config(command=_on_test_click)
+    btn_all.config(command=_on_test_all_click)
+    # PATCH P6-P2f-3: Comparison-Window-Command
+    btn_compare.config(command=lambda: _show_comparison_window(
+        top, _host,
+        on_select=lambda m: _select_model(m, scroll_to=True),
+        on_set_default=on_model_choose,
+    ))
+
+    # --- Initialer Zustand --------------------------------------
+    _refresh_list()
+    _refresh_ps_async()  # PATCH P6-P2d-2e: initial geladene Modelle zeigen
+    if current_model["name"]:
+        try:
+            _select_model(current_model["name"], scroll_to=True)
+        except Exception:
+            pass
+    elif filtered_models:
+        _select_model(filtered_models[0], scroll_to=True)
+
+    try:
+        top.grab_set()
+    except Exception:
+        pass
+
+    # PATCH P6-P2o-1: Empfehlungs-Box (wenn aktuelles Modell deutlich langsamer)
+    if on_model_choose and current_model["name"]:
+        try:
+            _meta_rec = _get_model_metadata(current_model["name"])
+            _tps_rec = _meta_rec.get("measured_tps")
+            if not _tps_rec:
+                _c = _MODEL_TEST_CACHE.get(current_model["name"])
+                if _c:
+                    _tps_rec = _c.get("tokens_per_sec")
+            if _tps_rec:
+                _best_rec = _find_faster_alternative(current_model["name"],
+                                                     _tps_rec, min_ratio=1.5)
+                if _best_rec:
+                    _ratio = _best_rec["tps"] / _tps_rec
+                    _rec_box = tk.Frame(top, bg=bg3, bd=0)
+                    _rec_box.pack(fill="x", padx=12, pady=(4, 4), before=main)
+                    _rec_inner = tk.Frame(_rec_box, bg=bg3)
+                    _rec_inner.pack(fill="x", padx=10, pady=8)
+                    tk.Label(_rec_inner, text="\U0001f44b Empfehlung",
+                            bg=bg3, fg=accent,
+                            font=f_bold, anchor="w").pack(fill="x")
+                    tk.Label(_rec_inner,
+                            text=f"Aktuell: {current_model['name']} ({_tps_rec:.1f} t/s)   \u00b7   "
+                                 f"\U0001f4a1 Besser: {_best_rec['model']} "
+                                 f"({_best_rec['tps']:.1f} t/s \u2014 {_ratio:.1f}\u00d7 schneller)",
+                            bg=bg3, fg=fg, font=f_main, anchor="w",
+                            justify="left", wraplength=900).pack(fill="x", pady=(2, 6))
+                    _br = tk.Frame(_rec_inner, bg=bg3)
+                    _br.pack(fill="x")
+                    def _apply_rec(m=_best_rec["model"], b=_rec_box):
+                        try:
+                            on_model_choose(m)
+                        except Exception:
+                            pass
+                        try:
+                            _select_model(m, scroll_to=True)
+                        except Exception:
+                            pass
+                        try:
+                            b.destroy()
+                        except Exception:
+                            pass
+                    def _dismiss_rec(b=_rec_box):
+                        try:
+                            b.destroy()
+                        except Exception:
+                            pass
+                    tk.Button(_br, text=f"\u2713 {_best_rec['model']} als Standard",
+                             command=_apply_rec, bg=accent, fg=bg, font=f_small,
+                             relief="flat", cursor="hand2",
+                             padx=10, pady=3).pack(side="left")
+                    tk.Button(_br, text="Ignorieren", command=_dismiss_rec,
+                             bg=bg, fg=fg2, font=f_small, relief="flat",
+                             cursor="hand2", padx=10, pady=3).pack(side="left", padx=(6, 0))
+        except Exception:
+            pass
+
+    try:
+        _canvas.yview_moveto(0.0)
+    except Exception:
+        pass
+
+    if start_test and current_model["name"]:
+        top.after(150, _on_test_click)
+
+
+# P6-P2b-1b: deprecated wrappers (rückwärtskompatibel)
+def _show_model_details_dialog_deprecated(parent, model_name, host=None):
+    _show_model_dashboard(parent, initial_model=model_name, host=host,
+                          start_test=False)
+
+def _show_model_mini_test_dialog_deprecated(parent, model, host=None, on_close=None):
+    _show_model_dashboard(parent, initial_model=model, host=host,
+                          start_test=True)
+# === END PATCH P6-P2b-1b ===
+
+
+# PATCH P6-P2f-2: comparison-window (sortierbar, exportierbar, auto-empfehlung)
+def _find_best_for_language(lang_code: str, rows: list[dict] | None = None):
+    """Beste Wahl für eine Sprache aus getesteten+validen Modellen."""
+    if rows is None:
+        rows = []
+        for m in _MODEL_TEST_CACHE:
+            r = _MODEL_TEST_CACHE[m]
+            meta = _get_model_metadata(m)
+            rows.append({"model": m, "tested": True,
+                         "tps": r.get("tokens_per_sec"),
+                         "vram": r.get("peak_vram_gb"),
+                         "validation_ok": r.get("validation", {}).get("ok"),
+                         "languages": meta.get("languages", ())})
+    candidates = [
+        r for r in rows
+        if r.get("tested") and r.get("validation_ok")
+        and lang_code in (r.get("languages") or ())
+    ]
+    if not candidates:
+        return None
+    def _score(r):
+        return (r.get("tps") or 0) * 10 - (r.get("vram") or 0) * 2
+    best = max(candidates, key=_score)
+    return {
+        "model": best["model"],
+        "tps": best.get("tps") or 0,
+        "vram": best.get("vram") or 0,
+    }
+
+
+def _show_comparison_window(parent, host: str | None = None, on_select=None,
+                             on_set_default=None):
+    """Vergleichsfenster mit sortierbarer Treeview, Best-Pick-Header, Export."""
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+
+    try:
+        _tk_master = _resolve_parent_tk(parent)
+    except RuntimeError as e:
+        logger.warning("[COMPARISON] %s", e)
+        return
+
+    theme = _resolve_dialog_theme(parent)
+    def _c(attr, default):
+        return getattr(theme, attr, default) if theme else default
+    bg = _c("BG_SECONDARY", "#2b2b2b")
+    fg = _c("TEXT_PRIMARY", "#e0e0e0")
+    fg2 = _c("TEXT_SECONDARY", "#a0a0a0")
+    bg3 = _c("BG_TERTIARY", "#3a3a3a")
+    accent = _c("TEXT_ACCENT", "#4fc3f7")
+    ok_g = "#81c784"
+    warn = "#e57373"
+    f_small = ("Segoe UI", 9)
+    f_main = ("Segoe UI", 10)
+    f_head = ("Segoe UI", 13, "bold")
+
+    _host = (host or _DEFAULT_OLLAMA_HOST).rstrip("/")
+
+    _load_test_cache()  # Sicherstellen, dass aktuell
+
+    top = tk.Toplevel(_tk_master)
+    top.title("📊 Modell-Vergleich")
+    top.geometry("1150x700")
+    top.minsize(900, 540)
+    top.configure(bg=bg)
+    try:
+        top.transient(_tk_master)
+    except Exception:
+        pass
+
+    # --- Sammle alle Modelle (Registry + Ollama-List)
+    all_models = set(_MODEL_METADATA.keys()) | set(_MODEL_TEST_CACHE.keys())
+    try:
+        _fetched = _fetch_ollama_model_names(_host, timeout=2.0)
+        if _fetched:
+            all_models.update(_fetched)
+    except Exception:
+        pass
+    all_models = sorted(all_models)
+
+    def _row_data(model: str) -> dict:
+        cached = _MODEL_TEST_CACHE.get(model)
+        meta = _get_model_metadata(model)
+        if not cached:
+            return {
+                "model": model, "tps": None, "vram": None,
+                "mode": "—", "valid": "—", "load": None,
+                "est200": None, "est500": None,
+                "tested": False, "validation_ok": False,
+                "languages": meta.get("languages", ()),
+                "context_length": meta.get("context_length", 0),
+            }
+        tps = cached.get("tokens_per_sec", 0) or 0
+        load_s = cached.get("load_s")
+        e200 = _estimate_summary_time(load_s, tps, output_tokens=200, prefill_s=1.0)
+        e500 = _estimate_summary_time(load_s, tps, output_tokens=500, prefill_s=1.5)
+        v = cached.get("validation", {})
+        mode = cached.get("mode", "?")
+        mode_short = {"gpu": "⚡ GPU", "partial": "🔶 Partial",
+                      "cpu": "🐢 CPU", "unknown": "?"}.get(mode, mode)
+        return {
+            "model": model,
+            "tps": tps,
+            "vram": cached.get("peak_vram_gb", 0),
+            "mode": mode_short,
+            "valid": f"✓ {v.get('found', 0)}/{v.get('expected', 20)}"
+                     if v.get("ok") else
+                     f"⚠ {v.get('found', 0)}/{v.get('expected', 20)}",
+            "load": load_s,
+            "est200": e200.get("seconds"),
+            "est500": e500.get("seconds"),
+            "tested": True,
+            "validation_ok": v.get("ok", False),
+            "languages": meta.get("languages", ()),
+            "context_length": meta.get("context_length", 0),
+        }
+
+    all_rows = [_row_data(m) for m in all_models]
+
+    def _compute_badges(rows):
+        """Rechnet Badges pro Modell (best-per-lang, schnellstes, etc.)."""
+        valid = [
+            r for r in rows
+            if r.get("tested") and r.get("validation_ok")
+            and not _is_unsuitable_for_summary(r["model"])
+        ]
+        def _best_by(pred, key):
+            c = [r for r in valid if pred(r)]
+            if not c:
+                return None
+            return max(c, key=lambda r: (r.get(key) or 0))["model"]
+        best_ko = _best_by(lambda r: "ko" in (r.get("languages") or ()), "tps")
+        best_de = _best_by(lambda r: "de" in (r.get("languages") or ()), "tps")
+        best_en = _best_by(lambda r: "en" in (r.get("languages") or ()), "tps")
+        best_speed = _best_by(lambda r: True, "tps")
+        best_vram = None
+        if valid:
+            best_vram = min(valid, key=lambda r: (r.get("vram") or 999))["model"]
+        out = {}
+        for r in rows:
+            name = r["model"]
+            meta = _get_model_metadata(name)
+            b = []
+            if name == best_ko:
+                b.append("🥇KO")
+            if name == best_de:
+                b.append("🥇DE")
+            if name == best_en:
+                b.append("🥇EN")
+            if name == best_speed:
+                b.append("⚡TOP")
+            if name == best_vram:
+                b.append("💾MIN")
+            ctx = int(meta.get("context_length", 0) or 0)
+            if ctx >= 100000:
+                b.append(f"📏{ctx // 1000}k")
+            if meta.get("thinking"):
+                b.append("💭")
+            if _is_unsuitable_for_summary(name):
+                b.append("❌")
+            if meta.get("deprecated"):
+                b.append("⚠")
+            out[name] = " ".join(b)
+        return out
+
+    # --- Best Picks berechnen
+    picks = [
+        ("🏆 Beste Wahl gesamt", _find_best_for_language("de", all_rows)
+                                 or _find_best_for_language("en", all_rows)
+                                 or _find_best_for_language("ko", all_rows)),
+        ("🇰🇷 Koreanisch", _find_best_for_language("ko", all_rows)),
+        ("🇩🇪 Deutsch", _find_best_for_language("de", all_rows)),
+        ("🇬🇧 Englisch", _find_best_for_language("en", all_rows)),
+    ]
+    best_model_global = picks[0][1]["model"] if picks[0][1] else None
+
+    # --- Header: Titel + Best Picks
+    header = tk.Frame(top, bg=bg)
+    header.pack(fill="x", padx=12, pady=(10, 4))
+    tk.Label(header, text="📊 Modell-Vergleich", bg=bg, fg=accent,
+             font=f_head, anchor="w").pack(side="left")
+
+    picks_frame = tk.Frame(top, bg=bg)
+    picks_frame.pack(fill="x", padx=12, pady=(0, 8))
+    for label, pick in picks:
+        row = tk.Frame(picks_frame, bg=bg)
+        row.pack(fill="x", pady=1)
+        tk.Label(row, text=f"{label}:", bg=bg, fg=fg2,
+                font=f_small, width=22, anchor="w").pack(side="left")
+        if pick:
+            tk.Label(row,
+                    text=f"{pick['model']}  ·  {pick['tps']:.1f} t/s · "
+                         f"{pick['vram']:.1f} GB",
+                    bg=bg, fg=ok_g, font=f_small, anchor="w").pack(side="left")
+        else:
+            tk.Label(row, text="— (noch keine Tests)",
+                    bg=bg, fg=fg2, font=f_small, anchor="w").pack(side="left")
+
+    # --- Filter + Export + Test-All
+    tools = tk.Frame(top, bg=bg)
+    tools.pack(fill="x", padx=12, pady=(0, 4))
+    tk.Label(tools, text="Filter:", bg=bg, fg=fg,
+             font=f_small).pack(side="left")
+    filter_var = tk.StringVar(value="Alle")
+    _filter_values = (
+        "Alle", "Nur getestete", "Nur valide",
+        "🇰🇷 Koreanisch", "🇩🇪 Deutsch", "🇬🇧 Englisch",
+        "⚡ Schnellste", "📏 Langes Video", "💾 Wenig VRAM",
+    )
+    filter_cb = ttk.Combobox(tools, textvariable=filter_var,
+                             values=_filter_values,
+                             state="readonly", width=20, font=f_small)
+    filter_cb.pack(side="left", padx=(4, 12))
+
+    # PATCH P6-P2l-1: Preset-Chips
+    def _apply_chip(chip):
+        filter_var.set(chip)
+        _k = {"key": "tps", "reverse": True}
+        if chip == "📏 Langes Video":
+            _k = {"key": "context_length", "reverse": True}
+        elif chip == "💾 Wenig VRAM":
+            _k = {"key": "vram", "reverse": False}
+        sort_state.clear()
+        sort_state.update(_k)
+        _update_header_labels()
+        _refresh()
+        for _n, _b in _chip_buttons:
+            try:
+                _b.config(bg=(accent if _n == chip else bg3),
+                          fg=(bg if _n == chip else fg))
+            except tk.TclError:
+                pass
+
+    chips_frame = tk.Frame(tools, bg=bg)
+    chips_frame.pack(side="left", padx=(4, 8))
+    _chip_buttons = []
+    for _label in ("🇰🇷 Koreanisch", "🇩🇪 Deutsch", "🇬🇧 Englisch",
+                   "⚡ Schnellste", "📏 Langes Video", "💾 Wenig VRAM"):
+        _b = tk.Button(
+            chips_frame, text=_label,
+            command=lambda ch=_label: _apply_chip(ch),
+            bg=bg3, fg=fg, font=("Segoe UI", 8), relief="flat",
+            cursor="hand2", padx=6, pady=2, bd=0,
+        )
+        _b.pack(side="left", padx=1)
+        _chip_buttons.append((_label, _b))
+    # PATCH P6-P2n-1b: Suchfeld (bei 30+ Modellen hilfreich)
+    tk.Label(tools, text="Suche:", bg=bg, fg=fg,
+             font=f_small).pack(side="left", padx=(8, 2))
+    search_var = tk.StringVar()
+    _search_entry = tk.Entry(
+        tools, textvariable=search_var, bg=bg3, fg=fg,
+        insertbackground=fg, font=f_small, relief="flat", width=18,
+    )
+    _search_entry.pack(side="left", padx=(0, 8))
+    tk.Label(tools, text="(Klick auf Spaltenkopf = sortieren · Doppelklick = auswählen)",
+             bg=bg, fg=fg2, font=("Segoe UI", 8)).pack(side="left")
+
+    def _export_json():
+        path = filedialog.asksaveasfilename(
+            parent=top, defaultextension=".json",
+            filetypes=[("JSON", "*.json"), ("Alle", "*.*")],
+            initialfile="model_comparison.json",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"version": 1, "exported": time.time(),
+                          "models": _MODEL_TEST_CACHE},
+                          f, ensure_ascii=False, indent=2, default=str)
+            messagebox.showinfo("Export OK", f"Gespeichert:\\n{path}", parent=top)
+        except Exception as e:
+            messagebox.showerror("Fehler", str(e), parent=top)
+
+    def _export_csv():
+        path = filedialog.asksaveasfilename(
+            parent=top, defaultextension=".csv",
+            filetypes=[("CSV", "*.csv"), ("Alle", "*.*")],
+            initialfile="model_comparison.csv",
+        )
+        if not path:
+            return
+        import csv
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["Modell", "t/s", "VRAM Peak (GB)", "Modus",
+                           "Validierung", "Load (s)",
+                           "Est 200tok (s)", "Est 500tok (s)"])
+                for r in all_rows:
+                    if not r["tested"]:
+                        continue
+                    w.writerow([r["model"], r["tps"], r["vram"], r["mode"],
+                               r["valid"], r["load"],
+                               r["est200"], r["est500"]])
+            messagebox.showinfo("Export OK", f"Gespeichert:\\n{path}", parent=top)
+        except Exception as e:
+            messagebox.showerror("Fehler", str(e), parent=top)
+
+    # P6-P2n-1a: Export-Buttons nach unten verschoben (statt in tools)
+
+    def _clear_cache():
+        if not messagebox.askyesno(
+            "Cache leeren",
+            f"Alle {len(_MODEL_TEST_CACHE)} Test-Ergebnisse löschen?",
+            parent=top,
+        ):
+            return
+        _MODEL_TEST_CACHE.clear()
+        _save_test_cache()
+        _refresh()
+
+    # --- Treeview
+    tree_frame = tk.Frame(top, bg=bg)
+    tree_frame.pack(fill="both", expand=True, padx=12, pady=4)
+
+    # PATCH P6-P2l-2: badges-Spalte, load+est200 entfernt
+    cols = ("model", "badges", "tps", "vram", "mode", "valid", "est500")
+    tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
+                       selectmode="browse")
+    headers = [
+        ("model", "Modell", 270, "w"),
+        ("badges", "Tags", 180, "w"),
+        ("tps", "t/s", 55, "e"),
+        ("vram", "VRAM", 75, "e"),
+        ("mode", "Modus", 85, "center"),
+        ("valid", "Valid", 75, "center"),
+        ("est500", "~500 tok", 80, "e"),
+    ]
+    for col, text, width, anchor in headers:
+        tree.heading(col, text=text)
+        tree.column(col, width=width, anchor=anchor)
+
+    tree.tag_configure("best", background="#1a3a1a", foreground="#b8f5b8")
+    tree.tag_configure("good", background="#1a2a3a")
+    tree.tag_configure("problem", background="#3a1a1a")
+    tree.tag_configure("untested", foreground="#808080")
+
+    scroll = tk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=scroll.set)
+    scroll.pack(side="right", fill="y")
+    tree.pack(side="left", fill="both", expand=True)
+
+    # --- Sort-State
+    sort_state = {"key": "tps", "reverse": True}
+
+    def _update_header_labels():
+        for col, text, _w, _a in headers:
+            arrow = ""
+            if col == sort_state["key"]:
+                arrow = " ▼" if sort_state["reverse"] else " ▲"
+            tree.heading(col, text=text + arrow)
+
+    def _sort_by(key):
+        if sort_state["key"] == key:
+            sort_state["reverse"] = not sort_state["reverse"]
+        else:
+            sort_state["key"] = key
+            sort_state["reverse"] = key in ("tps", "valid", "est200", "est500")
+        _update_header_labels()
+        _refresh()
+
+    for col in cols:
+        tree.heading(col, command=lambda c=col: _sort_by(c))
+
+    def _refresh():
+        _sel = tree.selection()
+        _sel_model = tree.item(_sel[0], "values")[0] if _sel else None
+
+        for item in tree.get_children():
+            tree.delete(item)
+
+        rows = list(all_rows)
+        # PATCH P6-P2n-1c: Such-Filter
+        _q = (search_var.get() or "").strip().lower()
+        if _q:
+            rows = [r for r in rows if _q in r["model"].lower()]
+        flt = filter_var.get()
+        if flt == "Nur getestete":
+            rows = [r for r in rows if r["tested"]]
+        elif flt == "Nur valide":
+            rows = [r for r in rows if r["tested"] and r["validation_ok"]]
+        elif flt == "🇰🇷 Koreanisch":
+            rows = [r for r in rows if r["tested"] and r["validation_ok"]
+                    and "ko" in (r.get("languages") or ())
+                    and not _is_unsuitable_for_summary(r["model"])]
+        elif flt == "🇩🇪 Deutsch":
+            rows = [r for r in rows if r["tested"] and r["validation_ok"]
+                    and "de" in (r.get("languages") or ())
+                    and not _is_unsuitable_for_summary(r["model"])]
+        elif flt == "🇬🇧 Englisch":
+            rows = [r for r in rows if r["tested"] and r["validation_ok"]
+                    and "en" in (r.get("languages") or ())
+                    and not _is_unsuitable_for_summary(r["model"])]
+        elif flt == "⚡ Schnellste":
+            rows = [r for r in rows if r["tested"] and r["validation_ok"]
+                    and not _is_unsuitable_for_summary(r["model"])]
+        elif flt == "📏 Langes Video":
+            rows = [r for r in rows if r["tested"] and r["validation_ok"]
+                    and int(r.get("context_length") or 0) >= 100000
+                    and not _is_unsuitable_for_summary(r["model"])]
+        elif flt == "💾 Wenig VRAM":
+            rows = [r for r in rows if r["tested"] and r["validation_ok"]
+                    and not _is_unsuitable_for_summary(r["model"])]
+
+        key = sort_state["key"]
+        rev = sort_state["reverse"]
+        def _key(r):
+            v = r.get(key)
+            if v is None:
+                return float("-inf") if rev else float("inf")
+            return v
+        rows.sort(key=_key, reverse=rev)
+        badges_map = _compute_badges(all_rows)  # PATCH P6-P2l-2
+
+        for r in rows:
+            if r["model"] == best_model_global:
+                tag = "best"
+            elif not r["tested"]:
+                tag = "untested"
+            elif not r["validation_ok"]:
+                tag = "problem"
+            elif "CPU" in r["mode"] or "Partial" in r["mode"]:
+                tag = "problem"
+            else:
+                tag = "good"
+
+            tps_s = f"{r['tps']:.1f}" if r["tps"] is not None else "—"
+            vram_s = f"{r['vram']:.2f} GB" if r["vram"] is not None else "—"
+            load_s = f"{r['load']:.2f}s" if r["load"] is not None else "—"
+            e200_s = f"~{r['est200']:.0f}s" if r["est200"] else "—"
+            e500_s = f"~{r['est500']:.0f}s" if r["est500"] else "—"
+
+            tree.insert("", "end", values=(
+                r["model"], badges_map.get(r["model"], ""),
+                tps_s, vram_s, r["mode"], r["valid"], e500_s,
+            ), tags=(tag,))
+
+        if _sel_model:
+            for item in tree.get_children():
+                if tree.item(item, "values")[0] == _sel_model:
+                    tree.selection_set(item)
+                    tree.see(item)
+                    break
+
+    def _on_double_click(_e):
+        sel = tree.selection()
+        if not sel:
+            return
+        model = tree.item(sel[0], "values")[0]
+        if on_select:
+            try:
+                on_select(model)
+            except Exception:
+                pass
+        try:
+            top.destroy()
+        except tk.TclError:
+            pass
+
+    def _close():
+        try:
+            top.grab_release()
+        except Exception:
+            pass
+        try:
+            top.destroy()
+        except tk.TclError:
+            pass
+
+    # PATCH P6-P2l-3: Warum-Panel (aktualisiert bei Zeilenauswahl)
+    warum_frame = tk.Frame(top, bg=bg3, bd=0)
+    warum_frame.pack(fill="x", padx=12, pady=(2, 2))
+    warum_inner = tk.Frame(warum_frame, bg=bg3)
+    warum_inner.pack(fill="x", padx=10, pady=6)
+    warum_title = tk.Label(warum_inner, text="W\u00e4hle eine Zeile f\u00fcr Details",
+                           bg=bg3, fg=fg2, font=f_small, anchor="w")
+    warum_title.pack(fill="x")
+    warum_body = tk.Frame(warum_inner, bg=bg3)
+    warum_body.pack(fill="x")
+
+    def _render_warum(model):
+        for w in warum_body.winfo_children():
+            w.destroy()
+        if not model:
+            warum_title.config(text="W\u00e4hle eine Zeile f\u00fcr Details", fg=fg2)
+            return
+        meta = _get_model_metadata(model)
+        cached = _MODEL_TEST_CACHE.get(model)
+        tps = vram = valid = None
+        if cached:
+            tps = cached.get("tokens_per_sec")
+            vram = cached.get("peak_vram_gb")
+            valid = cached.get("validation", {}).get("ok")
+        if tps is None:
+            tps = meta.get("measured_tps")
+        if vram is None:
+            vram = meta.get("measured_vram_gb") or meta.get("vram_estimate_gb")
+        warum_title.config(text=f"Warum {model}?", fg=accent)
+        lines = []
+        if tps:
+            lines.append(("\u2705", f"{tps:.1f} t/s"))
+        if vram:
+            lines.append(("\u2705", f"{vram:.2f} GB VRAM"))
+        if valid is True:
+            lines.append(("\u2705", "20/20 validiert"))
+        elif valid is False:
+            lines.append(("\u26a0", "Validierung fehlgeschlagen"))
+        langs = meta.get("languages", ())
+        if langs:
+            lines.append(("\u2705", f"Sprachen: {', '.join(langs).upper()}"))
+        ctx = int(meta.get("context_length", 0) or 0)
+        if ctx >= 100000:
+            lines.append(("\U0001f4cf", f"{ctx // 1000}k Kontext (lange Videos)"))
+        if meta.get("thinking"):
+            lines.append(("\U0001f4ad", "Thinking-Modell (Zeit \u00d7 2)"))
+        if _is_unsuitable_for_summary(model):
+            lines.append(("\u274c", meta.get("unsuitable_reason", "ungeeignet")))
+        if meta.get("deprecated"):
+            lines.append(("\u26a0", f"Deprecated \u2192 {meta.get('replaced_by','?')}"))
+        for icon, txt in lines:
+            row = tk.Frame(warum_body, bg=bg3)
+            row.pack(fill="x")
+            tk.Label(row, text=f"{icon} {txt}", bg=bg3, fg=fg,
+                    font=f_small, anchor="w").pack(side="left")
+        if on_set_default and not _is_unsuitable_for_summary(model):
+            def _set_def(m=model):
+                try:
+                    on_set_default(m)
+                except Exception:
+                    pass
+                try:
+                    top.destroy()
+                except tk.TclError:
+                    pass
+            tk.Button(warum_body, text="\u2705 Als Standard setzen",
+                     command=_set_def, bg=bg, fg=fg,
+                     font=f_small, relief="flat", cursor="hand2",
+                     padx=8, pady=2).pack(side="right", padx=4)
+
+    def _on_tree_select(_e=None):
+        sel = tree.selection()
+        if not sel:
+            _render_warum(None)
+            return
+        try:
+            _render_warum(tree.item(sel[0], "values")[0])
+        except Exception:
+            pass
+
+    tree.bind("<<TreeviewSelect>>", _on_tree_select)
+    # === END PATCH P6-P2l-3 ===
+
+    # --- Bottom-Bar: Aktionen links, Schließen rechts
+    bottom = tk.Frame(top, bg=bg)
+    bottom.pack(fill="x", padx=12, pady=(6, 10))
+
+    # PATCH P6-P2n-1e: Aktions-Buttons links (sichtbar ohne Fenstervergrößerung)
+    tk.Button(bottom, text="📥 CSV exportieren",
+              command=_export_csv,
+              bg=bg3, fg=fg, font=f_small, relief="flat",
+              cursor="hand2", padx=10, pady=4, bd=0,
+              ).pack(side="left", padx=(0, 4))
+    tk.Button(bottom, text="📥 JSON exportieren",
+              command=_export_json,
+              bg=bg3, fg=fg, font=f_small, relief="flat",
+              cursor="hand2", padx=10, pady=4, bd=0,
+              ).pack(side="left", padx=(0, 4))
+    tk.Button(bottom, text="🗑 Cache leeren",
+              command=lambda: _clear_cache(),
+              bg=bg3, fg=fg2, font=f_small, relief="flat",
+              cursor="hand2", padx=10, pady=4, bd=0,
+              ).pack(side="left", padx=(0, 4))
+
+    # Rechts: Schließen
+    tk.Button(bottom, text="Schließen", command=_close,
+              bg=bg3, fg=fg, font=f_main, relief="flat", cursor="hand2",
+              padx=18, pady=5).pack(side="right")
+
+    tree.bind("<Double-1>", _on_double_click)
+    def _on_filter_change(_e=None):
+        _refresh()
+        for _n, _b in _chip_buttons:
+            try:
+                _b.config(bg=bg3, fg=fg)
+            except tk.TclError:
+                pass
+    filter_cb.bind("<<ComboboxSelected>>", _on_filter_change)
+    top.protocol("WM_DELETE_WINDOW", _close)
+
+    _update_header_labels()
+    _refresh()
+
+    # PATCH P6-P2n-1d: Search-Trace
+    search_var.trace_add("write", lambda *_: _refresh())
+
+    try:
+        top.grab_set()
+    except Exception:
+        pass
+# === END PATCH P6-P2f-2 ===
 
 
 class OllamaSummarizer:
@@ -68804,6 +72839,39 @@ class OllamaSummarizer:
         if not target:
             return 4096
 
+        # PATCH P6-P2t-1: Registry-first (dynamisch aus _MODEL_METADATA)
+        try:
+            _reg_meta = _get_model_metadata(target)
+            _reg_ctx = int(_reg_meta.get("context_length", 0) or 0)
+            if _reg_ctx > 0:
+                # PATCH P6-P2u-1: VRAM-Cap (verhindert CPU-Only bei großen Kontexten)
+                try:
+                    _vram = _get_vram_status()
+                    if _vram:
+                        _model_gb = float(
+                            _reg_meta.get("vram_estimate_gb")
+                            or _reg_meta.get("measured_vram_gb")
+                            or 5.0
+                        )
+                        _free_gb = float(_vram.get("free_gb", 0) or 0)
+                        _kv_budget_gb = max(0.5, _free_gb - _model_gb - 0.3)
+                        # Faustregel: ~10k Tokens pro GB KV bei 8B-Modellen
+                        _vram_cap = int(_kv_budget_gb * 10000)
+                        _ctx_eff = min(_reg_ctx, _vram_cap)
+                        self._log_debug(
+                            f"Kontextlimit '{target}': registry={_reg_ctx}, "
+                            f"vram_cap={_vram_cap}, eff={_ctx_eff}",
+                        )
+                        return _ctx_eff
+                except Exception:
+                    pass
+                self._log_debug(
+                    f"Kontextlimit für '{target}' aus Registry: {_reg_ctx}",
+                )
+                return _reg_ctx
+        except Exception:
+            pass
+
         _KNOWN_LIMITS: dict[str, int] = {
             "llama3.1:8b": 131072,
             "llama3.1:70b": 131072,
@@ -69738,6 +73806,12 @@ class OllamaSummarizer:
         """Synchrone Zusammenfassung (blockierend) mit allen Optionen."""
         if not self.available:
             raise self.ServerUnreachableError("Ollama nicht verfügbar")
+
+        # P11-P0b: Counter (jeder synchrone LLM-Call)
+        try:
+            _run_counter_inc("llm.sync.calls")
+        except Exception:
+            pass
 
         # PATCH SUMMARY-MIN-CONTENT: Bei zu wenig Inhalt ist jede
         # LLM-Zusammenfassung eine Halluzination. Lieber ehrlich sagen,
@@ -78621,6 +82695,66 @@ class SummarizeDialog(BaseDialog):
             "{text}\n\n"
             "Erzaehlende Zusammenfassung:"
         ),
+        "Ausführlich · Inhaltswiedergabe (faktentreu)": (
+            # P9-P1-3: Inhaltswiedergabe statt Zusammenfassung.
+            # Unterschied: nicht verdichten, sondern vollstaendig nach-
+            # erzaehlen. Alle konkreten Details behalten (Preise, Namen,
+            # Orte, Mengen, Gegenstaende), keine Wertung, keine Auslassung.
+            "Gib den Inhalt des Videos faktentreu und vollstaendig wieder.\n"
+            "Ziel: Der Leser soll wissen, was im Video gezeigt und gesagt "
+            "wurde, ohne es selbst gesehen zu haben.\n\n"
+            "WICHTIG — UNTERSCHIED ZUR ZUSAMMENFASSUNG:\n"
+            "• Eine Zusammenfassung verdichtet und gewichtet (laesst weg).\n"
+            "• Eine Inhaltswiedergabe erzaehlt nach (laesst nichts weg).\n"
+            "• Du erstellst eine INHALTSWIEDERGABE, keine Zusammenfassung.\n\n"
+            "STRUKTUR (Markdown verwenden!):\n"
+            "• Gliedere in 3-6 thematische oder chronologische Abschnitte.\n"
+            "• Pro Abschnitt 3-8 Stichpunkte zu konkreten Details.\n"
+            "• Jeder Stichpunkt = ein konkreter Fakt aus dem Transkript.\n\n"
+            "REGELN:\n"
+            "• Konkrete Details: Orte, Namen, Preise, Mengen, Gegenstaende, "
+            "Aktivitaeten — woertlich aus dem Transkript.\n"
+            "• Keine Wertung ('toll', 'schoen', 'empfehlenswert').\n"
+            "• Keine Auslassung von Details, auch wenn sie unwichtig "
+            "erscheinen.\n"
+            "• Keine Saetze wie 'Das Video zeigt...', 'Der Sprecher...', "
+            "'Hier ist eine Zusammenfassung...'.\n"
+            "• Eigennamen in Originalsprache mit Uebersetzung in Klammern.\n"
+            "• Keine Spekulation.\n\n"
+            "{text}\n\n"
+            "Inhaltswiedergabe:"
+        ),
+        "Ausführlich · Thematisch (Lern-Zusammenfassung)": (
+            # P9-P2-4a: Sienna-Stil. Themenbloecke statt Zeitbloecke.
+            # Die eigentliche Topic-Zuordnung passiert in
+            # _extract_chunk_atoms (with_topics=True) — dieser Prompt
+            # beschreibt nur die Ausgabe-Form.
+            "Gib den Inhalt des Videos thematisch gruppiert und "
+            "faktentreu wieder.\n"
+            "Ziel: Der Leser soll verstehen, WELCHE Themen im Video "
+            "behandelt wurden — unabhaengig von der Reihenfolge.\n\n"
+            "STRUKTUR (Markdown):\n"
+            "• Gliedere in 5-8 THEMEN-Abschnitte mit **Fett-Titel**.\n"
+            "• Themen-Titel in Originalsprache (z.B. 성수/팝업, "
+            "음식/먹거리, 한강).\n"
+            # P9-P2-4e: 3-8 -> 8-15 (war Obergrenze statt Untergrenze)
+            "• Pro Thema 8-15 Stichpunkte. JEDER konkrete Fakt "
+            "aus dem Material MUSS erscheinen.\n"
+            "• Detailtiefe: Preise, Mengen, Namen, Gegenstaende, "
+            "Aktivitaeten — alles woertlich.\n"
+            "• Mindestens 4 Themen-Abschnitte.\n"
+            "• KEINE Zeitbloecke, KEINE chronologische Reihenfolge.\n\n"
+            "REGELN:\n"
+            "• Konkrete Details: Orte, Namen, Preise, Mengen, "
+            "Gegenstaende — woertlich aus dem Transkript.\n"
+            "• Keine Wertung, keine Auslassung.\n"
+            "• Keine Saetze wie 'Das Video zeigt...', 'Der Sprecher...'.\n"
+            "• Eigennamen in Originalsprache mit Uebersetzung in Klammern.\n"
+            "• ⚠️ KEINE Topic-Tags ([성수/팝업], [음식/먹거리] etc.) "
+            "als Praefix in der Ausgabe — die Zuordnung ist intern.\n\n"
+            "{text}\n\n"
+            "Thematische Zusammenfassung:"
+        ),
         "Ausführlich · Ausgewogen ⭐ (empfohlen)": (
             "Erstelle eine ausführliche, gut strukturierte Zusammenfassung "
             "des Videos in Markdown-Format.\n"
@@ -78699,7 +82833,25 @@ class SummarizeDialog(BaseDialog):
         self.model = getattr(adv, "summarize_model", "llama3.1:8b")
         self.temperature = getattr(adv, "summarize_temperature", 0.1)
         self.strategy = getattr(adv, "summary_strategy", "Schnell (parallel)")
-        self.language = getattr(adv, "summary_language", "Deutsch")
+        # P9-P2-1: Sprache aus Transkription ableiten, wenn Setting
+        # auf Default (Deutsch) oder auto steht — sonst User-Wahl behalten.
+        _p9_lang_setting = getattr(adv, "summary_language", "Deutsch")
+        if _p9_lang_setting in ("Deutsch", "auto", "", None):
+            _p9_detected = self._p9_detect_transcript_language()
+            if _p9_detected:
+                self.language = _p9_detected
+                try:
+                    logger.warning(
+                        "[LANG-SRC] summary_language=%r -> abgeleitet: %r",
+                        _p9_lang_setting, _p9_detected,
+                    )
+                except Exception:
+                    pass
+            else:
+                self.language = _p9_lang_setting
+        else:
+            self.language = _p9_lang_setting
+        # END P9-P2-1
         self.style = getattr(adv, "summary_style", "Kompakt (3‑5 Sätze)")
         # === PATCH E1c2: user_context aus Settings ===
         self._user_context = getattr(adv, "summary_context", "") or ""
@@ -79048,6 +83200,23 @@ class SummarizeDialog(BaseDialog):
         if self._model_context_limit is not None:
             return self._model_context_limit
 
+        # PATCH P6-P2r-1: Registry-first (dynamisch aus _MODEL_METADATA)
+        try:
+            _reg_meta = _get_model_metadata(self.model)
+            _reg_ctx = int(_reg_meta.get("context_length", 0) or 0)
+            if _reg_ctx > 0:
+                if DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "summarize",
+                        "_get_model_context_limit: Registry '%s' → %d Tokens",
+                        self.model,
+                        _reg_ctx,
+                    )
+                self._model_context_limit = _reg_ctx
+                return _reg_ctx
+        except Exception:
+            pass
+
         FALLBACK_LIMITS: dict[str, int] = {
             "llama3.1:8b": 128000,
             "llama3.1:70b": 128000,
@@ -79082,6 +83251,11 @@ class SummarizeDialog(BaseDialog):
             "wizardlm2:7b": 8192,
             "dolphin-mistral:latest": 8192,
             "dolphin-mixtral:latest": 32768,
+            # PATCH 34c-CTX: Qwen2.5-Serie (nativ 32k, konservativ 16k)
+            "qwen2.5:14b-instruct-q3_K_M": 16384,
+            "qwen2.5:7b-instruct-q5_K_M": 16384,
+            "qwen2.5-coder:7b": 16384,
+            "qwen2.5-coder:14b": 16384,
             "tinyllama": 2048,
             "orca-mini": 2048,
             "llama2:7b": 4096,
@@ -79892,6 +84066,23 @@ class SummarizeDialog(BaseDialog):
         """Extrahiert Titel und Transkriptionstext aus einer Datei."""
         title = ""
         text = content.strip()
+        # PATCH P7-P1-1b: JSON-Format erkennen (video_title + transcripts)
+        if text.startswith("{"):
+            try:
+                import json as _json
+                data = _json.loads(text)
+                meta = data.get("metadata") or {}
+                title = str(meta.get("video_title") or "")
+                transcripts = data.get("transcripts") or []
+                if transcripts:
+                    text = "\n".join(
+                        str(seg.get("text", ""))
+                        for seg in transcripts
+                        if seg.get("text")
+                    )
+                return title, text
+            except Exception:
+                pass  # Fallback auf TXT-Parser
         if "=== STREAM INFORMATION ===" in content:
             parts = re.split(r"=== (?:TRANSCRIPT|TRANSLATION) ===", content, maxsplit=1)
             info = parts[0]
@@ -79984,7 +84175,9 @@ class SummarizeDialog(BaseDialog):
         self._token_debounce_id = self.dialog.after(300, self._do_token_update)
 
     def _do_token_update(self) -> None:
-        """Führt das Token-Update durch."""
+        """Führt das Token-Update durch.
+        P9-P3-2: Map-Reduce-Erkennung — bei VODs ueber Limit
+        zeigt die Anzeige die geplante Chunk-Anzahl, nicht Panik."""
         self._token_debounce_id = None
         if not hasattr(self, "preview_text") or not self.preview_text.winfo_exists():
             return
@@ -79992,6 +84185,38 @@ class SummarizeDialog(BaseDialog):
         total_text = effective + "\n\n" + self.text
         tokens = self._estimate_tokens(total_text)
         limit = self._get_model_context_limit()
+        # P9-P3-2: Map-Reduce-Modus pruefen
+        try:
+            _adv = getattr(getattr(self, "gui", None), "advanced_settings", None)
+            _max_chunk = getattr(_adv, "summary_max_chunk_tokens", 2000) or 2000
+        except Exception:
+            _max_chunk = 2000
+        try:
+            _max_chunk = max(500, int(_max_chunk))
+        except Exception:
+            _max_chunk = 2000
+        _n_chunks_est = max(1, -(-tokens // _max_chunk))
+        _is_map_reduce = (tokens > limit and _n_chunks_est >= 2)
+        if _is_map_reduce:
+            # P9-P3-2b: nur EIN Label zeigt Details (token_label),
+            # context_label bleibt kurz -> keine Doppel-Anzeige
+            if hasattr(self, "context_bar") and self.context_bar is not None:
+                try:
+                    self.context_bar.config(width=0, bg="#238636")
+                    if hasattr(self, "context_label"):
+                        self.context_label.config(text="✅ Map-Reduce")
+                except Exception:
+                    pass
+            if hasattr(self, "token_label"):
+                try:
+                    self.token_label.config(
+                        text=f"📊 ~{_n_chunks_est} Calls à ≤{_max_chunk} Tok · OK",
+                        fg=CURRENT_THEME.SUCCESS,
+                    )
+                except Exception:
+                    pass
+            return
+        # Kein Map-Reduce: normale Anzeige
         self._update_context_bar(tokens, limit)
         if hasattr(self, "token_label"):
             if tokens <= limit * 0.8:
@@ -80512,6 +84737,46 @@ class SummarizeDialog(BaseDialog):
                                 _avail_preview,
                             )
                             self.model = _resolved
+                            # P11-P1b: aktive Modell-Wahl via Dialog
+                            # (nur bei echtem Fallback, 1x pro Dialog-Instanz)
+                            try:
+                                _p11b_want = (
+                                    _cur
+                                    and _cur != _resolved
+                                    and not getattr(self, "_model_choice_shown", False)
+                                )
+                                if _p11b_want:
+                                    self._model_choice_shown = True
+                                    _p11b_pref = _cur
+                                    _p11b_res = _resolved
+                                    _p11b_reas = _reason
+                                    _p11b_avl = list(_avail) if _avail else []
+
+                                    def _p11b_trigger():
+                                        try:
+                                            self._show_model_choice_dialog(
+                                                preferred=_p11b_pref,
+                                                resolved=_p11b_res,
+                                                available=_p11b_avl,
+                                                reason=_p11b_reas,
+                                            )
+                                        except Exception as _p11b_dlg_exc:
+                                            log_debug(
+                                                "summarize",
+                                                f"P11-P1b Dialog-Fehler: {_p11b_dlg_exc}",
+                                            )
+
+                                    try:
+                                        self._safe_after(100, _p11b_trigger)
+                                    except Exception:
+                                        # Fallback: direkter Aufruf
+                                        _p11b_trigger()
+                            except Exception as _p11b_exc:
+                                log_debug(
+                                    "summarize",
+                                    f"P11-P1b Trigger-Fehler: {_p11b_exc}",
+                                )
+                            # END P11-P1b
                         elif _resolved:
                             if _debug:
                                 log_debug(
@@ -80744,6 +85009,7 @@ class SummarizeDialog(BaseDialog):
         max_retries: int = 3,
         retry_delay_base: float = 1.0,
         timeout_seconds: float = 120.0,
+        options_override=None,  # P9-P2-2-fix-v2: explizite GenerateOptions
     ) -> str | None:
         """Fasst einen einzelnen Text‑Chunk mit dem Ollama‑Modell zusammen."""
         if not chunk or not isinstance(chunk, str) or not chunk.strip():
@@ -80768,7 +85034,15 @@ class SummarizeDialog(BaseDialog):
             )
             clean_chunk = clean_chunk[:MAX_CHUNK_LENGTH]
 
+        # PATCH P6-P2u-5: num_ctx im Cache-Key berücksichtigen
+        _cache_ctx = None
+        try:
+            _cache_ctx = self._get_model_context_limit()
+        except Exception:
+            pass
         cache_key = self._get_chunk_cache_key(clean_chunk, prompt, temperature)
+        if _cache_ctx:
+            cache_key = f"{cache_key}|ctx={_cache_ctx}"
         try:
             cached = self._chunk_cache.get(cache_key)
             if cached is not None:
@@ -80816,6 +85090,38 @@ class SummarizeDialog(BaseDialog):
                 start_time = time.perf_counter()
 
                 with self._ollama_usage(timeout=current_timeout) as summarizer:
+                    # PATCH P6-P2u-2: dynamisches num_ctx INNERHALB with
+                    _chunk_options = None
+                    # P9-P2-2-fix-v2: externer Override hat Vorrang
+                    if options_override is not None:
+                        _chunk_options = options_override
+                    else:
+                        try:
+                            _reg_ctx = summarizer.get_model_context_limit()
+                            _chunk_tokens = max(1, len(clean_chunk) // 2)
+                            _prompt_tokens = max(1, len(prompt or "") // 3)
+                            _needed = _chunk_tokens + _prompt_tokens + 1500
+                            _needed_rounded = ((_needed + 2047) // 2048) * 2048
+                            _num_ctx_eff = max(4096, min(_reg_ctx, _needed_rounded))
+                            _opts_cls = getattr(summarizer, "GenerateOptions", None)
+                            if _opts_cls is not None:
+                                _chunk_options = _opts_cls(
+                                    temperature=effective_temp,
+                                    num_predict=2048,
+                                    num_ctx=_num_ctx_eff,
+                                )
+                                log_debug(
+                                    "summarize",
+                                    f"num_ctx dynamisch: registry={_reg_ctx}, "
+                                    f"chunk_tokens={_chunk_tokens}, "
+                                    f"prompt_tokens={_prompt_tokens}, "
+                                    f"eff={_num_ctx_eff}",
+                                )
+                        except Exception as _e:
+                            log_debug(
+                                "summarize",
+                                f"num_ctx-Options fehlgeschlagen: {_e}",
+                            )
                     result = summarizer.summarize_sync(
                         text=clean_chunk,
                         prompt=prompt,
@@ -80823,7 +85129,7 @@ class SummarizeDialog(BaseDialog):
                         chunk_callback=chunk_callback,
                         cancel_event=abort_event,
                         use_cache=False,
-                        options=None,
+                        options=_chunk_options,
                         output_format=None,
                         force_refresh=False,
                     )
@@ -81297,6 +85603,85 @@ class SummarizeDialog(BaseDialog):
         return text
     # === END PATCH F11a ===
 
+    # P9-P1-2c: Atom-Quelle (True=Original, False=Map-Ergebnis)
+    # Fallback-Schalter: bei Problemen auf False setzen -> alte Doppel-Logik.
+    _cs_use_original_chunks: bool = False  # P9-P1-2c-revert: temporaer aus (haengt bei Original-Chunks, Diagnose ausstehend)
+
+    # P9-P1-2b: Sprach-Lock fuer Map-Prompt
+    _MAP_LANG_LOCKS: ClassVar[dict[str, str]] = {
+        "Deutsch": (
+            "- Antworte AUSSCHLIESSLICH auf Deutsch. Keine Zeichen "
+            "aus anderen Schriftsystemen (kein Chinesisch, Koreanisch, "
+            "Japanisch, Englisch, Kyrillisch). Keine Meta-Kommentare, "
+            "keine Sprachanalysen, keine Hinweise auf Sprachprobleme.\n\n"
+        ),
+        "Koreanisch": (
+            "- 한국어로만 답하세요. 다른 문자 체계(독일어, 영어, 중국어, "
+            "일본어)를 사용하지 마세요. 메타 코멘트, 언어 분석, "
+            "언어 문제 언급 금지.\n\n"
+        ),
+        "Englisch": (
+            "- Respond ONLY in English. No characters from other "
+            "writing systems (no German, Korean, Chinese, Japanese). "
+            "No meta-comments, no language analysis, no mention of "
+            "language problems.\n\n"
+        ),
+        "Französisch": (
+            "- Répondez UNIQUEMENT en français. Pas de caractères "
+            "d'autres systèmes d'écriture (pas d'allemand, coréen, "
+            "chinois, japonais). Pas de méta-commentaires, pas "
+            "d'analyse linguistique.\n\n"
+        ),
+        "Spanisch": (
+            "- Responde SOLO en español. Sin caracteres de otros "
+            "sistemas de escritura (sin alemán, coreano, chino, "
+            "japonés). Sin meta-comentarios, sin análisis lingüístico.\n\n"
+        ),
+    }
+
+    def _get_map_language_lock(self) -> str:
+        """P9-P1-2b: Liefert den sprachabhaengigen Sprach-Lock
+        fuer den Map-Prompt. Fallback: Deutsch (CJK-Schutz bleibt)."""
+        _lang = getattr(self, "language", None) or "Deutsch"
+        return self._MAP_LANG_LOCKS.get(
+            _lang, self._MAP_LANG_LOCKS["Deutsch"],
+        )
+
+    # P9-P2-1: Transkriptionssprache erkennen (fuer Sprach-Ableitung)
+    def _p9_detect_transcript_language(self) -> str | None:
+        """Erkennt die Hauptsprache der Transkription.
+        Returns: 'Koreanisch'/'Englisch'/... oder None bei Unsicherheit."""
+        try:
+            gui = getattr(self, "gui", None)
+            if gui is None:
+                return None
+            # 1) language_detector bevorzugen
+            ld = getattr(gui, "language_detector", None)
+            if ld is not None:
+                for attr in ("detected_language", "language", "current_language"):
+                    _v = getattr(ld, attr, None)
+                    if isinstance(_v, str) and _v.strip():
+                        _m = {"ko": "Koreanisch", "de": "Deutsch",
+                              "en": "Englisch", "ja": "Japanisch",
+                              "zh": "Chinesisch (vereinfacht)",
+                              "fr": "Französisch", "es": "Spanisch"}
+                        _key = _v.strip().lower()[:2]
+                        return _m.get(_key, _v.strip().capitalize())
+            # 2) Fallback: Transkriptions-Text scannen (Hangul > 10%)
+            _txt = getattr(gui, "_last_transcription_text", None) or ""
+            if _txt:
+                _hangul = sum(1 for ch in _txt[:5000]
+                              if "\uac00" <= ch <= "\ud7a3")
+                if _hangul / max(1, len(_txt[:5000])) > 0.10:
+                    return "Koreanisch"
+            return None
+        except Exception as _p9e:
+            try:
+                logger.warning("[LANG-SRC] Erkennung fehlgeschlagen: %s", _p9e)
+            except Exception:
+                pass
+            return None
+
     # === PATCH F13a: _get_map_chunk_prompt ===
     def _get_map_chunk_prompt(self) -> str:
         """Prompt fuer einen einzelnen Map-Chunk.
@@ -81318,11 +85703,11 @@ class SummarizeDialog(BaseDialog):
             "- Keine Wiederholungen.\n"
             # PATCH G: minimal - Zeitmarken in map prompt
             "- Zeitmarken [MM:SS]/[HH:MM:SS] woertlich beibehalten.\n"
-            "- Antworte AUSSCHLIESSLICH auf Deutsch. Keine chinesischen, "
-            "koreanischen, japanischen oder englischen Zeichen. "
-            "Keine Meta-Kommentare. Keine Sprachanalysen.\n\n"
-            "Ausschnitt:\n{text}\n\n"
-            "Beschreibung des Ausschnitts:"
+            # P9-P1-2b: sprachabhaengiger CJK-Schutz (war hartcodiert Deutsch)
+            + self._get_map_language_lock()
+            # END P9-P1-2b-hotfix
+            + "Ausschnitt:\n{text}\n\n"
+            + "Beschreibung des Ausschnitts:"
         )
     # === END PATCH F13a ===
 
@@ -81355,6 +85740,1327 @@ class SummarizeDialog(BaseDialog):
             )
         return text
     # === END PATCH F13g-a ===
+
+    def _extract_video_duration_sec(self) -> float:
+        """PATCH 34e-hier-reduce-v2: Video-Dauer aus timed_transcriptions
+        oder self.text ermitteln. Fallback: 0.0.
+        """
+        # 1) timed_transcriptions
+        try:
+            tt = getattr(self, "_timed_transcriptions", None)
+            if tt:
+                _ends = []
+                for _seg in tt:
+                    _e = getattr(_seg, "end", None)
+                    if _e:
+                        try:
+                            _ends.append(float(_e))
+                        except Exception:
+                            pass
+                if _ends:
+                    return max(_ends)
+        except Exception:
+            pass
+        # 2) self.text — Zeitmarken [MM:SS.mmm] oder [HH:MM:SS,mmm]
+        try:
+            import re as _re_dur
+            _txt = getattr(self, "text", "") or ""
+            if _txt:
+                _pat = r"\[(\d{1,2}):(\d{2})(?::(\d{2}))?(?:[.,]\d{3})?"
+                _max = 0.0
+                for _m in _re_dur.finditer(_pat, _txt):
+                    try:
+                        if _m.group(3):
+                            _t = (int(_m.group(1)) * 3600
+                                  + int(_m.group(2)) * 60
+                                  + int(_m.group(3)))
+                        else:
+                            _t = int(_m.group(1)) * 60 + int(_m.group(2))
+                        if _t > _max:
+                            _max = float(_t)
+                    except Exception:
+                        continue
+                return _max
+        except Exception:
+            pass
+        return 0.0
+
+    # PATCH 34e-content-selection: (1) _extract_chunk_atoms
+    # P10-P2b-v2: JSON-Schema mit Enum fuer structured output
+    def _get_topic_schema(self) -> dict:
+        # P10-P2b-hotfix
+        """Erzeugt Schema dynamisch (Enum aus _TOPIC_ALL)."""
+        return {
+            "type": "object",
+            "properties": {
+                "topics": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "i": {"type": "integer"},
+                            "t": {
+                                "type": "string",
+                                "enum": list(self._TOPIC_ALL),
+                            },
+                        },
+                        "required": ["i", "t"],
+                    },
+                },
+            },
+            "required": ["topics"],
+        }
+
+    def _build_topic_instruction(self) -> str:
+        """P9-P2-4a: Topic-Tag-Instruktion fuer Atom-Prompt.
+        Wird nur eingebunden, wenn with_topics=True."""
+        _topics_str = ", ".join(
+            f"[{t}]" for t in self._TOPIC_LIST
+        )
+        return (
+            "\u26a0\ufe0f \uac01 \uc0ac\uc2e4 \uc55e\uc5d0 "
+            "\uc8fc\uc81c \ud0dc\uadf8\ub97c \ubd99\uc774\uc138\uc694. "
+            "\uc0ac\uc6a9 \uac00\ub2a5\ud55c \uc8fc\uc81c: "
+            + _topics_str + "\n"
+            + "\ud615\uc2dd: [\uc8fc\uc81c] \uc0ac\uc2e4 \ub0b4\uc6a9\n"
+            + "\uc608: [\uc74c\uc2dd/\uba39\uac70\ub9ac] "
+            + "\ub9c8\ub77c\uaf2c\uce58\ub294 10\uac1c\uc5d0 "
+            + "1\ub9cc\uc6d0\uc785\ub2c8\ub2e4.\n"
+            + "\n"
+            + "\u26a0\ufe0f \uc911\uc694 1: \ubaa8\ub4e0 "
+            + "\uc0ac\uc2e4\uc5d0 \ubc18\ub4dc\uc2dc \uc8fc\uc81c "
+            + "\ud0dc\uadf8\ub97c \ubd99\uc774\uc138\uc694. "
+            + "\ud0dc\uadf8 \uc5c6\ub294 \uc0ac\uc2e4\uc740 "
+            + "\uc548 \ub429\ub2c8\ub2e4.\n"
+            + "\u26a0\ufe0f \uc911\uc694 2: \uadf8\uc640 "
+            + "\ubcc4\uac1c\ub85c, \uc774 \ubd80\ubd84\uc758 "
+            + "\ubaa8\ub4e0 \uad6c\uccb4\uc801 \uc0ac\uc2e4\uc744 "
+            + "\ube60\uc9d0\uc5c6\uc774 \ucd94\ucd9c\ud558\uc138\uc694 "
+            + "(\ucd5c\uc18c 10-15\uac1c). \ud3ec\uc2a4\ud2b8\ub294 "
+            + "\ubc29\ubc95\uc77c \ubfd0, \uc0ac\uc2e4\uc758 "
+            + "\uc218\ub97c \uc904\uc774\uc9c0 \ub9c8\uc138\uc694.\n"
+            + "\n"
+            + "\u26a0\ufe0f \uc2dc\uac04 \ud45c\uc2dc"
+            + "([MM:SS], [HH:MM:SS], [\u2192 ...]) \ubc0f "
+            + "TEIL \ub9c8\ucee4 \ucd9c\ub825 \uae08\uc9c0. "
+            + "\uc0ac\uc2e4 \ub0b4\uc6a9\ub9cc \ucd9c\ub825\ud558\uc138\uc694.\n\n"
+        )
+
+    # P9-P2-4a: feste Topic-Liste fuer thematische Gruppierung
+    # P10-P2a: Grob-Topics (unveraendert)
+    _TOPIC_LIST: ClassVar[tuple[str, ...]] = (
+        "성수/팝업",
+        "무인 가게",
+        "할로윈/축제",
+        "음식/먹거리",
+        "한강",
+        "전통/문화",
+        "Sonstiges",
+    )
+
+    # P10-P2a: Fein-Topics fuer Sonstiges (TaxoAdapt-Idee)
+    _TOPIC_SONSTIGES_SUB: ClassVar[tuple[str, ...]] = (
+        "Sonstiges/Handwerk",   # 기와집, 도자기, 공예
+        "Sonstiges/Musik",      # 버스킹, 노래, 공연
+        "Sonstiges/Alltag",     # 사람들, 거리, 날씨
+        "Sonstiges/Reise",      # 버스, 이동, 지하철
+        "Sonstiges",            # echter Fallback
+    )
+
+    # P10-P2a: Vollstaendige Topic-Liste fuer Klassifikation
+    _TOPIC_ALL: ClassVar[tuple[str, ...]] = (
+        *_TOPIC_LIST[:-1],
+        *_TOPIC_SONSTIGES_SUB,
+    )
+
+    def _extract_chunk_atoms(
+        self,
+        chunk_text: str,
+        chunk_idx: int,
+        temperature: float,
+        abort_event,
+        with_topics: bool = False,
+        overcapture: bool = False,  # P9-P3-1a
+    ) -> list[str]:
+        """Extrahiert atomare Fakten aus einem Chunk (deterministisch).
+
+        Kein "Fasse zusammen" — nur "Liste Fakten". Damit kann der
+        Lost-in-the-Middle-Effekt nicht auftreten: Jeder Chunk wird
+        einzeln verarbeitet, kein Chunk kann "vergessen" werden.
+        """
+        if not chunk_text or not chunk_text.strip():
+            return []
+
+        _atom_prompt = (
+            "\ub2e4\uc74c\uc740 \ube44\ub514\uc624 \ud55c \ubd80\ubd84\uc758 "
+            "\uc804\uc0ac\ubcf8\uc785\ub2c8\ub2e4.\n"
+            "\uc774 \ubd80\ubd84\uc5d0\uc11c \uc5b8\uae09\ub41c "
+            "\uad6c\uc0b4\uc801\uc778 \uc0ac\uc2e4\ub9cc "
+            "\ucd94\ucd9c\ud558\uc138\uc694:\n"
+            "\u2022 \uc7a5\uc18c, \uc774\ub984, \uc22b\uc790, "
+            "\uac00\uaca9, \ud65c\ub3d9, \uc74c\uc2dd, \uc0ac\ubb3c\n"
+            "\u2022 \ud55c \uc904\uc5d0 \ud558\ub098\uc529, "
+            "\uad6c\uc0b4\uc801\uc73c\ub85c (2-3\ubb38\uc7a5)\n"
+            "\u2022 \ud574\uc11d\ud558\uac70\ub098 \ud3c9\uac00\ud558\uc9c0 "
+            "\ub9c8\uc138\uc694\n"
+            "\u2022 \ucd94\uc815\ud558\uc9c0 \ub9c8\uc138\uc694\n"
+            "\u2022 \uc6d0\ubb38\uc758 \ud45c\ud604\uc744 \uadf8\ub300\ub85c "
+            "\uc0ac\uc6a9\ud558\uc138\uc694\n"
+            "\u2022 \uc2dc\uac04 \ud45c\uc2dc\ub294 \ubb34\uc2dc\ud558\uc138\uc694 "
+            "(\uc2dc\uc2a4\ud15c\uc774 \ucc98\ub9ac\ud569\ub2c8\ub2e4)\n\n"
+            # P9-P2-4a: optionaler Topic-Tag (nur wenn with_topics)
+            + (self._build_topic_instruction() if with_topics else "")
+            # P9-P3-1a: over-capture fuer Pass 1
+            + (self._build_overcapture_instruction() if overcapture else "")
+            + "\uc804\uc0ac\ubcf8:\n"
+            + f"{chunk_text}\n\n"
+            + "\uc0ac\uc2e4 \ubaa9\ub85d (\ud55c \uc904\uc5d0 \ud558\ub098):"
+        )
+
+        try:
+            result = self._summarize_chunk(
+                chunk_text,
+                _atom_prompt,
+                temperature,
+                chunk_callback=None,
+                abort_event=abort_event,
+            )
+        except Exception as _at_exc:
+            try:
+                logger.warning(
+                    "[ATOMS] Chunk %d/%s FEHLER: %s",
+                    chunk_idx + 1,
+                    getattr(self, "_atoms_total", "?"),
+                    _at_exc,
+                )
+            except Exception:
+                pass
+            return []
+
+        if not result:
+            return []
+
+        import re as _re_cs
+        atoms: list[str] = []
+        for _line in result.split("\n"):
+            _line = _line.strip()
+            if not _line:
+                continue
+            _line = _re_cs.sub(r"^[-*\u2022]\s*", "", _line)
+            _line = _re_cs.sub(r"^\d+[\.\)]\s*", "", _line)
+            _line = _line.strip()
+            if len(_line) < 5 or len(_line) > 300:
+                continue
+            atoms.append(_line)
+        return atoms
+    # END PATCH 34e-content-selection (1)
+
+    # PATCH 34e-content-selection: (2) _select_diverse_atoms
+    def _select_diverse_atoms(
+        self,
+        all_atoms_with_pos: list[tuple[int, str]],
+        max_atoms: int = 40,
+        similarity_threshold: float = 0.6,
+    ) -> list[tuple[int, str]]:
+        """Deterministische Diversitaets-Auswahl via Jaccard-Aehnlichkeit.
+
+        Kein LLM-Call. Entfernt Duplikate (z.B. 벼룩시장 in 2 Gruppen)
+        und behaelt max_atoms vielfaeltigste Atome.
+        """
+        if not all_atoms_with_pos:
+            return []
+
+        # P10-P1b: Zahlen-Atome VOR Round-Robin nach vorne
+        try:
+            import re as _re_p10b
+            _num_re = _re_p10b.compile(
+                r"\d|\uc6d0|\uac1c|\uba85|\uc2dc\uac04|\ubd84"
+                r"|\ub9cc\uc6d0|\ucc9c\uc6d0"
+            )
+            _num_first = []
+            _rest = []
+            for _pos, _atom in all_atoms_with_pos:
+                if _num_re.search(_atom or ""):
+                    _num_first.append((_pos, _atom))
+                else:
+                    _rest.append((_pos, _atom))
+            if _num_first:
+                all_atoms_with_pos = _num_first + _rest
+                try:
+                    logger.warning(
+                        "[P10-P1b] Zahlen-Atome zuerst: %d/%d",
+                        len(_num_first), len(_num_first) + len(_rest),
+                    )
+                except Exception:
+                    pass
+        except Exception as _p10be:
+            try:
+                logger.warning("[P10-P1b] Fehler: %s", _p10be)
+            except Exception:
+                pass
+        # END P10-P1b
+
+        # PATCH 34e-cs-fix3: Round-Robin statt sequenzieller Quota.
+        # Jede Runde nimmt 1 Atom pro Chunk -> alle Chunks vertreten.
+        _unique_chunks = sorted(set(pos for pos, _ in all_atoms_with_pos))
+        if not _unique_chunks:
+            return []
+
+        # Atome pro Chunk gruppieren (Reihenfolge bleibt erhalten)
+        _by_chunk: dict[int, list[str]] = {ci: [] for ci in _unique_chunks}
+        for pos, atom in all_atoms_with_pos:
+            _by_chunk[pos].append(atom)
+
+        selected: list[tuple[int, str]] = []
+        _round = 0
+        skipped_by_quota = 0
+
+        # Helper: Duplikat-Check
+        def _is_dup(atom: str) -> bool:
+            # P9-P2-4b: Topic-Tag vor Jaccard entfernen
+            _clean_atom = self._parse_topic_tag(atom)[1]
+            atom_words = set(_clean_atom.lower().split())
+            if len(atom_words) < 3:
+                return False
+            for _, sel_atom in selected:
+                _clean_sel = self._parse_topic_tag(sel_atom)[1]
+                sel_words = set(_clean_sel.lower().split())
+                if not sel_words:
+                    continue
+                _inter = len(atom_words & sel_words)
+                _union = len(atom_words | sel_words)
+                _jac = _inter / _union if _union > 0 else 0.0
+                if _jac > similarity_threshold:
+                    return True
+            return False
+
+        while len(selected) < max_atoms:
+            _took_this_round = 0
+            for ci in _unique_chunks:
+                if len(selected) >= max_atoms:
+                    break
+                if _round >= len(_by_chunk[ci]):
+                    skipped_by_quota += 1
+                    continue
+                atom = _by_chunk[ci][_round]
+                if _is_dup(atom):
+                    continue
+                selected.append((ci, atom))
+                _took_this_round += 1
+            if _took_this_round == 0:
+                break
+            _round += 1
+
+        # Diagnose-Log
+        _final_counts: dict[int, int] = {}
+        for pos, _ in selected:
+            _final_counts[pos] = _final_counts.get(pos, 0) + 1
+        try:
+            logger.warning(
+                "[CONTENT-SEL] Atome pro Chunk (Round-Robin): %s "
+                "(rounds=%d, skipped_empty=%d)",
+                dict(sorted(_final_counts.items())),
+                _round,
+                skipped_by_quota,
+            )
+        except Exception:
+            pass
+
+        # P10-P1-cleanup: alter Block entfernt
+        return selected
+        # END PATCH 34e-cs-fix3
+    # END PATCH 34e-content-selection (2)
+
+    # P9-P2-4d: Zeitstempel/Marker aus Atom entfernen
+    def _strip_timestamps_from_atom(self, atom: str) -> str:
+        """Entfernt [MM:SS], [HH:MM:SS], [X → Y]-Zeitmarken,
+        TEIL-Marker und Klammer-Zeit-Suffixe aus einem Atom."""
+        import re as _re
+        if not atom:
+            return atom or ""
+        _ts = r"\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?"
+        # 1) [MM:SS → MM:SS] oder [MM:SS,mmm → MM:SS,mmm]
+        atom = _re.sub(
+            rf"\[\s*{_ts}\s*\u2192\s*{_ts}\s*\]", "", atom,
+        )
+        # 2) [MM:SS] oder [HH:MM:SS]
+        atom = _re.sub(rf"\[\s*{_ts}\s*\]", "", atom)
+        # 3) (TEIL X/Y | beliebig)
+        atom = _re.sub(
+            r"\(\s*TEIL\s+\d+/\d+[^)]*\)", "", atom,
+        )
+        # 4) [TEIL X/Y | beliebig] oder [TEIL X/Y]
+        atom = _re.sub(
+            r"\[\s*TEIL\s+\d+/\d+[^\]]*\]", "", atom,
+        )
+        # 5) Standalone (MM:SS – MM:SS) am Ende
+        atom = _re.sub(
+            rf"\(\s*{_ts}\s*[\u2013\u2014-]\s*{_ts}\s*\)",
+            "", atom,
+        )
+        # Whitespace normalisieren
+        atom = _re.sub(r"[ \t]{2,}", " ", atom).strip()
+        return atom
+
+    # P9-P2-4h: Post-Processing der Topic-Gruppen
+    def _clean_topic_groups(
+        self, topic_groups: dict[str, list[str]],
+    ) -> dict[str, list[str]]:
+        """Filtert Duplikate, Fragmente, leere Topics."""
+        cleaned: dict[str, list[str]] = {}
+        seen: set[str] = set()
+        _removed_dup = 0
+        _removed_frag = 0
+        for _t, _atoms in topic_groups.items():
+            _keep: list[str] = []
+            for _a in _atoms:
+                _key = _a.strip().lower()
+                if not _key:
+                    _removed_frag += 1
+                    continue
+                # Duplikat (case-insensitive, exakt)
+                if _key in seen:
+                    _removed_dup += 1
+                    continue
+                seen.add(_key)
+                # Fragment: < 10 Zeichen (Koreanisch: '나왔어요.' = 9)
+                if len(_a.strip()) < 10:
+                    _removed_frag += 1
+                    continue
+                # Fragment: endet ohne Satzzeichen/Verb
+                _a_strip = _a.strip()
+                if not any(_a_strip.endswith(_c) for _c in
+                           ('다', '요', '까', '.', '!', '?', '。')):
+                    _removed_frag += 1
+                    continue
+                _keep.append(_a)
+            if _keep:
+                # P10-P2c: Subs immer behalten (auch bei 1-2 Atomen)
+                _is_sub = _t in getattr(
+                    self, "_TOPIC_SONSTIGES_SUB", (),
+                ) and _t != "Sonstiges"
+                if _is_sub or len(_keep) >= 2:
+                    cleaned[_t] = _keep
+        # P10-P2c: Cluster-Aware — Sonstiges behalten wenn >= 5 Atome
+        if 'Sonstiges' in cleaned and len(cleaned['Sonstiges']) < 5:
+            del cleaned['Sonstiges']
+        try:
+            logger.warning(
+                "[TOPIC-CLEAN] %d -> %d Topics, "
+                "removed_dup=%d, removed_frag=%d",
+                len(topic_groups), len(cleaned),
+                _removed_dup, _removed_frag,
+            )
+        except Exception:
+            pass
+        return cleaned
+
+    # P9-P3-1a: Over-Capture-Instruktion fuer Pass 1
+    def _build_overcapture_instruction(self) -> str:
+        return (
+            "\u26a0\ufe0f \uc911\uc694: \uac00\ub2a5\ud55c \ub9ce\uc740 "
+            "\uad6c\uccb4\uc801 \uc0ac\uc2e4\uc744 \ucd94\ucd9c\ud558\uc138\uc694.\n"
+            "\uc0ac\uc2e4\uc758 \uc218\ub97c \uc904\uc774\uc9c0 \ub9c8\uc138\uc694. "
+            "\ubd80\ubd84\uc801\uc778 \uc0ac\uc2e4\ub3c4 \ud3ec\ud568\ud558\uc138\uc694.\n"
+            "\ucd5c\uc18c 15\uac1c \uc774\uc0c1\uc758 \uc0ac\uc2e4\uc744 "
+            "\ucd94\ucd9c\ud558\ub824\uace0 \ub178\ub825\ud558\uc138\uc694.\n"
+            "\uc694\uc57d\ud558\uc9c0 \ub9c8\uc138\uc694. \ub098\uc5f4\ud558\uc138\uc694.\n\n"
+        )
+
+    # P9-P3-1a: Pass-2 Topic-Klassifikation (JSON, robust)
+    def _classify_topics_pass2(
+        self,
+        atoms_flat: list[tuple[int, str]],
+        temperature: float,
+        abort_event,
+    ) -> dict[str, str]:
+        """P9-P3-1d-v3: Topic-Klassifikation (LLM + Keyword-Fallback).
+
+        Fallback-Kette pro Batch:
+          1. LLM-Prompt -> JSON-Antwort
+          2. Greedy JSON-Regex -> Sanitize -> json.loads
+          3. Regex auf i/t-Paare
+          4. Keyword-Match pro Atom
+        """
+        import json as _json
+        import re as _re
+        if not atoms_flat:
+            return {}
+        _topics_str = ", ".join(f"[{t}]" for t in self._TOPIC_LIST)
+        _kw_map = self._topic_keyword_map()
+        _result: dict[str, str] = {}
+        _n_llm = 0
+        _n_kw = 0
+        _batch = 20
+        _total_batches = max(1, -(-len(atoms_flat) // _batch))
+        _batch_idx = 0
+        # P11-P0f-V2: Zaehler fuer tatsaechlich verarbeitete Atome
+        _p11f_processed_count = 0
+        # END P11-P0f-V2-init
+        for _start in range(0, len(atoms_flat), _batch):
+            if abort_event and abort_event.is_set():
+                break
+            _batch_idx += 1
+            # P9-P3-3: Phasen-Anzeige Topic-Batch
+            self._p9_set_phase("Topic", _batch_idx, _total_batches)
+            _slice = atoms_flat[_start:_start + _batch]
+            _lines = [f"{_i}. {_a}" for _i, (_ci, _a) in enumerate(_slice)]
+            _prompt = (
+                "Classify each fact into exactly one topic.\n"
+                f"Topics: {_topics_str}\n\n"
+                "Facts:\n" + "\n".join(_lines) + "\n\n"
+                'Return JSON only: {"topics":[{"i":0,"t":"TOPIC"},...]}\n'
+                "One entry per index. No prose. No markdown."
+            )
+            # P10-P2b-v2b: structured output bevorzugen
+            _out = None
+            try:
+                with self._ollama_usage(timeout=90.0) as _summ:
+                    _out = _summ.summarize_sync(
+                        text="\n".join(_lines),
+                        prompt=_prompt,
+                        temperature=0.0,
+                        cancel_event=abort_event,
+                        use_cache=False,
+                        output_format=self._get_topic_schema(),
+                    )
+            except Exception as _e:
+                logger.warning(
+                    "[TOPIC-P2] structured-Fehler: %s (Prompt-Fallback)",
+                    _e,
+                )
+                _out = None
+            if not _out:
+                # P10-P1c: Guard temporaer deaktivieren
+                import os as _os_p10c
+                _prev_guard = _os_p10c.environ.get(
+                    "DW_SUMMARY_MIN_WORDS"
+                )
+                _os_p10c.environ["DW_SUMMARY_MIN_WORDS"] = "0"
+                try:
+                    _out = self._summarize_chunk(
+                        "\n".join(_lines), _prompt, 0.0,
+                        chunk_callback=None, abort_event=abort_event,
+                        max_retries=1, timeout_seconds=90.0,
+                    )
+                except Exception as _e2:
+                    logger.warning(
+                        "[TOPIC-P2] Prompt-Fallback-Fehler: %s", _e2,
+                    )
+                    _out = None
+                finally:
+                    if _prev_guard is None:
+                        _os_p10c.environ.pop(
+                            "DW_SUMMARY_MIN_WORDS", None
+                        )
+                    else:
+                        _os_p10c.environ[
+                            "DW_SUMMARY_MIN_WORDS"
+                        ] = _prev_guard
+            # END P10-P2b-v2b
+
+            _parsed: dict[int, str] = {}
+            if _out:
+                _m = _re.search(r"\{.*\}", _out, _re.DOTALL)
+                _data = None
+                if _m:
+                    _cand = _m.group(0)
+                    _cand2 = _re.sub(r"'([^']*)'", r'"\1"', _cand)
+                    _cand2 = _re.sub(r",\s*([}\]])", r"\1", _cand2)
+                    for _c in (_cand2, _cand):
+                        try:
+                            _data = _json.loads(_c)
+                            break
+                        except Exception:
+                            _data = None
+                if _data is None:
+                    _pairs = _re.findall(
+                        r'"?i"?\s*:\s*(\d+)\s*,\s*"?t"?\s*:\s*"([^"]+)"',
+                        _out,
+                    )
+                    if _pairs:
+                        _data = {"topics": [
+                            {"i": int(_i), "t": _t} for _i, _t in _pairs
+                        ]}
+                        logger.warning(
+                            "[TOPIC-P2] Regex-Fallback: %d Paare", len(_pairs),
+                        )
+                if _data and isinstance(_data.get("topics"), list):
+                    for _entry in _data["topics"]:
+                        try:
+                            _idx = int(_entry.get("i"))
+                            _t = str(_entry.get("t", "")).strip().strip("[]")
+                        except Exception:
+                            continue
+                        if 0 <= _idx < len(_slice) and _t in self._TOPIC_LIST:
+                            _parsed[_idx] = _t
+                else:
+                    logger.warning(
+                        "[TOPIC-P2] Parse-Fail (Raw 300): %r",
+                        _out[:300],
+                    )
+
+            _kw_this = 0
+            _batch_stats = {"kw_strong": 0, "kw_1_llm_sonst": 0,
+                            "llm_ok": 0, "kw_fallback": 0}
+            for _i, (_ci, _a) in enumerate(_slice):
+                _kw_t = self._classify_by_keywords(_a, _kw_map)
+                _kw_scores = self._keyword_scores(_a, _kw_map)
+                _kw_max = max(_kw_scores.values()) if _kw_scores else 0
+                if _kw_max >= 2:
+                    _t = _kw_t
+                    _batch_stats["kw_strong"] += 1
+                    _n_kw += 1
+                    _kw_this += 1
+                elif _kw_max == 1 and _i in _parsed and (
+                    _parsed[_i] == "Sonstiges"
+                ):
+                    # LLM sagt "Sonstiges", Keyword hat Signal
+                    _t = _kw_t
+                    _batch_stats["kw_1_llm_sonst"] += 1
+                    _n_kw += 1
+                    _kw_this += 1
+                elif _i in _parsed:
+                    _t = _parsed[_i]
+                    _batch_stats["llm_ok"] += 1
+                    _n_llm += 1
+                else:
+                    _t = _kw_t
+                    _batch_stats["kw_fallback"] += 1
+                    _n_kw += 1
+                    _kw_this += 1
+                _result[_a] = _t
+                _p11f_processed_count += 1
+            # P10-P2f: erweiterte Batch-Diagnose
+            try:
+                logger.warning(
+                    "[TOPIC-P2] Batch %d-%d: strong=%d, "
+                    "kw_1_sonst=%d, llm=%d, fallback=%d",
+                    _start, _start + len(_slice) - 1,
+                    _batch_stats["kw_strong"],
+                    _batch_stats["kw_1_llm_sonst"],
+                    _batch_stats["llm_ok"],
+                    _batch_stats["kw_fallback"],
+                )
+            except Exception:
+                pass
+            if _kw_this:
+                logger.warning(
+                    "[TOPIC-P2] Batch %d-%d: %d/%d via Keyword",
+                    _start, _start + len(_slice) - 1,
+                    _kw_this, len(_slice),
+                )
+
+        _topic_counts: dict[str, int] = {}
+        for _t in _result.values():
+            _topic_counts[_t] = _topic_counts.get(_t, 0) + 1
+
+        # P11-P0f-V2: Duplikat-Diagnose
+        # - processed == len(atoms_flat): alle Atome verarbeitet (kein Verlust)
+        # - processed > len(_result): Duplikate (gleicher Text, by-design)
+        # - processed < len(atoms_flat): echter Verlust (Bug!)
+        try:
+            _p11f_actual = len(atoms_flat)
+            _p11f_aborted = bool(abort_event and abort_event.is_set())
+            if not _p11f_aborted and _p11f_processed_count < _p11f_actual:
+                _run_log_event(
+                    "invariant.violated",
+                    name="classify.atom_loss",
+                    processed=_p11f_processed_count,
+                    expected=_p11f_actual,
+                    lost=_p11f_actual - _p11f_processed_count,
+                )
+            _p11f_dup = _p11f_processed_count - len(_result)
+            if _p11f_dup > 0:
+                _run_log_event(
+                    "classify.duplicates",
+                    processed=_p11f_processed_count,
+                    unique=len(_result),
+                    dup_count=_p11f_dup,
+                )
+        except Exception:
+            pass
+        # END P11-P0f-V2
+
+        # P11-P0c: Invarianten Klassifikations-Phase
+        # 1) jedes Topic muss in _TOPIC_ALL sein (sonst Datenfehler upstream)
+        # 2) coverage-Ratio als Info (kein Alarm, nur Beobachtung)
+        try:
+            _valid_topics = set(getattr(self, "_TOPIC_ALL", ()) or ())
+            if _valid_topics:
+                _invalid = sorted(
+                    {t for t in _result.values() if t not in _valid_topics}
+                )
+                if _invalid:
+                    _run_log_event(
+                        "invariant.violated",
+                        name="classify.topic_valid",
+                        invalid_topics=_invalid[:5],
+                        total_invalid=len(_invalid),
+                    )
+            _run_log_event(
+                "classify.coverage",
+                classified=len(_result),
+                total_atoms=len(atoms_flat),
+                ratio=round(len(_result) / max(1, len(atoms_flat)), 3),
+                llm=_n_llm,
+                kw=_n_kw,
+            )
+        except Exception:
+            pass
+        # END P11-P0c
+        # P11-P0b: Counter (Klassifikation-Bilanz)
+        try:
+            _run_counter_inc("llm.classify.llm_count", _n_llm)
+            _run_counter_inc("kw.hits", _n_kw)
+        except Exception:
+            pass
+        logger.warning(
+            "[TOPIC-P2] SUMMARY: %d/%d klassifiziert "
+            "(LLM=%d, KW=%d), Topics=%s",
+            len(_result), len(atoms_flat), _n_llm, _n_kw,
+            dict(sorted(_topic_counts.items())),
+        )
+        return _result
+
+    def _topic_keyword_map(self) -> dict[str, tuple[str, ...]]:
+        """P9-P3-1e: Keyword-Map fuer deterministischen Topic-Fallback."""
+        return {
+            "\uc131\uc218/\ud31d\uc5c5": (
+                "\uc131\uc218", "\ud31d\uc5c5", "\ud3ec\ud1a0\uc874",
+                "\ub098\uc774\ud0a4", "\uc1fc\ud551", "\uc637",
+                "\ubcbc\ub8e9\uc2dc\uc7a5",  # P11-P3: 벼룩시장 -> 성수/팝업
+            ),
+            "\ubb34\uc778 \uac00\uac8c": (
+                "\ubb34\uc778", "\uc810\uc6d0", "\uacb0\uc81c", "QR",
+                "\uc790\ub3d9", "\ube75\uc9d1",
+            ),
+            "\ud560\ub85c\uc70c/\ucd95\uc81c": (
+                "\ud560\ub85c\uc70c", "\ud638\ubc15", "\ud574\uace8",
+                "\uc720\ub839", "\ucd95\uc81c", "\uc7a5\uc2dd",
+                "\ubc84\uc2a4\ud0b9", "\uacf5\uc911\uc804\ud654",
+            ),
+            # END P10-P2f-B
+            "\uc74c\uc2dd/\uba39\uac70\ub9ac": (
+                "\ub77c\uba74", "\ub5a1", "\uae40\uce58",
+                "\ud30c\uc2a4\ud0c0", "\uc0cc\ub4dc\uc704\uce58",
+                "\ud0c0\ucf54\uc57c\ud0a4", "\ub9c8\ub77c",
+                "\uc74c\uc2dd", "\uba39", "\ub9db", "\ube75",
+                "\uc6b0\uc720", "\uc18c\uc2a4", "\uc7a0\uce58",
+                "\ud30c\uc804", "\ub3c4\ud1a0\ub9ac",
+                "\ub5a1\ubcf6\uc774", "\ud53c\uc790", "\uad6d\uc218",
+                "\ud3b8\uc758\uc810", "\ucef5", "\uc57c\ub044",
+                "\ud568",
+                # P10-P2f-B: konkrete Fehl-Woerter aus 04:58
+                "\uc7a0\uce58\uad6d\uc218", "\uc7a0\uce58",
+                "\uc57c\uae30\uc18c\ubc14", "\ubcf6\uc740",
+                "\ubd80\uc0b0", "\uc0b4\uc544",
+                "\ud0d5\uba54\uae30", "\uc2dd\uc0ac",
+                "\uc2dd\ub2f9", "\uce74\ud398", "\ub808\uc2a4\ud1a0\ub791",
+            ),
+            "\ud55c\uac15": (
+                "\ud55c\uac15", "\ub178\uc744", "\uc9c0\ud558\ucd08",
+                "\uacf5\uc6d0",
+            ),
+            "\uc804\ud1b5/\ubb38\ud654": (
+                "\uae30\uc640", "\uc804\ud1b5", "\uc61b\ub0a0",
+                "\ub3c4\uc790\uae30", "\ubb38\ud654",
+                # P10-P2f-B
+                "\uae30\uc640\uc9d1", "\ud55c\uc625", "\uac74\ucd95",
+                "\ubb34\ub2a9", "\ub3c4\uc7a5",
+            ),
+            # P10-P2b-v2: Fein-Topics fuer Sonstiges
+            "Sonstiges/Handwerk": (
+                "\uae30\uc640", "\ud55c\uc625", "\ub3c4\uc790\uae30",
+                "\uacf5\uc608", "\uad6c\uacbd", "\uc608\uc220",
+                "\ubaa8\uc591", "\ub3c4\uc7a5", "\uadf8\ub9bc",
+            ),
+            "Sonstiges/Musik": (
+                "\ubc84\uc2a4\ud0b9", "\ub178\ub798", "\uacf5\uc5f0",
+                "\uc74c\uc545", "\ubb34\ub300", "\ub178\ub798\ud558",
+                # P10-P2f-B
+                "\uc5f0\uc8fc", "\uc7a5\uae30", "\ub178\ub798\ud558",
+            ),
+            "Sonstiges/Alltag": (
+                "\uc0ac\ub78c\ub4e4", "\uac70\ub9ac", "\ub0a0\uc528",
+                "\ubd84\uc704\uae30", "\ubaa8\uc2b5", "\uac74\ubb3c",
+            ),
+            "Sonstiges/Reise": (
+                "\ubc84\uc2a4", "\uc9c0\ud558\ucd08", "\uc774\ub3d9",
+                "\uc5ec\ud589", "\ub3c4\ucc29", "\ucd9c\ubc1c",
+            ),
+        }
+
+    # P10-P2f: Keyword-Scores ohne Entscheidung
+    # END P10-P2f-A
+    def _keyword_scores(
+        self, atom: str, kw_map: dict[str, tuple[str, ...]],
+    ) -> dict[str, int]:
+        """Score pro Topic (Anzahl Keyword-Matches)."""
+        if not atom:
+            return {}
+        _low = atom.lower()
+        _scores: dict[str, int] = {}
+        for _topic, _kws in kw_map.items():
+            _hits = sum(1 for _k in _kws if _k.lower() in _low)
+            if _hits:
+                _scores[_topic] = _hits
+        return _scores
+
+    def _classify_by_keywords(
+        self, atom: str, kw_map: dict[str, tuple[str, ...]],
+    ) -> str:
+        """P9-P3-1e: Deterministischer Topic-Fallback via Keywords."""
+        if not atom:
+            return "Sonstiges"
+        _low = atom.lower()
+        _scores: dict[str, int] = {}
+        for _topic, _kws in kw_map.items():
+            _hits = sum(1 for _k in _kws if _k.lower() in _low)
+            if _hits:
+                _scores[_topic] = _hits
+        if not _scores:
+            return "Sonstiges"
+        _max = max(_scores.values())
+        # P10-P2b-v2: erst Grob-Topics (ohne Sonstiges),
+        # dann Subs, dann Sonstiges
+        for _t in self._TOPIC_LIST:
+            if _t != "Sonstiges" and _scores.get(_t) == _max:
+                return _t
+        for _t in self._TOPIC_SONSTIGES_SUB:
+            if _t != "Sonstiges" and _scores.get(_t) == _max:
+                return _t
+        return "Sonstiges"
+
+    # P9-P3-3: Phasen-Fortschritt im Status-Label
+    def _p9_set_phase(self, phase, cur, tot, extra=""):
+        try:
+            _txt = f"🔄 {phase} {cur}/{tot}"
+            if extra:
+                _txt += f" · {extra}"
+            self._set_status(_txt)
+        except Exception:
+            pass
+
+    def _p9_write_run_diagnostics(self, data: dict) -> None:
+        import json as _json
+        from pathlib import Path as _Path
+        try:
+            _dir = _Path.home() / ".local" / "share" / "dragonwhisperer"
+            _dir.mkdir(parents=True, exist_ok=True)
+            _ts = __import__("time").strftime("%Y%m%d_%H%M%S")
+            data = dict(data)
+            data["timestamp"] = _ts
+            _latest = _dir / "last_run.json"
+            _latest.write_text(
+                _json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            _hist = _dir / f"run_{_ts}.json"
+            _hist.write_text(
+                _json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            # Ring-Puffer: nur die letzten 10 behalten
+            _files = sorted(_dir.glob("run_*.json"))
+            for _old in _files[:-10]:
+                try:
+                    _old.unlink()
+                except Exception:
+                    pass
+            logger.warning("[DIAG] geschrieben: %s", _latest)
+        except Exception as _e:
+            logger.warning("[DIAG] Schreiben fehlgeschlagen: %s", _e)
+
+    # P10-P2e: Subs auf Grob-Topics mappen (fuer Ausgabe)
+    def _map_sub_to_main(self, topic: str) -> str:
+        """Mappt Sub-Topic auf Grob-Topic fuer die Ausgabe-Gruppierung."""
+        _map = {
+            "Sonstiges/Handwerk": "전통/문화",
+            "Sonstiges/Musik": "할로윈/축제",  # 버스킹/공연 passt zu Festen
+            "Sonstiges/Alltag": "Sonstiges",
+            "Sonstiges/Reise": "Sonstiges",
+        }
+        return _map.get(topic, topic)
+
+    # END P10-P2e
+    # P9-P2-4b: Topic-Tag Parsing
+    def _parse_topic_tag(self, atom: str) -> tuple[str | None, str]:
+        """Parst [topic]-Prefix aus Atom. Returns (topic_or_None, clean)."""
+        import re as _re
+        if not atom:
+            return None, atom or ""
+        m = _re.match(r"^\s*\[([^\]]+)\]\s*(.+)$", atom, _re.DOTALL)
+        if not m:
+            return None, atom
+        _tag = m.group(1).strip()
+        _rest = m.group(2).strip()
+        if _tag in self._TOPIC_LIST:
+            return _tag, _rest
+        return None, atom
+
+    # PATCH 34e-content-selection: (3) _content_selection_reduce
+    def _content_selection_reduce(
+        self,
+        cleaned_valid: list[str],
+        chunks: list,
+        temperature: float,
+        abort_event,
+        max_atoms: int = 60,  # PATCH 34e-cs-fix4-A: war 40
+    ) -> str:
+        """Ersetzt _hierarchical_reduce durch Content-Selection-Pipeline.
+
+        Pipeline:
+          1. Pro Chunk 5-15 atomare Fakten extrahieren (LLM)
+          2. Alle Atome sammeln + Positionsindex merken
+          3. Deterministische Diversitaets-Auswahl (max 40 Atome)
+          4. Nach Zeitblock gruppieren -> combined mit [TEIL X/Y | ...]
+        """
+        n = len(cleaned_valid)
+        if n == 0:
+            return ""
+        # P9-P2-4b: thematischer Modus?
+        _is_thematic = "Thematisch" in (
+            getattr(self, "style", "") or ""
+        )
+        try:
+            logger.warning("[TOPIC] thematisch=%s", _is_thematic)
+        except Exception:
+            pass
+        # P9-P3-1b: Pass-2-Topic-Map (None = Single-Pass-Fallback)
+        self._p9_topic_map = None
+        self._p10_sub_merge_map = {}  # P10-P2f-C
+        _untagged = 0
+
+        try:
+            self._atoms_total = n
+        except Exception:
+            pass
+
+        # P9-P1-2c: Atome aus Original-Chunks (statt Map-Ergebnissen)
+        # Begruendung: Map-Phase reduziert auf ~1500 Zeichen und verliert
+        # Detail (Preise, Namen, Gegenstaende). Originale sind bereits
+        # halluzinations-gefiltert (_strip_hallucinations_from_input
+        # vor _split_into_chunks), also sicher als Atom-Quelle.
+        _cs_use_orig = getattr(self, "_cs_use_original_chunks", True)
+        if _cs_use_orig and len(chunks) == len(cleaned_valid):
+            _atom_source = chunks
+            _atom_src_label = "original"
+        else:
+            _atom_source = cleaned_valid
+            _atom_src_label = "map"
+        try:
+            logger.warning(
+                "[CONTENT-SEL] Atom-Quelle: %s (%d Chunks)",
+                _atom_src_label, len(_atom_source),
+            )
+        except Exception:
+            pass
+        # END P9-P1-2c
+        chunk_atoms: list[list[str]] = []
+        for ci, chunk in enumerate(_atom_source):
+            # P9-P3-3: Phasen-Anzeige Atom-Loop
+            self._p9_set_phase("Atome", ci + 1, n)
+            try:
+                # P9-P3-1b: Pass 1 = over-capture, KEINE Tags
+                atoms = self._extract_chunk_atoms(
+                    chunk, ci, temperature, abort_event,
+                    with_topics=False,
+                    overcapture=_is_thematic,
+                )
+                # P9-P1-2c: CJK-Sicherheitsnetz auf Atome (Hangul bleibt)
+                if atoms:
+                    atoms = [
+                        self._strip_cjk(a) for a in atoms if a.strip()
+                    ]
+            except Exception:
+                atoms = []
+            chunk_atoms.append(atoms)
+            # PATCH 34e-cs-fix2-C: Leere Chunks explizit loggen
+            if len(atoms) == 0:
+                try:
+                    logger.warning(
+                        "[ATOMS] Chunk %d/%d FEHLER (0 Atome, "
+                        "Fallback: Chunk wird in combined fehlen!)",
+                        ci + 1, n,
+                    )
+                except Exception:
+                    pass
+            try:
+                logger.warning(
+                    "[ATOMS] Chunk %d/%d: %d Atome",
+                    ci + 1, n, len(atoms),
+                )
+            except Exception:
+                pass
+            # END PATCH 34e-cs-fix2-C
+
+        # P9-P3-1b: Pass 2 - Topic-Klassifikation fuer alle Atome
+        if _is_thematic and chunk_atoms:
+            _all_flat = [
+                (ci, a)
+                for ci, atoms in enumerate(chunk_atoms)
+                for a in atoms
+            ]
+            try:
+                self._p9_topic_map = self._classify_topics_pass2(
+                    _all_flat, temperature, abort_event,
+                )
+            except Exception as _p2e:
+                logger.warning("[TOPIC-P2] fehlgeschlagen: %s", _p2e)
+                self._p9_topic_map = None
+        all_atoms_with_pos: list[tuple[int, str]] = []
+        for ci, atoms in enumerate(chunk_atoms):
+            for atom in atoms:
+                all_atoms_with_pos.append((ci, atom))
+
+        total_extracted = len(all_atoms_with_pos)
+        if total_extracted == 0:
+            try:
+                logger.warning(
+                    "[CONTENT-SEL] 0 Atome extrahiert - Fallback auf Hierarchie",
+                )
+            except Exception:
+                pass
+            raise RuntimeError("Keine Atome extrahiert")
+
+        # P9-P2-4g: bei thematisch mehr Atome (5 Topics x ~18)
+        _max_atoms_eff = max_atoms
+        if _is_thematic:
+            _max_atoms_eff = max(max_atoms, 90)
+        selected = self._select_diverse_atoms(
+            all_atoms_with_pos, max_atoms=_max_atoms_eff,
+        )
+        try:
+            logger.warning(
+                "[CONTENT-SEL] %d Chunks -> %d Atome -> %d ausgewaehlt",
+                n, total_extracted, len(selected),
+            )
+        except Exception:
+            pass
+
+        combined_parts: list[str] = []
+        _topic_used = False
+
+        # P9-P2-4b: thematische Gruppierung versuchen
+        if _is_thematic:
+            # END P10-P2f-C
+            _topic_groups: dict[str, list[str]] = {}
+            _p2_map = getattr(self, "_p9_topic_map", None) or {}
+            for (ci, a) in selected:
+                if _p2_map:
+                    _t = _p2_map.get(a)
+                    _clean = a
+                    if _t is None:
+                        _untagged += 1
+                        _t = "Sonstiges"
+                else:
+                    _t, _clean = self._parse_topic_tag(a)
+                    if _t is None:
+                        _untagged += 1
+                        _t = "Sonstiges"
+                # P9-P2-4d: Zeitstempel/Marker entfernen
+                _clean = self._strip_timestamps_from_atom(_clean)
+                if not _clean:
+                    continue
+                # P10-P2e: Subs auf Grob-Topic fuer Ausgabe
+                _t_out = self._map_sub_to_main(_t)
+                # P10-P2f-C: echtes Merge-Tracking
+                if _t != _t_out:
+                    if not hasattr(self, "_p10_sub_merge_map"):
+                        self._p10_sub_merge_map = {}
+                    _set = self._p10_sub_merge_map.setdefault(
+                        _t_out, set(),
+                    )
+                    _set.add(_t)
+                _topic_groups.setdefault(_t_out, []).append(_clean)
+            # P9-P2-4h: Duplikate + Fragmente rausfiltern
+            _topic_groups = self._clean_topic_groups(_topic_groups)
+            # P11-P0c-B: Gruppen-Invarianten (Info, kein Violation)
+            try:
+                _p11c_group_counts = {
+                    _k: len(_v) for _k, _v in _topic_groups.items()
+                }
+                _run_log_event(
+                    "group.atom_counts",
+                    counts=_p11c_group_counts,
+                    total=sum(_p11c_group_counts.values()),
+                    n_topics=len(_p11c_group_counts),
+                )
+                _p11c_tiny = [
+                    _k for _k, _n in _p11c_group_counts.items() if _n < 2
+                ]
+                if _p11c_tiny:
+                    _run_log_event(
+                        "invariant.soft",
+                        name="group.tiny",
+                        topics=_p11c_tiny[:5],
+                    )
+            except Exception:
+                pass
+            # END P11-P0c-B-groups
+            if len(_topic_groups) >= 2:
+                _topic_used = True
+                for _t, _atoms in _topic_groups.items():
+                    _label = f"[THEMA: {_t}]"
+                    _block = _label + "\n" + "\n".join(
+                        f"\u2022 {a}" for a in _atoms
+                    )
+                    combined_parts.append(_block)
+                try:
+                    # P10-P2f-C: echte Merge-Statistik
+                    _merge_map = getattr(
+                        self, "_p10_sub_merge_map", {},
+                    )
+                    _merge_summary = {
+                        _k: sorted(_v) for _k, _v in _merge_map.items()
+                    }
+                    logger.warning(
+                        "[TOPIC] Gruppierung: %d Topics, "
+                        "untagged=%d, %s",
+                        len(_topic_groups), _untagged,
+                        list(_topic_groups.keys()),
+                    )
+                    if _merge_summary:
+                        logger.warning(
+                            "[TOPIC] Subs gemerged: %s", _merge_summary,
+                        )
+                    self._p10_last_merge = _merge_summary
+                except Exception:
+                    pass
+            else:
+                try:
+                    logger.warning(
+                        "[TOPIC] zu wenige Topics (%d) - "
+                        "Fallback Zeitblock",
+                        len(_topic_groups),
+                    )
+                except Exception:
+                    pass
+
+        if not _topic_used:
+            # alter Zeitblock-Code (unveraendert)
+            n_groups = 3
+            group_size = max(1, (n + n_groups - 1) // n_groups)
+            _duration = self._extract_video_duration_sec()
+            for gi in range(n_groups):
+                start_ci = gi * group_size
+                end_ci = min(n, (gi + 1) * group_size)
+                if start_ci >= n:
+                    break
+                block_atoms = [
+                    a for (ci, a) in selected if start_ci <= ci < end_ci
+                ]
+                if not block_atoms:
+                    continue
+                _label = f"[TEIL {gi + 1}/{n_groups}]"
+                _block = _label + "\n" + "\n".join(
+                    f"\u2022 {a}" for a in block_atoms
+                )
+                combined_parts.append(_block)
+
+        combined = "\n\n".join(combined_parts)
+        try:
+            logger.warning(
+                "[CONTENT-SEL] combined: %d Zeichen (%d Bloecke)",
+                len(combined), len(combined_parts),
+            )
+        except Exception:
+            pass
+        # P9-P3-1b: Stats fuer Diagnose
+        self._p9_last_stats = {
+            "chunks": n,
+            "atoms_total": total_extracted,
+            "atoms_selected": len(selected),
+            "topics": (
+                list(_topic_groups.keys())
+                if _is_thematic and _topic_used else []
+            ),
+            "untagged": _untagged if _is_thematic else 0,
+            "combined_chars": len(combined),
+        }
+        return combined
+    # END PATCH 34e-content-selection (3)
+
+    def _build_group_synthesis_prompt(
+        self, group_text: str, group_idx: int, group_total: int,
+        time_label: str = "",
+    ) -> str:
+        """PATCH 34e-hier-reduce: Prompt fuer Zwischen-Summary einer Gruppe.
+
+        Bewusst OHNE Kapitel-Anweisung, OHNE Style-Block, OHNE 75%-Regel.
+        Ziel: nur "behalte alle Details". Die finale Synthese macht
+        spaeter die Struktur (Kapitel, Anti-Recency, 75%).
+        """
+        # PATCH 34e-group-fix: Koreanisch + Anti-Hallu + UNTER-TEIL-Anker
+        _label_prefix = time_label + "\n" if time_label else ""
+        return (
+            _label_prefix
+            + f"{group_total}\uac1c\uc758 \uc5b8\ud130-\ud14c\uc77c\uc744 "
+            "\ubc1b\uc2b5\ub2c8\ub2e4. "
+            "\ub2e4\uc74c\uc740 \ud55c \ube44\ub514\uc624 \ud074\ub9bd\uc758 "
+            "\ud55c \ubd80\ubd84\uc785\ub2c8\ub2e4.\n"
+            "\u26a0\ufe0f \uc911\uc694: "
+            f"[UNTER-TEIL 1/{group_total}], "
+            f"[UNTER-TEIL 2/{group_total}], "
+            f"[UNTER-TEIL 3/{group_total}] "
+            "\ubaa8\ub450 \ubc18\ub4dc\uc2dc \ub2e4\ub8e8\uc138\uc694. "
+            "\uc5b4\ub290 \ud558\ub098\ub3c4 \uc0dd\ub7b5\ud558\uc9c0 "
+            "\ub9c8\uc138\uc694.\n"
+            "\u26a0\ufe0f \ubc18\ub4dc\uc2dc \ud55c\uad6d\uc5b4\ub85c\ub9cc "
+            "\uc791\uc131\ud558\uc138\uc694.\n"
+            "\u26a0\ufe0f \uc8fc\uc5b4\uc9c4 \uc785\ub825\uc758 \ub0b4\uc6a9\ub9cc "
+            "\uc0ac\uc6a9\ud558\uc138\uc694. "
+            "\uc5b8\uc5b4 \ud559\uc2b5 \ud301, \ucd94\uc815, "
+            "\ud3c9\uac00\ub294 \uc0ac\uc6a9\ud558\uc9c0 \ub9c8\uc138\uc694.\n"
+            "\u26a0\ufe0f \uc694\ub9ac \uc774\ub984\uc740 \uc785\ub825\uc758 "
+            "\ud45c\uae30\ub97c \uadf8\ub300\ub85c \uc0ac\uc6a9\ud558\uc138\uc694. "
+            "\uc608: '\ud06c\ub9bc \ub5a1\ubcf6\uc774'\ub97c "
+            "'\ud06c\ub9bc \ub808\ubaac \ucf00\uc774\ud06c'\ub85c "
+            "\ubc14\uafb8\uc9c0 \ub9c8\uc138\uc694.\n"
+            "\ubaa8\ub4e0 \uc774\ub984, \uc7a5\uc18c, \uc22b\uc790, "
+            "\uac00\uaca9, \uc2dc\uac04\uc744 \ubcf4\uc874\ud558\uc138\uc694.\n"
+            "\uc644\uc804\ud55c \ubb38\uc7a5\uc73c\ub85c \uc791\uc131\ud558\uc138\uc694. "
+            "\uc11c\ub85c\uc5c6\uc774 \ubc14\ub85c \uc2dc\uc791\ud558\uc138\uc694.\n\n"
+            f"{group_text}\n\n"
+            "\uc694\uc57d:"
+        )
+
+    def _hierarchical_reduce(
+        self,
+        cleaned_valid: list[str],
+        chunks: list,
+        temperature: float,
+        abort_event,
+        group_size: int = 3,
+    ) -> str:
+        """PATCH 34e-hier-reduce: Hierarchisches Map-Reduce.
+
+        Teilt die Chunk-Summaries in Gruppen zu je *group_size* und
+        fasst jede Gruppe zu einer Zwischen-Summary zusammen. Die
+        Zwischen-Summaries werden zum combined-Text fuer die finale
+        Synthese verbunden.
+
+        Fallback: Bei Fehler einer Gruppe wird der Roh-Text der Gruppe
+        verwendet (nie Datenverlust).
+        """
+        n = len(cleaned_valid)
+        if n <= group_size:
+            try:
+                logger.warning(
+                    "[HIER] %d Chunks <= group_size=%d - keine Hierarchie",
+                    n, group_size,
+                )
+            except Exception:
+                pass
+            return "\n\n".join(cleaned_valid)
+
+        groups = [
+            cleaned_valid[i:i + group_size]
+            for i in range(0, n, group_size)
+        ]
+        intermediate: list[str] = []
+
+        # PATCH 34e-hier-reduce-v2: Video-Dauer und proportionale
+        # Zeitbereiche je Gruppe
+        _duration = self._extract_video_duration_sec()
+        _n_groups = len(groups)
+        if _duration > 0:
+            _group_dur = _duration / _n_groups
+        else:
+            _group_dur = 0.0
+
+        try:
+            logger.warning(
+                "[HIER] %d Chunks -> %d Gruppen (group_size=%d, "
+                "duration=%.1fs)",
+                n, _n_groups, group_size, _duration,
+            )
+        except Exception:
+            pass
+
+        for gi, group in enumerate(groups):
+            # Sub-Chunks explizit labeln
+            _sub_parts = []
+            for _si, _sc in enumerate(group):
+                _sub_parts.append(
+                    f"[UNTER-TEIL {_si + 1}/{len(group)}]\n{_sc}"
+                )
+            group_text = "\n\n".join(_sub_parts)
+
+            # Zeitlabel berechnen
+            # P9-P2-3d-v2: kein Zeit-Label mehr
+            time_label = f"[TEIL {gi + 1}/{_n_groups}]"
+
+            prompt = self._build_group_synthesis_prompt(
+                group_text, gi + 1, _n_groups, time_label=time_label,
+            )
+            try:
+                summary = self._summarize_chunk(
+                    group_text,
+                    prompt,
+                    temperature,
+                    chunk_callback=None,
+                    abort_event=abort_event,
+                )
+                if summary and summary.strip():
+                    # Zeitlabel voranstellen
+                    intermediate.append(
+                        time_label + "\n" + summary.strip()
+                    )
+                    try:
+                        logger.warning(
+                            "[HIER] Gruppe %d/%d OK: %d -> %d Zeichen "
+                            "(label=%r)",
+                            gi + 1, _n_groups,
+                            len(group_text), len(summary), time_label,
+                        )
+                    except Exception:
+                        pass
+                    # PATCH 34e-hier-content-log: Inhalt jeder Zwischen-Summary
+                    try:
+                        logger.warning(
+                            "[HIER-CONTENT] Gruppe %d/%d: %r",
+                            gi + 1, _n_groups, summary[:500],
+                        )
+                    except Exception:
+                        pass
+                    continue
+            except Exception as _hier_exc:
+                try:
+                    logger.warning(
+                        "[HIER] Gruppe %d/%d FEHLER: %s",
+                        gi + 1, _n_groups, _hier_exc,
+                    )
+                except Exception:
+                    pass
+
+            # Fallback: Roh-Text der Gruppe (mit Label)
+            intermediate.append(time_label + "\n" + group_text)
+            try:
+                logger.warning(
+                    "[HIER] Gruppe %d/%d FALLBACK auf Roh-Text "
+                    "(%d Zeichen)",
+                    gi + 1, _n_groups, len(group_text),
+                )
+            except Exception:
+                pass
+            # END PATCH 34e-hier-reduce-v2
+
+        result = "\n\n".join(intermediate)
+        try:
+            logger.warning(
+                "[HIER] combined: %d Chunks, %d -> %d Zeichen "
+                "(intermediate=%d)",
+                n,
+                sum(len(c) for c in cleaned_valid),
+                len(result),
+                len(intermediate),
+            )
+        except Exception:
+            pass
+        return result
+    # END PATCH 34e-hier-reduce
 
     def _summarize_map_reduce(
         self,
@@ -81481,12 +87187,12 @@ class SummarizeDialog(BaseDialog):
 
         log_debug("summarize", "  ➜ %d Chunks für Map‑Reduce vorbereitet", len(chunks))
 
-        MAX_TOTAL_TIME = 600.0
-        MAX_RETRIES = 2
+        MAX_TOTAL_TIME = 1800.0  # PATCH 34e-chunk-retry: war 600.0
+        MAX_RETRIES = 3          # PATCH 34e-chunk-retry: war 2
         RETRY_DELAY_BASE = 0.5
 
         workers = min(self.max_parallel_requests, max(1, len(chunks) // 2))
-        workers = max(1, min(workers, 4))
+        workers = max(1, min(workers, 2))  # PATCH 34e-chunk-retry: war 4
 
         executor = None
         futures = {}
@@ -81533,7 +87239,7 @@ class SummarizeDialog(BaseDialog):
                 self._set_status("❌ Keine Chunks zur Verarbeitung")
                 return None
 
-            TIMEOUT_PER_FUTURE = 60.0
+            TIMEOUT_PER_FUTURE = 180.0  # PATCH 34e-chunk-retry: war 60.0
             total_deadline = time.monotonic() + MAX_TOTAL_TIME
 
             try:
@@ -81564,6 +87270,12 @@ class SummarizeDialog(BaseDialog):
                         )
                     except Exception as exc:
                         self._chunk_error_count += 1
+                        # PATCH 34e-chunk-diag: sichtbar als WARNING
+                        logger.warning(
+                            "[CHUNK-FAIL] idx=%d/%d reason=%s(%s)",
+                            idx + 1, len(chunks),
+                            type(exc).__name__, str(exc)[:200],
+                        )
                         log_debug(
                             "summarize",
                             "  ❌ Chunk %d/%d fehlgeschlagen: %s",
@@ -81571,6 +87283,7 @@ class SummarizeDialog(BaseDialog):
                             len(chunks),
                             exc,
                         )
+                        # END PATCH 34e-chunk-diag
                         if not self._chunk_error_shown:
                             self._chunk_error_shown = True
                             self._safe_after(
@@ -81612,6 +87325,24 @@ class SummarizeDialog(BaseDialog):
             _cleaned_valid = [
                 self._clean_chunk_result(r) for r in valid if r
             ]
+            # PATCH 34e-log-chunk-results: zeigt Inhalt jedes Chunks
+            try:
+                _total_ck = len(self._chunk_results)
+                for _idx_orig, _c_orig in enumerate(self._chunk_results):
+                    if _c_orig is None:
+                        logger.warning(
+                            "[CHUNK-SUMMARY] idx=%d/%d NONE",
+                            _idx_orig + 1, _total_ck,
+                        )
+                    else:
+                        logger.warning(
+                            "[CHUNK-SUMMARY] idx=%d/%d len=%d preview=%r",
+                            _idx_orig + 1, _total_ck,
+                            len(_c_orig), _c_orig[:200],
+                        )
+            except Exception as _e_cs:
+                logger.debug("CHUNK-SUMMARY Fehler: %s", _e_cs)
+            # END PATCH 34e-log-chunk-results
             # # === PATCH F12c: F12 debug log ===
             _style_low = (getattr(self, "style", "") or "").lower()
             _is_verbose = (
@@ -81643,7 +87374,48 @@ class SummarizeDialog(BaseDialog):
                 )
                 return _direct
             # === END PATCH F12b ===
-            combined = "\n\n".join(_cleaned_valid)
+            # PATCH 34e-hier-reduce: hierarchisches Map-Reduce
+            # Statt 9 Chunks direkt zu synthetisieren -> 3er-Gruppen,
+            # jede Gruppe als Zwischen-Summary, dann finale Synthese.
+            # PATCH 34e-content-selection: (4) Aufruf
+            _cs_success = False
+            try:
+                combined = self._content_selection_reduce(
+                    _cleaned_valid, chunks, temp, effective_abort,
+                )
+                _cs_success = True
+            except Exception as _cs_exc:
+                try:
+                    logger.warning(
+                        "[CONTENT-SEL] Fehler: %s - Fallback auf Hierarchie",
+                        _cs_exc,
+                    )
+                except Exception:
+                    pass
+            if not _cs_success:
+                combined = self._hierarchical_reduce(
+                    _cleaned_valid, chunks, temp, effective_abort,
+                )
+            # END PATCH 34e-content-selection
+            # END PATCH 34e-hier-reduce
+            # PATCH 34e-log-combined: Context-Diagnose (kein Verhalten geaendert)
+            try:
+                _est_combined = self._estimate_tokens(combined)
+                _num_ctx_eff = 16384
+                _ratio_eff = (
+                    _est_combined / _num_ctx_eff if _num_ctx_eff > 0 else 0.0
+                )
+                logger.warning(
+                    "[CTX-DIAG] chunks_total=%d valid=%d "
+                    "combined_chars=%d combined_tokens~%d "
+                    "num_ctx=%d ratio=%.2f%s",
+                    len(chunks), len(valid), len(combined),
+                    _est_combined, _num_ctx_eff, _ratio_eff,
+                    " TRUNCATION_ERWARTET" if _ratio_eff > 1.0 else "",
+                )
+            except Exception as _e_diag:
+                logger.debug("CTX-DIAG Fehler: %s", _e_diag)
+            # END PATCH 34e-log-combined
             _before_len = sum(len(r) for r in valid)
             log_debug(
                 "summarize",
@@ -81654,6 +87426,21 @@ class SummarizeDialog(BaseDialog):
             )
             # === END PATCH F11b ===
 
+            # PATCH 34e-cs-fix2-B: Sprach-Diagnose
+            try:
+                logger.warning(
+                    "[LANG-DIAG] self.language=%r self.style=%r "
+                    "lang_upper=%r",
+                    getattr(self, "language", "?"),
+                    getattr(self, "style", "?"),
+                    (
+                        getattr(self, "language", "") or ""
+                    ).strip().upper()[:40],
+                )
+            except Exception:
+                pass
+            # PATCH P6-P2u-7: Synthese-Phase sichtbar machen
+            self._set_status("🔄 Synthese läuft – Chunks werden zusammengeführt…")
             synthesis_prompt = self._get_synthesis_prompt()
             max_synthesis_tokens = limit - self._estimate_tokens(synthesis_prompt) - 500
             if max_synthesis_tokens <= 0:
@@ -81725,6 +87512,45 @@ class SummarizeDialog(BaseDialog):
                 except Exception as _dump_exc:
                     log_debug("summarize", f"[F8-DUMP] Fehler: {_dump_exc}")
             # === END PATCH F8 ===
+            # P9-P1-2a: Synthese-Groessen-Diagnose (kein Verhalten geaendert)
+            try:
+                _p9_est_prompt = self._estimate_tokens(synthesis_prompt)
+                _p9_est_comb = self._estimate_tokens(truncated_combined)
+                _p9_registry = self._get_model_context_limit()
+                self._p9_last_est_prompt = _p9_est_prompt
+                self._p9_last_est_comb = _p9_est_comb
+                logger.warning(
+                    "[SYNTH] prompt_chars=%d combined_chars=%d "
+                    "est_prompt_tokens~%d est_combined_tokens~%d "
+                    "est_total~%d registry_limit=%d",
+                    len(synthesis_prompt), len(truncated_combined),
+                    _p9_est_prompt, _p9_est_comb,
+                    _p9_est_prompt + _p9_est_comb + 2048,
+                    _p9_registry,
+                )
+            except Exception as _p9_exc:
+                logger.warning("[SYNTH] Diagnose-Fehler: %s", _p9_exc)
+            # END P9-P1-2a
+            # P9-P2-2: num_ctx aus Registry statt default_options (16384)
+            try:
+                _p9_ctx_reg = self._get_model_context_limit()
+                _p9_ctx = min(max(_p9_ctx_reg, 16384), 65536)
+                _opts_cls = getattr(self, "GenerateOptions", None)
+                _p9_synth_opts = None
+                if _opts_cls is not None:
+                    # P9-P2-8: num_predict 2048 -> 4096 (Koreanisch ~2,5 Tok/Zeichen)
+                    _p9_synth_opts = _opts_cls(
+                        temperature=temp, num_predict=4096,
+                        num_ctx=_p9_ctx,
+                    )
+                logger.warning(
+                    "[CTX] Synthese num_ctx=%d (Registry=%d)",
+                    _p9_ctx, _p9_ctx_reg,
+                )
+            except Exception as _p9c:
+                _p9_synth_opts = None
+                logger.warning("[CTX] num_ctx-Fehler: %s", _p9c)
+            # END P9-P2-2
             try:
                 result = self._summarize_chunk(
                     truncated_combined,
@@ -81732,6 +87558,7 @@ class SummarizeDialog(BaseDialog):
                     temp,
                     chunk_callback=chunk_callback,
                     abort_event=effective_abort,
+                    options_override=_p9_synth_opts,
                 )
             except Exception as synth_exc:
                 log_debug("summarize", "  ❌ Synthese fehlgeschlagen: %s", synth_exc)
@@ -81761,6 +87588,138 @@ class SummarizeDialog(BaseDialog):
                 except Exception as _dump2_exc:
                     log_debug("summarize", f"[F8-DUMP] Output-Fehler: {_dump2_exc}")
             # === END PATCH F8b ===
+            # P9-P1-2a: Status-Callback nach Synthese
+            try:
+                logger.warning(
+                    "[SYNTH] fertig: output_chars=%d elapsed=%.1fs",
+                    len(result) if result else 0,
+                    time.perf_counter() - start_total,
+                )
+                # P11-P0c-B: Synthese-Invarianten + Baseline-Snapshot
+                try:
+                    _p11c_out_len = len(result) if result else 0
+                    if _p11c_out_len == 0:
+                        _run_log_event(
+                            "invariant.violated",
+                            name="synth.output_present",
+                        )
+                    # P11-P0f-V1: Baseline-Drift-Erkennung
+                    # Vergleicht aktuellen output_chars mit dem letzten
+                    # verfuegbaren baseline.json (vorheriger Run).
+                    # Drift > 30% -> invariant.violated (echter Alarm).
+                    try:
+                        import json as _p11f_json
+                        _p11f_runs_dir = os.path.dirname(_run_log_dir())
+                        _p11f_current = os.path.basename(_run_log_dir())
+                        _p11f_siblings = sorted(
+                            [
+                                d for d in os.listdir(_p11f_runs_dir)
+                                if os.path.isdir(
+                                    os.path.join(_p11f_runs_dir, d)
+                                )
+                            ],
+                            reverse=True,
+                        )
+                        _p11f_prev = [
+                            d for d in _p11f_siblings
+                            if d != _p11f_current
+                        ]
+                        if _p11f_prev:
+                            _p11f_prev_baseline = os.path.join(
+                                _p11f_runs_dir,
+                                _p11f_prev[0],
+                                "baseline.json",
+                            )
+                            if os.path.exists(_p11f_prev_baseline):
+                                with open(
+                                    _p11f_prev_baseline, encoding="utf-8"
+                                ) as _p11f_f:
+                                    _p11f_data = _p11f_json.load(_p11f_f)
+                                _p11f_prev_out = int(
+                                    _p11f_data.get("output_chars", 0) or 0
+                                )
+                                if _p11f_prev_out > 0 and _p11c_out_len > 0:
+                                    _p11f_drift = abs(
+                                        _p11c_out_len - _p11f_prev_out
+                                    ) / _p11f_prev_out
+                                    _run_log_event(
+                                        "baseline.compare",
+                                        prev_output_chars=_p11f_prev_out,
+                                        curr_output_chars=_p11c_out_len,
+                                        drift_ratio=round(_p11f_drift, 3),
+                                        prev_run=_p11f_prev[0],
+                                    )
+                                    if _p11f_drift > 0.30:
+                                        _run_log_event(
+                                            "invariant.violated",
+                                            name="baseline.output_drift",
+                                            drift_ratio=round(
+                                                _p11f_drift, 3
+                                            ),
+                                            prev=_p11f_prev_out,
+                                            curr=_p11c_out_len,
+                                            threshold=0.30,
+                                        )
+                    except Exception:
+                        pass
+                    # END P11-P0f-V1
+                    _run_log_event(
+                        "synth.output",
+                        output_chars=_p11c_out_len,
+                        elapsed_s=round(
+                            time.perf_counter() - start_total, 1
+                        ),
+                    )
+                    # Baseline-Snapshot (P11-P0f-Basis)
+                    try:
+                        import shutil as _p11c_sh
+                        _p11c_last_run = os.path.expanduser(
+                            "~/.local/share/dragonwhisperer/last_run.json"
+                        )
+                        if os.path.exists(_p11c_last_run):
+                            _p11c_baseline = os.path.join(
+                                _run_log_dir(), "baseline.json"
+                            )
+                            _p11c_sh.copy2(_p11c_last_run, _p11c_baseline)
+                            _run_log_event(
+                                "baseline.snapshot",
+                                path=_p11c_baseline,
+                                output_chars=_p11c_out_len,
+                            )
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                # END P11-P0c-B-synth
+                self._set_status("\u2705 Zusammenfassung fertig")
+                # P9-P3-1c: Diagnose schreiben
+                try:
+                    _p9_stats = getattr(self, "_p9_last_stats", {}) or {}
+                    _p9_diag = {
+                        "model": getattr(self, "model", "?"),
+                        "language": getattr(self, "language", "?"),
+                        "style": getattr(self, "style", "?"),
+                        "chunks": _p9_stats.get("chunks", 0),
+                        "atoms_total": _p9_stats.get("atoms_total", 0),
+                        "atoms_selected": _p9_stats.get("atoms_selected", 0),
+                        "topics": _p9_stats.get("topics", []),
+                        "subs_merged": getattr(
+                            self, "_p10_last_merge", {},
+                        ),
+                        "untagged": _p9_stats.get("untagged", 0),
+                        "combined_chars": _p9_stats.get("combined_chars", 0),
+                        "output_chars": len(result) if result else 0,
+                        "est_prompt_tokens": getattr(self, "_p9_last_est_prompt", 0),
+                        "est_combined_tokens": getattr(self, "_p9_last_est_comb", 0),
+                        "registry_limit": getattr(self, "_p9_last_est_prompt", 0) * 0 + self._get_model_context_limit(),
+                        "elapsed_s": round(time.perf_counter() - start_total, 1),
+                    }
+                    self._p9_write_run_diagnostics(_p9_diag)
+                except Exception as _p9de:
+                    logger.warning("[DIAG] Fehler: %s", _p9de)
+            except Exception as _p9s_exc:
+                logger.warning("[SYNTH] Status-Fehler: %s", _p9s_exc)
+            # END P9-P1-2a
             # === PATCH F13g-c: cjk filter auf finalen Output ===
             # Sicherheitsnetz: auch im Synthese-Output CJK filtern
             if result:
@@ -81769,10 +87728,11 @@ class SummarizeDialog(BaseDialog):
             elapsed = time.perf_counter() - start_total
             log_debug(
                 "summarize",
-                "  ✅ Synthese abgeschlossen in %.2fs – Ergebnislänge=%d",
+                "  ✅ Map-Reduce abgeschlossen (Gesamt) in %.2fs – Ergebnislänge=%d",
                 elapsed,
                 len(result) if result else 0,
             )
+            self._set_status("✅ Synthese abgeschlossen")
             return result
 
         except Exception as exc:
@@ -81871,12 +87831,20 @@ class SummarizeDialog(BaseDialog):
         else:
             raw = raw.strip()
         if for_synthesis:
-            # Schneide ab dem ersten 'REGELN:'-Block (Style hat
-            # eigene Regeln — die Synthese nutzt ihre eigenen).
-            import re as _re
-            _m = _re.search(r"\nREGELN:\s*\n", raw)
-            if _m:
-                raw = raw[:_m.start()].rstrip()
+            # PATCH 34e-b: REGELN-Block nur bei kompakten Styles abschneiden.
+            # Die "Ausführlich · ..."-Styles enthalten ihre Laengen- und
+            # Detail-Regeln IM REGELN-Block — Abschneiden macht sie kurz.
+            _style_low = (getattr(self, "style", "") or "").lower()
+            _is_verbose = (
+                "ausf\u00fchrlich" in _style_low
+                or "ausfuhrlich" in _style_low
+                or "detailliert" in _style_low
+            )
+            if not _is_verbose:
+                import re as _re
+                _m = _re.search(r"\nREGELN:\s*\n", raw)
+                if _m:
+                    raw = raw[:_m.start()].rstrip()
         return raw
     # === END PATCH F6a ===
     # === END PATCH F3a ===
@@ -81912,7 +87880,7 @@ class SummarizeDialog(BaseDialog):
             return False
         import re as _re_sy3
         sample = text[:5000]
-        _pat = r"\[\d{1,2}:\d{2}(?::\d{2})?\.\d{3}"
+        _pat = r"\[\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3}"  # PATCH 34e-ts-format-fix
         matches = _re_sy3.findall(_pat, sample)
         return len(matches) >= 2
 
@@ -81922,6 +87890,20 @@ class SummarizeDialog(BaseDialog):
         import re as _re
         lang = self.language
         _chapters_enabled = self._read_chapters_enabled()
+        # P9-P2-3b: Inhaltswiedergabe definiert eigene Struktur —
+        # Kapitel-Block mit Zeitstempel-Zwang wuerde sie ueberschreiben.
+        _p9_style_low = (getattr(self, "style", "") or "")
+        if ("Inhaltswiedergabe" in _p9_style_low
+                or "Thematisch" in _p9_style_low):
+            _chapters_enabled = False
+            try:
+                logger.warning(
+                    "[CHAP] deaktiviert fuer Style=%r (Inhaltswiedergabe)",
+                    getattr(self, "style", "?"),
+                )
+            except Exception:
+                pass
+        # END P9-P2-3b
         _txt = getattr(self, "text", "") or ""
         try:
             logger.info(
@@ -81934,27 +87916,41 @@ class SummarizeDialog(BaseDialog):
         # PATCH SY3: adaptive Kapitel-Struktur je nach Datenlage
         _has_vt_sy3 = self._has_video_time(_txt)
         try:
-            logger.info(
+            logger.warning(
                 "[SY3] Kapitel-Modus: %s",
                 "VIDEO_TIME" if _has_vt_sy3 else "TITLE_ONLY",
-            )
+            )  # PATCH 34e-sy3-visible
         except Exception:
             pass
         if _chapters_enabled and _has_vt_sy3:
+            # P9-P2-3c: Zeitstempel-Format -> Titel-Format
             _chapters_de = (
                 "KAPITEL-STRUKTUR:\n"
                 "\u2022 Gliedere in 3\u20136 Kapitel.\n"
-                "\u2022 Format pro Kapitel: **MM:SS \u2013 MM:SS | Titel**\n"
-                "\u2022 Nutze Zeitmarken [MM:SS] aus dem Material.\n"
+                "\u2022 Format pro Kapitel: **Titel** (ohne Zeitangabe!)\n"
+                "\u2022 \u26a0\ufe0f KEINE Zeitstempel ([MM:SS], [HH:MM:SS]) "
+                "in der Ausgabe.\n"
                 "\u2022 Leerzeile zwischen Kapiteln, chronologisch.\n\n"
             )
             # PATCH SY3-FIX: _chapters_en ergaenzt
+            # P9-P2-3c
             _chapters_en = (
                 "CHAPTER STRUCTURE:\n"
                 "\u2022 Structure into 3\u20136 chapters.\n"
-                "\u2022 Format per chapter: **MM:SS \u2013 MM:SS | Title**\n"
-                "\u2022 Use timestamps [MM:SS] from the material.\n"
+                "\u2022 Format per chapter: **Title** (no time spec!)\n"
+                "\u2022 \u26a0\ufe0f NO timestamps ([MM:SS], [HH:MM:SS]) "
+                "in the output.\n"
                 "\u2022 Blank line between chapters, chronological.\n\n"
+            )
+            # PATCH 34e-chapters-ko: Korean version (VIDEO_TIME)
+            # P9-P2-3c: 시간 형식 -> 제목 형식
+            _chapters_ko = (
+                "\ucc45\ud130 \uad6c\uc870:\n"
+                "\u2022 3\u20136\uac1c\uc758 \ucc45\ud130\ub85c \uad6c\uc131\ud558\uc138\uc694.\n"
+                "\u2022 \uac01 \ucc45\ud130 \ud615\uc2dd: **\uc81c\ubaa9** (\uc2dc\uac04 \uc5c6\uc774!)\n"
+                "\u2022 \u26a0\ufe0f \ucd9c\ub825\uc5d0 \uc2dc\uac04 \ud45c\uc2dc "
+                "([MM:SS], [HH:MM:SS]) \uae08\uc9c0.\n"
+                "\u2022 \ucc45\ud130 \uc0ac\uc774\uc5d0 \ube48 \uc904, \uc2dc\uac04 \uc21c\uc11c\ub300\ub85c.\n\n"
             )
         elif _chapters_enabled:
             _chapters_de = (
@@ -81976,10 +87972,21 @@ class SummarizeDialog(BaseDialog):
                 "  **Short Title**\n"
                 "\u2022 Blank line between chapters, chronological.\n\n"
             )
+            # PATCH 34e-chapters-ko: Korean version (TITLE_ONLY)
+            _chapters_ko = (
+                "\ucc45\ud130 \uad6c\uc870:\n"
+                "\u2022 3\u20136\uac1c\uc758 \ucc45\ud130\ub85c \uad6c\uc131\ud558\uc138\uc694.\n"
+                "\u2022 \uc911\uc694: \uc790\ub8cc\uc5d0 \uc0ac\uc6a9\ud560 \uc218 \uc788\ub294 \uc601\uc0c1 \uc2dc\uac04 \ud45c\uc2dc\uac00 \uc5c6\uc2b5\ub2c8\ub2e4. \uc2dc\uac04\uc744 \uc9c0\uc5b4\ub0b4\uc9c0 \ub9c8\uc138\uc694.\n"
+                "\u2022 \uac01 \ucc45\ud130\ub294 \uc81c\ubaa9\ub9cc\uc73c\ub85c \uc2dc\uc791\ud558\uc138\uc694:\n"
+                "  **\uac04\ub2e8\ud55c \uc81c\ubaa9**\n"
+                "\u2022 \ucc45\ud130 \uc0ac\uc774\uc5d0 \ube48 \uc904, \uc2dc\uac04 \uc21c\uc11c\ub300\ub85c.\n\n"
+            )
         else:
             _chapters_de = ""
             # PATCH SY3-FIX: _chapters_en ergaenzt (disabled)
             _chapters_en = ""
+            # PATCH 34e-chapters-ko: disabled
+            _chapters_ko = ""
         _task_de = (
             "Kombiniere die folgenden Teilzusammenfassungen zu EINER "
             "vollstaendigen Gesamtzusammenfassung auf Deutsch.\n"
@@ -82011,6 +88018,9 @@ class SummarizeDialog(BaseDialog):
             "Format-Vorlage: 'Name (Uebersetzung)'. Nur Namen aus dem Transkript.\n"
             "\u2022 Keine Spekulationswoerter ('vermutlich', 'koennte', "
             "'moeglicherweise'). Nur was in den Teilzusammenfassungen steht.\n"
+            # PATCH 34e-rules-de: 75%-Mindestlaenge (DE)
+            "\u2022 Mindestlaenge: 75% der Eingabe. Kuerze nur bei echter "
+            "Redundanz \u2014 nicht bei Detailtiefe.\n"
             "\u2022 Keine Vorrede \u2014 direkt die Saetze.\n\n"
         )
         _rules_en = (
@@ -82038,8 +88048,7 @@ class SummarizeDialog(BaseDialog):
                 "vor allen Style-Vorgaben zur Gliederung.\n\n"
             ) if _chapters_enabled else ""
             _remind_de = (
-                "\u26a0\ufe0f ERINNERUNG: Beginne jeden Kapitelabschnitt mit "
-                "**MM:SS \u2013 MM:SS | Titel**.\n\n"
+                "\u26a0\ufe0f ERINNERUNG: KEINE Zeitstempel in Kapitel-\u00dcberschriften.\n\n"
             ) if _chapters_enabled else ""
             return (
                 _task_de + "\n\n"
@@ -82057,8 +88066,7 @@ class SummarizeDialog(BaseDialog):
                 "style instructions.\n\n"
             ) if _chapters_enabled else ""
             _remind_en = (
-                "\u26a0\ufe0f REMINDER: Begin each chapter with "
-                "**MM:SS \u2013 MM:SS | Title**.\n\n"
+                "\u26a0\ufe0f REMINDER: NO timestamps in chapter headings.\n\n"
             ) if _chapters_enabled else ""
             return (
                 _task_en + "\n\n"
@@ -82068,6 +88076,77 @@ class SummarizeDialog(BaseDialog):
                 + _remind_en
                 + _rules_en
             )
+        # PATCH 34e-korean: eigener Koreanisch-Zweig
+        # (vorher fiel Koreanisch in den deutschen else-Branch)
+        if lang in ("Koreanisch", "Korean", "\ud55c\uad6d\uc5b4"):
+            _style_block = self._get_style_instructions(for_synthesis=True)
+            _style_prefix = (_style_block + "\n\n") if _style_block else ""
+            _warn_ko = (
+                "\u26a0\ufe0f \uc378\ud37c \uad6c\uc870\ub294 "
+                "\ubaa8\ub4e0 \uc2a4\ud0c0\uc77c \uc9c0\uce68\ubcf4\ub2e4 "
+                "\uc6b0\uc120\ud569\ub2c8\ub2e4.\n\n"
+            ) if _chapters_enabled else ""
+            _remind_ko = (
+                "\u26a0\ufe0f \uc54c\ub9bc: \uc378\ud37c \uc81c\ubaa9\uc5d0 \uc2dc\uac04 \ud45c\uc2dc \uae08\uc9c0.\n\n"
+            ) if _chapters_enabled else ""
+            # PATCH 34e-task-ko: Anti-Recency + 75% + keine Kompression
+            _task_ko = (
+                "\ub2e4\uc74c\uc740 \ube44\ub514\uc624 \ud074\ub9bd\uc758 "
+                "\ubd80\ubd84 \uc694\uc57d\ub4e4\uc785\ub2c8\ub2e4. "
+                "\ubaa8\ub4e0 \ubd80\ubd84 \uc694\uc57d\uc744 "
+                "\ud558\ub098\uc758 \uc644\uc804\ud55c \ud55c\uad6d\uc5b4 "
+                "\uc804\uccb4 \uc694\uc57d\uc73c\ub85c \uacb0\ud569\ud558\uc138\uc694.\n"
+                "\u26a0\ufe0f \uc911\uc694: \uc555\ucd95\ud558\uc9c0 \ub9c8\uc138\uc694. "
+                "\ubaa8\ub4e0 \ubd80\ubd84\uc758 \ubaa8\ub4e0 \uc138\ubd80 \uc0ac\ud56d, "
+                "\uc22b\uc790, \uc774\ub984, \uac00\uaca9\uc744 \uc720\uc9c0\ud558\uc138\uc694. "
+                "\ucd9c\ub825\uc740 \uc785\ub825 \uae38\uc774\uc758 \ucd5c\uc18c 75%\uc5ec\uc57c \ud569\ub2c8\ub2e4.\n"
+                "\u26a0\ufe0f \ubc18\ub4dc\uc2dc \uccab \ubc88\uc9f8 \ubd80\ubd84\ubd80\ud130 "
+                "\ub9c8\uc9c0\ub9c9 \ubd80\ubd84\uae4c\uc9c0 \uc21c\uc11c\ub300\ub85c "
+                "\ub2e4\ub8e8\uc138\uc694. \uc5b4\ub5a4 \ubd80\ubd84\ub3c4 "
+                "\uc0dd\ub7b5\ud558\uc9c0 \ub9c8\uc138\uc694.\n"
+                # PATCH 34e-hier-reduce-v2: Teil-Label-Hinweis
+                "\u26a0\ufe0f \uc785\ub825\uc758 \uac01 \ud14c\uc774\ub294 "
+                "[TEIL X/Y | HH:MM \u2013 HH:MM] \ub77c\ubca8\ub85c "
+                "\uc2dc\uc791\ud569\ub2c8\ub2e4. \uc774 \ub77c\ubca8\uc758 "
+                "\uc2dc\uac04 \ubc94\uc704\ub97c \ucc45\ud130 \uc81c\ubaa9\uc758 "
+                "\uc2dc\uac04 \ud45c\uc2dc\ub85c \uadf8\ub300\ub85c "
+                "\uc0ac\uc6a9\ud558\uc138\uc694. \uc2dc\uac04\uc744 "
+                "\uc9c0\uc5b4\ub0b4\uc9c0 \ub9c8\uc138\uc694.\n\n"
+            )
+            _rules_ko = (
+                "\uaddc\uce59:\n"
+                "\u2022 \ub2a5\ub3d9\uc801\uc774\uace0 "
+                "\uad6c\uccb4\uc801\uc778 \ubb38\uc7a5. "
+                "Markdown \ud615\uc2dd \uc720\uc9c0. "
+                "\u26a0\ufe0f \ucd9c\ub825\uc5d0 \uc2dc\uac04 "
+                "\ud45c\uc2dc([MM:SS], [HH:MM:SS]), [TEIL X/Y], "
+                "[THEMA: ...] \ub610\ub294 \uad04\ud638 \ud615\uc2dd\uc758 "
+                "(TEIL X/Y | MM:SS \u2013 MM:SS) \ub9c8\ucee4 "
+                "\uc0ac\uc6a9 \uae08\uc9c0.\n"
+                "\u2022 \ucd5c\uc18c \uae38\uc774: \uc785\ub825\uc758 75%.\n"
+                "\u2022 \uae08\uc9c0: '\ud654\uc790\ub294...', "
+                "'\ube44\ub514\uc624\ub294...', "
+                "'\uc791\uc131\uc790\ub294...', "
+                "'\uc774 \ud074\ub9bd\uc5d0\uc11c...', "
+                "'\uc55e\uc11c \uc5b8\uae09\ud55c \ub300\ub85c'.\n"
+                "\u2022 \uace0\uc720\uba85\uc0ac\ub294 \uc6d0\uc5b4\ub85c, "
+                "\ubc88\uc5ed\uc740 \uad04\ud638 \uc548\uc5d0.\n"
+                "\u2022 \ucd94\uc815 \uae08\uc9c0. "
+                "\uc804\uc0ac\ubcf8\uc5d0 \uc788\ub294 \ub0b4\uc6a9\ub9cc.\n"
+                "\u2022 \uc11c\ub85c\uc5c6\uc774 \ubc14\ub85c "
+                "\ubb38\uc7a5\uc73c\ub85c \uc2dc\uc791.\n\n"
+            )
+            # Hinweis: _chapters_de ist sprachlich deutsch — Kapitel-
+            # Struktur wird spaeter mit 34e-chapters-ko uebersetzt.
+            return (
+                _task_ko + "\n\n"
+                + _chapters_ko + _warn_ko  # PATCH 34e-korean-use-ko
+                + _style_prefix
+                + _remind_ko
+                + _rules_ko
+            )
+        # END PATCH 34e-korean
+
         _style_block = self._get_style_instructions(for_synthesis=True)
         _style_prefix = (_style_block + "\n\n") if _style_block else ""
         # PATCH G-min-v2: Kapitel-Block nach vorne + Wiederholung
@@ -82376,6 +88455,12 @@ class SummarizeDialog(BaseDialog):
 
     def _set_status(self, text: str, is_error: bool = False) -> None:
         """Setzt den Status-Label im Hauptthread (threadsicher)."""
+        # PATCH P6-P2u-7c: Status-Wechsel loggen (Diagnose)
+        if DEBUG_LEVEL >= 3:
+            try:
+                log_debug("status", "set_status: %s", text)
+            except Exception:
+                pass
         if not self._is_dialog_alive():
             return
 
@@ -82422,15 +88507,17 @@ class SummarizeDialog(BaseDialog):
                     self.progress_var.set(nxt)
                 except Exception:
                     pass
-            self._progress_pump_id = self.root.after(100, _tick)
-        self._progress_pump_id = self.root.after(100, _tick)
+            # PATCH P8-P1-3: SummarizeDialog hat kein self.root, nutze self.dialog
+            self._progress_pump_id = self.dialog.after(100, _tick)
+        self._progress_pump_id = self.dialog.after(100, _tick)
 
     def _progress_pump_stop(self) -> None:
         """PATCH U3: Stoppt den Progress-Pump."""
         pid = getattr(self, "_progress_pump_id", None)
         if pid is not None:
             try:
-                self.root.after_cancel(pid)
+                # PATCH P8-P1-3: SummarizeDialog hat kein self.root, nutze self.dialog
+                self.dialog.after_cancel(pid)
             except Exception:
                 pass
             self._progress_pump_id = None
@@ -82915,6 +89002,80 @@ class SummarizeDialog(BaseDialog):
             )
             logger.warning("_finalize_summary: result is empty or invalid")
             return
+
+        # PATCH 34c-TS: Zeitstempel-Validation gegen echte Segment-Grenzen.
+        # Nur Logging (WARNING bei Ueberschreitung), keine harte Korrektur.
+        try:
+            _ap = getattr(self.gui, "audio_processor", None)
+            if _ap is not None:
+                _timed = []
+                _lock = getattr(_ap, "_subtitle_lock", None)
+                if _lock is not None:
+                    with _lock:
+                        _timed = list(
+                            getattr(_ap, "_timed_transcriptions", []) or []
+                        )
+                        if not _timed:
+                            _timed = list(
+                                getattr(
+                                    _ap,
+                                    "_last_session_transcriptions",
+                                    [],
+                                )
+                                or []
+                            )
+                else:
+                    _timed = list(
+                        getattr(_ap, "_timed_transcriptions", []) or []
+                    )
+                    if not _timed:
+                        _timed = list(
+                            getattr(_ap, "_last_session_transcriptions", [])
+                            or []
+                        )
+
+                if _timed:
+                    _real_max = 0.0
+                    for _s in _timed:
+                        _e = getattr(_s, "end", None)
+                        if _e is not None and _e > _real_max:
+                            _real_max = _e
+
+                    if _real_max > 0:
+                        import re as _re_ts
+
+                        _ts_pat = _re_ts.compile(
+                            r"(\d{1,2}):(\d{2})\s*[–-]\s*"
+                            r"(\d{1,2}):(\d{2})"
+                        )
+                        _llm_max = 0.0
+                        for _m in _ts_pat.finditer(result):
+                            _h = int(_m.group(3))
+                            _mi = int(_m.group(4))
+                            _sec = _h * 60 + _mi
+                            if _sec > _llm_max:
+                                _llm_max = _sec
+
+                        if _llm_max > _real_max + 30:
+                            logger.warning(
+                                "[SUMMARY-34c-TS] Zeitstempel im LLM-Output "
+                                "(%.0fs) ueberschreiten echte "
+                                "Segment-Endzeit (%.0fs) um %.0fs "
+                                "— LLM-Halluzination vermutet",
+                                _llm_max,
+                                _real_max,
+                                _llm_max - _real_max,
+                            )
+                        elif _llm_max > 0:
+                            logger.info(
+                                "[SUMMARY-34c-TS] Zeitstempel-Check OK: "
+                                "max_LLM=%.0fs, max_real=%.0fs",
+                                _llm_max,
+                                _real_max,
+                            )
+        except Exception as _e_ts:
+            logger.debug("[SUMMARY-34c-TS] Validation: %s", _e_ts)
+        # END PATCH 34c-TS
 
         try:
             self._set_full_summary(result)
@@ -83573,7 +89734,7 @@ class SummarizeDialog(BaseDialog):
         """Aktualisiert die Modell-Combobox."""
         if not hasattr(self, "model_combo"):
             return
-        self.model_combo["values"] = models
+        self.model_combo["values"] = sorted(models)  # PATCH P6-P2s-2c
         # FIX: User-Wahl NICHT still überschreiben. Wenn `self.model`
         # nicht in der Liste steht, bleibt die Combobox trotzdem bei
         # diesem Wert — und Stufe B zeigt die Warnung darunter an.
@@ -83621,6 +89782,345 @@ class SummarizeDialog(BaseDialog):
                     pass
         self._safe_after(0, _do)
 
+    def _show_model_choice_dialog(
+        self,
+        preferred: str,
+        resolved: str | None,
+        available: list[str],
+        reason: str = "",
+    ) -> bool:
+        """P11-P1: Auswahl-Dialog wenn gewaehltes Modell fehlt.
+
+        Returns True wenn Dialog den Fall behandelt hat (Auswahl uebernommen
+        oder Ollama-Befehl gezeigt), False fuer Fallback auf alte Warnung.
+        """
+        if not available:
+            return False
+        try:
+            import tkinter as tk
+        except Exception:
+            return False
+
+        _candidates: list[str] = []
+        try:
+            for _cand in _SUMMARIZE_MODEL_PRIORITY:
+                if _cand in available and _cand not in _candidates:
+                    _candidates.append(_cand)
+                if len(_candidates) >= 3:
+                    break
+            if len(_candidates) < 3:
+                for _cand in available:
+                    if _cand not in _candidates:
+                        _candidates.append(_cand)
+                    if len(_candidates) >= 3:
+                        break
+        except Exception:
+            return False
+        _candidates = _candidates[:3]
+        if not _candidates:
+            return False
+
+        try:
+            _parent = getattr(self, "dialog", None) or getattr(self, "gui", None) or self
+            _tk_parent = _resolve_parent_tk(_parent)
+            _theme = _resolve_dialog_theme(_parent)
+        except Exception:
+            return False
+
+        if _theme is not None:
+            _bg = getattr(_theme, "BG_SECONDARY", "#2b2b2b")
+            _fg = getattr(_theme, "TEXT_PRIMARY", "#e0e0e0")
+            _bg_tert = getattr(_theme, "BG_TERTIARY", "#3a3a3a")
+            _warn_fg = getattr(_theme, "WARNING", "#f0a500")
+        else:
+            _bg, _fg, _bg_tert, _warn_fg = "#2b2b2b", "#e0e0e0", "#3a3a3a", "#f0a500"
+        _font_main = ("Segoe UI", 10)
+        _font_head = ("Segoe UI", 11, "bold")
+
+        _vram = None
+        try:
+            _vram = _get_vram_status()
+        except Exception:
+            pass
+
+        try:
+            _top = tk.Toplevel(_tk_parent)
+            _top.title("Modell auswaehlen (P11-P1)")
+            _top.geometry("680x360")
+            _top.configure(bg=_bg)
+            try:
+                _top.transient(_tk_parent)
+            except Exception:
+                pass
+        except Exception:
+            return False
+
+        _selected = tk.StringVar(
+            value=resolved if resolved in _candidates else _candidates[0]
+        )
+        _result = {"action": "abort", "choice": None}
+
+        tk.Label(
+            _top,
+            text=f"Modell '{preferred}' ist nicht installiert",
+            bg=_bg, fg=_warn_fg, font=_font_head, anchor="w",
+        ).pack(fill="x", padx=15, pady=(14, 4))
+        tk.Label(
+            _top,
+            text=f"Grund: {reason or 'nicht verfuegbar'}",
+            bg=_bg, fg=_fg, font=_font_main, anchor="w",
+        ).pack(fill="x", padx=15, pady=(0, 6))
+        if _vram:
+            tk.Label(
+                _top,
+                text=(
+                    f"VRAM jetzt: {_vram['used_gb']:.1f} / "
+                    f"{_vram['total_gb']:.1f} GB "
+                    f"(frei: {_vram['free_gb']:.1f} GB)"
+                ),
+                bg=_bg, fg=_fg, font=_font_main, anchor="w",
+            ).pack(fill="x", padx=15, pady=(0, 10))
+
+        _frame = tk.Frame(_top, bg=_bg)
+        _frame.pack(fill="both", expand=True, padx=15, pady=(0, 10))
+
+        for _cand in _candidates:
+            try:
+                _meta = _get_model_metadata(_cand) or {}
+            except Exception:
+                _meta = {}
+            _vram_gb = float(_meta.get("vram_estimate_gb", 0) or 0)
+            _tps = _meta.get("measured_tps")
+            _langs = ", ".join(_meta.get("languages", ()) or ()) or "?"
+            _parts = []
+            if _vram_gb > 0:
+                _parts.append(f"~{_vram_gb:.1f} GB VRAM")
+            if _tps:
+                _parts.append(f"{float(_tps):.1f} t/s")
+            _parts.append(f"Sprachen: {_langs}")
+            _info = "  .  ".join(_parts)
+            _row = tk.Frame(_frame, bg=_bg)
+            _row.pack(fill="x", pady=3)
+            tk.Radiobutton(
+                _row, text=_cand, variable=_selected, value=_cand,
+                bg=_bg, fg=_fg, selectcolor=_bg_tert,
+                font=_font_main, anchor="w",
+            ).pack(side="left")
+            tk.Label(
+                _row, text=_info, bg=_bg, fg=_fg,
+                font=_font_main, anchor="e",
+            ).pack(side="right")
+
+        _btn_frame = tk.Frame(_top, bg=_bg)
+        _btn_frame.pack(fill="x", padx=15, pady=(0, 12))
+
+        def _on_apply():
+            _result["action"] = "apply"
+            _result["choice"] = _selected.get()
+            _top.destroy()
+
+        def _on_pull():
+            # P11-P1c: Action "info_shown" statt "pull" -> Info-Dialog danach
+            _result["action"] = "info_shown"
+            _top.destroy()
+
+        def _on_abort():
+            _result["action"] = "abort"
+            _top.destroy()
+
+        _btn_cfg = {
+            "bg": _bg_tert, "fg": _fg, "relief": "flat",
+            "cursor": "hand2", "padx": 12, "pady": 4,
+        }
+        tk.Button(_btn_frame, text="Uebernehmen", command=_on_apply, **_btn_cfg).pack(side="right", padx=(6, 0))
+        tk.Button(_btn_frame, text="Original-Info", command=_on_pull, **_btn_cfg).pack(side="right", padx=(6, 0))
+        tk.Button(_btn_frame, text="Abbrechen", command=_on_abort, **_btn_cfg).pack(side="right")
+
+        try:
+            _top.grab_set()
+        except Exception:
+            pass
+        try:
+            _top.wait_window()
+        except Exception:
+            pass
+
+        if _result["action"] == "apply" and _result["choice"]:
+            _choice = _result["choice"]
+            try:
+                _adv = getattr(getattr(self, "gui", None), "advanced_settings", None)
+                if _adv is not None:
+                    _adv.summarize_model = _choice
+                self.model = _choice
+                if hasattr(self, "model_var"):
+                    self.model_var.set(_choice)
+                self._clear_model_warn()
+                try:
+                    _run_log_event(
+                        "model.choice.override",
+                        old=preferred, new=_choice, reason=reason,
+                    )
+                except Exception:
+                    pass
+            except Exception as _apply_exc:
+                log_debug("summarize", f"Modell-Uebernahme fehlgeschlagen: {_apply_exc}")
+                return False
+            return True
+        if _result["action"] == "info_shown":
+            # P11-P1c-B: resolved mitgeben, damit auto-Fall korrekt behandelt wird
+            try:
+                self._show_pull_info_dialog(preferred, resolved=resolved)
+            except Exception as _p11c_dlg_exc:
+                log_debug("summarize", f"Pull-Info-Dialog fehlgeschlagen: {_p11c_dlg_exc}")
+                # Fallback: alte Warnung
+                self._show_model_warn(
+                    f"Installiere mit: ollama pull {preferred}",
+                    severity="info",
+                )
+            return True
+        return False
+    # END P11-P1-dialog
+
+    def _show_pull_info_dialog(
+        self,
+        model_name: str,
+        resolved: str | None = None,
+    ) -> None:
+        """P11-P1c-B: Info-Dialog mit ollama-pull-Befehl + Kopieren-Button.
+
+        Behandelt auch den Fall model_name='auto':
+        - preferred='auto' -> resolved wird als Ziel-Modell genutzt (falls da)
+        - sonst -> model_name selbst
+
+        Zeigt den Befehl an und bietet Clipboard-Kopie. Kein automatischer
+        Download (User behaelt Kontrolle ueber den Zeitpunkt).
+        """
+        try:
+            import tkinter as tk
+        except Exception:
+            return
+        try:
+            _parent = getattr(self, "dialog", None) or getattr(self, "gui", None) or self
+            _tk_parent = _resolve_parent_tk(_parent)
+            _theme = _resolve_dialog_theme(_parent)
+        except Exception:
+            return
+
+        if _theme is not None:
+            _bg = getattr(_theme, "BG_SECONDARY", "#2b2b2b")
+            _fg = getattr(_theme, "TEXT_PRIMARY", "#e0e0e0")
+            _bg_tert = getattr(_theme, "BG_TERTIARY", "#3a3a3a")
+            _accent = getattr(_theme, "ACCENT", "#58a6ff")
+        else:
+            _bg, _fg, _bg_tert, _accent = "#2b2b2b", "#e0e0e0", "#3a3a3a", "#58a6ff"
+        _font_main = ("Segoe UI", 10)
+        _font_head = ("Segoe UI", 11, "bold")
+        _font_mono = ("Courier New", 11)
+
+        # P11-P1c-B: auto-Fall behandeln
+        _target_model = model_name
+        _is_auto = (model_name or "").strip().lower() == "auto"
+        if _is_auto and resolved:
+            _target_model = resolved
+        _cmd = f"ollama pull {_target_model}"
+
+        try:
+            _top = tk.Toplevel(_tk_parent)
+            _top.title(
+                f"Auto-Modus: {_target_model}" if _is_auto
+                else f"Original-Modell: {model_name}"
+            )
+            _top.geometry("560x240")
+            _top.configure(bg=_bg)
+            try:
+                _top.transient(_tk_parent)
+            except Exception:
+                pass
+        except Exception:
+            return
+
+        if _is_auto:
+            _title_text = (
+                f"Auto-Modus - Empfehlung: {_target_model}"
+                if resolved else "Auto-Modus aktiv"
+            )
+            _hint_text = (
+                "Auto-Modus waehlt automatisch aus. Wenn du das "
+                "empfohlene Modell dauerhaft nutzen willst, kannst du "
+                "es manuell installieren (ist bereits installiert):"
+                if resolved else
+                "Auto-Modus aktiv - kein konkretes Modell zu installieren."
+            )
+        else:
+            _title_text = f"Original-Modell: {model_name}"
+            _hint_text = (
+                "Fuehre diesen Befehl im Terminal aus, um das Modell "
+                "zu installieren:"
+            )
+
+        tk.Label(
+            _top,
+            text=_title_text,
+            bg=_bg, fg=_fg, font=_font_head, anchor="w",
+        ).pack(fill="x", padx=15, pady=(14, 4))
+
+        tk.Label(
+            _top,
+            text=_hint_text,
+            bg=_bg, fg=_fg, font=_font_main, anchor="w",
+            justify="left", wraplength=520,
+        ).pack(fill="x", padx=15, pady=(0, 8))
+
+        _cmd_frame = tk.Frame(_top, bg=_bg_tert)
+        _cmd_frame.pack(fill="x", padx=15, pady=(0, 10))
+        _cmd_var = tk.StringVar(value=_cmd)
+        _cmd_entry = tk.Entry(
+            _cmd_frame, textvariable=_cmd_var, font=_font_mono,
+            bg=_bg_tert, fg=_accent, relief="flat", state="readonly",
+            readonlybackground=_bg_tert,
+        )
+        _cmd_entry.pack(side="left", fill="x", expand=True, padx=8, pady=8)
+
+        _btn_frame = tk.Frame(_top, bg=_bg)
+        _btn_frame.pack(fill="x", padx=15, pady=(0, 12))
+
+        def _on_copy():
+            try:
+                _tk_parent.clipboard_clear()
+                _tk_parent.clipboard_append(_cmd)
+                _tk_parent.update()
+                _copy_btn.config(text="✓ Kopiert")
+                _top.after(
+                    1500,
+                    lambda: _copy_btn.config(text="Kopieren"),
+                )
+            except Exception:
+                pass
+
+        _btn_cfg = {
+            "bg": _bg_tert, "fg": _fg, "relief": "flat",
+            "cursor": "hand2", "padx": 12, "pady": 4,
+        }
+        _copy_btn = tk.Button(
+            _btn_frame, text="Kopieren", command=_on_copy, **_btn_cfg,
+        )
+        _copy_btn.pack(side="left")
+        tk.Button(
+            _btn_frame, text="Schliessen",
+            command=_top.destroy, **_btn_cfg,
+        ).pack(side="right")
+
+        try:
+            _top.grab_set()
+        except Exception:
+            pass
+        try:
+            _top.wait_window()
+        except Exception:
+            pass
+    # END P11-P1c-B
+    # END P11-P1c
+
     def _refresh_model_availability_warning(self, models: list[str]) -> None:
         """Prüft, ob das konfigurierte Modell verfügbar ist, und zeigt Warnung.
 
@@ -83641,9 +90141,112 @@ class SummarizeDialog(BaseDialog):
             )
             return
         if original in models:
+            # PATCH P6-P2r-3: Sprach-Pre-Flight
+            try:
+                _lang_map = {
+                    "Deutsch": "de", "Englisch": "en", "Koreanisch": "ko",
+                    "Chinesisch": "zh", "Japanisch": "ja", "Französisch": "fr",
+                    "Spanisch": "es", "Italienisch": "it", "Russisch": "ru",
+                    "Portugiesisch": "pt", "Arabisch": "ar",
+                }
+                _cur_lang = getattr(self, "language", "") or ""
+                _lang_code = _lang_map.get(_cur_lang)
+                _meta_l = _get_model_metadata(original)
+                _model_langs = _meta_l.get("languages", ())
+                if _lang_code and _model_langs and _lang_code not in _model_langs:
+                    _lang_names = {
+                        "de": "Deutsch", "en": "Englisch", "ko": "Koreanisch",
+                        "zh": "Chinesisch", "ja": "Japanisch", "fr": "Französisch",
+                        "es": "Spanisch", "it": "Italienisch", "ru": "Russisch",
+                        "pt": "Portugiesisch", "ar": "Arabisch",
+                    }
+                    _supported = ", ".join(
+                        _lang_names.get(c, c).upper() for c in _model_langs
+                    )
+                    _alt = None
+                    for _cand, _cm in _MODEL_METADATA.items():
+                        if _cand == original:
+                            continue
+                        if _cm.get("deprecated") or _cm.get("unsuitable_for_summary"):
+                            continue
+                        if _lang_code in (_cm.get("languages") or ()):
+                            _alt = _cand
+                            break
+                    _msg = (
+                        f"\u26a0\ufe0f '{original}' unterst\u00fctzt: {_supported} "
+                        f"\u2014 deine Sprache: {_cur_lang.upper()}. "
+                        f"Ausgabe wird wahrscheinlich NICHT {_cur_lang} sein."
+                    )
+                    if _alt:
+                        _msg += f" Besser: '{_alt}'."
+                    self._show_model_warn(_msg, severity="warning")
+                    return
+            except Exception:
+                pass
+            # PATCH P6-P2b-2: VRAM-Pre-Flight
+            _meta = _get_model_metadata(original)
+            _vram = _get_vram_status()
+            if _meta and _vram:
+                _need = float(_meta.get("vram_estimate_gb", 0) or 0)
+                _free = _vram["free_gb"]
+                if _need > 0 and _need > _free + 0.5:
+                    _alt = _suggest_alternative(original, _free)
+                    if _alt:
+                        _alt_meta = _get_model_metadata(_alt)
+                        _alt_need = float(_alt_meta.get("vram_estimate_gb", 0) or 0)
+                        self._show_model_warn(
+                            f"\u26a0\ufe0f Modell '{original}' ben\u00f6tigt "
+                            f"~{_need:.1f} GB VRAM, frei: {_free:.1f} GB \u2013 "
+                            f"CPU-Offload (langsam). Alternative: '{_alt}' "
+                            f"({_alt_need:.1f} GB).",
+                            severity="warning",
+                        )
+                    else:
+                        self._show_model_warn(
+                            f"\u26a0\ufe0f Modell '{original}' ben\u00f6tigt "
+                            f"~{_need:.1f} GB VRAM, frei: {_free:.1f} GB \u2013 "
+                            f"CPU-Offload (langsam).",
+                            severity="warning",
+                        )
+                    return
+            # PATCH P6-P2o-3: Speed-Pre-Flight (nur wenn VRAM OK)
+            _meta_pf = _get_model_metadata(original)
+            _my_tps = _meta_pf.get("measured_tps")
+            if _my_tps:
+                _best = _find_faster_alternative(original, _my_tps)
+                if _best and _best["tps"] > _my_tps * 1.5:
+                    _est_now = _estimate_summary_time(
+                        None, _my_tps, output_tokens=500, prefill_s=1.5)
+                    _est_best = _estimate_summary_time(
+                        None, _best["tps"], output_tokens=500, prefill_s=1.5)
+                    _t_now = _est_now.get("seconds") or 0
+                    _t_best = _est_best.get("seconds") or 0
+                    _ratio = _best["tps"] / _my_tps
+                    self._show_model_warn(
+                        f"\U0001f4a1 '{original}' ist {_my_tps:.1f} t/s. "
+                        f"'{_best['model']}' wäre {_best['tps']:.1f} t/s "
+                        f"({_ratio:.1f}\u00d7 schneller). "
+                        f"~500 Tokens: {_t_now:.0f}s statt {_t_best:.0f}s.",
+                        severity="info",
+                    )
+                    return
             self._clear_model_warn()
             return
         resolved, _reason = _resolve_summarize_model(original, models)
+        # P11-P1: Choice-Dialog statt nur Warnung (User waehlt aktiv)
+        try:
+            _dialog_shown = self._show_model_choice_dialog(
+                preferred=original,
+                resolved=resolved,
+                available=models,
+                reason=_reason or "",
+            )
+        except Exception as _dlg_exc:
+            _dialog_shown = False
+            log_debug("summarize", f"Model-Choice-Dialog fehlgeschlagen: {_dlg_exc}")
+        if _dialog_shown:
+            return
+        # P11-P1-Fallback: alte Warnung (kein Dialog moeglich / User abgebrochen)
         if resolved:
             self._show_model_warn(
                 f"\u26a0\ufe0f Modell '{original}' ist nicht installiert. "
@@ -83662,6 +90265,15 @@ class SummarizeDialog(BaseDialog):
                 f"ollama pull {original}",
                 severity="error",
             )
+        # END P11-P1-caller
+
+    # PATCH P6-P2-3: mini-test click handler
+    def _on_mini_test_click(self) -> None:
+        model = (self.model_var.get() or "").strip()
+        if not model:
+            return
+        _show_model_dashboard(self, initial_model=model, start_test=True,
+                              on_model_choose=lambda m: self.model_var.set(m))
 
     def _safe_after(
         self,
@@ -83876,10 +90488,70 @@ class SummarizeDialog(BaseDialog):
             model_row,
             textvariable=self.model_var,
             values=["llama3.1:8b"],
-            width=16,
+            width=35,  # PATCH 34c-COMBO: war 16, schnitt Modellnamen ab
+            height=20,  # PATCH 34c-COMBO: Dropdown-Höhe
             style="Dark.TCombobox",
         )
         self.model_combo.pack(side="left", padx=4)
+        # PATCH P6-P1-3d: details-button (SummarizeDialog, neben Modell-Combo)
+        self._model_details_btn = tk.Button(
+            model_row,
+            text="ⓘ",
+            command=lambda: _show_model_dashboard(
+                self,
+                initial_model=(self.model_var.get() or "").strip(),
+                start_test=False,
+                on_model_choose=lambda m: self.model_var.set(m),
+            ),
+            bg=getattr(CURRENT_THEME, "BG_TERTIARY", CURRENT_THEME.BG_SECONDARY),
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            relief="flat",
+            bd=0,
+            font=Fonts.SMALL,
+            cursor="hand2",
+            padx=4,
+            activebackground=getattr(
+                CURRENT_THEME, "BG_HOVER",
+                getattr(CURRENT_THEME, "BG_TERTIARY", CURRENT_THEME.BG_SECONDARY),
+            ),
+            activeforeground=getattr(
+                CURRENT_THEME, "TEXT_ACCENT", CURRENT_THEME.TEXT_PRIMARY,
+            ),
+        )
+        self._model_details_btn.pack(side="left", padx=(2, 4))
+        ToolTip(
+            self._model_details_btn,
+            "Modell-Details: Größe, Kontext, Sprachen, VRAM-Bedarf,\n"
+            "Live-VRAM-Status und Deprecation-Hinweis.",
+        )
+        # === END PATCH P6-P1-3d ===
+        # PATCH P6-P2-3: mini-test button
+        self._mini_test_btn = tk.Button(
+            model_row,
+            text="🧪",
+            command=self._on_mini_test_click,
+            bg=getattr(CURRENT_THEME, "BG_TERTIARY", CURRENT_THEME.BG_SECONDARY),
+            fg=CURRENT_THEME.TEXT_PRIMARY,
+            relief="flat",
+            bd=0,
+            font=Fonts.SMALL,
+            cursor="hand2",
+            padx=4,
+            activebackground=getattr(
+                CURRENT_THEME, "BG_HOVER",
+                getattr(CURRENT_THEME, "BG_TERTIARY", CURRENT_THEME.BG_SECONDARY),
+            ),
+            activeforeground=getattr(
+                CURRENT_THEME, "TEXT_ACCENT", CURRENT_THEME.TEXT_PRIMARY,
+            ),
+        )
+        self._mini_test_btn.pack(side="left", padx=(0, 4))
+        ToolTip(
+            self._mini_test_btn,
+            "Mini-Test: Modell laden, VRAM-Peak messen, Tokens/s ermitteln.\n"
+            "Dauer je nach Modell 5–60 s.",
+        )
+        # === END PATCH P6-P2-3 ===
         self.model_status_label = tk.Label(
             model_row,
             text="",
@@ -83979,10 +90651,8 @@ class SummarizeDialog(BaseDialog):
             style="Dark.TCombobox",
         )
         self.strategy_combo.pack(side="left", padx=4)
-        self.strategy_combo.bind(
-            "<<ComboboxSelected>>",
-            lambda e: setattr(self, "strategy", self.strategy_var.get()),
-        )
+        # PATCH P8-P1-2b: strategy_combo an _on_setting_changed binden
+        self.strategy_combo.bind("<<ComboboxSelected>>", self._on_setting_changed)
 
         prof_frame = tk.Frame(left_lf, bg=CURRENT_THEME.BG_SECONDARY)
         prof_frame.pack(fill="x", pady=(2, 0))
@@ -84057,11 +90727,8 @@ class SummarizeDialog(BaseDialog):
             fg=CURRENT_THEME.TEXT_PRIMARY,
             font=Fonts.SMALL,
             selectcolor=CURRENT_THEME.BG_TERTIARY,
-            command=lambda: setattr(
-                self,
-                "use_structured_output",
-                self.structured_var.get(),
-            ),
+            # PATCH P8-P1-2b: structured_cb an _on_setting_changed binden
+            command=self._on_setting_changed,
         )
         self.structured_cb.pack(anchor="w", pady=1)
 
@@ -84585,24 +91252,65 @@ class SummarizeDialog(BaseDialog):
         old_style = self.style
         old_title = self.use_title_context
         old_structured = self.use_structured_output
+        # PATCH P8-P1-2a: strategy_var mitbehandeln
+        old_strategy = self.strategy
 
         new_lang = self._get_valid_language(self.lang_var.get())
         new_style = self._get_valid_style(self.style_var.get())
         new_title = self.title_var.get()
         new_structured = self.structured_var.get()
+        # PATCH P8-P1-2a: strategy_var lesen
+        new_strategy = self.strategy_var.get()
 
         has_changed = (
             new_lang != old_lang
             or new_style != old_style
             or new_title != old_title
             or new_structured != old_structured
+            # PATCH P8-P1-2a: strategy_var beruecksichtigen
+            or new_strategy != old_strategy
         )
         if not has_changed:
             return
 
+        # PATCH P8-P1-1b: adv.* defensiv synchronisieren
+        # PATCH P8-P1-1d: Logging fuer Verifikation
+        try:
+            _adv = getattr(getattr(self, "gui", None), "advanced_settings", None)
+            if _adv is not None:
+                _changed = []
+                if new_lang != old_lang:
+                    _adv.summary_language = new_lang
+                    _changed.append(f"lang={new_lang!r}")
+                if new_style != old_style:
+                    _adv.summary_style = new_style
+                    _changed.append(f"style={new_style!r}")
+                if new_title != old_title:
+                    _adv.summary_use_title = new_title
+                    _changed.append(f"title={new_title!r}")
+                if new_structured != old_structured:
+                    _adv.summary_structured = new_structured
+                    _changed.append(f"structured={new_structured!r}")
+                # PATCH P8-P1-2a: strategy ebenfalls spiegeln
+                if new_strategy != old_strategy:
+                    _adv.summary_strategy = new_strategy
+                    _changed.append(f"strategy={new_strategy!r}")
+                if _changed and DEBUG_LEVEL >= 3:
+                    log_debug(
+                        "summarize",
+                        f"[P8-P1-1b] adv.* synced: {', '.join(_changed)}",
+                    )
+            elif DEBUG_LEVEL >= 3:
+                log_debug("summarize", "[P8-P1-1b] _adv is None — NICHT synced")
+        except Exception as _e:
+            if DEBUG_LEVEL >= 3:
+                log_debug("summarize", f"[P8-P1-1b] sync-Fehler: {_e}")
+
+        # PATCH P8-P1-1a: Nur Stil-Wechsel braucht Bestaetigung
+        # (Sprache aendert den Prompt-Inhalt nicht, nur die Zielsprache)
         if (
             self._user_edited_prompt
-            and (new_lang != old_lang or new_style != old_style)
+            and (new_style != old_style)
             and not self._ask_confirm_settings_change(old_lang, old_style)
         ):
             self._restore_settings(old_lang, old_style, old_title, old_structured)
@@ -84612,6 +91320,8 @@ class SummarizeDialog(BaseDialog):
         self.style = new_style
         self.use_title_context = new_title
         self.use_structured_output = new_structured
+        # PATCH P8-P1-2a: strategy setzen
+        self.strategy = new_strategy
 
         self._user_edited_prompt = False
         self._reset_to_default_prompt()
@@ -84697,6 +91407,16 @@ class SummarizeDialog(BaseDialog):
         self.style = style
         self.use_title_context = title
         self.use_structured_output = structured
+        # PATCH P8-P1-1c: adv.* zurueckspiegeln
+        try:
+            _adv = getattr(getattr(self, "gui", None), "advanced_settings", None)
+            if _adv is not None:
+                _adv.summary_language = lang
+                _adv.summary_style = style
+                _adv.summary_use_title = title
+                _adv.summary_structured = structured
+        except Exception:
+            pass
         self.status_label.config(text="ℹ️ Änderung verworfen (Benutzerabbruch)")
 
     def test_prompt(self) -> None:
@@ -84844,7 +91564,7 @@ class SummarizeDialog(BaseDialog):
 
         if hasattr(self, "status_label") and self.status_label is not None:
             try:
-                if self.status_label.winfo_exists():
+                if _safe_winfo_exists(self.status_label):
                     self.status_label.config(text="")
             except Exception as e:
                 logger.debug("Ignored exception: %s", e, exc_info=True)
@@ -94911,7 +101631,7 @@ class AdvancedSettingsDialog:
                 "best_of": 5,
                 "suppress_tokens": "-1",
                 "summarize_temperature": 0.1,
-                "summarize_model": "qwen2.5:7b",
+                "summarize_model": "llama3.1:8b",  # PATCH 34b
                 "tts_engine": "piper",
                 "tts_length_scale": 0.9,
                 "tts_sentence_silence": 0.1,
@@ -94959,7 +101679,7 @@ class AdvancedSettingsDialog:
                 "best_of": 5,
                 "suppress_tokens": "-1",
                 "summarize_temperature": 0.1,
-                "summarize_model": "qwen2.5:7b",
+                "summarize_model": "llama3.1:8b",  # PATCH 34b
                 "tts_engine": "piper",
                 "tts_length_scale": 0.75,
                 "tts_sentence_silence": 0.05,
@@ -95007,7 +101727,7 @@ class AdvancedSettingsDialog:
                 "best_of": 5,
                 "suppress_tokens": "-1",
                 "summarize_temperature": 0.1,
-                "summarize_model": "qwen2.5:7b",
+                "summarize_model": "llama3.1:8b",  # PATCH 34b
                 "tts_engine": "piper",
                 "tts_length_scale": 0.75,
                 "tts_sentence_silence": 0.05,
@@ -95056,7 +101776,7 @@ class AdvancedSettingsDialog:
                 "best_of": 5,
                 "suppress_tokens": "-1",
                 "summarize_temperature": 0.1,
-                "summarize_model": "qwen2.5:7b",
+                "summarize_model": "llama3.1:8b",  # PATCH 34b
                 "tts_engine": "piper",
                 "tts_length_scale": 1.0,
                 "tts_sentence_silence": 0.15,
@@ -95104,7 +101824,7 @@ class AdvancedSettingsDialog:
                 "best_of": 5,
                 "suppress_tokens": "-1",
                 "summarize_temperature": 0.1,
-                "summarize_model": "qwen2.5:7b",
+                "summarize_model": "llama3.1:8b",  # PATCH 34b
                 "tts_engine": "piper",
                 "tts_length_scale": 0.9,
                 "tts_sentence_silence": 0.1,
@@ -95152,7 +101872,7 @@ class AdvancedSettingsDialog:
                 "best_of": 5,
                 "suppress_tokens": "-1",
                 "summarize_temperature": 0.1,
-                "summarize_model": "qwen2.5:7b",
+                "summarize_model": "llama3.1:8b",  # PATCH 34b
                 "tts_engine": "piper",
                 "tts_length_scale": 0.8,
                 "tts_sentence_silence": 0.1,
@@ -95407,7 +102127,7 @@ class AdvancedSettingsDialog:
         self.high_words_var = tk.IntVar(value=12)
         self.blacklist_mode_var = tk.StringVar(value="word")
         self.summarize_temperature_var = tk.DoubleVar(value=0.1)
-        self.summarize_model_var = tk.StringVar(value="qwen2.5:7b")
+        self.summarize_model_var = tk.StringVar(value="qwen2.5:7b-instruct-q5_K_M")  # PATCH P6-P2i-3 (vorher qwen2.5:14b)
         self.sentence_interval_var = tk.DoubleVar(value=3.0)
         self.sentence_words_var = tk.IntVar(value=30)
         self.audio_enhancement_var = tk.BooleanVar(value=False)
@@ -97040,7 +103760,8 @@ class AdvancedSettingsDialog:
             ollama_frame,
             textvariable=self.ollama_model_var,
             values=[],
-            width=15,
+            width=35,  # PATCH 34c-COMBO
+            height=20,  # PATCH 34c-COMBO
             style="Dark.TCombobox",
         )
         self.ollama_combo.pack(side="left", fill="x", expand=True)
@@ -100317,7 +107038,7 @@ class AdvancedSettingsDialog:
             self._get_safe(adv, "summarize_temperature", 0.1),
         )
         self.summarize_model_var.set(
-            self._get_safe(adv, "summarize_model", "qwen2.5:7b"),
+            self._get_safe(adv, "summarize_model", "qwen2.5:14b")  # PATCH 34e-model,
         )
 
         self.sentence_interval_var.set(
@@ -101993,8 +108714,11 @@ class AdvancedSettingsDialog:
                             logger.warning(f"_fetch_ollama_models: JSON‑Fehler: {e}")
                             self._update_ollama_label("⚠️ Ungültige Server‑Antwort")
                             return
-                        models = [m.get("name", "") for m in data.get("models", [])]
-                        models = [m for m in models if m]
+                        # PATCH P6-P2s-2a: alphabetisch sortiert
+                        models = sorted(
+                            m.get("name", "") for m in data.get("models", [])
+                            if m.get("name")
+                        )
                         if DEBUG_LEVEL >= 3:
                             log_debug("ollama", f"Gefundene Modelle: {models}")
                         if not models:
@@ -102068,7 +108792,7 @@ class AdvancedSettingsDialog:
                     return
             except tk.TclError:
                 return
-            self.ollama_combo["values"] = models
+            self.ollama_combo["values"] = sorted(models)  # PATCH P6-P2s-2b
             current = self.ollama_model_var.get()
             if current in models:
                 pass
@@ -119766,17 +126490,7 @@ class DragonWhispererGUI:
         """Schreibt eine TXT-Datei aus Segmenten (nicht GUI-Widgets)."""
         try:
             with open(filename, "w", encoding="utf-8") as f:
-                if self.current_stream_info:
-                    f.write("=== STREAM INFORMATION ===\n")
-                    f.write(f"Title: {self.current_stream_info.title}\n")
-                    f.write(f"Uploader: {self.current_stream_info.uploader}\n")
-                    f.write(f"Duration: {self.current_stream_info.duration}\n")
-                    f.write(f"Platform: {self.current_stream_info.platform}\n")
-                    f.write(
-                        f"Saved at: {
-                            datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')
-                        }\n\n",
-                    )
+                self._write_stream_info_header(f)  # PATCH P7-P1-1a
                 f.write("=== TRANSCRIPT ===\n")
                 for seg in segments:
                     start = getattr(seg, "start", None)
@@ -119960,11 +126674,7 @@ class DragonWhispererGUI:
                     success = True
                 elif content == "both":
                     with open(filename, "w", encoding="utf-8") as f:
-                        if self.current_stream_info:
-                            f.write("=== STREAM INFORMATION ===\n")
-                            f.write(f"Title: {self.current_stream_info.title}\n")
-                            f.write(f"Uploader: {self.current_stream_info.uploader}\n")
-                            f.write(f"Duration: {self.current_stream_info.duration}\n\n")
+                        self._write_stream_info_header(f)  # PATCH P7-P1-1a
                         f.write("=== TRANSCRIPT + TRANSLATION ===\n")
                         for i, seg in enumerate(_t_use):
                             start = getattr(seg, "start", None)
@@ -120011,10 +126721,42 @@ class DragonWhispererGUI:
             )
 
 
+    # PATCH P7-P1-1a: Zentraler STREAM-INFORMATION-Header-Writer.
+    # Nutzt stream_title (geladen/live), current_stream_info (live),
+    # last_completed_stream_info (letzte Session) - in dieser Reihenfolge.
+    def _write_stream_info_header(self, f) -> None:
+        si = getattr(self, "current_stream_info", None)
+        if si is None:
+            si = getattr(self, "last_completed_stream_info", None)
+        title = getattr(self, "stream_title", "") or ""
+        if not title and si is not None:
+            title = getattr(si, "title", "") or ""
+        if not title:
+            return
+        f.write("=== STREAM INFORMATION ===\n")
+        f.write(f"Title: {title}\n")
+        if si is not None:
+            for attr, label in (
+                ("uploader", "Uploader"),
+                ("duration", "Duration"),
+                ("platform", "Platform"),
+            ):
+                val = getattr(si, attr, "") or ""
+                if val:
+                    f.write(f"{label}: {val}\n")
+        f.write(
+            f"Saved at: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        )
+
     def _get_safe_filename(self) -> str:
-        if self.current_stream_info and self.current_stream_info.title:
+        # PATCH P7-P1-1a: Fallback auf stream_title / last_completed_stream_info
+        _t = getattr(self, "stream_title", "") or ""
+        if not _t:
+            _si = getattr(self, "current_stream_info", None) or getattr(self, "last_completed_stream_info", None)
+            _t = getattr(_si, "title", "") if _si is not None else ""
+        if _t:
             return (
-                re.sub(r"[^\w\-_\. ]", "", self.current_stream_info.title)
+                re.sub(r"[^\w\-_\. ]", "", _t)
                 .strip()
                 .replace(" ", "_")[:50]
             )
@@ -120024,17 +126766,7 @@ class DragonWhispererGUI:
     def _save_as_text_from_widgets(self, filename: str) -> bool:
         try:
             with open(filename, "w", encoding="utf-8") as f:
-                if self.current_stream_info:
-                    f.write("=== STREAM INFORMATION ===\n")
-                    f.write(f"Title: {self.current_stream_info.title}\n")
-                    f.write(f"Uploader: {self.current_stream_info.uploader}\n")
-                    f.write(f"Duration: {self.current_stream_info.duration}\n")
-                    f.write(f"Platform: {self.current_stream_info.platform}\n")
-                    f.write(
-                        f"Saved at: {
-                            datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')
-                        }\n\n",
-                    )
+                self._write_stream_info_header(f)  # PATCH P7-P1-1a
                 f.write("=== TRANSCRIPT ===\n")
                 f.write(self._get_text_widget_content("transcript_text"))
                 f.write("\n\n=== TRANSLATION ===\n")
@@ -122593,6 +129325,19 @@ class DragonWhispererGUI:
                     "[G4] Kein Video-Zeit-Text verfuegbar, nutze Widget-Inhalt"
                 )
                 text = self._get_text_widget_content("transcript_text")
+
+        # PATCH P6-P2u-8: Pre-Flight – warnt bei leerem Transkript,
+        # laesst Drag-&-Drop-Pfad offen (askyesno → User entscheidet).
+        if not text or not text.strip():
+            _p8_ok = DarkMessageBox.askyesno(
+                "Keine Transkription geladen",
+                "Es ist kein Transkriptionstext vorhanden.\n\n"
+                "Trotzdem \u00f6ffnen? Du kannst danach per Drag & Drop oder \u00fcber\n"
+                "'\U0001f4e5 Transkription laden' Text hinzuf\u00fcgen.",
+                self.root,
+            )
+            if not _p8_ok:
+                return
 
         try:
             SummarizeDialog(self.root, text, self)
@@ -125502,6 +132247,12 @@ class DragonWhispererGUI:
         with contextlib.suppress(Exception):
             sys.stderr.flush()
             log_ai("SESSION-END", reason="shutdown_entry", depth=_depth)
+        # P11-P0d: session.end schreiben (GUI-Exit, idempotent)
+        try:
+            _p11_finalize_run(cause="gui_exit")
+        except Exception:
+            pass
+        # END P11-P0d-C
 
         if debug_level >= 3:
             with contextlib.suppress(Exception):
@@ -135627,9 +142378,22 @@ class WhisperController:
             )
             return
 
+        # PATCH 33d: SOURCE-LANG-CHANGE-LOGGING
+        _old_forced = getattr(engine, "forced_language", None)
+        logger.info(
+            "[LANG] Quellsprache-Wechsel: %r → %r (forced_language vorher=%r)",
+            getattr(gui, "_current_source_language", None),
+            src_lang_name,
+            _old_forced,
+        )
+
         if src_lang_name == "Automatisch":
             engine.forced_language = None
-            logger.info("[LANG] 🔤 Quellsprache: Automatisch (Whisper-Erkennung)")
+            logger.info(
+                "[LANG] 🔤 Quellsprache: Automatisch (Whisper-Erkennung; "
+                "forced_language: %r → None)",
+                _old_forced,
+            )
             if DEBUG_LEVEL >= 3:
                 log_debug("language", "[LANG] Whisper forced_language = None (auto)")
 
@@ -135653,6 +142417,11 @@ class WhisperController:
                     "info",
                     f"⚠️ Unbekannte Sprache '{src_lang_name}' – automatische Erkennung aktiviert.",
                 )
+            # PATCH 33d: SOURCE-LANG-CHANGE-LOGGING
+            logger.info(
+                "[LANG] forced_language: %r → None (Grund: unbekannter Sprachname %r)",
+                _old_forced, src_lang_name,
+            )
             engine.forced_language = None
             self._sync_audio_processor_engine(engine)
             self._restart_dispatcher_after_language_change()
@@ -135669,6 +142438,12 @@ class WhisperController:
                     "info",
                     f"⚠️ Sprache '{src_lang_name}' wird von Whisper nicht unterstützt. Automatische Erkennung aktiviert.",
                 )
+            # PATCH 33d: SOURCE-LANG-CHANGE-LOGGING
+            logger.info(
+                "[LANG] forced_language: %r → None (Grund: Code %r nicht in "
+                "WHISPER_SUPPORTED_LANGUAGES)",
+                _old_forced, code,
+            )
             engine.forced_language = None
             self._sync_audio_processor_engine(engine)
             self._restart_dispatcher_after_language_change()
@@ -148933,7 +155708,8 @@ class AudioProcessor:
                 )
 
             if pending > 100 and pending % 50 == 0:
-                logger.warning(
+                _warn_once(
+                    "pending_sync",
                     f"⚠️ Hohe Anzahl ausstehender Tasks bei Synchronisation: {pending}",
                     extra={"component": "task_event"},
                 )
@@ -155097,12 +161873,78 @@ class AudioProcessor:
                     logger.debug(f"[EMIT] Segment {idx} hat leeren Text – überspringe")
                 continue
 
+            # PATCH 34c-DEDUP-C: Time-jump-DROP vor Batching
+            _c_start = getattr(seg, "start", None)
+            _c_end = getattr(seg, "end", None)
+            if _c_start is not None and _c_end is not None:
+                try:
+                    _c_cfg = getattr(
+                        getattr(self, "settings", None), "config", None
+                    )
+                    _c_overlap = (
+                        getattr(_c_cfg, "CHUNK_OVERLAP", 2.0) if _c_cfg else 2.0
+                    )
+                    _c_tol = max(0.5, float(_c_overlap) * 2.0)
+                    _c_lock = getattr(
+                        self, "_last_output_timestamp_lock", None
+                    )
+                    if _c_lock:
+                        with _c_lock:
+                            _c_last = getattr(
+                                self, "_last_output_timestamp", 0.0
+                            )
+                            _c_drop = (
+                                _c_last > 0.0 and _c_end < _c_last - _c_tol
+                            )
+                    else:
+                        _c_last = getattr(
+                            self, "_last_output_timestamp", 0.0
+                        )
+                        _c_drop = (
+                            _c_last > 0.0 and _c_end < _c_last - _c_tol
+                        )
+                    if _c_drop:
+                        logger.warning(
+                            "[EMIT-DIRECT] Time-jump-back DROP: "
+                            "end=%.2f < last=%.2f - tol=%.2f (text='%.50s')",
+                            _c_end, _c_last, _c_tol, text[:50],
+                        )
+                        continue
+                except Exception as _c_e:
+                    if is_verbose:
+                        logger.debug("[EMIT-DIRECT] Time-jump-Check: %s", _c_e)
+            # END PATCH 34c-DEDUP-C
+
             batch.append(seg)
 
             if len(batch) >= effective_batch_size:
                 try:
                     self._emit_batch(batch, trans_cb, transl_cb)
                     emitted_count += len(batch)
+                    # PATCH 34c-DEDUP-C-TS: Timestamp nach Batch-Update
+                    try:
+                        _c_max_end = 0.0
+                        for _c_s in batch:
+                            _c_e2 = getattr(_c_s, "end", None)
+                            if _c_e2 is not None and _c_e2 > _c_max_end:
+                                _c_max_end = _c_e2
+                        if _c_max_end > 0.0:
+                            _c_lock2 = getattr(
+                                self, "_last_output_timestamp_lock", None
+                            )
+                            if _c_lock2:
+                                with _c_lock2:
+                                    if _c_max_end > getattr(
+                                        self, "_last_output_timestamp", 0.0
+                                    ):
+                                        self._last_output_timestamp = _c_max_end
+                            else:
+                                if _c_max_end > getattr(
+                                    self, "_last_output_timestamp", 0.0
+                                ):
+                                    self._last_output_timestamp = _c_max_end
+                    except Exception:
+                        pass
                 except Exception as e:
                     logger.error(f"[EMIT] Batch-Fehler: {e}", exc_info=is_verbose)
                     error_count += 1
@@ -155126,6 +161968,30 @@ class AudioProcessor:
             try:
                 self._emit_batch(batch, trans_cb, transl_cb)
                 emitted_count += len(batch)
+                # PATCH 34c-DEDUP-C-TS: Timestamp nach Rest-Batch-Update
+                try:
+                    _c_max_end = 0.0
+                    for _c_s in batch:
+                        _c_e2 = getattr(_c_s, "end", None)
+                        if _c_e2 is not None and _c_e2 > _c_max_end:
+                            _c_max_end = _c_e2
+                    if _c_max_end > 0.0:
+                        _c_lock2 = getattr(
+                            self, "_last_output_timestamp_lock", None
+                        )
+                        if _c_lock2:
+                            with _c_lock2:
+                                if _c_max_end > getattr(
+                                    self, "_last_output_timestamp", 0.0
+                                ):
+                                    self._last_output_timestamp = _c_max_end
+                        else:
+                            if _c_max_end > getattr(
+                                self, "_last_output_timestamp", 0.0
+                            ):
+                                self._last_output_timestamp = _c_max_end
+                except Exception:
+                    pass
             except Exception as e:
                 logger.error(f"[EMIT] Rest-Batch-Fehler: {e}", exc_info=is_verbose)
                 error_count += 1
@@ -157567,6 +164433,32 @@ class AudioProcessor:
             if debug_enabled:
                 log_debug("SEG_OUT", "🚀 Duplikatprüfung komplett deaktiviert")
 
+        # PATCH 34c-DEDUP-A: Time-jump-Check VOR callback.
+        # Nur bei aktivem Duplikat-Check, nicht bei allow_duplicate.
+        if (
+            # PATCH 34c-DEDUP-A-FIX: disable_duplicate_check NICHT mehr pruefen,
+            # da Time-jump orthogonal zu Text-Dedup ist.
+            not allow_duplicate
+            and start_ts is not None
+            and end_ts is not None
+        ):
+            try:
+                _a_cfg = getattr(getattr(self, "settings", None), "config", None)
+                _a_overlap = getattr(_a_cfg, "CHUNK_OVERLAP", 2.0) if _a_cfg else 2.0
+                _a_tol = max(0.5, float(_a_overlap) * 2.0)
+                with getattr(self, "_last_output_timestamp_lock", nullcontext()):
+                    _a_last = getattr(self, "_last_output_timestamp", 0.0)
+                    if _a_last > 0.0 and end_ts < _a_last - _a_tol:
+                        logger.warning(
+                            "SEG_OUT: Time-jump-back DROP: end=%.2f < last=%.2f - tol=%.2f (text='%.50s')",
+                            end_ts, _a_last, _a_tol, seg_text[:50],
+                        )
+                        return False
+            except Exception as _e_da:
+                if debug_enabled:
+                    log_debug("SEG_OUT", "Time-jump-DROP-Check: %s", _e_da)
+        # END PATCH 34c-DEDUP-A
+
         if _probe:
             logger.warning(
                 "[TIMED-PROBE] BEFORE callback: start=%s end=%s text='%.50s'",
@@ -157613,6 +164505,11 @@ class AudioProcessor:
         if not disable_duplicate_check:
             with duplicate_lock:
                 flushed_set.add(seg_text)
+                # PATCH 34c-DEDUP-B: Long-term ring buffer (maxlen=2000)
+                if not hasattr(self, "_long_term_flushed"):
+                    from collections import deque as _deque_lt
+                    self._long_term_flushed = _deque_lt(maxlen=2000)
+                self._long_term_flushed.append(seg_text)
 
                 if len(flushed_set) > 50000:
                     temp = list(flushed_set)
@@ -157725,6 +164622,10 @@ class AudioProcessor:
     def _fuzzy_duplicate(self, text: str, flushed_set: set) -> bool:
         """Prüft, ob der Text einem der letzten 50 Einträge ähnlich ist."""
         recent = list(flushed_set)[-50:] if flushed_set else []
+        # PATCH 34c-DEDUP-B: Long-term ring buffer einbeziehen
+        _lt = getattr(self, "_long_term_flushed", None)
+        if _lt:
+            recent = recent + list(_lt)
         if not recent:
             return False
 
@@ -178255,7 +185156,8 @@ class AudioProcessor:
                 )
 
             if new_value > 50 and new_value % 10 == 0:
-                logger.warning(
+                _warn_once(
+                    "pending_transcription",
                     "Hohe Anzahl ausstehender Transkriptionen: %d Tasks (reason=%s)",
                     new_value,
                     reason,
@@ -189340,6 +196242,15 @@ class AdvancedSettings:
     optimize_translations: bool = False
     translate_active: bool = True
 
+    # PATCH 31: V4-FIELDS-IN-DATACLASS
+    # multilingual_mode und min_confidence_for_fallback existierten
+    # seit v4 in der JSON, waren aber keine Dataclass-Felder. Dadurch
+    # hat load_from_file sie verworfen und save_to_file schrieb die
+    # Defaults zurueck. Mit dieser Deklaration bleiben sie erhalten.
+    multilingual_mode: bool = True
+    min_confidence_for_fallback: float = 0.05
+    # END PATCH 31
+
     # === PATCH F14a: summary_* als Dataclass-Felder ===
     # Diese Felder waren bisher NUR __init__-Attribute, nicht
     # dataclass-Felder. Daher wurden sie weder gespeichert noch
@@ -189637,7 +196548,7 @@ class AdvancedSettings:
         self.enable_sentence_buffering = True
 
         self.summarize_temperature = 0.1
-        self.summarize_model = "qwen2.5:7b"
+        self.summarize_model = "auto"  # P9-P1-1b (war 34e-model "qwen2.5:14b")
         self.summary_strategy = "Schnell (parallel)"
         self.summary_language = "Deutsch"
         self.summary_style = "Kompakt (3-5 Sätze)"
@@ -189664,7 +196575,8 @@ class AdvancedSettings:
         self.precision_mode = False
         self.adaptive_chunk = False
 
-        self._version = 2
+        # PATCH 31: VERSION-BUMP
+        self._version = 4
 
         self._apply_mode_overrides()
 
@@ -190929,8 +197841,18 @@ class AdvancedSettings:
         filename: str = "dragon_advanced_settings.json",
         *,
         force_reload: bool = False,
+        # PATCH 32b: DUMP-CONFIG-READONLY
+        # save_on_repair=False macht load_from_file strikt read-only:
+        # bereinigte Konfiguration wird NICHT zurueckgeschrieben.
+        # Fuer --dump-config / --doctor / Diagnose-Tools.
+        save_on_repair: bool = True,
     ) -> AdvancedSettings:
-        """Lädt die erweiterten Einstellungen von der Platte."""
+        """Lädt die erweiterten Einstellungen von der Platte.
+
+        PATCH 32b: DUMP-CONFIG-READONLY
+        ``save_on_repair=False`` => read-only; bereinigte/reparierte
+        Konfiguration bleibt nur im Speicher.
+        """
         import time
         from contextlib import suppress
         from dataclasses import MISSING, fields
@@ -191012,18 +197934,25 @@ class AdvancedSettings:
             return instance
 
         _p0 = time.perf_counter()
+        # PATCH 28: SETTINGS-VERSION-WARNING-IMPROVED
+        # Aktuell vom Code unterstützte Settings-Version.
+        # Bei Erhöhung: _migrate_data erweitern und hier anpassen.
+        CURRENT_SETTINGS_VERSION = 4
         file_version = data.get("_version", 1)
-        if file_version > 3:
+        if file_version > CURRENT_SETTINGS_VERSION:
             logger.warning(
-                f"Einstellungen haben neuere Version {file_version} – "
-                f"möglicherweise nicht vollständig kompatibel.",
+                f"Einstellungen haben neuere Version {file_version} "
+                f"(Code unterstützt bis v{CURRENT_SETTINGS_VERSION}). "
+                f"Unbekannte Felder werden ignoriert und beim nächsten Speichern entfernt. "
+                f"Bitte Software aktualisieren oder Config sichern: {file_path}"
             )
-        elif file_version < 3:
+        elif file_version < CURRENT_SETTINGS_VERSION:
             data = cls._migrate_data(data, file_version)
             logger.info(
-                f"Einstellungen von Version {file_version} auf 3 migriert.",
+                f"Einstellungen von Version {file_version} auf "
+                f"{CURRENT_SETTINGS_VERSION} migriert.",
             )
-            data["_version"] = 3
+            data["_version"] = CURRENT_SETTINGS_VERSION
         _mark("migration", _p0)
 
         chunk_duration_val = data.pop("chunk_duration", None)
@@ -191244,15 +198173,53 @@ class AdvancedSettings:
 
         total_removed = len(outdated) + len(removed_hotwords)
         if total_removed > 0:
-            logger.info(
-                f"🔧 {total_removed} veraltete(s) Feld(er) / Hotwords "
-                f"entfernt. Speichere bereinigte Konfiguration…",
-            )
-            _p0 = time.perf_counter()
-            with suppress(Exception):
-                instance.save_to_file(filename=filename)
-                logger.info("✅ Bereinigte Einstellungen gespeichert.")
-            _mark("save_cleaned", _p0)
+            # PATCH 33b: MIGRATION-DETAILED-LOGGING
+            # Konkrete Feldnamen auflisten, damit sichtbar wird, was beim
+            # Speichern verloren geht.
+            _outdated_display = ", ".join(sorted(outdated)[:15])
+            if len(outdated) > 15:
+                _outdated_display += f" … (+{len(outdated) - 15} weitere)"
+            _is_newer_file = file_version > CURRENT_SETTINGS_VERSION
+            if _is_newer_file:
+                logger.warning(
+                    "MIGRATION: %d unbekannte(s) Feld(er) in Datei "
+                    "v%s (Code v%s). Werden beim nächsten Speichern "
+                    "entfernt: %s",
+                    len(outdated), file_version,
+                    CURRENT_SETTINGS_VERSION,
+                    _outdated_display or "(keine)",
+                )
+            else:
+                logger.info(
+                    "MIGRATION: %d veraltete(s) Feld(er) entfernt: %s",
+                    len(outdated), _outdated_display or "(keine)",
+                )
+            if removed_hotwords:
+                _hw_display = ", ".join(removed_hotwords[:10])
+                if len(removed_hotwords) > 10:
+                    _hw_display += (
+                        f" … (+{len(removed_hotwords) - 10} weitere)"
+                    )
+                logger.info(
+                    "MIGRATION: %d Hotword(s) entfernt: %s",
+                    len(removed_hotwords), _hw_display,
+                )
+            # PATCH 32b: DUMP-CONFIG-READONLY
+            if save_on_repair:
+                logger.info(
+                    f"🔧 {total_removed} veraltete(s) Feld(er) / Hotwords "
+                    f"entfernt. Speichere bereinigte Konfiguration…",
+                )
+                _p0 = time.perf_counter()
+                with suppress(Exception):
+                    instance.save_to_file(filename=filename)
+                    logger.info("✅ Bereinigte Einstellungen gespeichert.")
+                _mark("save_cleaned", _p0)
+            else:
+                logger.info(
+                    f"🔧 {total_removed} veraltete(s) Feld(er) / Hotwords "
+                    f"entfernt. Nicht gespeichert (read-only Modus).",
+                )
 
         cls._cache_and_log(instance, cache_key, time.perf_counter())
 
@@ -191486,15 +198453,53 @@ class AdvancedSettings:
         """Führt Versions‑Migrationen durch.  Wird erweitert, sobald
         sich die Datenstruktur ändert.
         """
+        # PATCH 33b: MIGRATION-DETAILED-LOGGING
+        # Jeder Migrationsschritt loggt, welche Felder tatsächlich
+        # umbenannt / entfernt / verändert wurden.
         if from_version < 2:
-            data.pop("some_old_key", None)
+            _v1_removed: list[str] = []
+            _v1_renamed: list[str] = []
+            if "some_old_key" in data:
+                data.pop("some_old_key")
+                _v1_removed.append("some_old_key")
             if "old_name" in data:
                 data["new_name"] = data.pop("old_name")
+                _v1_renamed.append("old_name→new_name")
+            if _v1_removed or _v1_renamed:
+                logger.info(
+                    "MIGRATION v1→v2: entfernt=%s, umbenannt=%s",
+                    _v1_removed or "(keine)",
+                    _v1_renamed or "(keine)",
+                )
+            else:
+                logger.debug(
+                    "MIGRATION v1→v2: keine Änderungen (keine Legacy-Keys)",
+                )
 
         if from_version < 3:
             if data.get("blacklist_mode") == "word":
                 data["blacklist_mode"] = "substring"
+                logger.info(
+                    "MIGRATION v2→v3: blacklist_mode 'word'→'substring'",
+                )
+            else:
+                logger.debug(
+                    "MIGRATION v2→v3: blacklist_mode=%r (keine Änderung)",
+                    data.get("blacklist_mode"),
+                )
 
+        # PATCH 31: V4-MIGRATION-BRANCH
+        if from_version < 4:
+            logger.info(
+                "MIGRATION v3→v4: multilingual_mode und "
+                "min_confidence_for_fallback bleiben als Felder erhalten",
+            )
+        # END PATCH 31
+
+        logger.info(
+            "MIGRATION: abgeschlossen (from_version=%d, _version-Ziel=%d)",
+            from_version, 4,
+        )
         return data
 
     @classmethod
@@ -192595,7 +199600,7 @@ class AdvancedSettings:
             not isinstance(self.summarize_model, str)
             or not self.summarize_model.strip()
         ):
-            self.summarize_model = "qwen2.5:7b"
+            self.summarize_model = "auto"  # P9-P1-1b (war 34e-model "qwen2.5:14b")
             changes.append(f"summarize_model: {old} -> {self.summarize_model}")
 
         old = self.summary_strategy
@@ -192777,7 +199782,7 @@ class AdvancedSettings:
             not isinstance(self.summarize_model, str)
             or not self.summarize_model.strip()
         ):
-            self.summarize_model = "qwen2.5:7b"
+            self.summarize_model = "auto"  # P9-P1-1b (war 34e-model "qwen2.5:14b")
 
     def _validate_ollama_model(self) -> None:
         """Setzt ein gültiges Ollama‑Modell."""
@@ -192855,7 +199860,10 @@ class AdvancedSettings:
         """
         return {
             # === PATCH F14c: version bump to 4 ===
-            "_version": 4,
+            # PATCH 31a2: VERSION-NOT-HARDCODED
+            # _version nicht hardcoden, sondern aus self._version lesen,
+            # damit kuenftige Versionsbumps automatisch greifen.
+            "_version": getattr(self, "_version", 4),
             # === END PATCH F14c ===
             "beam_size": self.beam_size,
             "temperature": self.temperature,
@@ -192945,6 +199953,9 @@ class AdvancedSettings:
                 "min_confidence_for_fallback",
                 0.05,
             ),
+            # PATCH 31a: F601-FIX-VERSION
+            # _version wird bereits weiter oben im Dict persistiert;
+            # hier kein zweiter Eintrag (F601: repeated key literal).
         }
 
     def save_to_file(self, filename: str = "dragon_advanced_settings.json") -> bool:
@@ -193671,7 +200682,7 @@ class AdvancedSettings:
         _str_repair("suppress_tokens", [], "-1")
         _str_repair("hotwords", [], "")
         _str_repair("blacklist_mode", ["word", "substring"], "word")
-        _str_repair("summarize_model", [], "qwen2.5:7b")
+        _str_repair("summarize_model", [], "qwen2.5:14b")  # PATCH 34e-model
         _str_repair(
             "cookies_browser",
             [
@@ -193965,13 +200976,24 @@ class AdvancedSettings:
 _ADVANCED_SETTINGS_CACHE = None
 
 
-def get_advanced_settings(force_reload: bool = False) -> AdvancedSettings:
-    """Gibt die aktuellen erweiterten Einstellungen zurück (mit Fallback)."""
+def get_advanced_settings(
+    force_reload: bool = False,
+    # PATCH 32b: DUMP-CONFIG-READONLY
+    # save_on_repair=False => read-only (fuer --dump-config u.ae.).
+    save_on_repair: bool = True,
+) -> AdvancedSettings:
+    """Gibt die aktuellen erweiterten Einstellungen zurück (mit Fallback).
+
+    PATCH 32b: DUMP-CONFIG-READONLY
+    ``save_on_repair=False`` verhindert das Zurueckschreiben reparierter
+    Settings. Nur sinnvoll fuer Diagnose-Tools.
+    """
     global _ADVANCED_SETTINGS_CACHE
     if force_reload or _ADVANCED_SETTINGS_CACHE is None:
         try:
             _ADVANCED_SETTINGS_CACHE = AdvancedSettings.load_from_file(
                 force_reload=force_reload,
+                save_on_repair=save_on_repair,
             )
         except Exception as e:
             logger.critical(
@@ -194403,8 +201425,16 @@ def configure_logging(
     debug_level: int,
     debug_components: list[str],
     quiet: bool,
+    log_file: "str | None" = None,
 ) -> None:
-    """Konfiguriert das Logging basierend auf Debug‑Level und Quiet‑Modus."""
+    """Konfiguriert das Logging basierend auf Debug‑Level und Quiet‑Modus.
+
+    PATCH 32: LOG-FILE-ARG-SUPPORT
+    ``log_file`` reicht die CLI-Option ``--log-file`` an den Root-Logger
+    durch. Der Standard-Handler (``/tmp/dragon_logs/dragon_debug.log``
+    bei ``--debug >= 2``) bleibt erhalten; ``--log-file`` ergaenzt einen
+    zusaetzlichen FileHandler am angegebenen Pfad.
+    """
     if quiet:
         log_level = logging.ERROR
     elif debug_level >= 1:
@@ -194420,6 +201450,30 @@ def configure_logging(
 
     if not logging.getLogger().handlers:
         logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
+
+    # PATCH 32: LOG-FILE-ARG-SUPPORT
+    # Zusaetzlicher FileHandler fuer --log-file. Default-Handler in
+    # /tmp/dragon_logs/ (falls aktiv) bleibt bestehen.
+    if log_file:
+        try:
+            _lf_path = Path(log_file).expanduser()
+            _lf_path.parent.mkdir(parents=True, exist_ok=True)
+            _file_handler = logging.FileHandler(
+                _lf_path, mode="a", encoding="utf-8",
+            )
+            _file_handler.setLevel(logging.DEBUG)
+            _file_handler.setFormatter(
+                logging.Formatter(
+                    "[%(asctime)s.%(msecs)03d] [%(levelname)s] %(message)s",
+                    datefmt="%H:%M:%S",
+                ),
+            )
+            logging.getLogger().addHandler(_file_handler)
+        except (OSError, ValueError) as _exc:
+            logging.getLogger().warning(
+                "--log-file %r konnte nicht geoeffnet werden: %s",
+                log_file, _exc,
+            )
 
     dragonlogger = logging.getLogger("dragon")
     dragonlogger.setLevel(log_level)
@@ -195806,6 +202860,562 @@ def _validate_and_repair_environment(debug_level: int) -> list[str]:
         os.environ["PYTHONIOENCODING"] = "utf-8"
         repairs.append("PYTHONIOENCODING auf utf-8 gesetzt")
     return repairs
+
+
+def _dump_effective_config() -> int:
+    """PATCH 33a: DUMP-EFFECTIVE-CONFIG
+
+    Lädt die effektive Konfiguration und gibt sie als JSON aus.
+    Zeigt Datei-Version, Code-Version, Anzahl Felder, unbekannte Felder
+    und die effektiven Werte nach Reparatur.
+    Rückgabe: 0 bei Erfolg, 1 bei Fehler (Skript-tauglich).
+    """
+    import json as _json
+    from dataclasses import asdict, fields, is_dataclass
+
+    print("=" * 70)
+    print("🐉 Dragon Whisperer - Effective Configuration Dump")
+    print(f"   Version: {__version__}")
+    print("=" * 70)
+
+    # 1. Rohdatei lesen (für _version / unknown fields)
+    config_dir = PlatformUtils.get_platform_config_dir()
+    adv_file = config_dir / "dragon_advanced_settings.json"
+    raw_data: dict = {}
+    raw_file_version = None
+    raw_field_count = 0
+
+    if adv_file.exists():
+        try:
+            with open(adv_file, encoding="utf-8") as fh:
+                raw_data = _json.load(fh)
+            raw_file_version = raw_data.get("_version")
+            raw_field_count = len(raw_data)
+            logger.info(
+                "DUMP: Config gelesen: %s (%d Felder, _version=%r)",
+                adv_file, raw_field_count, raw_file_version,
+            )
+        except (OSError, _json.JSONDecodeError) as e:
+            logger.warning("DUMP: Config nicht lesbar: %s", e)
+            print(f"⚠️  Konnte Config-Datei nicht lesen: {e}")
+    else:
+        print(f"ℹ️  Keine Config-Datei vorhanden: {adv_file}")
+        logger.info("DUMP: Keine Config-Datei vorhanden: %s", adv_file)
+
+    # 2. Effektive Settings laden (mit Reparatur)
+    get_advanced_settings = globals().get("get_advanced_settings")
+    if get_advanced_settings is None:
+        print("❌ get_advanced_settings() nicht im Modul-Scope gefunden")
+        logger.error("DUMP: get_advanced_settings() fehlt")
+        return 1
+
+    try:
+        # PATCH 32b: DUMP-CONFIG-READONLY
+        # force_reload=True umgeht den Cache, save_on_repair=False
+        # macht den Aufruf strikt read-only.
+        settings = get_advanced_settings(
+            force_reload=True,
+            save_on_repair=False,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"❌ Fehler beim Laden der effektiven Settings: {e}")
+        logger.exception("DUMP: Fehler beim Laden der effektiven Settings")
+        return 1
+
+    # 3. Metriken
+    print()
+    print("📊 Config-Metriken:")
+    print(f"  Datei:                  {adv_file}")
+    print(f"  Datei existiert:        {'✅' if adv_file.exists() else '❌'}")
+    print(f"  Felder in Datei:        {raw_field_count}")
+    print(
+        "  _version in Datei:      "
+        f"{raw_file_version if raw_file_version is not None else 'nicht vorhanden (→ 1)'}"
+    )
+
+    expected_version = getattr(settings, "SETTINGS_VERSION", None) or 3
+    print(f"  Code unterstützt bis:   v{expected_version}")
+    if raw_file_version is not None and raw_file_version > expected_version:
+        print(
+            f"  ⚠️  WARNUNG: Datei-Version {raw_file_version} > Code-Version v{expected_version}"
+        )
+
+    # 4. Effektive Werte als JSON
+    if is_dataclass(settings):
+        try:
+            effective_dict = asdict(settings)
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️  asdict() fehlgeschlagen: {e}")
+            effective_dict = {
+                fld.name: getattr(settings, fld.name, None)
+                for fld in fields(settings)
+                if hasattr(settings, fld.name)
+            }
+    else:
+        effective_dict = {
+            k: getattr(settings, k, None)
+            for k in dir(settings)
+            if not k.startswith("_")
+        }
+
+    print()
+    print(f"📋 Effektive Einstellungen ({len(effective_dict)} Felder):")
+    try:
+        print(
+            _json.dumps(
+                effective_dict, indent=2, ensure_ascii=False, default=str
+            )
+        )
+    except (TypeError, ValueError) as e:
+        print(f"⚠️  JSON-Serialisierung fehlgeschlagen: {e}")
+        for k, v in effective_dict.items():
+            print(f"  {k} = {v!r}")
+
+    logger.info(
+        "DUMP: %d effektive Felder ausgegeben (Datei-Version=%r, Code-Version=v%d)",
+        len(effective_dict), raw_file_version, expected_version,
+    )
+    return 0
+
+
+def _run_doctor(quiet: bool = False) -> int:
+    """PATCH 29: DOCTOR-DIAGNOSE
+
+    Read-only vollstaendige Diagnose. Triggert keinen Settings-Save
+    und startet keine GUI. Exit-Code:
+      0 = lauffaehig (Warnungen erlaubt)
+      1 = Fehler (blockierend)
+    """
+    _p = (lambda *a, **k: None) if quiet else print
+
+    _p("\U0001f409 Dragon Whisperer \u2014 Diagnose")
+    _p("\u2500" * 32)
+    _p(f"Version:      {__version__}")
+    _p(f"Python:       {sys.version.split()[0]}")
+    _p(f"Executable:   {sys.executable}")
+    _p(f"Platform:     {SYSTEM} {'ARM' if IS_ARM else 'x86'}")
+    _p(f"Working Dir:  {os.getcwd()}")
+    _p()
+
+    errors = 0
+    warnings = 0
+
+    # ── 1) Settings (read-only, ohne get_advanced_settings) ──────────
+    _p("[1/4] Settings")
+    try:
+        config_dir = PlatformUtils.get_platform_config_dir()
+        adv_file = config_dir / "dragon_advanced_settings.json"
+        _p(f"  Datei:       {adv_file}")
+        if adv_file.exists():
+            import json as _json
+            try:
+                with open(adv_file, encoding="utf-8") as _fh:
+                    _raw = _json.load(_fh)
+                _fv = _raw.get("_version", 1)
+                _fc = len(_raw)
+                _code_ver = 3
+                _p(f"  Felder:      {_fc}")
+                _p(f"  Version:     Datei v{_fv}, Code v{_code_ver}")
+                if _fv > _code_ver:
+                    _p("  \u26a0\ufe0f  Datei-Version neuer als Code. "
+                       "Unbekannte Felder werden beim naechsten Speichern "
+                       "verworfen.")
+                    _p("      Empfehlung: Software aktualisieren oder "
+                       "Config sichern.")
+                    warnings += 1
+                elif _fv < _code_ver:
+                    _p("  \u2139\ufe0f  Aeltere Version wird beim Laden "
+                       "migriert.")
+            except (OSError, _json.JSONDecodeError) as e:
+                _p(f"  \u274c Datei nicht lesbar: {e}")
+                errors += 1
+        else:
+            _p("  \u2139\ufe0f  Keine Config-Datei vorhanden (Standard "
+               "wird erzeugt).")
+    except Exception as e:
+        _p(f"  \u274c Settings-Check fehlgeschlagen: {e}")
+        errors += 1
+    _p()
+
+    # ── 2) Dependencies (read-only) ──────────────────────────────────
+    _p("[2/4] Dependencies")
+    try:
+        _ffmpeg = shutil.which("ffmpeg")
+        _ytdlp = shutil.which("yt-dlp")
+        _ffplay = shutil.which("ffplay")
+        _p(f"  FFmpeg:          "
+           f"{'\u2705 ' + _ffmpeg if _ffmpeg else '\u274c fehlt'}")
+        _p(f"  yt-dlp:          "
+           f"{'\u2705 ' + _ytdlp if _ytdlp else '\u274c fehlt'}")
+        _p(f"  ffplay:          "
+           f"{'\u2705 ' + _ffplay if _ffplay else '\u26a0\ufe0f  fehlt'}")
+        _p(f"  Tkinter:         "
+           f"{'\u2705' if GUI_AVAILABLE else '\u274c'}")
+        _p(f"  faster-whisper:  "
+           f"{'\u2705' if WHISPER_AVAILABLE else '\u274c'}")
+        _p(f"  NumPy:           "
+           f"{'\u2705' if NUMPY_AVAILABLE else '\u274c'}")
+        _p(f"  PyTorch:         "
+           f"{'\u2705' if TORCH_AVAILABLE else '\u274c'}")
+        _p(f"  deep-translator: "
+           f"{'\u2705' if TRANSLATOR_AVAILABLE else '\u274c'}")
+        _p(f"  SciPy:           "
+           f"{'\u2705' if SCIPY_AVAILABLE else '\u274c'}")
+        if not _ffmpeg or not _ytdlp:
+            errors += 1
+        if not WHISPER_AVAILABLE or not TORCH_AVAILABLE:
+            errors += 1
+    except Exception as e:
+        _p(f"  \u274c Dependency-Check fehlgeschlagen: {e}")
+        errors += 1
+    _p()
+
+    # ── 3) Hardware (read-only) ──────────────────────────────────────
+    _p("[3/4] Hardware")
+    try:
+        import psutil as _ps
+        _cpu = _ps.cpu_count(logical=True) or 0
+        _ram = _ps.virtual_memory()
+        _p(f"  CPU:             {_cpu} Kerne")
+        _p(f"  RAM:             {_ram.total / (1024**3):.1f} GB "
+           f"(verfuegbar: {_ram.available / (1024**3):.1f} GB)")
+    except Exception as e:
+        _p(f"  \u26a0\ufe0f  CPU/RAM-Check fehlgeschlagen: {e}")
+    try:
+        _gpu_ok, _gpu_msg = _check_gpu_health()
+        _p(f"  GPU:             {_gpu_msg}")
+        if not _gpu_ok:
+            _p("      \u2139\ufe0f  CPU-Fallback wird verwendet "
+               "(langsamer).")
+            warnings += 1
+    except Exception as e:
+        _p(f"  \u26a0\ufe0f  GPU-Check fehlgeschlagen: {e}")
+    _p()
+
+    # ── 4) Ollama (read-only, 2s Timeout) ────────────────────────────
+    _p("[4/4] Ollama (optional, fuer Zusammenfassung)")
+    try:
+        _host = "http://localhost:11434"
+        _models = _fetch_ollama_model_names(_host, timeout=2.0)
+        if _models is None:
+            _p(f"  Status:          \u26a0\ufe0f  nicht erreichbar "
+               f"({_host})")
+            _p("      \u2139\ufe0f  Zusammenfassung nicht verfuegbar, "
+               "Rest funktioniert.")
+            warnings += 1
+        else:
+            _p(f"  Status:          \u2705 erreichbar "
+               f"({len(_models)} Modelle)")
+            _pref = "qwen2.5:14b-instruct-q3_K_M"
+            if _pref in _models:
+                _p(f"  Bevorzugt:       \u2705 {_pref} installiert")
+            else:
+                _p(f"  Bevorzugt:       \u26a0\ufe0f  {_pref} nicht "
+                   "installiert")
+                if _models:
+                    _shown = ", ".join(_models[:3])
+                    _more = (
+                        f" \u2026 (+{len(_models) - 3})"
+                        if len(_models) > 3 else ""
+                    )
+                    _p(f"      Alternative: {_shown}{_more}")
+    except Exception as e:
+        _p(f"  \u26a0\ufe0f  Ollama-Check fehlgeschlagen: {e}")
+    _p()
+
+    # ── Summary ──────────────────────────────────────────────────────
+    _p("\u2500" * 32)
+    if errors:
+        _p(f"Ergebnis: \u274c {errors} Fehler, {warnings} Warnung(en) "
+           "\u2014 NICHT lauffaehig.")
+        return 1
+    if warnings:
+        _p(f"Ergebnis: \u26a0\ufe0f  0 Fehler, {warnings} Warnung(en) "
+           "\u2014 lauffaehig.")
+        return 0
+    _p("Ergebnis: \u2705 0 Fehler, 0 Warnungen \u2014 voll "
+       "funktionsfaehig.")
+    return 0
+
+
+def _mask_url_credentials(url: str) -> str:
+    """PATCH 30: DEBUG-BUNDLE (helper)
+    Maskiert Credentials in URLs: scheme://user:pass@host -> scheme://***@host
+    """
+    if not url or not isinstance(url, str):
+        return url
+    import re as _re
+    return _re.sub(r"://[^/@]+@", "://***@", url)
+
+
+def _redact_settings_for_bundle(raw: dict) -> dict:
+    """PATCH 30: DEBUG-BUNDLE (helper)
+    Entfernt Pfade und Credentials aus AdvancedSettings fuer das Bundle.
+    """
+    import re as _re
+    out = dict(raw)
+    # allowed_dirs: konkrete Pfade durch Platzhalter ersetzen
+    if isinstance(out.get("allowed_dirs"), list):
+        out["allowed_dirs"] = [
+            _re.sub(r"/home/[^/]+", "/home/***", str(p)) if p else p
+            for p in out["allowed_dirs"]
+        ]
+    # proxy_url + ollama_host: Credentials maskieren
+    for key in ("proxy_url", "ollama_host"):
+        if isinstance(out.get(key), str):
+            out[key] = _mask_url_credentials(out[key])
+    return out
+
+
+def _find_log_files_for_bundle(log_file_override: "str | None" = None) -> list:
+    """PATCH 30: DEBUG-BUNDLE (helper)
+    Sucht dragon_debug.log in den ueblichen Verzeichnissen.
+    Liefert leere Liste, wenn keine Logs vorhanden sind.
+
+    PATCH 30c: BUNDLE-LOGFILE-OVERRIDE
+    ``log_file_override`` (aus ``--log-file``) hat Vorrang vor den
+    Standard-Kandidaten, damit auch explizit gewaehlte Log-Ziele
+    eingesammelt werden.
+    """
+    candidates = []
+    if log_file_override:
+        try:
+            _lf_path = Path(log_file_override).expanduser()
+            if _lf_path.is_file():
+                return [_lf_path]
+        except Exception:
+            pass
+    # PATCH 30b: BUNDLE-LOGDIR-TMP
+    # Primaerer Log-Ort laut configure_logging: $TMPDIR/dragon_logs.
+    # Nur aktiv, wenn DEBUG_LEVEL >= 2 and not QUIET_MODE.
+    try:
+        import tempfile as _tf
+        candidates.append(Path(_tf.gettempdir()) / "dragon_logs")
+    except Exception:
+        pass
+    try:
+        _xdg = os.environ.get("XDG_DATA_HOME")
+        if not _xdg:
+            _xdg = os.path.expanduser("~/.local/share")
+        candidates.append(Path(_xdg) / "dragonwhisperer" / "logs")
+    except Exception:
+        pass
+    try:
+        _cfg = PlatformUtils.get_platform_config_dir()
+        candidates.append(_cfg / "logs")
+        candidates.append(_cfg.parent / "dragonwhisperer" / "logs")
+    except Exception:
+        pass
+    candidates.append(
+        Path.home() / ".local" / "share" / "dragonwhisperer" / "logs"
+    )
+    found: list = []
+    for _c in candidates:
+        try:
+            if not _c.is_dir():
+                continue
+            for _f in _c.glob("*.log"):
+                if _f.is_file():
+                    found.append(_f)
+            if found:
+                break
+        except Exception:
+            continue
+    return found
+
+
+def _run_debug_bundle(
+    output_path: "str | None" = None,
+    quiet: bool = False,
+    log_file_override: "str | None" = None,
+) -> int:
+    """PATCH 30: DEBUG-BUNDLE
+
+    Erzeugt ein read-only ZIP-Bundle fuer Bug-Reports. Inhalt:
+      doctor.txt, system.txt, settings.json (redigiert),
+      logs/ (letzte 5 MB), manifest.json, README.txt
+
+    NICHT enthalten: Audio, Transkripte, Cookies, Browser-Profile.
+    Exit-Code: 0 = Bundle geschrieben, 1 = Fehler.
+    """
+    import contextlib as _cl
+    import io as _io
+    import json as _json
+    import zipfile as _zipfile
+    from datetime import datetime as _dt
+
+    _p = (lambda *a, **k: None) if quiet else print
+
+    _ts = _dt.now().strftime("%Y%m%d-%H%M%S")
+    if output_path is None:
+        output_path = f"dragon_debug_bundle_{_ts}.zip"
+    _out = Path(output_path).expanduser().resolve()
+
+    _p(f"\U0001f4e6 Erstelle Debug-Bundle: {_out}")
+
+    # 1) doctor.txt – _run_doctor in Buffer umleiten
+    _doctor_buf = _io.StringIO()
+    _doctor_rc = 1
+    try:
+        with _cl.redirect_stdout(_doctor_buf):
+            _doctor_rc = _run_doctor(quiet=False)
+    except Exception as _e:
+        _doctor_buf.write(f"ERROR in _run_doctor: {_e!r}\n")
+    _doctor_text = _doctor_buf.getvalue()
+
+    # 2) system.txt
+    _sys_lines = [
+        # PATCH 30a: F541-FIX-DEBUG-BUNDLE
+        "Dragon Whisperer Debug Bundle",
+        f"Timestamp:     {_ts}",
+        f"Version:       {__version__}",
+        f"Python:        {sys.version.split()[0]}",
+        f"Executable:    {sys.executable}",
+        f"Platform:      {SYSTEM} {'ARM' if IS_ARM else 'x86'}",
+        f"Working Dir:   {os.getcwd()}",
+    ]
+    try:
+        import hashlib as _hl
+        import socket as _sock
+        _host = _sock.gethostname()
+        _hash = _hl.sha256(_host.encode("utf-8", "replace")).hexdigest()[:8]
+        _sys_lines.append(f"Hostname-Hash: {_hash}")
+    except Exception:
+        pass
+    try:
+        import psutil as _ps
+        _sys_lines.append(
+            f"CPU-Kerne:     {_ps.cpu_count(logical=True) or '?'}"
+        )
+        _ram = _ps.virtual_memory()
+        _sys_lines.append(
+            f"RAM total:     {_ram.total / (1024**3):.1f} GB"
+        )
+        _sys_lines.append(
+            f"RAM frei:      {_ram.available / (1024**3):.1f} GB"
+        )
+    except Exception:
+        pass
+    try:
+        import torch as _t
+        if _t.cuda.is_available():
+            _sys_lines.append(f"CUDA:          {_t.version.cuda}")
+            _sys_lines.append(
+                f"GPU:           {_t.cuda.get_device_name(0)}"
+            )
+            _free, _total = _t.cuda.mem_get_info()
+            _sys_lines.append(
+                f"VRAM frei:     {_free / (1024**3):.1f} GB / "
+                f"{_total / (1024**3):.1f} GB"
+            )
+    except Exception:
+        pass
+    _system_text = "\n".join(_sys_lines) + "\n"
+
+    # 3) settings.json – redigiert (read-only, kein Save!)
+    _settings_text = "{}"
+    try:
+        _cfg = PlatformUtils.get_platform_config_dir()
+        _adv = _cfg / "dragon_advanced_settings.json"
+        if _adv.exists():
+            with open(_adv, encoding="utf-8") as _fh:
+                _raw = _json.load(_fh)
+            _redacted = _redact_settings_for_bundle(_raw)
+            _settings_text = _json.dumps(
+                _redacted, indent=2, ensure_ascii=False,
+            )
+        else:
+            _settings_text = '{"_note": "keine dragon_advanced_settings.json"}'
+    except Exception as _e:
+        _settings_text = _json.dumps({"error": f"load failed: {_e}"})
+
+    # 4) Logs (max 5 MB pro Datei, tail-cut)
+    # PATCH 30c: BUNDLE-LOGFILE-OVERRIDE
+    _log_files = _find_log_files_for_bundle(log_file_override)
+    _max_bytes = 5 * 1024 * 1024
+    _logs_payload: list = []  # (name, bytes)
+    for _lf in _log_files:
+        try:
+            _size = _lf.stat().st_size
+            with open(_lf, "rb") as _fh:
+                if _size > _max_bytes:
+                    _fh.seek(-_max_bytes, 2)
+                    _data = b"[...tail-cut: 5 MB max...]\n" + _fh.read()
+                else:
+                    _data = _fh.read()
+            _logs_payload.append((f"logs/{_lf.name}", _data))
+        except Exception as _e:
+            _logs_payload.append(
+                (f"logs/{_lf.name}.error.txt",
+                 f"could not read: {_e}".encode("utf-8"))
+            )
+
+    # 5) manifest.json
+    _manifest = {
+        "timestamp": _ts,
+        "version": __version__,
+        "python": sys.version.split()[0],
+        "platform": SYSTEM,
+        "doctor_exit_code": _doctor_rc,
+        "log_files_count": len(_logs_payload),
+        "contains": [
+            "doctor.txt", "system.txt",
+            "settings.json (redacted)", "manifest.json",
+            "README.txt", "logs/ (if present)",
+        ],
+        "excludes": [
+            "audio", "transcripts",
+            "cookies (browser)", "browser profiles",
+        ],
+    }
+    _manifest_text = _json.dumps(
+        _manifest, indent=2, ensure_ascii=False,
+    )
+
+    # 6) README.txt
+    _readme = (
+        "Dragon Whisperer Debug Bundle\n"
+        "=============================\n"
+        f"Erstellt: {_ts}\n"
+        f"Version:  {__version__}\n"
+        "\n"
+        "Inhalt:\n"
+        "  doctor.txt     -- vollstaendige --doctor-Ausgabe\n"
+        "  system.txt     -- Platform / Python / CUDA / CPU / RAM / GPU\n"
+        "  settings.json  -- AdvancedSettings, REDIGIERT\n"
+        "                    (allowed_dirs=/home/***, proxy_url creds=***)\n"
+        "  logs/          -- letzte 5 MB aus dragon_debug.log (falls vorhanden)\n"
+        "  manifest.json  -- Metadaten\n"
+        "\n"
+        "NICHT enthalten: Audio, Transkripte, Cookies, Browser-Profile.\n"
+        "\n"
+        "Teilen: Dieses ZIP kann einem Bug-Report angehaengt werden.\n"
+        "Der Hostname ist gehasht; sensitive Pfade sind durch '***'\n"
+        "ersetzt; URL-Credentials sind maskiert.\n"
+    )
+
+    # 7) ZIP schreiben
+    try:
+        _out.parent.mkdir(parents=True, exist_ok=True)
+        with _zipfile.ZipFile(
+            _out, "w", _zipfile.ZIP_DEFLATED,
+        ) as _zf:
+            _zf.writestr("README.txt", _readme)
+            _zf.writestr("manifest.json", _manifest_text)
+            _zf.writestr("doctor.txt", _doctor_text)
+            _zf.writestr("system.txt", _system_text)
+            _zf.writestr("settings.json", _settings_text)
+            for _name, _data in _logs_payload:
+                _zf.writestr(_name, _data)
+        _sz_mb = _out.stat().st_size / (1024 * 1024)
+        _p(f"\u2705 Bundle geschrieben: {_out} ({_sz_mb:.2f} MB)")
+        if not _logs_payload:
+            _p("   \u2139\ufe0f  Keine Log-Dateien gefunden "
+               "(dragon_debug.log fehlt). Bundle ist trotzdem nutzbar.")
+        return 0
+    except Exception as _e:
+        _p(f"\u274c Bundle schreiben fehlgeschlagen: {_e!r}")
+        return 1
 
 
 def _check_gpu_health() -> tuple[bool, str]:
@@ -198255,6 +205865,29 @@ def parse_arguments() -> argparse.Namespace:
         help="Check GPU availability and VRAM, then exit",
     )
 
+    # PATCH 29: DOCTOR-DIAGNOSE
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help=(
+            "Run full read-only diagnostic "
+            "(Settings, Dependencies, Hardware, Ollama), then exit"
+        ),
+    )
+
+    # PATCH 30: DEBUG-BUNDLE
+    parser.add_argument(
+        "--debug-bundle",
+        nargs="?",
+        const="auto",
+        default=None,
+        metavar="ZIP_PATH",
+        help=(
+            "Create a read-only diagnostic ZIP bundle "
+            "(doctor + system + redacted settings + logs) and exit"
+        ),
+    )
+
     parser.add_argument(
         "--safe-mode",
         action="store_true",
@@ -198322,6 +205955,34 @@ def parse_arguments() -> argparse.Namespace:
         "--no-translation",
         action="store_true",
         help="Disable translation (only transcribe)",
+    )
+
+    # PATCH P7-P2a-1: Language Compliance Test Flags
+    parser.add_argument(
+        "--lang-test",
+        action="store_true",
+        help="Run language compliance test and exit",
+    )
+    parser.add_argument(
+        "--langs",
+        default="ko",
+        help="Languages for --lang-test (comma-separated, e.g. ko,de,en)",
+    )
+    parser.add_argument(
+        "--models",
+        nargs="*",
+        default=None,
+        help="Specific models for --lang-test (default: all installed)",
+    )
+    parser.add_argument(
+        "--skip-unsuitable",
+        action="store_true",
+        help="Skip unsuitable-for-summary models in --lang-test",
+    )
+    parser.add_argument(
+        "--lang-test-save",
+        action="store_true",
+        help="Save --lang-test results to JSON cache",
     )
 
     args = parser.parse_args()
@@ -198426,6 +206087,20 @@ def main() -> int:
             pass
 
     _log_phase("entry")
+
+    # ── P11-P0a-C: Run-Start + atexit-Hook fuer Run-Ende ──────────────────
+    try:
+        _run_log_event(
+            "session.start",
+            debug_level=int(globals().get("DEBUG_LEVEL", 0) or 0),
+            ai_log_enabled=bool(globals().get("_AI_LOG_ENABLED", False)),
+            run_id=_RUN_ID,
+        )
+        atexit.register(_run_summary_print)
+        atexit.register(lambda: _run_log_event("session.end", **_run_summary()))
+    except Exception:
+        pass
+    # END P11-P0a-C
 
     _early_log_debug("urllib3 version: %s", urllib3.__version__)
 
@@ -198546,10 +206221,19 @@ def main() -> int:
     original_excepthook = sys.excepthook
 
     def custom_excepthook(t, v, tb):
+        # P11-P0d: Bundle + session.crashed vor Crash-Handler
+        try:
+            _p11_finalize_run(
+                cause="excepthook",
+                exc_info_tuple=(t, v, tb),
+            )
+        except Exception:
+            pass
         try:
             _global_crash_handler(t, v, tb, DEBUG_LEVEL)
         except Exception:
             original_excepthook(t, v, tb)
+    # END P11-P0d-B
 
     sys.excepthook = custom_excepthook
 
@@ -198625,7 +206309,49 @@ def main() -> int:
         _log_phase("exit:test")
         return rc
 
-    configure_logging(DEBUG_LEVEL, DEBUG_COMPONENTS, QUIET_MODE)
+    # PATCH P7-P2a-1: Language Compliance Test
+    if args.lang_test:
+        rc = _run_language_compliance_test(
+            langs=args.langs,
+            models=args.models,
+            save=args.lang_test_save,
+            skip_unsuitable=args.skip_unsuitable,
+        )
+        _log_phase("exit:lang-test")
+        return rc
+
+    # PATCH 33a: DUMP-EFFECTIVE-CONFIG
+    if args.dump_config:
+        rc = _dump_effective_config()
+        _log_phase("exit:dump-config")
+        return rc
+
+    # PATCH 29: DOCTOR-DIAGNOSE
+    if args.doctor:
+        rc = _run_doctor(quiet=QUIET_MODE)
+        _log_phase("exit:doctor")
+        return rc
+
+    # PATCH 30: DEBUG-BUNDLE
+    if args.debug_bundle is not None:
+        _target = None if args.debug_bundle == "auto" else args.debug_bundle
+        # PATCH 30c: BUNDLE-LOGFILE-OVERRIDE
+        rc = _run_debug_bundle(
+            output_path=_target,
+            quiet=QUIET_MODE,
+            log_file_override=(args.log_file or None),
+        )
+        _log_phase("exit:debug-bundle")
+        return rc
+
+    # PATCH 32: LOG-FILE-ARG-SUPPORT
+    # --log-file aus den CLI-Args an configure_logging durchreichen.
+    configure_logging(
+        DEBUG_LEVEL,
+        DEBUG_COMPONENTS,
+        QUIET_MODE,
+        log_file=(getattr(args, "log_file", None) or None),
+    )
     _log_phase("configure-logging")
 
     def _thread_exc_hook(args_th: threading.ExceptHookArgs) -> None:
